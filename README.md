@@ -39,6 +39,7 @@ Download a decrypted .ipa of Limbus Company through your decryption service of c
 
 To install, **[SideStore](https://sidestore.io/)** is recommended, follow the steps provided in their Documentation
 
+A PC is recommended for the smoothest installation process, otherwise you may use **[Sideinstaller](https://sideinstaller.net)** (iOS27+ only)
 ## Caveats 
 
 You will not be able to install updates from the AppStore, every time Limbus updates you’ll need to manually sideload the new version into your device 
