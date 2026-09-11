@@ -1,4 +1,4 @@
-name: Nightly Release
+name: Build Nightly release
 
 on:
   workflow_dispatch:
@@ -7,6 +7,8 @@ on:
       - main
     paths-ignore:
       - 'Documentation/**'
+      - 'README.md'
+      - 'assets/**'
 
 env:
   LZ4_REF: v1.10.0

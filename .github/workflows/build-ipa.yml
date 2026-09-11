@@ -4,8 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'Direct download link to the .ipa. Leave blank to reuse the last cached .ipa.'
-        required: false
+        description: 'Direct download link to the .ipa
         type: string
 
 env:
