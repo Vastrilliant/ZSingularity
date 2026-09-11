@@ -1,5 +1,6 @@
 #import "ZSInfoPlistPatch.h"
 #import "ZTweakLog.h"
+#import "ZSUpdater.h"
 
 static BOOL g_zsInfoPlistNeedsRestartPrompt = NO;
 
@@ -20,6 +21,11 @@ static NSDictionary<NSString *, NSArray<NSString *> *> *zs_info_plist_stale_arra
 }
 
 void zs_patch_info_plist_launch_flags(void) {
+    if ([ZSDylibUpdater isStandaloneInstall]) {
+        ZLog(@"[ZSInfoPlistPatch] skipping patch: standalone install, bundle is not writable at runtime");
+        return;
+    }
+
     NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Info.plist"];
     NSMutableDictionary *plist = [NSMutableDictionary dictionaryWithContentsOfFile:path];
     if (!plist) {

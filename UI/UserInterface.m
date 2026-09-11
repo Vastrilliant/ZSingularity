@@ -1461,7 +1461,8 @@ static const CGFloat kFillAlpha = 1.0;
 @property (nonatomic, strong) UIView *selectionPill;
 @property (nonatomic, strong) UIView *defaultIndicator;
 @property (nonatomic, strong) CAGradientLayer *edgeFadeMask;
-@property (nonatomic, strong) NSMutableArray<UILabel *> *itemLabels;
+@property (nonatomic, strong) NSMutableArray<CATextLayer *> *itemLabels;
+@property (nonatomic, strong) UIView *itemLayerHost;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *itemCenters;
 @property (nonatomic, assign) CGFloat contentCenterX;
 @property (nonatomic, assign) CGFloat dragStartCenterX;
@@ -1587,7 +1588,7 @@ static const NSInteger kZSWheelLoopCopies = 9;
 - (void)setLabels:(NSArray<NSString *> *)labels {
     _labels = [labels copy];
     _itemCount = (NSInteger)_labels.count;
-    for (UILabel *l in self.itemLabels) [l removeFromSuperview];
+    for (CATextLayer *layer in self.itemLabels) [layer removeFromSuperlayer];
     [self.itemLabels removeAllObjects];
     [self.itemCenters removeAllObjects];
 
@@ -1597,20 +1598,35 @@ static const NSInteger kZSWheelLoopCopies = 9;
         return;
     }
 
+    if (!self.itemLayerHost) {
+        self.itemLayerHost = [[UIView alloc] init];
+        self.itemLayerHost.userInteractionEnabled = NO;
+        self.itemLayerHost.backgroundColor = UIColor.clearColor;
+        self.itemLayerHost.frame = self.track.bounds;
+        [self.track addSubview:self.itemLayerHost];
+    } else {
+        self.itemLayerHost.frame = self.track.bounds;
+        for (CALayer *layer in [self.itemLayerHost.layer.sublayers copy]) [layer removeFromSuperlayer];
+    }
+
+    UIFont *font = zs_mono_font(9, UIFontWeightBold);
+    NSDictionary *attributes = @{NSFontAttributeName: font};
     CGFloat x = 0;
     for (NSInteger copy = 0; copy < kZSWheelLoopCopies; copy++) {
         for (NSString *text in _labels) {
-            UILabel *l = [[UILabel alloc] init];
-            l.text = text;
-            l.textAlignment = NSTextAlignmentCenter;
-            l.font = zs_mono_font(9, UIFontWeightBold);
-            l.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-            l.userInteractionEnabled = NO;
-            [l sizeToFit];
-            CGFloat w = MAX(34, ceil(l.bounds.size.width) + kWheelItemHPadding * 2);
-            l.bounds = CGRectMake(0, 0, w, kCapsuleSliderHeight);
-            [self.track addSubview:l];
-            [self.itemLabels addObject:l];
+            NSString *value = text ?: @"";
+            CGFloat textWidth = ceil([value sizeWithAttributes:attributes].width);
+            CGFloat w = MAX(34, textWidth + kWheelItemHPadding * 2);
+            CATextLayer *layer = [CATextLayer layer];
+            layer.string = value;
+            layer.alignmentMode = kCAAlignmentCenter;
+            layer.font = (__bridge CFTypeRef)font;
+            layer.fontSize = 9;
+            layer.foregroundColor = [UIColor colorWithWhite:1 alpha:0.4].CGColor;
+            layer.contentsScale = UIScreen.mainScreen.scale;
+            layer.frame = CGRectMake(x, 0, w, kCapsuleSliderHeight);
+            [self.itemLayerHost.layer addSublayer:layer];
+            [self.itemLabels addObject:layer];
             [self.itemCenters addObject:@(x + w / 2.0)];
             x += w + kWheelItemGap;
         }
@@ -1694,28 +1710,31 @@ static const NSInteger kZSWheelLoopCopies = 9;
     CGFloat focusX = trackW / 2.0;
     NSInteger nearest = [self nearestIndexForContentCenterX:self.contentCenterX];
 
-    UILabel *nearestLabel = self.itemLabels[nearest];
-    CGFloat pillWidth = MIN(trackW - 6, ceil(nearestLabel.intrinsicContentSize.width) + kWheelItemHPadding * 1.2);
+    CATextLayer *nearestLabel = self.itemLabels[nearest];
+    CGFloat pillWidth = MIN(trackW - 6, nearestLabel.bounds.size.width);
     self.selectionPill.frame = CGRectMake(focusX - pillWidth / 2.0, 2, MAX(0, pillWidth), MAX(0, h - 4));
     self.selectionPill.layer.cornerRadius = MAX(0, (h - 4) / 2.0);
     if (self.trackGlass) [self.track sendSubviewToBack:self.trackGlass];
     if (self.trackGlass) [self.track insertSubview:self.selectionPill aboveSubview:self.trackGlass];
     zs_refresh_gif_view_tint(self.selectionPill, self.selectionPill.bounds);
 
+    self.itemLayerHost.frame = self.track.bounds;
     for (NSInteger i = 0; i < count; i++) {
-        UILabel *l = self.itemLabels[i];
+        CATextLayer *l = self.itemLabels[i];
         CGFloat center = self.itemCenters[i].doubleValue;
         CGFloat screenCenterX = focusX + (center - self.contentCenterX);
-        l.center = CGPointMake(screenCenterX, h / 2.0);
+        CGRect frame = l.frame;
+        frame.origin.x = screenCenterX - frame.size.width / 2.0;
+        frame.origin.y = (h - frame.size.height) / 2.0;
+        l.frame = frame;
 
         CGFloat dist = fabs(screenCenterX - focusX);
         CGFloat norm = MIN(1.0, dist / MAX((CGFloat)1, trackW * 0.5));
         BOOL isNearest = (i == nearest);
         NSInteger logicalIndex = _itemCount > 0 ? (i % _itemCount) : i;
         BOOL isCommittedSelection = (logicalIndex == self.selectedIndex);
-        l.alpha = isNearest ? 1.0 : MAX(0.25, 1.0 - norm * 0.7);
-        l.textColor = isCommittedSelection ? UIColor.blackColor : [UIColor colorWithWhite:1 alpha:0.55];
-        l.font = zs_mono_font(9, UIFontWeightBold);
+        l.opacity = isNearest ? 1.0 : MAX(0.25, 1.0 - norm * 0.7);
+        l.foregroundColor = (isCommittedSelection ? UIColor.blackColor : [UIColor colorWithWhite:1 alpha:0.55]).CGColor;
     }
 
     BOOL hasDefault = self.defaultIndex >= 0 && self.defaultIndex < _itemCount;
@@ -1834,10 +1853,7 @@ static const NSInteger kZSWheelLoopCopies = 9;
 - (void)zs_forceLabelRedisplay {
     [self setNeedsLayout];
     [self layoutIfNeeded];
-    for (UILabel *l in self.itemLabels) {
-        [l setNeedsDisplay];
-        [l.layer setNeedsDisplay];
-    }
+    for (CATextLayer *layer in self.itemLabels) [layer setNeedsDisplay];
 }
 
 @end

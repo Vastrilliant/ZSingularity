@@ -250,6 +250,15 @@ jobs:
           EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_DIR/Info.plist")"
           echo "MAIN_BINARY=$APP_DIR/$EXECUTABLE_NAME" >> "$GITHUB_ENV"
 
+      - name: Patch Info.plist keys
+        run: |
+          set -euo pipefail
+          PLIST="$APP_DIR/Info.plist"
+          for key in CADisableMinimumFrameDuration CADisableMinimumFrameDurationOnPhone LSSupportsGameMode LSSupportsOpeningDocumentsInPlace UIFileSharingEnabled; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :$key bool true" "$PLIST"
+          done
+
       - name: Install injection tooling
         run: python3 -m pip install --quiet --break-system-packages lief
 
