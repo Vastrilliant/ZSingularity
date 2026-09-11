@@ -2456,7 +2456,7 @@ static void ZSUID_RedactAllActiveInstances(void *klass, const char *fieldName) {
     }
 }
 
-static const int kUIDHotResolveRetryThrottleTicks = 30;
+static const int kUIDHotResolveMaxAttempts = 3;
 
 static void ZSUID_RedactColdTargets(void);
 
@@ -2464,16 +2464,16 @@ static void *gUIDColdInstance[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static void *gUIDColdTMPInstance[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static const void *gUIDColdSetText[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static void *gUIDColdLastWritten[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
-static int gUIDColdResolveFailStreak[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
+static int gUIDColdResolveAttempts[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 
-static const int kUIDColdResolveRetryThrottleTicks = 30;
+static const int kUIDColdResolveMaxAttempts = 3;
 
 static void ZSUID_ColdSingleInvalidate(size_t i) {
     gUIDColdInstance[i] = NULL;
     gUIDColdTMPInstance[i] = NULL;
     gUIDColdSetText[i] = NULL;
     gUIDColdLastWritten[i] = NULL;
-    gUIDColdResolveFailStreak[i] = 0;
+    gUIDColdResolveAttempts[i] = 0;
 }
 
 static BOOL ZSUID_ColdSingleResolve(size_t i) {
@@ -2519,13 +2519,9 @@ static BOOL ZSUID_ColdSingleResolve(size_t i) {
 
 static void ZSUID_ColdSingleForceWrite(size_t i) {
     if (!gUIDColdTMPInstance[i]) {
-        if (gUIDColdResolveFailStreak[i] > 0) {
-            gUIDColdResolveFailStreak[i] = (gUIDColdResolveFailStreak[i] + 1) % kUIDColdResolveRetryThrottleTicks;
-            return;
-        }
-        if (!ZSUID_ColdSingleResolve(i)) {
-            gUIDColdResolveFailStreak[i] = 1;
-        }
+        if (gUIDColdResolveAttempts[i] >= kUIDColdResolveMaxAttempts) return;
+        gUIDColdResolveAttempts[i]++;
+        ZSUID_ColdSingleResolve(i);
         return;
     }
 
@@ -2587,7 +2583,7 @@ static const void *gUIDHotGetText;
 static const void *gUIDHotSetText;
 static void *gUIDHotLastWrittenString;
 
-static int gUIDHotResolveFailStreak;
+static int gUIDHotResolveAttempts;
 
 static BOOL gUIDRedactorEnabledCache;
 static BOOL gUIDRedactorEnabledCacheLoaded;
@@ -2598,7 +2594,7 @@ static void ZSUID_HotFieldInvalidate(void) {
     gUIDHotGetText = NULL;
     gUIDHotSetText = NULL;
     gUIDHotLastWrittenString = NULL;
-    gUIDHotResolveFailStreak = 0;
+    gUIDHotResolveAttempts = 0;
 }
 
 static BOOL ZSUID_HotFieldResolve(void) {
@@ -2662,15 +2658,11 @@ static void ZSUID_HotFieldTick(void) {
     if (sceneStateKnown && sceneState != ZSGlobalSceneStateMain) return;
 
     if (!gUIDHotTMPInstance) {
-        if (gUIDHotResolveFailStreak > 0) {
-            gUIDHotResolveFailStreak = (gUIDHotResolveFailStreak + 1) % kUIDHotResolveRetryThrottleTicks;
-            return;
-        }
+        if (gUIDHotResolveAttempts >= kUIDHotResolveMaxAttempts) return;
+        gUIDHotResolveAttempts++;
         if (ZSUID_HotFieldResolve()) {
             ZSUID_RedactColdSingleInstanceTargets();
             ZSUID_ScheduleMultiInstanceRescan();
-        } else {
-            gUIDHotResolveFailStreak = 1;
         }
         return;
     }
