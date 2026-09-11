@@ -109,6 +109,7 @@ typedef NS_ENUM(NSInteger, ZSGifWindowKind) {
 #pragma mark Decoding (source: full-resolution Enkephalin.gif, embedded at link time)
 
 static const CGFloat kZSGifPlaybackRate = 0.5;
+static const size_t kZSGifDecodeMaxPixelSize = 240;
 
 - (void)decodeFramesIfNeeded {
     if (_frames.count > 0) return;
@@ -132,8 +133,14 @@ static const CGFloat kZSGifPlaybackRate = 0.5;
     NSMutableArray<UIImage *> *frames = [NSMutableArray arrayWithCapacity:count];
     NSMutableArray<NSNumber *> *durations = [NSMutableArray arrayWithCapacity:count];
 
+    NSDictionary *thumbOptions = @{
+        (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(kZSGifDecodeMaxPixelSize),
+        (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+    };
+
     for (size_t i = 0; i < count; i++) {
-        CGImageRef cgImage = CGImageSourceCreateImageAtIndex(source, i, NULL);
+        CGImageRef cgImage = CGImageSourceCreateThumbnailAtIndex(source, i, (__bridge CFDictionaryRef)thumbOptions);
         if (!cgImage) continue;
         [frames addObject:[UIImage imageWithCGImage:cgImage]];
         CGImageRelease(cgImage);
