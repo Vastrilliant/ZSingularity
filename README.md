@@ -39,6 +39,13 @@ Download a decrypted .ipa of Limbus Company through your decryption service of c
 
 To install, **[SideStore](https://sidestore.io/)** is recommended, follow the steps provided in their Documentation
 
+## Caveats 
+
+You will not be able to install updates from the AppStore, every time Limbus updates you’ll need to manually sideload the new version into your device 
+
+You won’t be able to make any app purchases in a sideloaded version of LimbusCompany
+
+You won’t be able to login to your limbus account thru Apple ID
 
 ## Legal, Liability & Usage Notice
 
