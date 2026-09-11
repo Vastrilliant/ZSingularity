@@ -2464,12 +2464,16 @@ static void *gUIDColdInstance[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static void *gUIDColdTMPInstance[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static const void *gUIDColdSetText[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
 static void *gUIDColdLastWritten[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
+static int gUIDColdResolveFailStreak[sizeof(kUIDTargets) / sizeof(kUIDTargets[0])];
+
+static const int kUIDColdResolveRetryThrottleTicks = 30;
 
 static void ZSUID_ColdSingleInvalidate(size_t i) {
     gUIDColdInstance[i] = NULL;
     gUIDColdTMPInstance[i] = NULL;
     gUIDColdSetText[i] = NULL;
     gUIDColdLastWritten[i] = NULL;
+    gUIDColdResolveFailStreak[i] = 0;
 }
 
 static BOOL ZSUID_ColdSingleResolve(size_t i) {
@@ -2515,7 +2519,13 @@ static BOOL ZSUID_ColdSingleResolve(size_t i) {
 
 static void ZSUID_ColdSingleForceWrite(size_t i) {
     if (!gUIDColdTMPInstance[i]) {
-        ZSUID_ColdSingleResolve(i);
+        if (gUIDColdResolveFailStreak[i] > 0) {
+            gUIDColdResolveFailStreak[i] = (gUIDColdResolveFailStreak[i] + 1) % kUIDColdResolveRetryThrottleTicks;
+            return;
+        }
+        if (!ZSUID_ColdSingleResolve(i)) {
+            gUIDColdResolveFailStreak[i] = 1;
+        }
         return;
     }
 
