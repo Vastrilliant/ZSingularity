@@ -1,0 +1,244 @@
+name: Release Tweak
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version (X.Y.Z), leave blank to release current version
+        required: false
+        type: string
+
+env:
+  LZ4_REF: v1.10.0
+  OPENSSL_VERSION: "3.6.4"
+
+jobs:
+  release:
+    runs-on: macos-26
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.version }}"
+          if [[ -z "$VERSION" ]]; then
+            MAJOR=$(grep -oE '#define ZS_VERSION_MAJOR [0-9]+' Core/ZSVersion.h | grep -oE '[0-9]+$')
+            MINOR=$(grep -oE '#define ZS_VERSION_MINOR [0-9]+' Core/ZSVersion.h | grep -oE '[0-9]+$')
+            PATCH=$(grep -oE '#define ZS_VERSION_PATCH [0-9]+' Core/ZSVersion.h | grep -oE '[0-9]+$')
+            VERSION="${MAJOR}.${MINOR}.${PATCH}"
+            echo "bump=false" >> "$GITHUB_OUTPUT"
+          else
+            if [[ ! "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              echo "Version must be in X.Y.Z format, got: $VERSION" >&2
+              exit 1
+            fi
+            echo "bump=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Update ZSVersion.h
+        if: steps.version.outputs.bump == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          [[ "$VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]
+          VERSION_MAJOR="${BASH_REMATCH[1]}"
+          VERSION_MINOR="${BASH_REMATCH[2]}"
+          VERSION_PATCH="${BASH_REMATCH[3]}"
+          sed -i '' -E "s/#define ZS_VERSION_MAJOR .*/#define ZS_VERSION_MAJOR ${VERSION_MAJOR}/" Core/ZSVersion.h
+          sed -i '' -E "s/#define ZS_VERSION_MINOR .*/#define ZS_VERSION_MINOR ${VERSION_MINOR}/" Core/ZSVersion.h
+          sed -i '' -E "s/#define ZS_VERSION_PATCH .*/#define ZS_VERSION_PATCH ${VERSION_PATCH}/" Core/ZSVersion.h
+          cat Core/ZSVersion.h
+
+      - name: Commit updated ZSVersion.h
+        if: steps.version.outputs.bump == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet -- Core/ZSVersion.h; then
+            git add Core/ZSVersion.h
+            git commit -m "Bump version to ${{ steps.version.outputs.tag }}"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Resolve iOS SDK path
+        id: sdk
+        run: echo "path=$(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache LZ4 reference library
+        id: lz4-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            lz4.h
+            lz4.c
+            lz4hc.h
+            lz4hc.c
+            lz4-checksums.txt
+          key: lz4-${{ env.LZ4_REF }}
+
+      - name: Fetch LZ4 reference library
+        if: steps.lz4-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          BASE="https://raw.githubusercontent.com/lz4/lz4/${LZ4_REF}/lib"
+          for f in lz4.h lz4.c lz4hc.h lz4hc.c; do
+            curl -fsSL "${BASE}/${f}" -o "$f"
+          done
+          shasum -a 256 lz4.h lz4.c lz4hc.h lz4hc.c > lz4-checksums.txt
+          shasum -a 256 -c lz4-checksums.txt
+
+      - name: Verify cached LZ4 checksums
+        if: steps.lz4-cache.outputs.cache-hit == 'true'
+        run: shasum -a 256 -c lz4-checksums.txt
+
+      - name: Cache static OpenSSL build (device arm64)
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: openssl/install
+          key: openssl-static-${{ env.OPENSSL_VERSION }}-ios64-arm64-v1
+
+      - name: Build static OpenSSL for iOS device (arm64)
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p openssl
+          curl -fsSL "https://github.com/openssl/openssl/archive/refs/tags/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl-src.tar.gz
+          mkdir -p openssl-src
+          tar -xzf openssl-src.tar.gz -C openssl-src --strip-components=1
+          rm openssl-src.tar.gz
+
+          PREFIX="$PWD/openssl/install"
+          mkdir -p "$PREFIX"
+
+          export CROSS_TOP="$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer"
+          export CROSS_SDK="$(basename "${{ steps.sdk.outputs.path }}")"
+          export PATH="$CROSS_TOP/usr/bin:$PATH"
+
+          pushd openssl-src
+          ./Configure ios64-cross no-shared no-tests no-apps \
+            -miphoneos-version-min=15.0 \
+            --prefix="$PREFIX"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install_sw
+          popd
+          rm -rf openssl-src
+
+      - name: Resolve static OpenSSL paths
+        id: openssl
+        run: |
+          set -euo pipefail
+          echo "lib_dir=$PWD/openssl/install/lib" >> "$GITHUB_OUTPUT"
+          echo "headers_dir=$PWD/openssl/install/include" >> "$GITHUB_OUTPUT"
+
+      - name: Compile ZSign engine objects
+        run: |
+          set -euo pipefail
+          mkdir -p obj
+          ENGINE_SOURCES=(
+            Core/ZSStandaloneSigner.mm
+            Core/ZSSignEngine/archo.cpp
+            Core/ZSSignEngine/macho.cpp
+            Core/ZSSignEngine/openssl.cpp
+            Core/ZSSignEngine/signing.cpp
+            Core/ZSSignEngine/common/base64.cpp
+            Core/ZSSignEngine/common/fs.cpp
+            Core/ZSSignEngine/common/json.cpp
+            Core/ZSSignEngine/common/log.cpp
+            Core/ZSSignEngine/common/sha.cpp
+            Core/ZSSignEngine/common/timer.cpp
+            Core/ZSSignEngine/common/util.cpp
+          )
+          for src in "${ENGINE_SOURCES[@]}"; do
+            name="$(basename "${src%.*}")"
+            clang -c \
+              -O2 \
+              -fobjc-arc \
+              -fmodules \
+              -isysroot "${{ steps.sdk.outputs.path }}" \
+              -arch arm64 \
+              -miphoneos-version-min=15.0 \
+              -std=gnu++17 \
+              -stdlib=libc++ \
+              -I"${{ steps.openssl.outputs.headers_dir }}" \
+              -I. -ICore -ICore/ZSSignEngine -ICore/ZSSignEngine/common \
+              "$src" -o "obj/${name}.o"
+          done
+
+      - name: Compile tweak dylib
+        run: |
+          clang \
+            -dynamiclib \
+            -O2 \
+            -fobjc-arc \
+            -fmodules \
+            -isysroot "${{ steps.sdk.outputs.path }}" \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -DZS_BUILD_NUMBER=${{ github.run_number }} \
+            -framework Foundation \
+            -framework UIKit \
+            -framework QuartzCore \
+            -framework CoreText \
+            -framework ImageIO \
+            -framework UniformTypeIdentifiers \
+            -framework Security \
+            -lcompression \
+            -lc++ \
+            -stdlib=libc++ \
+            -L"${{ steps.openssl.outputs.lib_dir }}" \
+            -lssl -lcrypto \
+            -install_name "@rpath/ZSingularity.dylib" \
+            -Wl,-ld_classic \
+            -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
+            -I. \
+            -ICore -IUI -IMods -IBundleTools -ITranscoder -INetwork -IDiagnostics -IResources -INotifications \
+            obj/*.o \
+            BundleTools/UnityBundleTools.m \
+            Core/IL2CppIntrospection.m \
+            Core/ZSDumpTypeRegistry.m \
+            Core/ZSDylibSigning.m \
+            Core/ZSEngine.m \
+            Core/ZSInfoPlistPatch.m \
+            Diagnostics/ZSDiagnostics.m \
+            Mods/BankTransplant.m \
+            Mods/ModAssetManagement.m \
+            Network/PatchManifestNetwork.m \
+            Network/ZSUpdater.m \
+            Transcoder/Transcoder.m \
+            UI/UserInterface.m \
+            UI/ZSGifTint.m \
+            lz4.c \
+            lz4hc.c \
+            -o ZSingularity.dylib
+
+      - name: Ad-hoc codesign
+        run: codesign -f -s - ZSingularity.dylib
+
+      - name: Verify architecture
+        run: lipo -info ZSingularity.dylib
+
+      - name: Create Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.version.outputs.tag }}" ZSingularity.dylib \
+            --repo "${{ github.repository }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --notes "Automated release ${{ steps.version.outputs.tag }} (build ${{ github.run_number }})" \
+            --draft
