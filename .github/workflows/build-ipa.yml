@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'Direct download link to the .ipa
+        description: 'Direct download link to the .ipa'
         type: string
 
 env:
