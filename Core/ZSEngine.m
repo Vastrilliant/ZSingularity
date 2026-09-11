@@ -2082,6 +2082,44 @@ void zs_clear_guide_portrait_cache(void) {
     [IL2CppBridge invokeMethod:clear onInstance:dict args:NULL outException:&exc];
 }
 
+#pragma mark - Global Scene State
+
+typedef NS_ENUM(int32_t, ZSGlobalSceneState) {
+    ZSGlobalSceneStateLogin = 0,
+    ZSGlobalSceneStateBattle = 1,
+    ZSGlobalSceneStateMain = 2,
+    ZSGlobalSceneStateStory = 3,
+    ZSGlobalSceneStateDungeon = 4,
+    ZSGlobalSceneStateMirrorDungeon = 5,
+    ZSGlobalSceneStateRailwayDungeon = 6,
+    ZSGlobalSceneStateStoryMirrorDungeon = 7,
+    ZSGlobalSceneStateProjectGS = 8,
+};
+
+static void *gZSGlobalGameManagerClass;
+static void *gZSGlobalSceneStateField;
+
+static BOOL ZSGlobalScene_Current(int32_t *outState) {
+    if (!gZSGlobalGameManagerClass) {
+        gZSGlobalGameManagerClass = [IL2CppBridge classNamed:"GlobalGameManager" inNamespace:"" assemblyContains:"Assembly-CSharp"];
+        if (!gZSGlobalGameManagerClass) return NO;
+    }
+
+    void *instance = NULL;
+    if (![IL2CppBridge copyStaticFieldOnClass:gZSGlobalGameManagerClass name:"_instance" toBuffer:&instance] || !instance) return NO;
+
+    if (!gZSGlobalSceneStateField) {
+        gZSGlobalSceneStateField = [IL2CppBridge fieldNamed:"sceneState" onClass:gZSGlobalGameManagerClass];
+        if (!gZSGlobalSceneStateField) return NO;
+    }
+
+    int32_t state = -1;
+    if (![IL2CppBridge copyInstanceFieldValue:gZSGlobalSceneStateField onInstance:instance toBuffer:&state]) return NO;
+
+    *outState = state;
+    return YES;
+}
+
 #pragma mark - Custom Greeting Text
 
 static NSString * const kZSMiscSettingsSection = @"misc";
@@ -2209,9 +2247,21 @@ static void ZSCustomGreeting_ApplyText(NSString *text) {
     gZSGreetingLastWrittenString = converted;
 }
 
+static int32_t gZSGreetingLastSceneState = -1;
+
 static void ZSCustomGreeting_Tick(void) {
     NSString *customText = zs_custom_greeting_text();
     if (customText.length == 0) return;
+
+    int32_t sceneState = ZSGlobalSceneStateMain;
+    BOOL sceneStateKnown = ZSGlobalScene_Current(&sceneState);
+
+    if (sceneStateKnown && sceneState != gZSGreetingLastSceneState) {
+        gZSGreetingLastSceneState = sceneState;
+        ZSCustomGreeting_HotFieldInvalidate();
+    }
+
+    if (sceneStateKnown && sceneState != ZSGlobalSceneStateMain) return;
 
     if (!gZSGreetingTMPInstance) {
         if (gZSGreetingResolveFailStreak > 0) {
@@ -2582,12 +2632,24 @@ static BOOL ZSUID_HotFieldResolve(void) {
     return YES;
 }
 
+static int32_t gUIDHotLastSceneState = -1;
+
 static void ZSUID_HotFieldTick(void) {
     if (!gUIDRedactorEnabledCacheLoaded) {
         gUIDRedactorEnabledCache = UIDRedactor.isEnabled;
         gUIDRedactorEnabledCacheLoaded = YES;
     }
     if (!gUIDRedactorEnabledCache) return;
+
+    int32_t sceneState = ZSGlobalSceneStateMain;
+    BOOL sceneStateKnown = ZSGlobalScene_Current(&sceneState);
+
+    if (sceneStateKnown && sceneState != gUIDHotLastSceneState) {
+        gUIDHotLastSceneState = sceneState;
+        ZSUID_HotFieldInvalidate();
+    }
+
+    if (sceneStateKnown && sceneState != ZSGlobalSceneStateMain) return;
 
     if (!gUIDHotTMPInstance) {
         if (gUIDHotResolveFailStreak > 0) {
