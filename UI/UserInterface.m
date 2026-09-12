@@ -1623,7 +1623,8 @@ static const NSInteger kZSWheelLoopCopies = 9;
             layer.fontSize = 9;
             layer.foregroundColor = [UIColor colorWithWhite:1 alpha:0.4].CGColor;
             layer.contentsScale = UIScreen.mainScreen.scale;
-            layer.frame = CGRectMake(x, 0, w, kCapsuleSliderHeight);
+            CGFloat yDiff = (kCapsuleSliderHeight - layer.fontSize) / 2.0 - layer.fontSize / 10.0;
+            layer.frame = CGRectMake(x, yDiff, w, layer.fontSize + 4);
             [self.itemLayerHost.layer addSublayer:layer];
             [self.itemLabels addObject:layer];
             [self.itemCenters addObject:@(x + w / 2.0)];
@@ -1724,7 +1725,7 @@ static const NSInteger kZSWheelLoopCopies = 9;
         CGFloat screenCenterX = focusX + (center - self.contentCenterX);
         CGRect frame = l.frame;
         frame.origin.x = screenCenterX - frame.size.width / 2.0;
-        frame.origin.y = (h - frame.size.height) / 2.0;
+        frame.origin.y = (h - l.fontSize) / 2.0 - l.fontSize / 10.0;
         l.frame = frame;
 
         CGFloat dist = fabs(screenCenterX - focusX);
