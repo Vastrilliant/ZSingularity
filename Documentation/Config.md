@@ -31,4 +31,4 @@ Compresses bundles into LZ4HC before being uploaded to the Transcoder pipeline t
 
 ZSingularity will check for any new Nightly builds instead of releases in the main repository 
 
-**NOTE: Expect instability issues when running Nighly Builds**
+**NOTE: Expect instability issues when running Nightly Builds**

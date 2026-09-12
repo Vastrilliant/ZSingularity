@@ -25,4 +25,4 @@ Import modded bundles taken from your mod library of choice. Two kinds of file a
 
 Transcoding a bundle sends it to the GitHub repository configured under [Auth](Auth.md), where a GitHub Actions workflow re-encodes its textures into the format chosen under [Config → Transcode Format](Config.md).
 
-Once a run finishes successfully, the tweak downloads the processed bundle and installs it in place of the original — the original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later. Processed bundles already sitting in the configured repo from an earlier dispatch can also be listed and reinstalled directly, without re-running the Doctor workflow.
+Once a run finishes successfully, the tweak downloads the processed bundle and installs it in place of the original — the original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later. Processed bundles already sitting in the configured repo from an earlier dispatch can also be listed and reinstalled directly, without re-running the Transcoder workflow.
