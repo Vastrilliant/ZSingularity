@@ -17,7 +17,7 @@ Generate a fine-grained, repo-scoped token.
 
 Select your transcoder proxy repo, see [Mods](mods.md) on how to set up
 
-![PAT Repository example](images/PAT-Permissions_example.png)
+![PAT Repository example](images/PAT-Permissions_example2.png)
 
 Give your token an expiration date - it’s best practice to give it a finite number of days for better security, set to no expiration if you don’t care.
 
@@ -26,7 +26,7 @@ Assign the token these permissions:
 - `Contents (Read / Write)`
 - `Actions (Read / Write)`
 
-![PAT Permissions Example](images/PAT-Permissions_example2.png)
+![PAT Permissions Example](images/PAT-Permissions_example.png)
 
 Make sure to save your personal access token in a secure place. Once you configure it — you won’t be able to see it again. 
 
