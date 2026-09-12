@@ -16,9 +16,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (nullable NSString *)selfLoadedDylibPath;
 
-+ (void)replaceSelfDylibWithData:(NSData *)data
-                        completion:(void (^)(BOOL success, NSString *message))completion;
-
 @end
 
 extern NSString * const kZSUpdateRepoOwner;

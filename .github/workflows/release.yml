@@ -10,7 +10,6 @@ on:
 
 env:
   LZ4_REF: v1.10.0
-  OPENSSL_VERSION: "3.6.4"
 
 jobs:
   release:
@@ -105,80 +104,6 @@ jobs:
         if: steps.lz4-cache.outputs.cache-hit == 'true'
         run: shasum -a 256 -c lz4-checksums.txt
 
-      - name: Cache static OpenSSL build (device arm64)
-        id: openssl-cache
-        uses: actions/cache@v4
-        with:
-          path: openssl/install
-          key: openssl-static-${{ env.OPENSSL_VERSION }}-ios64-arm64-v1
-
-      - name: Build static OpenSSL for iOS device (arm64)
-        if: steps.openssl-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p openssl
-          curl -fsSL "https://github.com/openssl/openssl/archive/refs/tags/openssl-${OPENSSL_VERSION}.tar.gz" -o openssl-src.tar.gz
-          mkdir -p openssl-src
-          tar -xzf openssl-src.tar.gz -C openssl-src --strip-components=1
-          rm openssl-src.tar.gz
-
-          PREFIX="$PWD/openssl/install"
-          mkdir -p "$PREFIX"
-
-          export CROSS_TOP="$(xcode-select -p)/Platforms/iPhoneOS.platform/Developer"
-          export CROSS_SDK="$(basename "${{ steps.sdk.outputs.path }}")"
-          export PATH="$CROSS_TOP/usr/bin:$PATH"
-
-          pushd openssl-src
-          ./Configure ios64-cross no-shared no-tests no-apps \
-            -miphoneos-version-min=15.0 \
-            --prefix="$PREFIX"
-          make -j"$(sysctl -n hw.ncpu)"
-          make install_sw
-          popd
-          rm -rf openssl-src
-
-      - name: Resolve static OpenSSL paths
-        id: openssl
-        run: |
-          set -euo pipefail
-          echo "lib_dir=$PWD/openssl/install/lib" >> "$GITHUB_OUTPUT"
-          echo "headers_dir=$PWD/openssl/install/include" >> "$GITHUB_OUTPUT"
-
-      - name: Compile ZSign engine objects
-        run: |
-          set -euo pipefail
-          mkdir -p obj
-          ENGINE_SOURCES=(
-            Core/ZSStandaloneSigner.mm
-            Core/ZSSignEngine/archo.cpp
-            Core/ZSSignEngine/macho.cpp
-            Core/ZSSignEngine/openssl.cpp
-            Core/ZSSignEngine/signing.cpp
-            Core/ZSSignEngine/common/base64.cpp
-            Core/ZSSignEngine/common/fs.cpp
-            Core/ZSSignEngine/common/json.cpp
-            Core/ZSSignEngine/common/log.cpp
-            Core/ZSSignEngine/common/sha.cpp
-            Core/ZSSignEngine/common/timer.cpp
-            Core/ZSSignEngine/common/util.cpp
-          )
-          for src in "${ENGINE_SOURCES[@]}"; do
-            name="$(basename "${src%.*}")"
-            clang -c \
-              -O2 \
-              -fobjc-arc \
-              -fmodules \
-              -isysroot "${{ steps.sdk.outputs.path }}" \
-              -arch arm64 \
-              -miphoneos-version-min=15.0 \
-              -std=gnu++17 \
-              -stdlib=libc++ \
-              -I"${{ steps.openssl.outputs.headers_dir }}" \
-              -I. -ICore -ICore/ZSSignEngine -ICore/ZSSignEngine/common \
-              "$src" -o "obj/${name}.o"
-          done
-
       - name: Compile tweak dylib
         run: |
           clang \
@@ -200,18 +125,14 @@ jobs:
             -lcompression \
             -lc++ \
             -stdlib=libc++ \
-            -L"${{ steps.openssl.outputs.lib_dir }}" \
-            -lssl -lcrypto \
             -install_name "@rpath/ZSingularity.dylib" \
             -Wl,-ld_classic \
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
             -I. \
             -ICore -IUI -IMods -IBundleTools -ITranscoder -INetwork -IDiagnostics -IResources -INotifications \
-            obj/*.o \
             BundleTools/UnityBundleTools.m \
             Core/IL2CppIntrospection.m \
             Core/ZSDumpTypeRegistry.m \
-            Core/ZSDylibSigning.m \
             Core/ZSEngine.m \
             Core/ZSInfoPlistPatch.m \
             Diagnostics/ZSDiagnostics.m \

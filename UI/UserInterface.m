@@ -14,7 +14,6 @@
 #import "ZSInfoPlistPatch.h"
 #import "ZSVersion.h"
 #import "ZSUpdater.h"
-#import "ZSDylibSigning.h"
 
 #import "ModAssetManagement.h"
 #import "UnityBundleTools.h"
@@ -3744,7 +3743,6 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UITextView *docsBodyLabel;
 @property (nonatomic, strong) UIStackView *docsUpdateActionsStack;
 @property (nonatomic, strong) UIButton *docsLiveContainerInstallButton;
-@property (nonatomic, strong) UIButton *docsDylibInjectionInstallButton;
 @property (nonatomic, strong) UIButton *docsGitHubReleaseLinkButton;
 @property (nonatomic, strong) UILabel *docsUpdateActionsDisabledNoteLabel;
 @property (nonatomic, strong) NSLayoutConstraint *docsScrollViewBottomToOverlayConstraint;
@@ -3775,21 +3773,6 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) BOOL authInRemoveMode;
 
 @property (nonatomic, assign) BOOL authCredentialsStale;
-
-@property (nonatomic, strong) UITextField *dylibCertPathField;
-@property (nonatomic, strong) UITextField *dylibCertPasswordField;
-
-@property (nonatomic, strong) UIView *dylibCertPathFieldContainer;
-@property (nonatomic, strong) UIView *dylibCertPasswordFieldContainer;
-@property (nonatomic, strong) UIButton *dylibSigningVerifyButton;
-
-@property (nonatomic, strong) UILabel *dylibSigningStatusLabel;
-
-@property (nonatomic, assign) BOOL dylibSigningInRemoveMode;
-
-@property (nonatomic, assign) BOOL dylibSigningCredentialsStale;
-
-@property (nonatomic, weak) UIDocumentPickerViewController *dylibCertPicker;
 
 @property (nonatomic, strong) UIButton *customGreetingTextButton;
 
@@ -4028,203 +4011,6 @@ static UIButton *zs_make_section_info_button(NSString *docKey, id target, SEL ac
         [button.heightAnchor constraintEqualToConstant:size],
     ]];
     return button;
-}
-
-#pragma mark Credentials section (unified Auth + Provisioning)
-
-static UIView *zs_make_credentials_subheader_row(NSString *title, id infoTarget, SEL infoAction) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.text = [title uppercaseString];
-    label.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-    label.font = zs_mono_font(10.5, UIFontWeightSemibold);
-    [row addSubview:label];
-
-    CGFloat infoButtonSize = ceil(label.font.lineHeight);
-    UIButton *infoButton = zs_make_section_info_button(title, infoTarget, infoAction, infoButtonSize);
-    infoButton.tintColor = [UIColor colorWithWhite:1 alpha:0.3];
-    [row addSubview:infoButton];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [infoButton.leadingAnchor constraintEqualToAnchor:label.trailingAnchor constant:4],
-        [infoButton.centerYAnchor constraintEqualToAnchor:label.centerYAnchor],
-        [infoButton.trailingAnchor constraintLessThanOrEqualToAnchor:row.trailingAnchor],
-
-        [row.topAnchor constraintEqualToAnchor:label.topAnchor],
-        [row.bottomAnchor constraintEqualToAnchor:label.bottomAnchor],
-    ]];
-
-    return row;
-}
-
-static const CGFloat kZSCredentialCardIconWidth = 18;
-static const CGFloat kZSCredentialCardRowGap = 8;
-
-static UIImageView *zs_make_credential_card_icon(NSString *sfSymbolName, UIColor *tint) {
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightRegular];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:sfSymbolName withConfiguration:config]];
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.tintColor = tint;
-    icon.contentMode = UIViewContentModeCenter;
-    return icon;
-}
-
-static UIView *zs_make_provisioning_cert_row(UITextField *pathField, id target, SEL tapAction) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-    row.userInteractionEnabled = YES;
-
-    UIImageView *icon = zs_make_credential_card_icon(@"doc.fill", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [row addSubview:icon];
-
-    pathField.font = zs_mono_font(12, UIFontWeightMedium);
-    pathField.textColor = UIColor.whiteColor;
-    pathField.userInteractionEnabled = NO;
-    pathField.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:@"No Certificate Selected"
-                                         attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
-    pathField.translatesAutoresizingMaskIntoConstraints = NO;
-    [row addSubview:pathField];
-
-    UIImageSymbolConfiguration *chevronConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
-    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevronConfig]];
-    chevron.translatesAutoresizingMaskIntoConstraints = NO;
-    chevron.tintColor = [UIColor colorWithWhite:1 alpha:0.3];
-    chevron.contentMode = UIViewContentModeCenter;
-    [row addSubview:chevron];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [icon.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [icon.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [icon.widthAnchor constraintEqualToConstant:kZSCredentialCardIconWidth],
-
-        [pathField.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:kZSCredentialCardRowGap],
-        [pathField.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [pathField.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-kZSCredentialCardRowGap],
-
-        [chevron.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [chevron.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [chevron.widthAnchor constraintEqualToConstant:12],
-    ]];
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:target action:tapAction];
-    [row addGestureRecognizer:tap];
-
-    return row;
-}
-
-static UIView *zs_make_provisioning_password_row(UITextField *passwordField, UIButton *verifyButton) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UIImageView *icon = zs_make_credential_card_icon(@"key.fill", [UIColor colorWithWhite:1 alpha:0.55]);
-    [row addSubview:icon];
-
-    passwordField.font = zs_mono_font(12, UIFontWeightRegular);
-    passwordField.textColor = UIColor.whiteColor;
-    passwordField.tintColor = zs_accent_green_color();
-    passwordField.secureTextEntry = YES;
-    passwordField.attributedPlaceholder =
-        [[NSAttributedString alloc] initWithString:@"Certificate Password"
-                                         attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
-    passwordField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    passwordField.translatesAutoresizingMaskIntoConstraints = NO;
-    [row addSubview:passwordField];
-
-    verifyButton.translatesAutoresizingMaskIntoConstraints = NO;
-    verifyButton.titleLabel.font = zs_mono_font(10.5, UIFontWeightSemibold);
-    [row addSubview:verifyButton];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [icon.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [icon.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [icon.widthAnchor constraintEqualToConstant:kZSCredentialCardIconWidth],
-
-        [passwordField.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:kZSCredentialCardRowGap],
-        [passwordField.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [passwordField.trailingAnchor constraintEqualToAnchor:verifyButton.leadingAnchor constant:-kZSCredentialCardRowGap],
-
-        [verifyButton.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [verifyButton.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [verifyButton.heightAnchor constraintEqualToConstant:24],
-        [verifyButton.widthAnchor constraintGreaterThanOrEqualToConstant:56],
-    ]];
-
-    return row;
-}
-
-static UIView *zs_make_provisioning_credentials_card(UIView *certRow, UIView *passwordRow, UILabel *statusLabel) {
-    UIView *card;
-    UIView *host;
-
-    if (zs_has_liquid_glass()) {
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        glass.translatesAutoresizingMaskIntoConstraints = NO;
-        zs_configure_glass_corners(glass, 12, NO);
-        glass.layer.borderWidth = 1;
-        glass.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-        zs_register_suspendable_glass(glass);
-        card = glass;
-        host = glass.contentView;
-    } else {
-        UIView *plain = [[UIView alloc] init];
-        plain.translatesAutoresizingMaskIntoConstraints = NO;
-        plain.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.96];
-        plain.layer.cornerRadius = 12;
-        plain.layer.cornerCurve = kCACornerCurveContinuous;
-        plain.layer.borderWidth = 1;
-        plain.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-        plain.clipsToBounds = YES;
-        card = plain;
-        host = plain;
-    }
-
-    certRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:certRow];
-
-    UIView *separator = [[UIView alloc] init];
-    separator.translatesAutoresizingMaskIntoConstraints = NO;
-    separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
-    [host addSubview:separator];
-
-    passwordRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:passwordRow];
-
-    statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    statusLabel.font = zs_mono_font(9.5, UIFontWeightRegular);
-    statusLabel.numberOfLines = 0;
-    statusLabel.hidden = YES;
-    [host addSubview:statusLabel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [certRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [certRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [certRow.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
-        [certRow.heightAnchor constraintEqualToConstant:24],
-
-        [separator.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [separator.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [separator.topAnchor constraintEqualToAnchor:certRow.bottomAnchor constant:10],
-        [separator.heightAnchor constraintEqualToConstant:1],
-
-        [passwordRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [passwordRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [passwordRow.topAnchor constraintEqualToAnchor:separator.bottomAnchor constant:10],
-        [passwordRow.heightAnchor constraintEqualToConstant:24],
-
-        [statusLabel.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [statusLabel.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [statusLabel.topAnchor constraintEqualToAnchor:passwordRow.bottomAnchor constant:10],
-        [statusLabel.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-12],
-    ]];
-
-    return card;
 }
 
 static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blacklistHeader, UILabel *statusLabel, UIScrollView *entriesScroll) {
@@ -4942,11 +4728,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack addArrangedSubview:self.modsLibraryStack];
     [self zs_rebuildModsLibrary];
 
-    zs_add_section_header(self.stack, @"Credentials", self);
-
-    UIView *authSubheaderRow = zs_make_credentials_subheader_row(@"Auth", self, @selector(docsInfoTapped:));
-    [self.stack addArrangedSubview:authSubheaderRow];
-    [self.stack setCustomSpacing:8 afterView:authSubheaderRow];
+    zs_add_section_header_with_docs(self.stack, @"Auth", self, @selector(docsInfoTapped:));
 
     self.authRepoLinkField = [[UITextField alloc] init];
     self.authRepoLinkField.keyboardType = UIKeyboardTypeURL;
@@ -4969,37 +4751,6 @@ static const CGFloat kContentFadeHeight = 22;
     [self zs_loadAuthFields];
 
     [self zs_authRunBootVerification];
-
-    UIView *provisioningSubheaderRow = zs_make_credentials_subheader_row(@"Provisioning", self, @selector(docsInfoTapped:));
-    [self.stack addArrangedSubview:provisioningSubheaderRow];
-    [self.stack setCustomSpacing:8 afterView:provisioningSubheaderRow];
-
-    self.dylibCertPathField = [[UITextField alloc] init];
-    self.dylibCertPathField.enabled = NO;
-
-    UIView *certPathRow = zs_make_provisioning_cert_row(self.dylibCertPathField, self, @selector(zs_dylibCertRowTapped:));
-    self.dylibCertPathFieldContainer = certPathRow;
-
-    self.dylibSigningVerifyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.dylibSigningVerifyButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_auth_verify_button(self.dylibSigningVerifyButton, @"Verify");
-    [self.dylibSigningVerifyButton addTarget:self action:@selector(zs_dylibSigningVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.dylibCertPasswordField = [[UITextField alloc] init];
-    self.dylibCertPasswordField.delegate = self;
-
-    UIView *certPasswordRow = zs_make_provisioning_password_row(self.dylibCertPasswordField, self.dylibSigningVerifyButton);
-    self.dylibCertPasswordFieldContainer = certPasswordRow;
-
-    self.dylibSigningStatusLabel = [[UILabel alloc] init];
-
-    UIView *provisioningCard = zs_make_provisioning_credentials_card(certPathRow, certPasswordRow, self.dylibSigningStatusLabel);
-    [self.stack addArrangedSubview:provisioningCard];
-    [self.stack setCustomSpacing:8 afterView:provisioningCard];
-
-    [self zs_loadDylibSigningFields];
-
-    [self zs_dylibSigningRunBootVerification];
 
     zs_add_section_header_with_docs(self.stack, @"Debug", self, @selector(docsInfoTapped:));
 
@@ -6173,7 +5924,6 @@ static const CGFloat kContentFadeHeight = 22;
 
     UIFont *installButtonFont = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightSemibold];
     UIColor *liveContainerBlue = [UIColor colorWithRed:0.02 green:0.48 blue:1.0 alpha:1.0];
-    UIColor *dylibInjectionRed = [UIColor colorWithRed:1.0 green:0.23 blue:0.19 alpha:1.0];
 
     NSString *liveContainerInstallTitle = @"LiveContainer installation";
     self.docsLiveContainerInstallButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -6181,13 +5931,6 @@ static const CGFloat kContentFadeHeight = 22;
     zs_style_button_as_solid_glass_with_font(self.docsLiveContainerInstallButton, liveContainerInstallTitle, liveContainerBlue, installButtonFont);
     [self.docsLiveContainerInstallButton.heightAnchor constraintEqualToConstant:50].active = YES;
     [self.docsLiveContainerInstallButton addTarget:self action:@selector(docsLiveContainerInstallTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    NSString *dylibInjectionInstallTitle = @"dylib injection installation";
-    self.docsDylibInjectionInstallButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.docsDylibInjectionInstallButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_solid_glass_with_font(self.docsDylibInjectionInstallButton, dylibInjectionInstallTitle, dylibInjectionRed, installButtonFont);
-    [self.docsDylibInjectionInstallButton.heightAnchor constraintEqualToConstant:50].active = YES;
-    [self.docsDylibInjectionInstallButton addTarget:self action:@selector(docsDylibInjectionInstallTapped:) forControlEvents:UIControlEventTouchUpInside];
 
     self.docsUpdateActionsDisabledNoteLabel = [[UILabel alloc] init];
     self.docsUpdateActionsDisabledNoteLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -6204,10 +5947,9 @@ static const CGFloat kContentFadeHeight = 22;
     [self.docsGitHubReleaseLinkButton addTarget:self action:@selector(docsGitHubReleaseLinkTapped:) forControlEvents:UIControlEventTouchUpInside];
 
     [self.docsUpdateActionsStack addArrangedSubview:self.docsLiveContainerInstallButton];
-    [self.docsUpdateActionsStack addArrangedSubview:self.docsDylibInjectionInstallButton];
     [self.docsUpdateActionsStack addArrangedSubview:self.docsUpdateActionsDisabledNoteLabel];
     [self.docsUpdateActionsStack addArrangedSubview:self.docsGitHubReleaseLinkButton];
-    [self.docsUpdateActionsStack setCustomSpacing:16 afterView:self.docsDylibInjectionInstallButton];
+    [self.docsUpdateActionsStack setCustomSpacing:16 afterView:self.docsLiveContainerInstallButton];
     [self.docsUpdateActionsStack setCustomSpacing:14 afterView:self.docsUpdateActionsDisabledNoteLabel];
 
     self.docsScrollViewBottomToOverlayConstraint =
@@ -6380,16 +6122,6 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
             if ([item.name isEqualToString:@"mode"]) mode = (ZSUpdateCheckMode)item.value.integerValue;
         }
         [self zs_confirmAndReplaceInstalledDylibWithMode:mode];
-        return NO;
-    }
-
-    if ([URL.scheme isEqualToString:@"zsupdate"] && [URL.host isEqualToString:@"sign"]) {
-        ZSUpdateCheckMode mode = ZSUpdateCheckModeReleases;
-        NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:NO];
-        for (NSURLQueryItem *item in components.queryItems) {
-            if ([item.name isEqualToString:@"mode"]) mode = (ZSUpdateCheckMode)item.value.integerValue;
-        }
-        [self zs_confirmAndSignInstallWithMode:mode];
         return NO;
     }
     return NO;
@@ -6797,17 +6529,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         }
         return;
     }
-    if (controller == self.dylibCertPicker) {
-        self.dylibCertPicker = nil;
-        [self zs_handlePickedCertificateURL:urls.firstObject];
-        return;
-    }
 }
 
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
-    if (controller == self.dylibCertPicker) {
-        self.dylibCertPicker = nil;
-    }
     if (controller == self.libraryImportPicker) {
         self.libraryImportTargetFolder = nil;
     }
@@ -9745,233 +9469,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     }];
 }
 
-#pragma mark Provisioning
-
-- (void)zs_loadDylibSigningFields {
-    ZSDylibSigningConfig *config = [ZSDylibSigningSettings loadConfig];
-    self.dylibCertPathField.text = config.certificateFileName.length > 0 ? config.certificateFileName : @"";
-    self.dylibCertPasswordField.text = config.password ?: @"";
-}
-
-- (void)zs_persistDylibSigningPasswordField {
-    ZSDylibSigningConfig *config = [ZSDylibSigningSettings loadConfig];
-
-    NSString *password = self.dylibCertPasswordField.text ?: @"";
-    config.password = password.length > 0 ? password : nil;
-
-    NSError *error = nil;
-    if (![ZSDylibSigningSettings saveConfig:config error:&error]) {
-        ZLog(@"[UserInterface] Dylib Signing: failed to save config: %@", error);
-    }
-}
-
-- (void)zs_setDylibSigningStatusLabelText:(NSString *)text color:(UIColor *)color {
-    self.dylibSigningStatusLabel.text = text ?: @"";
-    self.dylibSigningStatusLabel.textColor = color;
-    self.dylibSigningStatusLabel.hidden = (text.length == 0);
-    if ([color isEqual:zs_accent_green_color()]) {
-        zs_apply_gif_text_tint(self.dylibSigningStatusLabel);
-    } else {
-        zs_remove_gif_text_tint(self.dylibSigningStatusLabel);
-    }
-}
-
-- (void)zs_setDylibSigningFieldsLocked:(BOOL)locked {
-    self.dylibCertPasswordField.enabled = !locked;
-
-    UIColor *textColor = locked ? [UIColor colorWithWhite:1 alpha:0.35] : UIColor.whiteColor;
-    self.dylibCertPathField.textColor = textColor;
-    self.dylibCertPasswordField.textColor = textColor;
-    self.dylibCertPasswordField.alpha = locked ? 0.5 : 1.0;
-
-    UIView *passwordContainer = self.dylibCertPasswordFieldContainer;
-    UIView *passwordRow = passwordContainer;
-    if (passwordRow) {
-        passwordRow.alpha = 1.0;
-        if (zs_has_liquid_glass() && [passwordRow isKindOfClass:[UIVisualEffectView class]]) {
-            ((UIVisualEffectView *)passwordRow).effect = zs_make_glass_effect(!locked);
-        }
-    }
-    self.dylibCertPathFieldContainer.alpha = locked ? 0.5 : 1.0;
-}
-
-- (void)zs_dylibSigningEnterVerifiedStateWithCommonName:(NSString *)commonName expiration:(NSDate *)expirationDate {
-    self.dylibSigningCredentialsStale = NO;
-    self.dylibSigningInRemoveMode = YES;
-    [self zs_setDylibSigningFieldsLocked:YES];
-
-    [self.dylibSigningVerifyButton removeTarget:self action:@selector(zs_dylibSigningVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-    zs_remove_tap_to_confirm(self.dylibSigningVerifyButton);
-    __weak typeof(self) weakSelf = self;
-    zs_attach_tap_to_confirm(self.dylibSigningVerifyButton, self,
-        @"Remove Certificate?", @"Your stored signing certificate and password will be removed from this device.", @"Remove", YES, ^{
-        [weakSelf zs_dylibSigningRemoveCredentialsConfirmed];
-    });
-    self.dylibSigningVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_remove(self.dylibSigningVerifyButton);
-
-    NSString *statusText;
-    if (expirationDate) {
-        NSDateFormatter *formatter = [NSDateFormatter new];
-        formatter.dateFormat = @"MM-dd-yyyy";
-
-        NSString *devLine = commonName.length > 0 ? commonName : @"unknown";
-        NSRange prefixRange = [devLine rangeOfString:@": "];
-        if (prefixRange.location != NSNotFound) {
-            devLine = [devLine substringFromIndex:NSMaxRange(prefixRange)];
-        }
-
-        statusText = [NSString stringWithFormat:@"Certificate Valid\nDev: %@\nExpiration date: %@",
-                      devLine, [formatter stringFromDate:expirationDate]];
-    } else {
-        statusText = @"Certificate Valid";
-    }
-    [self zs_setDylibSigningStatusLabelText:statusText color:zs_accent_green_color()];
-    ZLog(@"[UserInterface] Dylib Signing: certificate verified (%@)", commonName ?: @"unknown identity");
-}
-
-- (void)zs_dylibSigningEnterStaleState {
-    self.dylibSigningCredentialsStale = YES;
-    self.dylibSigningInRemoveMode = YES;
-    [self zs_setDylibSigningFieldsLocked:YES];
-
-    [self.dylibSigningVerifyButton removeTarget:self action:@selector(zs_dylibSigningVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-    zs_remove_tap_to_confirm(self.dylibSigningVerifyButton);
-    __weak typeof(self) weakSelf = self;
-    zs_attach_tap_to_confirm(self.dylibSigningVerifyButton, self,
-        @"Remove Certificate?", @"Your stored signing certificate and password will be removed from this device.", @"Remove", YES, ^{
-        [weakSelf zs_dylibSigningRemoveCredentialsConfirmed];
-    });
-    self.dylibSigningVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_remove(self.dylibSigningVerifyButton);
-
-    [self zs_setDylibSigningStatusLabelText:@"Your stored certificate is no longer valid."
-                                       color:[UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0]];
-    ZLog(@"[UserInterface] Dylib Signing: stored certificate is no longer valid");
-}
-
-- (void)zs_dylibSigningRemoveCredentialsConfirmed {
-    NSError *error = nil;
-    if (![ZSDylibSigningSettings clearAllWithError:&error]) {
-        ZLog(@"[UserInterface] Dylib Signing: failed to wipe stored certificate: %@", error);
-    } else {
-        ZLog(@"[UserInterface] Dylib Signing: certificate removed");
-    }
-
-    self.dylibSigningInRemoveMode = NO;
-    self.dylibSigningCredentialsStale = NO;
-    zs_remove_tap_to_confirm(self.dylibSigningVerifyButton);
-    [self.dylibSigningVerifyButton addTarget:self action:@selector(zs_dylibSigningVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.dylibCertPathField.text = @"";
-    self.dylibCertPasswordField.text = @"";
-    [self zs_setDylibSigningFieldsLocked:NO];
-
-    self.dylibSigningVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_verify(self.dylibSigningVerifyButton);
-
-    [self zs_setDylibSigningStatusLabelText:nil color:nil];
-}
-
-- (void)zs_dylibSigningRunBootVerification {
-    ZSDylibSigningConfig *config = [ZSDylibSigningSettings loadConfig];
-    if (config.certificateFileName.length == 0 || config.password.length == 0) {
-        return;
-    }
-
-    __weak typeof(self) weakSelf = self;
-    [ZSDylibSigningService verifyCertificateForConfig:config completion:^(BOOL valid, NSString *commonName, NSDate *expirationDate, NSError *verifyError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (valid) {
-            [strongSelf zs_dylibSigningEnterVerifiedStateWithCommonName:commonName expiration:expirationDate];
-        } else {
-            [strongSelf zs_dylibSigningEnterStaleState];
-        }
-    }];
-}
-
-- (void)zs_dylibCertRowTapped:(UITapGestureRecognizer *)recognizer {
-    if (self.dylibSigningInRemoveMode) return;
-
-    UIDocumentPickerViewController *picker;
-    if (@available(iOS 14.0, *)) {
-        UTType *pkcs12Type = [UTType typeWithFilenameExtension:@"p12"];
-        NSArray<UTType *> *types = pkcs12Type ? @[pkcs12Type] : @[UTTypeData];
-        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:types];
-    } else {
-        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"com.rsa.pkcs-12", @"public.data"]
-                                                                          inMode:UIDocumentPickerModeImport];
-    }
-    picker.delegate = self;
-    picker.allowsMultipleSelection = NO;
-
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) {
-        ZLog(@"[Dylib Signing] no root view controller to present the certificate picker from");
-        return;
-    }
-    self.dylibCertPicker = picker;
-    [presenter presentViewController:picker animated:YES completion:nil];
-}
-
-- (void)zs_handlePickedCertificateURL:(NSURL *)url {
-    BOOL accessing = [url startAccessingSecurityScopedResource];
-    NSError *error = nil;
-    NSString *importedFileName = [ZSDylibSigningSettings importCertificateAtURL:url error:&error];
-    if (accessing) [url stopAccessingSecurityScopedResource];
-
-    if (importedFileName.length == 0) {
-        [self zs_presentModsAlertWithTitle:@"Couldn't Import Certificate"
-                                    message:error.localizedDescription ?: @"Unknown error."];
-        return;
-    }
-
-    ZSDylibSigningConfig *config = [ZSDylibSigningSettings loadConfig];
-    config.certificateFileName = importedFileName;
-    NSError *saveError = nil;
-    if (![ZSDylibSigningSettings saveConfig:config error:&saveError]) {
-        ZLog(@"[UserInterface] Dylib Signing: failed to persist imported certificate name: %@", saveError);
-    }
-
-    self.dylibCertPathField.text = importedFileName;
-    [self zs_setDylibSigningStatusLabelText:nil color:nil];
-    ZLog(@"[UserInterface] Dylib Signing: imported certificate \"%@\"", importedFileName);
-}
-
-- (void)zs_dylibSigningVerifyTapped:(UIButton *)sender {
-    if (self.dylibSigningInRemoveMode) return;
-
-    [self zs_persistDylibSigningPasswordField];
-
-    ZSDylibSigningConfig *config = [ZSDylibSigningSettings loadConfig];
-    if (config.certificateFileName.length == 0 || config.password.length == 0) {
-        [self zs_presentModsAlertWithTitle:@"Certificate Not Configured"
-                                    message:@"Select a .p12 certificate and enter its password above first."];
-        return;
-    }
-
-    sender.enabled = NO;
-    zs_crossfade_auth_verify_button_title(sender, @"Verifying\u2026");
-
-    __weak typeof(self) weakSelf = self;
-    [ZSDylibSigningService verifyCertificateForConfig:config completion:^(BOOL valid, NSString *commonName, NSDate *expirationDate, NSError *verifyError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (valid) {
-            [strongSelf zs_dylibSigningEnterVerifiedStateWithCommonName:commonName expiration:expirationDate];
-        } else {
-            sender.enabled = YES;
-            zs_crossfade_auth_verify_button_title(sender, @"Verify");
-            ZLog(@"[UserInterface] Dylib Signing: manual verification failed: %@", verifyError.localizedDescription ?: @"Couldn't verify the certificate and password.");
-            [strongSelf zs_presentModsAlertWithTitle:@"Verification Failed"
-                                              message:verifyError.localizedDescription ?: @"Couldn't verify the certificate and password."];
-        }
-    }];
-}
-
 #pragma mark Re-Encoding format
 
 - (void)zs_reencodeFormatSelected:(NSString *)format {
@@ -10245,21 +9742,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
             if (!strongSelf || !strongField) return;
             strongField.text = trimmedText ?: @"";
             [strongSelf zs_persistAuthFields];
-        }];
-        return NO;
-    }
-    if (textField == self.dylibCertPasswordField) {
-        __weak typeof(self) weakSelf = self;
-        __weak UITextField *weakField = textField;
-        [self zs_presentFloatingTextFieldWithInitialText:textField.text
-                                              placeholder:textField.placeholder
-                                                   secure:textField.secureTextEntry
-                                               completion:^(NSString * _Nullable trimmedText) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            __strong UITextField *strongField = weakField;
-            if (!strongSelf || !strongField) return;
-            strongField.text = trimmedText ?: @"";
-            [strongSelf zs_persistDylibSigningPasswordField];
         }];
         return NO;
     }
@@ -10862,24 +10344,19 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 
 - (void)zs_configureReleaseInfoActionsWithMode:(ZSUpdateCheckMode)mode disabled:(BOOL)disabled releaseURLString:(NSString * _Nullable)releaseURLString {
     objc_setAssociatedObject(self.docsLiveContainerInstallButton, "zs_updateMode", @(mode), OBJC_ASSOCIATION_RETAIN);
-    objc_setAssociatedObject(self.docsDylibInjectionInstallButton, "zs_updateMode", @(mode), OBJC_ASSOCIATION_RETAIN);
 
     BOOL liveContainerAvailable = [ZSDylibUpdater isRunningUnderLiveContainer];
 
     self.docsLiveContainerInstallButton.hidden = NO;
 
     BOOL liveContainerGreyedOut = disabled || !liveContainerAvailable;
-    BOOL dylibInjectionGreyedOut = disabled || liveContainerAvailable;
     zs_set_install_option_greyed_out(self.docsLiveContainerInstallButton, liveContainerGreyedOut);
-    zs_set_install_option_greyed_out(self.docsDylibInjectionInstallButton, dylibInjectionGreyedOut);
 
     NSString *disabledNoteText = nil;
     if (disabled) {
         disabledNoteText = @"On-device install disabled for this release.";
     } else if (liveContainerGreyedOut) {
         disabledNoteText = @"Not in a LiveContainer Instance.";
-    } else if (dylibInjectionGreyedOut) {
-        disabledNoteText = @"Unavailable in a LiveContainer Instance.";
     }
     self.docsUpdateActionsDisabledNoteLabel.text = disabledNoteText;
     self.docsUpdateActionsDisabledNoteLabel.hidden = (disabledNoteText.length == 0);
@@ -10904,12 +10381,6 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     NSNumber *modeNumber = objc_getAssociatedObject(sender, "zs_updateMode");
     ZSUpdateCheckMode mode = modeNumber ? (ZSUpdateCheckMode)modeNumber.integerValue : ZSUpdateCheckModeReleases;
     [self zs_confirmAndReplaceInstalledDylibWithMode:mode];
-}
-
-- (void)docsDylibInjectionInstallTapped:(UIButton *)sender {
-    NSNumber *modeNumber = objc_getAssociatedObject(sender, "zs_updateMode");
-    ZSUpdateCheckMode mode = modeNumber ? (ZSUpdateCheckMode)modeNumber.integerValue : ZSUpdateCheckModeReleases;
-    [self zs_confirmAndSignInstallWithMode:mode];
 }
 
 - (void)docsGitHubReleaseLinkTapped:(UIButton *)sender {
@@ -11081,63 +10552,6 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
                 [haptic notificationOccurred:success ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
                 NSString *displayMessage = success ? @"Successfully Installed. Restart your game to load the new build." : message;
                 [strongSelf zs_presentModsAlertWithTitle:success ? @"Dylib Replaced" : @"Replace Failed" message:displayMessage];
-            }];
-        }];
-    }];
-}
-
-- (void)zs_confirmAndSignInstallWithMode:(ZSUpdateCheckMode)mode {
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) return;
-
-    if (self.updateOnDeviceInstallDisabled) {
-        [self zs_presentModsAlertWithTitle:@"Install Disabled"
-                                    message:@"On-device installation is disabled for this release."];
-        return;
-    }
-
-    if (![ZSDylibSigningSettings hasStoredConfig]) {
-        [self zs_presentModsAlertWithTitle:@"Certificate Not Configured"
-                                    message:@"Import a .p12 provisioning certificate under Provisioning before using this install method."];
-        return;
-    }
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Install update?"
-        message:@"This downloads the update, signs it on-device with your imported certificate, and swaps the binary."
-        preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-
-    __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Sign & Replace" style:UIAlertActionStyleDestructive
-        handler:^(UIAlertAction *action) {
-        [weakSelf zs_performSignInstallWithMode:mode];
-    }]];
-    [presenter presentViewController:alert animated:YES completion:nil];
-}
-
-- (void)zs_performSignInstallWithMode:(ZSUpdateCheckMode)mode {
-    UIAlertController *working = [self zs_presentDylibInstallWorkingAlertWithTitle:@"Signing & Replacing\u2026"
-        message:@"Downloading & Installing update."];
-
-    __weak typeof(self) weakSelf = self;
-    [ZSUpdateChecker fetchLatestDylibDataWithMode:mode completion:^(NSData * _Nullable dylibData, NSError * _Nullable error) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (!dylibData) {
-            [strongSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
-                [strongSelf zs_presentModsAlertWithTitle:@"Sign & Replace Failed"
-                                                  message:error.localizedDescription ?: @"Couldn't download the latest build."];
-            }];
-            return;
-        }
-
-        [ZSDylibUpdater replaceSelfDylibWithData:dylibData completion:^(BOOL success, NSString *message) {
-            [strongSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
-                UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-                [haptic notificationOccurred:success ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
-                NSString *displayMessage = success ? @"Signed, downloaded, and installed. Restart your game to load the new build." : message;
-                [strongSelf zs_presentModsAlertWithTitle:success ? @"Dylib Signed & Replaced" : @"Sign & Replace Failed" message:displayMessage];
             }];
         }];
     }];

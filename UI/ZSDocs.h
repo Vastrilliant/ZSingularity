@@ -24,7 +24,6 @@ static NSDictionary<NSString *, NSString *> *zs_docs_section_files(void) {
             @"Miscellaneous": @"Miscellaneous.md",
             @"Mods": @"Mods.md",
             @"Auth": @"Auth.md",
-            @"Provisioning": @"Provisioning.md",
             @"Config": @"Config.md",
         };
     });

@@ -1,5 +1,4 @@
 #import "ZSUpdater.h"
-#import "ZSDylibSigning.h"
 #import "ZTweakLog.h"
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
@@ -112,62 +111,6 @@ static void zs_self_image_anchor(void) {}
         }
     }
     return nil;
-}
-
-+ (void)replaceSelfDylibWithData:(NSData *)data
-                        completion:(void (^)(BOOL success, NSString *message))completion {
-    void (^finish)(BOOL, NSString *) = ^(BOOL success, NSString *message) {
-        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(success, message); });
-    };
-
-    if (data.length == 0) {
-        finish(NO, @"Downloaded dylib was empty.");
-        return;
-    }
-
-    NSString *targetPath = [self selfLoadedDylibPath];
-    if (!targetPath) {
-        finish(NO, @"Couldn't locate the currently loaded dylib on disk.");
-        return;
-    }
-
-    if (![ZSDylibSigningSettings certificateFileURL]) {
-        finish(NO, @"No signing certificate configured. Import one under Dylib Signing before installing updates.");
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSString *tempPath = [targetPath stringByAppendingPathExtension:@"incoming"];
-        NSError *writeError = nil;
-        if (![data writeToFile:tempPath options:NSDataWritingAtomic error:&writeError]) {
-            ZLog(@"[ZSDylibUpdater] failed to stage new dylib: %@", writeError);
-            finish(NO, writeError.localizedDescription ?: @"Couldn't write the new dylib to disk.");
-            return;
-        }
-
-        ZSDylibSigningConfig *signingConfig = [ZSDylibSigningSettings loadConfig];
-        [ZSDylibSigningService signDylibAtPath:tempPath withConfig:signingConfig completion:^(BOOL signSuccess, NSError *signError) {
-            if (!signSuccess) {
-                ZLog(@"[ZSDylibUpdater] failed to sign staged dylib: %@", signError);
-                [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
-                finish(NO, signError.localizedDescription ?: @"Couldn't sign the downloaded dylib.");
-                return;
-            }
-
-            NSFileManager *fm = [NSFileManager defaultManager];
-            [fm removeItemAtPath:targetPath error:nil];
-
-            NSError *moveError = nil;
-            if (![fm moveItemAtPath:tempPath toPath:targetPath error:&moveError]) {
-                ZLog(@"[ZSDylibUpdater] failed to replace dylib: %@", moveError);
-                finish(NO, moveError.localizedDescription ?: @"Couldn't replace the dylib.");
-                return;
-            }
-
-            ZLog(@"[ZSDylibUpdater] signed and replaced dylib at %@", targetPath);
-            finish(YES, @"Signed, replaced. Relaunch the app to load the new build.");
-        }];
-    });
 }
 
 + (void)zs_stageAndReplaceAtPath:(NSString *)targetPath
