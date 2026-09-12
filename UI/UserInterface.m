@@ -61,6 +61,12 @@ static UIWindow *zs_key_window(void) {
     return [UIApplication sharedApplication].delegate.window;
 }
 
+static void zs_force_dark(UIView *view) {
+    if (@available(iOS 13.0, *)) {
+        view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    }
+}
+
 #pragma mark - Accent color
 
 static UIColor *zs_accent_green_color(void) {
@@ -4357,6 +4363,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
     [window addSubview:self.glassContainer];
+    zs_force_dark(self.glassContainer);
 
     if (zs_has_liquid_glass()) {
 
@@ -4390,6 +4397,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
     self.contentOverlay.userInteractionEnabled = YES;
     [window addSubview:self.contentOverlay];
+    zs_force_dark(self.contentOverlay);
 
     UIPanGestureRecognizer *closeSwipe = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panelSwiped:)];
     closeSwipe.delegate = self;
@@ -5818,6 +5826,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.docsContentOverlay.userInteractionEnabled = YES;
     self.docsContentOverlay.hidden = YES;
     [window addSubview:self.docsContentOverlay];
+    zs_force_dark(self.docsContentOverlay);
     if (self.contentOverlay) {
         [window insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
     }
@@ -8305,6 +8314,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     backdrop.userInteractionEnabled = YES;
     [backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_floatingFieldBackdropTapped)]];
     [window addSubview:backdrop];
+    zs_force_dark(backdrop);
     self.zsFloatingFieldBackdrop = backdrop;
     [NSLayoutConstraint activateConstraints:@[
         [backdrop.leadingAnchor constraintEqualToAnchor:window.leadingAnchor],
@@ -8330,6 +8340,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     UIView *container = glass ?: field;
     container.translatesAutoresizingMaskIntoConstraints = NO;
     [window addSubview:container];
+    zs_force_dark(container);
     [window bringSubviewToFront:container];
     self.zsFloatingFieldContainer = container;
 
