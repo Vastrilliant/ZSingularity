@@ -2971,7 +2971,7 @@ static UIView *zs_make_mods_entry_row(ModAssetLibraryEntry *entry, id target, SE
 
     BOOL isBank = ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame);
 
-    BOOL isDoctorEligible = entry.isAssetBundle && !isStoredBundlesFolder;
+    BOOL isDoctorEligible = (entry.isAssetBundle || entry.zipCacheHash1.length > 0) && !isStoredBundlesFolder;
     UIImageSymbolConfiguration *iconConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
     UIImageView *icon = [[UIImageView alloc] initWithImage:
         [UIImage systemImageNamed:(isBank ? @"waveform" : @"doc.fill") withConfiguration:iconConfig]];
