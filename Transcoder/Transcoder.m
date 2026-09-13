@@ -14,6 +14,7 @@ NSString * const ZTranscoderServiceResponseBodyKey = @"ZTranscoderServiceRespons
 NSString * const ZTranscoderServiceRunURLKey = @"ZTranscoderServiceRunURLKey";
 
 static NSString * const kBDSInputAssetName = @"input.bundle";
+static NSString * const kBDSCarra2AssetName = @"input.carra2";
 static NSString * const kBDSOutputAssetName = @"output.bundle";
 
 static NSString * const kBDSOriginalAssetName = @"original.bundle";
@@ -627,7 +628,8 @@ didFinishDownloadingToURL:(NSURL *)location {
             reportProgress((int64_t)moddedBytes + bytesSent);
         };
 
-        if (![self bds_uploadReleaseAssetData:uploadData name:kBDSInputAssetName
+        NSString *inputAssetName = isCarra2 ? kBDSCarra2AssetName : kBDSInputAssetName;
+        if (![self bds_uploadReleaseAssetData:uploadData name:inputAssetName
                              uploadURLTemplate:uploadURLTemplate progress:reportModdedProgress
                                         config:config error:&error]) {
             [self bds_cleanupScratchSubmission:scratchBranch config:config];
