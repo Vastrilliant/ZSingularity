@@ -2423,6 +2423,15 @@ static NSString *zs_reencode_format_display_name(NSString *format) {
     return format ?: @"RGBA32";
 }
 
+static NSString *zs_codec_descriptor_label_for_format(NSString *format) {
+    if ([format isEqualToString:@"ASTC_RGBA_4x4"]) return @"ASTC_4x4";
+    if ([format isEqualToString:@"ASTC_RGBA_6x6"]) return @"ASTC_6x6";
+    if ([format isEqualToString:@"ASTC_RGBA_8x8"]) return @"ASTC_8x8";
+    if ([format isEqualToString:@"RGBA32"]) return @"RGBA32";
+    if ([format isEqualToString:@"ETC2"]) return @"ETC2";
+    return format ?: @"RGBA32";
+}
+
 static UIImage *zs_make_dropdown_chevron_image(void) {
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightSemibold];
     UIImage *chevronImage = [UIImage systemImageNamed:@"chevron.up.chevron.down" withConfiguration:symbolConfig];
@@ -3253,6 +3262,14 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
             platformLabel.font = subtextFont;
             platformLabel.textColor = subtextColor;
             [panel addArrangedSubview:platformLabel];
+        }
+
+        if (entry.doctorTranscodeCodec.length > 0) {
+            UILabel *transcodeCodecLabel = [[UILabel alloc] init];
+            transcodeCodecLabel.text = [NSString stringWithFormat:@"Codec: %@", zs_codec_descriptor_label_for_format(entry.doctorTranscodeCodec)];
+            transcodeCodecLabel.font = subtextFont;
+            transcodeCodecLabel.textColor = subtextColor;
+            [panel addArrangedSubview:transcodeCodecLabel];
         }
 
         NSString *statusText = zs_doctor_status_text_for_entry(entry, downloadInFlight, isStoredBundlesFolder);
@@ -6912,6 +6929,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         entryToMutate.doctorUploadProgress = 0;
         entryToMutate.doctorProcessProgress = 0.0;
         entryToMutate.doctorLastError = nil;
+        entryToMutate.doctorTranscodeCodec = config.outputFormat.length > 0 ? config.outputFormat : kZSDefaultReencodeFormat;
     }
                                                                            error:&stateError];
     if (!updated) {
@@ -8811,26 +8829,36 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 - (void)zs_doctorInstallDoctoredURL:(NSURL *)doctoredURL toStockBundleURL:(NSURL *)stockBundleURL entryPath:(NSString *)entryPath inFolder:(NSString *)folderName {
 
-    NSError *readErr = nil;
-    NSData *doctoredData = [NSData dataWithContentsOfURL:doctoredURL options:0 error:&readErr];
-    if (!doctoredData) {
-        [self.doctorDownloadInFlightPaths removeObject:entryPath];
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        [self zs_presentModsAlertWithTitle:@"Install Failed"
-                                    message:readErr.localizedDescription ?: @"Couldn't read the doctored bundle."];
-        [self zs_rebuildModsLibrary];
-        return;
+    NSError *currentEntriesErr = nil;
+    NSArray<ModAssetLibraryEntry *> *currentEntries = [ModAssetLibrary entriesInFolder:folderName error:&currentEntriesErr] ?: @[];
+    ModAssetLibraryEntry *currentEntry = nil;
+    for (ModAssetLibraryEntry *candidate in currentEntries) {
+        if ([candidate.path isEqualToString:entryPath]) { currentEntry = candidate; break; }
     }
-    NSError *libraryWriteErr = nil;
-    if (![doctoredData writeToFile:entryPath options:NSDataWritingAtomic error:&libraryWriteErr]) {
-        [self.doctorDownloadInFlightPaths removeObject:entryPath];
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        [self zs_presentModsAlertWithTitle:@"Install Failed"
-                                    message:libraryWriteErr.localizedDescription ?: @"Couldn't update the mod library's own copy."];
-        [self zs_rebuildModsLibrary];
-        return;
+    BOOL wasCarra2Entry = currentEntry && !currentEntry.isAssetBundle && currentEntry.zipCacheHash1.length > 0;
+
+    if (!wasCarra2Entry) {
+        NSError *readErr = nil;
+        NSData *doctoredData = [NSData dataWithContentsOfURL:doctoredURL options:0 error:&readErr];
+        if (!doctoredData) {
+            [self.doctorDownloadInFlightPaths removeObject:entryPath];
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            [haptic notificationOccurred:UINotificationFeedbackTypeError];
+            [self zs_presentModsAlertWithTitle:@"Install Failed"
+                                        message:readErr.localizedDescription ?: @"Couldn't read the doctored bundle."];
+            [self zs_rebuildModsLibrary];
+            return;
+        }
+        NSError *libraryWriteErr = nil;
+        if (![doctoredData writeToFile:entryPath options:NSDataWritingAtomic error:&libraryWriteErr]) {
+            [self.doctorDownloadInFlightPaths removeObject:entryPath];
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            [haptic notificationOccurred:UINotificationFeedbackTypeError];
+            [self zs_presentModsAlertWithTitle:@"Install Failed"
+                                        message:libraryWriteErr.localizedDescription ?: @"Couldn't update the mod library's own copy."];
+            [self zs_rebuildModsLibrary];
+            return;
+        }
     }
 
     NSError *installError = nil;
@@ -8846,41 +8874,70 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         return;
     }
 
-    int32_t freshPlatform = 0;
-    NSError *platformErr = nil;
-    BOOL gotPlatform = [UnityBundleCAB targetPlatform:&freshPlatform forBundleAtPath:doctoredURL.path error:&platformErr];
-    NSNumber *freshPlatformNumber = gotPlatform ? @(freshPlatform) : nil;
-    if (!gotPlatform) {
-
-        ZLog(@"[Mods Library] couldn't re-read target platform from the doctored bundle for %@, leaving the row's existing value: %@", entryPath.lastPathComponent, platformErr.localizedDescription);
-    }
-    NSDictionary<NSFileAttributeKey, id> *doctoredAttrs = [NSFileManager.defaultManager attributesOfItemAtPath:doctoredURL.path error:nil];
-    unsigned long long freshByteSize = doctoredAttrs.fileSize;
-
     NSDateFormatter *iso = [NSDateFormatter new];
     iso.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
     iso.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
     iso.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
     NSString *nowISO = [iso stringFromDate:[NSDate date]];
 
-    NSError *stateError = nil;
-    ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:zs_mods_entry_placeholder_for_path(entryPath)
-                                                                        inFolder:folderName
-                                                                      applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusInstalled;
-        if (freshPlatformNumber) entryToMutate.targetPlatform = freshPlatformNumber;
-        if (freshByteSize > 0) entryToMutate.byteSize = freshByteSize;
-        entryToMutate.dateAdded = nowISO;
+    NSString *installedLogName = entryPath.lastPathComponent;
+    unsigned long long freshByteSize = 0;
 
-        entryToMutate.livePathDescription = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:stockBundleURL];
+    if (wasCarra2Entry) {
+        NSError *replaceErr = nil;
+        ModAssetLibraryEntry *replaced = [ModAssetLibrary replaceEntry:currentEntry
+                                                                inFolder:folderName
+                                              withDownloadedBundleAtURL:doctoredURL
+                                                                   error:&replaceErr];
+        if (!replaced) {
+            ZLog(@"[Mods Library] installed %@ but couldn't replace its Carra2 entry with the downloaded bundle: %@", entryPath.lastPathComponent, replaceErr.localizedDescription);
+        } else {
+            installedLogName = replaced.fileName;
+            freshByteSize = replaced.byteSize;
+            NSError *stateError = nil;
+            ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:replaced
+                                                                                inFolder:folderName
+                                                                              applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
+                entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusInstalled;
+                entryToMutate.dateAdded = nowISO;
+                entryToMutate.livePathDescription = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:stockBundleURL];
+            }
+                                                                                   error:&stateError];
+            if (!updated) {
+                ZLog(@"[Mods Library] replaced %@ with its downloaded bundle but couldn't record it as Installed on the manifest (entry deleted mid-flight?): %@", entryPath.lastPathComponent, stateError);
+            }
+        }
+    } else {
+        int32_t freshPlatform = 0;
+        NSError *platformErr = nil;
+        BOOL gotPlatform = [UnityBundleCAB targetPlatform:&freshPlatform forBundleAtPath:doctoredURL.path error:&platformErr];
+        NSNumber *freshPlatformNumber = gotPlatform ? @(freshPlatform) : nil;
+        if (!gotPlatform) {
 
+            ZLog(@"[Mods Library] couldn't re-read target platform from the doctored bundle for %@, leaving the row's existing value: %@", entryPath.lastPathComponent, platformErr.localizedDescription);
+        }
+        NSDictionary<NSFileAttributeKey, id> *doctoredAttrs = [NSFileManager.defaultManager attributesOfItemAtPath:doctoredURL.path error:nil];
+        freshByteSize = doctoredAttrs.fileSize;
+
+        NSError *stateError = nil;
+        ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:zs_mods_entry_placeholder_for_path(entryPath)
+                                                                            inFolder:folderName
+                                                                          applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
+            entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusInstalled;
+            if (freshPlatformNumber) entryToMutate.targetPlatform = freshPlatformNumber;
+            if (freshByteSize > 0) entryToMutate.byteSize = freshByteSize;
+            entryToMutate.dateAdded = nowISO;
+
+            entryToMutate.livePathDescription = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:stockBundleURL];
+
+        }
+                                                                               error:&stateError];
+        if (!updated) {
+            ZLog(@"[Mods Library] installed %@ but couldn't record it as Installed on the manifest (entry deleted mid-flight?): %@", entryPath.lastPathComponent, stateError);
+        }
     }
-                                                                           error:&stateError];
-    if (!updated) {
-        ZLog(@"[Mods Library] installed %@ but couldn't record it as Installed on the manifest (entry deleted mid-flight?): %@", entryPath.lastPathComponent, stateError);
-    }
 
-    ZLog(@"[Mods Library] installed doctored bundle %@ over %@ (%llu bytes)", entryPath.lastPathComponent, stockBundleURL.path, freshByteSize);
+    ZLog(@"[Mods Library] installed doctored bundle %@ over %@ (%llu bytes)", installedLogName, stockBundleURL.path, freshByteSize);
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
     [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     [self zs_rebuildModsLibrary];

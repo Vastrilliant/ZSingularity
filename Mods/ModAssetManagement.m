@@ -465,6 +465,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     if (self.doctorRunID) d[@"doctorRunID"] = self.doctorRunID;
     if (self.doctorRunURL) d[@"doctorRunURL"] = self.doctorRunURL;
     if (self.doctorLastError) d[@"doctorLastError"] = self.doctorLastError;
+    if (self.doctorTranscodeCodec) d[@"doctorTranscodeCodec"] = self.doctorTranscodeCodec;
     return d;
 }
 
@@ -499,6 +500,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     e.doctorRunID = [d[@"doctorRunID"] isKindOfClass:NSString.class] ? d[@"doctorRunID"] : nil;
     e.doctorRunURL = [d[@"doctorRunURL"] isKindOfClass:NSString.class] ? d[@"doctorRunURL"] : nil;
     e.doctorLastError = [d[@"doctorLastError"] isKindOfClass:NSString.class] ? d[@"doctorLastError"] : nil;
+    e.doctorTranscodeCodec = [d[@"doctorTranscodeCodec"] isKindOfClass:NSString.class] ? d[@"doctorTranscodeCodec"] : nil;
     return e;
 }
 
@@ -1282,6 +1284,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     movedEntry.doctorRunID = entry.doctorRunID;
     movedEntry.doctorRunURL = entry.doctorRunURL;
     movedEntry.doctorLastError = entry.doctorLastError;
+    movedEntry.doctorTranscodeCodec = entry.doctorTranscodeCodec;
 
     NSMutableArray<ModAssetLibraryEntry *> *toEntries =
         [([self entriesInFolder:toFolder error:nil] ?: @[]) mutableCopy];
@@ -1314,6 +1317,132 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     }
 
     return movedEntry;
+}
+
++ (nullable ModAssetLibraryEntry *)replaceEntry:(ModAssetLibraryEntry *)entry
+                                        inFolder:(NSString *)folderName
+                       withDownloadedBundleAtURL:(NSURL *)bundleURL
+                                           error:(NSError **)error {
+    NSString *root = [self modLibraryRootDirectory];
+    NSString *folderPath = root ? [root stringByAppendingPathComponent:folderName] : nil;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if (!folderPath || ![fm fileExistsAtPath:folderPath isDirectory:&isDir] || !isDir) {
+        if (error) *error = MALError(ModAssetLibraryErrorFolderNotFound,
+            [NSString stringWithFormat:@"No folder named \"%@\" - create it first.", folderName]);
+        return nil;
+    }
+
+    NSError *entriesErr = nil;
+    NSMutableArray<ModAssetLibraryEntry *> *entries =
+        [([self entriesInFolder:folderName error:&entriesErr] ?: @[]) mutableCopy];
+    if (!entries) {
+        if (error) *error = entriesErr;
+        return nil;
+    }
+    NSInteger existingIndex = NSNotFound;
+    for (NSInteger i = 0; i < (NSInteger)entries.count; i++) {
+        if ([entries[i].path isEqualToString:entry.path]) { existingIndex = i; break; }
+    }
+    if (existingIndex == NSNotFound) {
+        if (error) *error = MALError(ModAssetLibraryErrorEntryNotFound,
+            [NSString stringWithFormat:@"\"%@\" is no longer in the mods library.", entry.fileName]);
+        return nil;
+    }
+
+    NSError *cabErr = nil;
+    NSString *cabID = [UnityBundleCAB primaryCABForBundleAtPath:bundleURL.path error:&cabErr];
+    if (cabID.length == 0) {
+        cabID = nil;
+        ZLog(@"[ModAssetLibrary] downloaded bundle replacing %@ has no readable CAB id (%@) - importing flat.",
+             entry.fileName, cabErr.localizedDescription);
+    }
+
+    int32_t platform = 0;
+    NSNumber *targetPlatformNumber = nil;
+    NSError *platformErr = nil;
+    if ([UnityBundleCAB targetPlatform:&platform forBundleAtPath:bundleURL.path error:&platformErr]) {
+        targetPlatformNumber = @(platform);
+    } else {
+        ZLog(@"[ModAssetLibrary] couldn't read a target platform for the downloaded bundle replacing %@: %@",
+             entry.fileName, platformErr.localizedDescription);
+    }
+
+    NSString *destPath = nil;
+    NSString *destName = nil;
+    if (cabID) {
+        NSString *cabFolderName = [self mal_uniqueFolderNameFor:cabID inParentFolder:folderPath];
+        NSString *cabFolderPath = [folderPath stringByAppendingPathComponent:cabFolderName];
+        NSError *mkdirErr = nil;
+        if ([fm createDirectoryAtPath:cabFolderPath withIntermediateDirectories:YES attributes:nil error:&mkdirErr]) {
+            destName = @"__data";
+            destPath = [cabFolderPath stringByAppendingPathComponent:destName];
+        } else {
+            ZLog(@"[ModAssetLibrary] couldn't create CAB subfolder \"%@\" replacing %@: %@ - importing flat instead.",
+                 cabFolderName, entry.fileName, mkdirErr.localizedDescription);
+        }
+    }
+    if (!destPath) {
+        destName = [self mal_uniqueFileNameFor:bundleURL.lastPathComponent inFolder:folderPath];
+        destPath = [folderPath stringByAppendingPathComponent:destName];
+    }
+
+    NSError *copyErr = nil;
+    BOOL copied = [fm copyItemAtPath:bundleURL.path toPath:destPath error:&copyErr];
+    if (!copied) {
+        if (error) *error = copyErr ?: MALError(ModAssetLibraryErrorCopyFailed,
+            [NSString stringWithFormat:@"Couldn't replace \"%@\" with the downloaded bundle.", entry.fileName]);
+        return nil;
+    }
+
+    NSDictionary<NSFileAttributeKey, id> *attrs = [fm attributesOfItemAtPath:destPath error:nil];
+
+    ModAssetLibraryEntry *replacedEntry = [ModAssetLibraryEntry new];
+    replacedEntry.fileName = destName;
+    replacedEntry.path = destPath;
+    replacedEntry.byteSize = attrs.fileSize;
+    replacedEntry.dateAdded = entry.dateAdded;
+    replacedEntry.isAssetBundle = YES;
+    replacedEntry.cabIdentifier = cabID;
+    replacedEntry.targetPlatform = targetPlatformNumber;
+    replacedEntry.livePathDescription = entry.livePathDescription;
+    replacedEntry.resolvedInstallTargetPath = entry.resolvedInstallTargetPath;
+    replacedEntry.remark = entry.remark;
+    replacedEntry.cachedFromFolder = entry.cachedFromFolder;
+    replacedEntry.currentFolder = entry.currentFolder ?: folderName;
+    replacedEntry.doctorStatus = entry.doctorStatus;
+    replacedEntry.doctorUploadProgress = entry.doctorUploadProgress;
+    replacedEntry.doctorUploadTotalBytes = entry.doctorUploadTotalBytes;
+    replacedEntry.doctorProcessProgress = entry.doctorProcessProgress;
+    replacedEntry.doctorDownloadProgress = entry.doctorDownloadProgress;
+    replacedEntry.doctorDispatchCompressedByteSize = entry.doctorDispatchCompressedByteSize;
+    replacedEntry.doctorScratchBranch = entry.doctorScratchBranch;
+    replacedEntry.doctorRunID = entry.doctorRunID;
+    replacedEntry.doctorRunURL = entry.doctorRunURL;
+    replacedEntry.doctorLastError = entry.doctorLastError;
+    replacedEntry.doctorTranscodeCodec = entry.doctorTranscodeCodec;
+
+    entries[existingIndex] = replacedEntry;
+
+    NSError *writeErr = nil;
+    if (![self mal_writeEntries:entries toFolder:folderName error:&writeErr]) {
+        [fm removeItemAtPath:destPath error:nil];
+        if (error) *error = writeErr;
+        return nil;
+    }
+
+    NSString *oldEntryDir = entry.path.stringByDeletingLastPathComponent;
+    [fm removeItemAtPath:entry.path error:nil];
+    if (![oldEntryDir isEqualToString:folderPath]) {
+        NSArray<NSString *> *remainingInOldDir = [fm contentsOfDirectoryAtPath:oldEntryDir error:nil];
+        if (remainingInOldDir.count == 0) {
+            [fm removeItemAtPath:oldEntryDir error:nil];
+        }
+    }
+
+    ZLog(@"[ModAssetLibrary] replaced Carra2 entry \"%@\" in \"%@\" with the downloaded bundle \"%@\"",
+         entry.fileName, folderName, destName);
+    return replacedEntry;
 }
 
 + (nullable ModAssetLibraryEntry *)updateDoctorStateForEntry:(ModAssetLibraryEntry *)entry

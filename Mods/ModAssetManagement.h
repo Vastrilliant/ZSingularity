@@ -106,6 +106,7 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
 @property (nonatomic, copy, nullable) NSString *doctorRunID;
 @property (nonatomic, copy, nullable) NSString *doctorRunURL;
 @property (nonatomic, copy, nullable) NSString *doctorLastError;
+@property (nonatomic, copy, nullable) NSString *doctorTranscodeCodec;
 @end
 
 @interface ModAssetLibrary : NSObject
@@ -149,6 +150,11 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
                                      toFolder:(NSString *)toFolder
                           replacementBytesURL:(nullable NSURL *)replacementBytesURL
                                         error:(NSError **)error;
+
++ (nullable ModAssetLibraryEntry *)replaceEntry:(ModAssetLibraryEntry *)entry
+                                        inFolder:(NSString *)folderName
+                       withDownloadedBundleAtURL:(NSURL *)bundleURL
+                                           error:(NSError **)error;
 
 + (nullable ModAssetLibraryEntry *)updateDoctorStateForEntry:(ModAssetLibraryEntry *)entry
                                                       inFolder:(NSString *)folderName
