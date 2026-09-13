@@ -4374,6 +4374,7 @@ static const CGFloat kHandleHeight = 72;
 static const CGFloat kPanelCornerRadiusMinimum = 20;
 static const CGFloat kZSDocsPanelGlassFillOverlap = kPanelCornerRadiusMinimum + 6;
 static const CGFloat kHandleCornerRadius = 10;
+static const CGFloat kHandleNonGlassOverlap = 20;
 static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
 static const CGFloat kContentFadeHeight = 22;
@@ -4450,11 +4451,11 @@ static const CGFloat kContentFadeHeight = 22;
         self.handle.backgroundColor = UIColor.clearColor;
         self.handle.layer.borderWidth = 0;
     } else {
-        self.handle.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+        self.handle.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
         self.handle.layer.cornerRadius = kHandleCornerRadius;
         self.handle.layer.cornerCurve = kCACornerCurveContinuous;
-        self.handle.layer.borderWidth = 1;
-        self.handle.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+        self.handle.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+        self.handle.layer.borderWidth = 0;
     }
     self.handle.clipsToBounds = NO;
 
@@ -4471,6 +4472,10 @@ static const CGFloat kContentFadeHeight = 22;
     self.handle.userInteractionEnabled = YES;
 
     [self buildDocsPanel:window];
+
+    if (!zs_has_liquid_glass()) {
+        [self.glassContainerContent sendSubviewToBack:self.handle];
+    }
 
     self.syslogLines = [NSMutableArray array];
     self.syslogBlacklist = [NSMutableOrderedSet orderedSet];
@@ -10106,9 +10111,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
+        CGFloat handleOverlap = self.handleGlass ? 0 : kHandleNonGlassOverlap;
         handleElement.frame = CGRectMake(0,
                                           (height - kHandleHeight) * 0.5,
-                                          kHandleWidth,
+                                          kHandleWidth + handleOverlap,
                                           kHandleHeight);
 
         CGRect docsFrameLocal = CGRectMake(kHandleWidth, 0, docsW, height);
