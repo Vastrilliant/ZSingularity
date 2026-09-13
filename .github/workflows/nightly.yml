@@ -9,6 +9,7 @@ on:
       - 'Documentation/**'
       - 'README.md'
       - 'assets/**'
+      - '.github/workflows/**'
 
 env:
   LZ4_REF: v1.10.0
