@@ -1122,7 +1122,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
                 carra2URL.lastPathComponent, info.hash1, info.hash2]);
         return NO;
     }
-    NSString *resolvedTargetPath = [self mal_gameBundleRelativePath:matchPath];
+    NSString *resolvedTargetPath = [self mal_libraryRelativePath:matchPath];
 
     NSError *entriesErr = nil;
     NSMutableArray<ModAssetLibraryEntry *> *entries =
