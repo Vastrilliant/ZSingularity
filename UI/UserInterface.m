@@ -86,9 +86,33 @@ static UIColor *zs_bar_fill_color(void) {
 
 #pragma mark - Liquid Glass helpers
 
+static NSString * const kZSLiquidGlassSettingsSection = @"liquidGlass";
+static NSString * const kZSLiquidGlassDisabledKey = @"disabled";
+
 static NSString * const kZSUISettingsSection = @"ui";
 static NSString * const kZSUICollapsedSectionsKey = @"collapsedSections";
 
+
+static BOOL gZSLiquidGlassDisabledCache;
+static BOOL gZSLiquidGlassDisabledCacheLoaded;
+
+static BOOL zs_liquid_glass_disabled_by_user(void) {
+    if (!gZSLiquidGlassDisabledCacheLoaded) {
+        NSDictionary *section = zs_settings_section(kZSLiquidGlassSettingsSection);
+        id stored = section[kZSLiquidGlassDisabledKey];
+        gZSLiquidGlassDisabledCache = stored ? [stored boolValue] : NO;
+        gZSLiquidGlassDisabledCacheLoaded = YES;
+    }
+    return gZSLiquidGlassDisabledCache;
+}
+
+static void zs_set_liquid_glass_disabled_by_user(BOOL disabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSLiquidGlassSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSLiquidGlassDisabledKey] = @(disabled);
+    zs_write_settings_section(kZSLiquidGlassSettingsSection, section);
+    gZSLiquidGlassDisabledCache = disabled;
+    gZSLiquidGlassDisabledCacheLoaded = YES;
+}
 
 #pragma mark - Social links
 
@@ -144,7 +168,16 @@ static ZSUpdateCheckMode zs_update_check_mode(void) {
 }
 
 static BOOL zs_has_liquid_glass(void) {
-    return NO;
+    static BOOL has;
+    static dispatch_once_t token;
+    dispatch_once(&token, ^{
+        has = NO;
+        if (@available(iOS 26.0, *)) {
+            has = (NSClassFromString(@"UIGlassEffect") != nil &&
+                   NSClassFromString(@"UIGlassContainerEffect") != nil);
+        }
+    });
+    return has && !zs_liquid_glass_disabled_by_user();
 }
 
 static UIVisualEffect *zs_make_glass_effect_style(NSInteger style, BOOL interactive, UIColor *tintColor) {
@@ -1010,6 +1043,9 @@ static const CGFloat kFillAlpha = 1.0;
     if (!zs_has_liquid_glass()) {
         _glassEnabled = NO;
         [self.trackGlass removeFromSuperview];
+        self.track.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+        self.track.layer.borderWidth = 1;
+        self.track.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
         self.fill.backgroundColor = [self.fillColor colorWithAlphaComponent:kFillAlpha];
         return;
     }
@@ -1017,6 +1053,8 @@ static const CGFloat kFillAlpha = 1.0;
     _glassEnabled = glassEnabled;
 
     if (glassEnabled) {
+        self.track.backgroundColor = UIColor.clearColor;
+        self.track.layer.borderWidth = 0;
         if (!self.trackGlass) {
             UIVisualEffect *effect = zs_make_glass_effect(self.touching);
             self.trackGlass = [[UIVisualEffectView alloc] initWithEffect:effect];
@@ -4394,7 +4432,16 @@ static const CGFloat kContentFadeHeight = 22;
     self.panel.clipsToBounds = NO;
     self.panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-    self.handle.backgroundColor = UIColor.clearColor;
+    if (zs_has_liquid_glass()) {
+        self.handle.backgroundColor = UIColor.clearColor;
+        self.handle.layer.borderWidth = 0;
+    } else {
+        self.handle.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+        self.handle.layer.cornerRadius = kHandleCornerRadius;
+        self.handle.layer.cornerCurve = kCACornerCurveContinuous;
+        self.handle.layer.borderWidth = 1;
+        self.handle.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+    }
     self.handle.clipsToBounds = NO;
 
     self.chevron = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, kHandleWidth, 24)];
@@ -4882,10 +4929,15 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *uidRedactorRow = zs_make_switch_row(@"Hide user ID", UIDRedactor.isEnabled);
     [uidRedactorRow.toggle addTarget:self action:@selector(uidRedactorChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
+    [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
+
     [self.stack addArrangedSubview:customGreetingRow];
     [self.stack setCustomSpacing:8 afterView:customGreetingRow];
     [self.stack addArrangedSubview:uidRedactorRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:uidRedactorRow];
+    [self.stack setCustomSpacing:8 afterView:uidRedactorRow];
+    [self.stack addArrangedSubview:disableLiquidGlassRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:disableLiquidGlassRow];
 
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
@@ -10199,6 +10251,18 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 - (void)uidRedactorChanged:(UISwitch *)toggle {
     [UIDRedactor setEnabled:toggle.on];
+}
+
+- (void)disableLiquidGlassChanged:(UISwitch *)toggle {
+    zs_set_liquid_glass_disabled_by_user(toggle.on);
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (presenter) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restart Required"
+                                                                         message:@"You must restart the app for the Liquid Glass changes to take effect."
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [presenter presentViewController:alert animated:YES completion:nil];
+    }
 }
 
 - (void)nightlyReleasesEnabledChanged:(UISwitch *)toggle {
