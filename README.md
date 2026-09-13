@@ -12,7 +12,7 @@
 
 Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's historically been desktop-only. Modded asset bundles are sent to a private GitHub repository running AssetTools.NET, re-encoded and re-targeted for mobile, then returned to the tweak and installed directly into the game.
 
-Have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
+Need some help, have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
 ## Features
 
 Adjust various graphical settings such as: 
@@ -24,12 +24,12 @@ Adjust various graphical settings such as:
 - Texture MIP
 - Particles 
 - Bloom 
-- Motion Blur 
-And so much more
+- Motion Blur
 
-Full fledged Mod Loader & Asset manager optimized for mobile, load and bookkeep your mods with ease
+And many Quality-Of-Life settings that aim to give you a better experience 
 
-And Many more Quality-of-Life settings
+ZSingularity also features a fledged Mod Loader & Asset manager optimized for mobile, load and bookkeep your mods with ease
+
 
 ## Installation
 
@@ -37,16 +37,31 @@ And Many more Quality-of-Life settings
 
 Download a decrypted .ipa of Limbus Company through your decryption service of choice, fork this repository and use `build-ipa.yml` to inject ZSingularity into your .ipa
 
+You must modify the .ipa’s `info.plist` to get all of ZSingularity’s functionality
+
+Add the following key’s to your .ipa’s `info.plist`
+```
+<key>CADisableMinimumFrameDurationOnPhone</key>
+<true/>
+<key>CADisableMinimumFrameDuration</key>
+<true/>
+<key>LSSupportsGameMode</key>
+<true/>
+<key>LSSupportsOpeningDocumentsInPlace</key>
+<true/>
+<key>UIFileSharingEnabled</key>
+<true/>
+```
 To install, **[SideStore](https://sidestore.io/)** is recommended, follow the steps provided in their Documentation
 
 A PC is recommended for the smoothest installation process, otherwise you may use **[Sideinstaller](https://sideinstaller.net)** (iOS27+ only)
-## Caveats 
 
-You will not be able to install updates from the AppStore, every time Limbus updates you’ll need to manually sideload the new version into your device 
-
-You won’t be able to make any app purchases in a sideloaded version of LimbusCompany
-
-You won’t be able to login to your limbus account thru Apple ID
+> [!WARNING]
+>You will not be able to install updates from the AppStore, every time Limbus updates you’ll need to manually sideload the new version into your device 
+>
+>You won’t be able to make any app purchases in a sideloaded version of LimbusCompany
+>
+>You won’t be able to login to your limbus account thru Apple ID
 
 ## Legal, Liability & Usage Notice
 
