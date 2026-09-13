@@ -1986,9 +1986,25 @@ static CFTimeInterval zs_marquee_cycle_start(NSString *key) {
 
 static NSString *zs_custom_greeting_button_title(NSString *text) {
     if (text.length == 0) return @"Not Set";
-    static const NSUInteger kMaxPreviewLength = 18;
-    if (text.length <= kMaxPreviewLength) return text;
-    return [[text substringToIndex:kMaxPreviewLength] stringByAppendingString:@"…"];
+    return text;
+}
+
+static ZSMarqueeLabel *zs_custom_greeting_marquee_label(UIButton *button) {
+    static const void *kGreetingLabelKey = &kGreetingLabelKey;
+    ZSMarqueeLabel *label = objc_getAssociatedObject(button, kGreetingLabelKey);
+    if (!label) {
+        label = [[ZSMarqueeLabel alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.userInteractionEnabled = NO;
+        [button addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:10],
+            [label.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:-10],
+            [label.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
+        ]];
+        objc_setAssociatedObject(button, kGreetingLabelKey, label, OBJC_ASSOCIATION_RETAIN);
+    }
+    return label;
 }
 
 static ZSRow *zs_make_custom_greeting_row(NSString *currentText, id target, SEL tapAction) {
@@ -2006,15 +2022,18 @@ static ZSRow *zs_make_custom_greeting_row(NSString *currentText, id target, SEL 
 
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(button, zs_custom_greeting_button_title(currentText),
-                                               UIColor.whiteColor, zs_mono_font(11, UIFontWeightRegular));
-    button.titleLabel.adjustsFontSizeToFitWidth = YES;
-    button.titleLabel.minimumScaleFactor = 0.75;
+    zs_style_button_as_native_glass_with_font(button, @"", UIColor.whiteColor, zs_mono_font(11, UIFontWeightRegular));
     [button addTarget:target action:tapAction forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:button];
     objc_setAssociatedObject(row, "zs_button", button, OBJC_ASSOCIATION_RETAIN);
 
-    static const CGFloat kZSCustomGreetingFieldWidth = 120;
+    ZSMarqueeLabel *greetingLabel = zs_custom_greeting_marquee_label(button);
+    greetingLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    greetingLabel.textColor = UIColor.whiteColor;
+    greetingLabel.marqueeKey = @"customGreetingButton";
+    greetingLabel.text = zs_custom_greeting_button_title(currentText);
+
+    static const CGFloat kZSCustomGreetingFieldWidth = 156;
     static const CGFloat kZSCustomGreetingFieldHeight = 26;
     [NSLayoutConstraint activateConstraints:@[
         [row.titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
@@ -2486,6 +2505,7 @@ static void zs_style_reencode_format_button(UIButton *button, NSString *format) 
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
 
     SEL getConfiguration = NSSelectorFromString(@"configuration");
+    BOOL appliedConfigurationInsets = NO;
     if ([button respondsToSelector:getConfiguration]) {
         id configuration = ((id (*)(id, SEL))objc_msgSend)(button, getConfiguration);
         if (configuration) {
@@ -2505,8 +2525,14 @@ static void zs_style_reencode_format_button(UIButton *button, NSString *format) 
             SEL setConfig = NSSelectorFromString(@"setConfiguration:");
             if ([button respondsToSelector:setConfig]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
+                appliedConfigurationInsets = YES;
             }
         }
+    }
+
+    if (!appliedConfigurationInsets) {
+        button.contentEdgeInsets = UIEdgeInsetsMake(6, kZSReencodeHorizontalPadding,
+                                                     6, kZSReencodeHorizontalPadding + kZSReencodeChevronReserve);
     }
 
     zs_configure_glass_button_fixed_corner_radius(button, kZSAuthFieldCornerRadius);
@@ -4374,7 +4400,6 @@ static const CGFloat kHandleHeight = 72;
 static const CGFloat kPanelCornerRadiusMinimum = 20;
 static const CGFloat kZSDocsPanelGlassFillOverlap = kPanelCornerRadiusMinimum + 6;
 static const CGFloat kHandleCornerRadius = 10;
-static const CGFloat kHandleNonGlassOverlap = 20;
 static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
 static const CGFloat kContentFadeHeight = 22;
@@ -4443,6 +4468,7 @@ static const CGFloat kContentFadeHeight = 22;
         self.panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
         self.panel.layer.cornerRadius = kPanelCornerRadiusMinimum;
         self.panel.layer.cornerCurve = kCACornerCurveContinuous;
+        self.panel.layer.maskedCorners = kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner;
         self.panel.clipsToBounds = YES;
     }
     self.panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -9638,7 +9664,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     if (currentText.length > 0) {
         [prompt addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
             zs_set_custom_greeting_text(@"");
-            [self.customGreetingTextButton setTitle:zs_custom_greeting_button_title(@"") forState:UIControlStateNormal];
+            zs_custom_greeting_marquee_label(self.customGreetingTextButton).text = zs_custom_greeting_button_title(@"");
         }]];
     }
     __weak typeof(self) weakSelf = self;
@@ -9646,7 +9672,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         NSString *entered = prompt.textFields.firstObject.text ?: @"";
         zs_set_custom_greeting_text(entered);
         NSString *stored = zs_custom_greeting_text();
-        [weakSelf.customGreetingTextButton setTitle:zs_custom_greeting_button_title(stored) forState:UIControlStateNormal];
+        zs_custom_greeting_marquee_label(weakSelf.customGreetingTextButton).text = zs_custom_greeting_button_title(stored);
     }]];
     [presenter presentViewController:prompt animated:YES completion:nil];
 }
@@ -10111,10 +10137,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
-        CGFloat handleOverlap = self.handleGlass ? 0 : kHandleNonGlassOverlap;
         handleElement.frame = CGRectMake(0,
                                           (height - kHandleHeight) * 0.5,
-                                          kHandleWidth + handleOverlap,
+                                          kHandleWidth,
                                           kHandleHeight);
 
         CGRect docsFrameLocal = CGRectMake(kHandleWidth, 0, docsW, height);
