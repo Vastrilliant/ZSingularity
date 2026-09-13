@@ -6,9 +6,13 @@ on:
       ipa_url:
         description: 'Direct download link to the .ipa'
         type: string
-
-env:
-  LZ4_REF: v1.10.0
+      dylib_channel:
+        description: 'Select channel'
+        type: choice
+        required: true
+        options:
+          - latest
+          - nightly
 
 jobs:
   build-ipa:
@@ -63,84 +67,31 @@ jobs:
           path: ipa/app.ipa
           key: ipa-${{ github.run_id }}
 
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Resolve iOS SDK path
-        id: sdk
-        run: echo "path=$(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache LZ4 reference library
-        id: lz4-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            lz4.h
-            lz4.c
-            lz4hc.h
-            lz4hc.c
-            lz4-checksums.txt
-          key: lz4-${{ env.LZ4_REF }}
-
-      - name: Fetch LZ4 reference library
-        if: steps.lz4-cache.outputs.cache-hit != 'true'
+      - name: Resolve dylib release tag
+        id: dylib-tag
         run: |
           set -euo pipefail
-          BASE="https://raw.githubusercontent.com/lz4/lz4/${LZ4_REF}/lib"
-          for f in lz4.h lz4.c lz4hc.h lz4hc.c; do
-            curl -fsSL "${BASE}/${f}" -o "$f"
-          done
-          shasum -a 256 lz4.h lz4.c lz4hc.h lz4hc.c > lz4-checksums.txt
-          shasum -a 256 -c lz4-checksums.txt
+          if [[ "${{ inputs.dylib_channel }}" == "nightly" ]]; then
+            echo "tag=nightly" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Verify cached LZ4 checksums
-        if: steps.lz4-cache.outputs.cache-hit == 'true'
-        run: shasum -a 256 -c lz4-checksums.txt
-
-      - name: Compile tweak dylib
+      - name: Download dylib from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          clang \
-            -dynamiclib \
-            -O2 \
-            -fobjc-arc \
-            -fmodules \
-            -isysroot "${{ steps.sdk.outputs.path }}" \
-            -arch arm64 \
-            -miphoneos-version-min=15.0 \
-            -DZS_BUILD_NUMBER=${{ github.run_number }} \
-            -DZS_BUILD_CHANNEL=ipa \
-            -DZS_BUILD_BRANCH='"${{ github.ref_name }}"' \
-            -framework Foundation \
-            -framework UIKit \
-            -framework QuartzCore \
-            -framework CoreText \
-            -framework ImageIO \
-            -framework UniformTypeIdentifiers \
-            -framework Security \
-            -lcompression \
-            -lc++ \
-            -stdlib=libc++ \
-            -install_name "@rpath/ZSingularity.dylib" \
-            -Wl,-ld_classic \
-            -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
-            -I. \
-            -ICore -IUI -IMods -IBundleTools -ITranscoder -INetwork -IDiagnostics -IResources -INotifications \
-            BundleTools/UnityBundleTools.m \
-            Core/IL2CppIntrospection.m \
-            Core/ZSDumpTypeRegistry.m \
-            Core/ZSEngine.m \
-            Core/ZSInfoPlistPatch.m \
-            Diagnostics/ZSDiagnostics.m \
-            Mods/BankTransplant.m \
-            Mods/ModAssetManagement.m \
-            Network/PatchManifestNetwork.m \
-            Network/ZSUpdater.m \
-            Transcoder/Transcoder.m \
-            UI/UserInterface.m \
-            UI/ZSGifTint.m \
-            lz4.c \
-            lz4hc.c \
-            -o ZSingularity.dylib
+          set -euo pipefail
+          gh release download ${{ steps.dylib-tag.outputs.tag }} \
+            --repo "${{ github.repository }}" \
+            --pattern 'ZSingularity.dylib' \
+            --dir . \
+            --clobber
+
+          if [[ ! -s ZSingularity.dylib ]]; then
+            echo "::error::Couldn't find a ZSingularity.dylib asset on the '${{ inputs.dylib_channel }}' release." >&2
+            exit 1
+          fi
 
       - name: Ad-hoc codesign
         run: codesign -f -s - ZSingularity.dylib
@@ -197,7 +148,7 @@ jobs:
               sys.exit(f"Failed to parse main executable at {binary_path}")
 
           for binary in fat:
-              if not any(lib.name == dylib_ref for lib in binary.libraries):
+              if not binary.has_library(dylib_ref):
                   binary.add_library(dylib_ref)
 
           fat.write(binary_path)
