@@ -848,7 +848,13 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
         self.track = [[UIView alloc] init];
         self.track.translatesAutoresizingMaskIntoConstraints = NO;
-        self.track.backgroundColor = UIColor.clearColor;
+        if (zs_has_liquid_glass()) {
+            self.track.backgroundColor = UIColor.clearColor;
+        } else {
+            self.track.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+            self.track.layer.borderWidth = 1;
+            self.track.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+        }
         self.track.userInteractionEnabled = NO;
         self.track.layer.cornerCurve = kCACornerCurveContinuous;
         self.track.clipsToBounds = YES;
@@ -4381,7 +4387,7 @@ static const CGFloat kContentFadeHeight = 22;
         chrome = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_container_effect(kGlassMergeSpacing)];
     } else {
 
-        chrome = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(NO)];
+        chrome = [[UIVisualEffectView alloc] initWithEffect:nil];
     }
 
     self.glassContainer = chrome;
@@ -4428,8 +4434,16 @@ static const CGFloat kContentFadeHeight = 22;
     closeSwipe.delegate = self;
     [self.contentOverlay addGestureRecognizer:closeSwipe];
 
-    self.panel.backgroundColor = UIColor.clearColor;
-    self.panel.clipsToBounds = NO;
+    if (zs_has_liquid_glass()) {
+        self.panel.backgroundColor = UIColor.clearColor;
+        self.panel.clipsToBounds = NO;
+        self.panel.layer.cornerRadius = 0;
+    } else {
+        self.panel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+        self.panel.layer.cornerRadius = kPanelCornerRadiusMinimum;
+        self.panel.layer.cornerCurve = kCACornerCurveContinuous;
+        self.panel.clipsToBounds = YES;
+    }
     self.panel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
     if (zs_has_liquid_glass()) {
