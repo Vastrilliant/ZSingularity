@@ -197,7 +197,7 @@ jobs:
               sys.exit(f"Failed to parse main executable at {binary_path}")
 
           for binary in fat:
-              if dylib_ref not in binary.libraries:
+              if not any(lib.name == dylib_ref for lib in binary.libraries):
                   binary.add_library(dylib_ref)
 
           fat.write(binary_path)
