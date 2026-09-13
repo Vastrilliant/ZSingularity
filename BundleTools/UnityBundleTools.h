@@ -121,6 +121,8 @@ typedef NS_ENUM(NSInteger, UnityCacheLocatorErrorCode) {
 
 + (nullable NSString *)synthesizeCacheDirectoryForHash1:(NSString *)hash1 hash2:(NSString *)hash2 error:(NSError **)error;
 
++ (nullable NSString *)locateGameFilePathForHash1:(NSString *)hash1 hash2:(NSString *)hash2 error:(NSError **)error;
+
 @end
 
 @interface ZSFileIndex : NSObject

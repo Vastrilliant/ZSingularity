@@ -1358,6 +1358,43 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
     return dirPath;
 }
 
++ (nullable NSString *)locateGameFilePathForHash1:(NSString *)hash1 hash2:(NSString *)hash2 error:(NSError **)error {
+    if (hash1.length == 0 || hash2.length == 0) {
+        if (error) *error = UCLError(UnityCacheLocatorErrorNoMatch, @"Missing hash1/hash2 - nothing to scan the game's files for.");
+        return nil;
+    }
+
+    NSString *root = NSBundle.mainBundle.bundlePath;
+    if (root.length == 0) {
+        if (error) *error = UCLError(UnityCacheLocatorErrorSharedDirectoryNotFound, @"Couldn't resolve the game's own app bundle directory.");
+        return nil;
+    }
+
+    NSString *suffix = [hash1.lowercaseString stringByAppendingPathComponent:hash2.lowercaseString];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
+    NSString *relPath = nil;
+    NSString *matchedPath = nil;
+    while ((relPath = [walker nextObject])) {
+        if (relPath.length > kUCLMaxPathLength) continue;
+        NSString *lowerRel = relPath.lowercaseString;
+        if (![lowerRel hasSuffix:suffix]) continue;
+        NSUInteger cut = lowerRel.length - suffix.length;
+        if (cut > 0 && [lowerRel characterAtIndex:cut - 1] != '/') continue;
+        matchedPath = [root stringByAppendingPathComponent:relPath];
+        break;
+    }
+
+    if (!matchedPath) {
+        if (error) *error = UCLError(UnityCacheLocatorErrorNoMatch,
+            [NSString stringWithFormat:@"No file or folder under the game's own files matches %@/%@.", hash1, hash2]);
+        return nil;
+    }
+
+    ZLog(@"[UnityCacheLocator] matched hash %@/%@ against the game's own files at %@", hash1, hash2, matchedPath);
+    return matchedPath;
+}
+
 @end
 
 #pragma mark - ZSFileIndex

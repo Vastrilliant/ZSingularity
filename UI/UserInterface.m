@@ -6589,17 +6589,32 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 }
 
+- (void)zs_handleLoadModsPickedCarra2URLs:(NSArray<NSURL *> *)carra2URLs intoFolder:(NSString *)folderName summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    for (NSURL *carra2URL in carra2URLs) {
+        NSError *importErr = nil;
+        BOOL imported = [ModAssetLibrary importCarra2URL:carra2URL intoFolder:folderName error:&importErr];
+        if (imported) {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: Carra2 mod imported - tap Dispatch when ready to send it for processing", carra2URL.lastPathComponent]];
+        } else {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", carra2URL.lastPathComponent, importErr.localizedDescription ?: @"doesn't match the Carra2 mod format"]];
+        }
+    }
+}
+
 - (void)zs_handleLoadModsPickedURLs:(NSArray<NSURL *> *)urls intoFolder:(NSString *)folderName {
     if (urls.count == 0) return;
 
     NSMutableArray<NSURL *> *validURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *bankURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *zipURLs = [NSMutableArray array];
+    NSMutableArray<NSURL *> *carra2URLs = [NSMutableArray array];
     NSMutableArray<NSString *> *summaryLines = [NSMutableArray array];
 
     for (NSURL *url in urls) {
         if ([url.pathExtension caseInsensitiveCompare:@"zip"] == NSOrderedSame) {
             [zipURLs addObject:url];
+        } else if ([url.pathExtension caseInsensitiveCompare:@"carra2"] == NSOrderedSame) {
+            [carra2URLs addObject:url];
         } else if ([url.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
             [bankURLs addObject:url];
             [validURLs addObject:url];
@@ -6615,7 +6630,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
     self.loadModsSummaryLines = summaryLines;
 
-    if (validURLs.count == 0 && zipURLs.count == 0) {
+    if (validURLs.count == 0 && zipURLs.count == 0 && carra2URLs.count == 0) {
         [self zs_processLoadModsBankURLs:bankURLs];
         return;
     }
@@ -6658,6 +6673,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         }
         if (zipURLs.count > 0) {
             [self zs_handleLoadModsPickedZipURLs:zipURLs intoFolder:folderName summaryLines:summaryLines];
+        }
+        if (carra2URLs.count > 0) {
+            [self zs_handleLoadModsPickedCarra2URLs:carra2URLs intoFolder:folderName summaryLines:summaryLines];
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -6904,8 +6922,12 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 
     ZLog(@"[Mods Library] dispatching %@ (folder=%@, resuming scratch branch=%@).", entryPath.lastPathComponent, folderName, previousScratchBranch ?: @"none");
     NSURL *bundleURL = [NSURL fileURLWithPath:entryPath];
+    NSString *carra2Hash1 = entry.isAssetBundle ? nil : entry.zipCacheHash1;
+    NSString *carra2Hash2 = entry.isAssetBundle ? nil : entry.zipCacheHash2;
     __weak typeof(self) weakSelf = self;
     [ZTranscoderService dispatchBundleAtURL:bundleURL
+                                   carra2Hash1:carra2Hash1
+                                   carra2Hash2:carra2Hash2
                                         config:config
                          previousScratchBranch:previousScratchBranch
                                 uploadProgress:^(int64_t bytesSent, int64_t totalBytesExpected) {

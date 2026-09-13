@@ -333,6 +333,97 @@ static BOOL lma_isHex32(NSString *s) {
 
 @end
 
+#pragma mark - Carra2ModArchive
+
+@implementation Carra2ArchiveInfo
+- (instancetype)initWithHash1:(NSString *)h1 hash2:(NSString *)h2 {
+    if ((self = [super init])) {
+        _hash1 = [h1 copy];
+        _hash2 = [h2 copy];
+    }
+    return self;
+}
+@end
+
+@implementation Carra2ModArchive
+
++ (nullable Carra2ArchiveInfo *)archiveInfoForZipAtURL:(NSURL *)zipURL error:(NSError **)error {
+    NSData *data = [NSData dataWithContentsOfURL:zipURL options:NSDataReadingMappedIfSafe error:error];
+    if (!data) return nil;
+
+    NSUInteger length = data.length;
+    if (length < 22) {
+        if (error) *error = LMAError(LunartiqueModArchiveErrorNotAZip, @"File is too small to be a zip.");
+        return nil;
+    }
+    const uint8_t *bytes = data.bytes;
+
+    NSUInteger searchWindow = MIN((NSUInteger)(22 + 65535), length);
+    NSUInteger start = length - searchWindow;
+    uint32_t cdOffset = 0, cdSize = 0;
+    uint16_t count = 0;
+    BOOL foundEOCD = NO;
+    for (NSInteger i = (NSInteger)(length - 22); i >= (NSInteger)start; i--) {
+        const uint8_t *p = bytes + i;
+        if (lma_read_u32(p) == kEOCDSignature) {
+            uint16_t commentLen = lma_read_u16(p + 20);
+            if (i + 22 + commentLen != (NSInteger)length) continue;
+            cdOffset = lma_read_u32(p + 16);
+            cdSize = lma_read_u32(p + 12);
+            count = lma_read_u16(p + 10);
+            foundEOCD = YES;
+            break;
+        }
+    }
+    if (!foundEOCD) {
+        if (error) *error = LMAError(LunartiqueModArchiveErrorNotAZip, @"No End Of Central Directory record found - not a valid zip.");
+        return nil;
+    }
+    if ((NSUInteger)cdOffset + cdSize > length) {
+        if (error) *error = LMAError(LunartiqueModArchiveErrorNotAZip,
+            @"Central Directory offset/size runs past end of file - corrupt or ZIP64 (unsupported).");
+        return nil;
+    }
+
+    NSUInteger cursor = cdOffset;
+    NSUInteger cdEnd = (NSUInteger)cdOffset + cdSize;
+    NSString *matchedHash1 = nil, *matchedHash2 = nil;
+
+    for (uint16_t i = 0; i < count && cursor + 46 <= cdEnd; i++) {
+        const uint8_t *p = bytes + cursor;
+        if (lma_read_u32(p) != kCDFileHeaderSignature) break;
+
+        uint16_t nameLen = lma_read_u16(p + 28);
+        uint16_t extraLen = lma_read_u16(p + 30);
+        uint16_t commentLen = lma_read_u16(p + 32);
+
+        NSUInteger nameStart = cursor + 46;
+        if (nameStart + nameLen > cdEnd) break;
+        NSString *name = [[NSString alloc] initWithBytes:(bytes + nameStart) length:nameLen encoding:NSUTF8StringEncoding];
+        if (!name) name = [[NSString alloc] initWithBytes:(bytes + nameStart) length:nameLen encoding:NSISOLatin1StringEncoding];
+
+        NSString *normalized = [name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+        NSArray<NSString *> *comps = [normalized componentsSeparatedByString:@"/"];
+        if (!matchedHash1 && comps.count >= 2 && lma_isHex32(comps[0]) && lma_isHex32(comps[1])) {
+            matchedHash1 = comps[0].lowercaseString;
+            matchedHash2 = comps[1].lowercaseString;
+            break;
+        }
+
+        cursor = nameStart + nameLen + extraLen + commentLen;
+    }
+
+    if (!matchedHash1 || !matchedHash2) {
+        if (error) *error = LMAError(LunartiqueModArchiveErrorNoMatchingTree,
+            @"No <hash>/<hash>/... entry found - doesn't match the Carra2 format's file tree.");
+        return nil;
+    }
+
+    return [[Carra2ArchiveInfo alloc] initWithHash1:matchedHash1 hash2:matchedHash2];
+}
+
+@end
+
 #pragma mark - ModAssetLibrary
 
 NSString * const ModAssetLibraryErrorDomain = @"ModAssetLibraryErrorDomain";
@@ -421,6 +512,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
 + (NSString *)mal_uniqueFolderNameFor:(NSString *)desired inParentFolder:(NSString *)parentPath;
 + (nullable NSString *)mal_livePathDescriptionForFileName:(NSString *)fileName;
 + (void)mal_reconcileEntryPaths:(NSArray<ModAssetLibraryEntry *> *)entries folderName:(NSString *)folderName;
++ (NSString *)mal_gameBundleRelativePath:(NSString *)path;
 @end
 
 @implementation ModAssetLibrary
@@ -707,6 +799,16 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     return path;
 }
 
++ (NSString *)mal_gameBundleRelativePath:(NSString *)path {
+    NSString *appBundleDir = NSBundle.mainBundle.bundlePath;
+    if (appBundleDir.length > 0 && [path hasPrefix:appBundleDir]) {
+        NSString *relative = [path substringFromIndex:appBundleDir.length];
+        if ([relative hasPrefix:@"/"]) relative = [relative substringFromIndex:1];
+        return [appBundleDir.lastPathComponent stringByAppendingPathComponent:relative];
+    }
+    return path;
+}
+
 + (nullable NSString *)mal_livePathDescriptionForFileName:(NSString *)fileName {
     if ([fileName.pathExtension caseInsensitiveCompare:@"bank"] != NSOrderedSame) return nil;
     NSString *bankDir = [BankTransplant mobileFMODBuildsDirectory];
@@ -982,6 +1084,85 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     if (wrote) {
         ZLog(@"[ModAssetLibrary] imported %ld bundle(s) from Lunartique zip \"%@\" into \"%@\" (%lu rejected)",
              (long)importedCount, zipURL.lastPathComponent, folderName, (unsigned long)rejectedLines.count);
+    }
+    return wrote;
+}
+
++ (BOOL)importCarra2URL:(NSURL *)carra2URL
+              intoFolder:(NSString *)folderName
+                   error:(NSError **)error {
+    BOOL accessing = [carra2URL startAccessingSecurityScopedResource];
+    NSError *formatErr = nil;
+    Carra2ArchiveInfo *info = [Carra2ModArchive archiveInfoForZipAtURL:carra2URL error:&formatErr];
+    if (!info) {
+        if (accessing) [carra2URL stopAccessingSecurityScopedResource];
+        if (error) *error = formatErr ?: MALError(ModAssetLibraryErrorCopyFailed, @"Not a Carra2-format mod file.");
+        return NO;
+    }
+
+    NSString *root = [self modLibraryRootDirectory];
+    NSString *folderPath = root ? [root stringByAppendingPathComponent:folderName] : nil;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if (!folderPath || ![fm fileExistsAtPath:folderPath isDirectory:&isDir] || !isDir) {
+        if (accessing) [carra2URL stopAccessingSecurityScopedResource];
+        if (error) *error = MALError(ModAssetLibraryErrorFolderNotFound,
+            [NSString stringWithFormat:@"No folder named \"%@\" - create it first.", folderName]);
+        return NO;
+    }
+
+    NSError *locateErr = nil;
+    NSString *matchPath = [UnityCacheLocator locateGameFilePathForHash1:info.hash1 hash2:info.hash2 error:&locateErr];
+    if (!matchPath) {
+        if (accessing) [carra2URL stopAccessingSecurityScopedResource];
+        ZLog(@"[ModAssetLibrary] no match in the game's own files for Carra2 %@'s hash %@/%@ - rejecting: %@",
+             carra2URL.lastPathComponent, info.hash1, info.hash2, locateErr.localizedDescription);
+        if (error) *error = MALError(ModAssetLibraryErrorCABNotIndexed,
+            [NSString stringWithFormat:@"%@: rejected - no matching bundle found in the game's own files for hash %@/%@",
+                carra2URL.lastPathComponent, info.hash1, info.hash2]);
+        return NO;
+    }
+    NSString *resolvedTargetPath = [self mal_gameBundleRelativePath:matchPath];
+
+    NSError *entriesErr = nil;
+    NSMutableArray<ModAssetLibraryEntry *> *entries =
+        [([self entriesInFolder:folderName error:&entriesErr] ?: @[]) mutableCopy];
+
+    NSDateFormatter *iso = [NSDateFormatter new];
+    iso.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    iso.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+    iso.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    NSString *now = [iso stringFromDate:[NSDate date]];
+
+    NSString *destName = [self mal_uniqueFileNameFor:carra2URL.lastPathComponent inFolder:folderPath];
+    NSString *destPath = [folderPath stringByAppendingPathComponent:destName];
+
+    NSError *copyErr = nil;
+    BOOL copied = [fm copyItemAtPath:carra2URL.path toPath:destPath error:&copyErr];
+    if (accessing) [carra2URL stopAccessingSecurityScopedResource];
+    if (!copied) {
+        if (error) *error = copyErr ?: MALError(ModAssetLibraryErrorCopyFailed, @"Couldn't copy the Carra2 file into the mod library.");
+        return NO;
+    }
+
+    NSDictionary<NSFileAttributeKey, id> *attrs = [fm attributesOfItemAtPath:destPath error:nil];
+
+    ModAssetLibraryEntry *entry = [ModAssetLibraryEntry new];
+    entry.fileName = destName;
+    entry.path = destPath;
+    entry.byteSize = attrs.fileSize;
+    entry.dateAdded = now;
+    entry.isAssetBundle = NO;
+    entry.zipCacheHash1 = info.hash1;
+    entry.zipCacheHash2 = info.hash2;
+    entry.resolvedInstallTargetPath = resolvedTargetPath;
+    entry.livePathDescription = resolvedTargetPath;
+    [entries addObject:entry];
+
+    BOOL wrote = [self mal_writeEntries:entries toFolder:folderName error:error];
+    if (wrote) {
+        ZLog(@"[ModAssetLibrary] imported Carra2 file \"%@\" into \"%@\", targeting %@",
+             carra2URL.lastPathComponent, folderName, resolvedTargetPath);
     }
     return wrote;
 }

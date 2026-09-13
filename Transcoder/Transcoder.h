@@ -75,6 +75,8 @@ typedef NS_ENUM(NSInteger, ZTranscoderRunStatus) {
 #pragma mark - Decoupled phase API (see this file's header)
 
 + (void)dispatchBundleAtURL:(NSURL *)moddedBundleURL
+                  carra2Hash1:(nullable NSString *)carra2Hash1
+                  carra2Hash2:(nullable NSString *)carra2Hash2
                        config:(ZTranscoderConfig *)config
         previousScratchBranch:(nullable NSString *)previousScratchBranch
                uploadProgress:(nullable void (^)(int64_t bytesSent, int64_t totalBytesExpected))uploadProgress

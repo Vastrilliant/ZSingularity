@@ -225,6 +225,7 @@ didFinishDownloadingToURL:(NSURL *)location {
 
 @interface ZTranscoderService ()
 + (nullable NSData *)bds_findOriginalBundleDataForModdedBundleAtPath:(NSString *)moddedBundlePath;
++ (nullable NSData *)bds_findOriginalGameFileDataForHash1:(NSString *)hash1 hash2:(NSString *)hash2;
 + (BOOL)bds_resolveBaseCommitSHA:(NSString **)outCommitSHA
                           config:(ZTranscoderConfig *)config
                            error:(NSError **)error;
@@ -492,11 +493,42 @@ didFinishDownloadingToURL:(NSURL *)location {
     return originalData;
 }
 
++ (nullable NSData *)bds_findOriginalGameFileDataForHash1:(NSString *)hash1 hash2:(NSString *)hash2 {
+    NSError *locateError = nil;
+    NSString *originalPath = [UnityCacheLocator locateGameFilePathForHash1:hash1 hash2:hash2 error:&locateError];
+    if (!originalPath) {
+        ZLog(@"[ZTranscoderService] Carra2 dispatch: no matching game file found for hash %@/%@ (%@) - skipping original upload.",
+             hash1, hash2, locateError.localizedDescription);
+        return nil;
+    }
+
+    BOOL isDir = NO;
+    if (![NSFileManager.defaultManager fileExistsAtPath:originalPath isDirectory:&isDir] || isDir) {
+        ZLog(@"[ZTranscoderService] Carra2 dispatch: resolved target %@ isn't a regular file - skipping original upload.", originalPath);
+        return nil;
+    }
+
+    NSError *readError = nil;
+    NSData *originalData = [NSData dataWithContentsOfFile:originalPath options:0 error:&readError];
+    if (!originalData) {
+        ZLog(@"[ZTranscoderService] Carra2 dispatch: resolved target at %@ but couldn't read it (%@) - skipping.",
+             originalPath, readError.localizedDescription);
+        return nil;
+    }
+
+    ZLog(@"[ZTranscoderService] Carra2 dispatch: matched hash %@/%@ -> %@ (%lu bytes).",
+         hash1, hash2, originalPath, (unsigned long)originalData.length);
+    return originalData;
+}
+
 + (void)dispatchBundleAtURL:(NSURL *)moddedBundleURL
+                  carra2Hash1:(nullable NSString *)carra2Hash1
+                  carra2Hash2:(nullable NSString *)carra2Hash2
                        config:(ZTranscoderConfig *)rawConfig
         previousScratchBranch:(nullable NSString *)previousScratchBranch
                uploadProgress:(void (^)(int64_t, int64_t))uploadProgress
                    completion:(void (^)(ZTranscoderHandle * _Nullable, NSError * _Nullable))completion {
+    BOOL isCarra2 = carra2Hash1.length > 0 && carra2Hash2.length > 0;
     __block int64_t totalBytesToSend = 0;
     void (^reportProgress)(int64_t) = ^(int64_t bytesSent) {
         if (!uploadProgress) return;
@@ -527,20 +559,31 @@ didFinishDownloadingToURL:(NSURL *)location {
         }
 
         unsigned long long compressedByteSize = 0;
-        NSData *uploadData = bds_prepareBundleDataForUpload(moddedData, &compressedByteSize, &error);
-        if (!uploadData) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                     description:error.localizedDescription ?: @"Couldn't prepare the bundle for upload."]);
-            return;
+        NSData *uploadData = moddedData;
+        if (!isCarra2) {
+            uploadData = bds_prepareBundleDataForUpload(moddedData, &compressedByteSize, &error);
+            if (!uploadData) {
+                finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
+                                         description:error.localizedDescription ?: @"Couldn't prepare the bundle for upload."]);
+                return;
+            }
+        } else {
+            ZLog(@"[ZTranscoderService] %@ is a Carra2 mod file - leaving its bytes untouched for upload (LZ4HC recompression skipped).",
+                 moddedBundleURL.lastPathComponent);
         }
 
-        NSData *originalData = [self bds_findOriginalBundleDataForModdedBundleAtPath:moddedBundleURL.path];
+        NSData *originalData = isCarra2
+            ? [self bds_findOriginalGameFileDataForHash1:carra2Hash1 hash2:carra2Hash2]
+            : [self bds_findOriginalBundleDataForModdedBundleAtPath:moddedBundleURL.path];
 
-        NSError *cabError = nil;
-        NSString *cabIdentifier = [UnityBundleCAB primaryCABForBundleAtPath:moddedBundleURL.path error:&cabError];
-        if (!cabIdentifier) {
-            ZLog(@"[ZTranscoderService] couldn't resolve a CAB identifier for %@ (%@) - tag will just be a bare UUID.",
-                 moddedBundleURL.path.lastPathComponent, cabError.localizedDescription);
+        NSString *cabIdentifier = nil;
+        if (!isCarra2) {
+            NSError *cabError = nil;
+            cabIdentifier = [UnityBundleCAB primaryCABForBundleAtPath:moddedBundleURL.path error:&cabError];
+            if (!cabIdentifier) {
+                ZLog(@"[ZTranscoderService] couldn't resolve a CAB identifier for %@ (%@) - tag will just be a bare UUID.",
+                     moddedBundleURL.path.lastPathComponent, cabError.localizedDescription);
+            }
         }
 
         if (previousScratchBranch.length > 0 && [self bds_releaseAtTagHasOutputAsset:previousScratchBranch config:config]) {

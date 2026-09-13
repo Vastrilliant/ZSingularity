@@ -999,6 +999,14 @@ static void configure_metal_layer(UIView *unityView) {
 
 #pragma mark - Startup
 
+static void *file_index_worker(void *arg) {
+    (void)arg;
+    @autoreleasepool {
+        [ZSFileIndex ensureIndexUpToDate];
+    }
+    return NULL;
+}
+
 static void *background_worker(void *arg) {
     (void)arg;
 
@@ -1035,6 +1043,10 @@ static void *background_worker(void *arg) {
 __attribute__((constructor))
 static void fps120_init(void) {
     ZLog(@"dylib loaded - starting background worker");
+
+    pthread_t indexThread;
+    pthread_create(&indexThread, NULL, file_index_worker, NULL);
+    pthread_detach(indexThread);
 
     pthread_t t;
     pthread_create(&t, NULL, background_worker, NULL);

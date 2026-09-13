@@ -35,6 +35,17 @@ typedef NS_ENUM(NSInteger, LunartiqueModArchiveErrorCode) {
 
 @end
 
+@interface Carra2ArchiveInfo : NSObject
+@property (nonatomic, copy, readonly) NSString *hash1;
+@property (nonatomic, copy, readonly) NSString *hash2;
+@end
+
+@interface Carra2ModArchive : NSObject
+
++ (nullable Carra2ArchiveInfo *)archiveInfoForZipAtURL:(NSURL *)zipURL error:(NSError **)error;
+
+@end
+
 extern NSString * const ModAssetLibraryErrorDomain;
 
 typedef NS_ENUM(NSInteger, ModAssetLibraryErrorCode) {
@@ -126,6 +137,10 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
                     intoFolder:(NSString *)folderName
              rejectedEntryLines:(NSArray<NSString *> * _Nullable * _Nullable)rejectedEntryLines
                          error:(NSError **)error;
+
++ (BOOL)importCarra2URL:(NSURL *)carra2URL
+              intoFolder:(NSString *)folderName
+                   error:(NSError **)error;
 
 + (BOOL)removeEntry:(ModAssetLibraryEntry *)entry fromFolder:(NSString *)folderName error:(NSError **)error;
 
