@@ -3271,7 +3271,10 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
             transcodeCodecLabel.textColor = subtextColor;
             [panel addArrangedSubview:transcodeCodecLabel];
         }
+    }
 
+    BOOL isCarra2Entry = !entry.isAssetBundle && entry.zipCacheHash1.length > 0;
+    if (entry.isAssetBundle || isCarra2Entry) {
         NSString *statusText = zs_doctor_status_text_for_entry(entry, downloadInFlight, isStoredBundlesFolder);
         UILabel *statusLabel = [[UILabel alloc] init];
         statusLabel.text = [NSString stringWithFormat:@"Status: %@", statusText];
