@@ -1373,24 +1373,40 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
     return nil;
 }
 
++ (nullable NSString *)ucl_firstDataPathUnderDirectory:(NSString *)directoryPath {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:directoryPath];
+    NSString *relPath = nil;
+    while ((relPath = [walker nextObject])) {
+        if (relPath.length > kUCLMaxPathLength) continue;
+        if ([relPath.lastPathComponent.lowercaseString isEqualToString:@"__data"]) {
+            return [directoryPath stringByAppendingPathComponent:relPath];
+        }
+    }
+    return nil;
+}
+
 + (nullable NSString *)locateGameFilePathForHash1:(NSString *)hash1 hash2:(NSString *)hash2 error:(NSError **)error {
-    if (hash1.length == 0 || hash2.length == 0) {
-        if (error) *error = UCLError(UnityCacheLocatorErrorNoMatch, @"Missing hash1/hash2 - nothing to scan the game's files for.");
+    if (hash1.length == 0) {
+        if (error) *error = UCLError(UnityCacheLocatorErrorNoMatch, @"Missing hash1 - nothing to scan the game's files for.");
         return nil;
     }
 
-    NSString *suffix = [hash1.lowercaseString stringByAppendingPathComponent:hash2.lowercaseString];
+    NSString *suffix = hash1.lowercaseString;
 
     for (NSString *cacheRoot in [self unityCacheSharedDirectories]) {
-        NSString *matchedPath = [self ucl_firstPathUnderRoot:cacheRoot matchingNestedSuffix:suffix];
-        if (matchedPath) {
-            ZLog(@"[UnityCacheLocator] matched hash %@/%@ against the game's own files at %@", hash1, hash2, matchedPath);
-            return matchedPath;
+        NSString *matchedDir = [self ucl_firstPathUnderRoot:cacheRoot matchingNestedSuffix:suffix];
+        if (!matchedDir) continue;
+
+        NSString *dataPath = [self ucl_firstDataPathUnderDirectory:matchedDir];
+        if (dataPath) {
+            ZLog(@"[UnityCacheLocator] matched hash %@ against the game's own files at %@", hash1, dataPath);
+            return dataPath;
         }
     }
 
     if (error) *error = UCLError(UnityCacheLocatorErrorNoMatch,
-        [NSString stringWithFormat:@"No file or folder under the game's own files matches %@/%@.", hash1, hash2]);
+        [NSString stringWithFormat:@"No __data found under the game's own files for hash %@.", hash1]);
     return nil;
 }
 
