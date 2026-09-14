@@ -918,6 +918,42 @@ static void zs_install_scene_loaded_hook(void) {
 
 @end
 
+#pragma mark - Locked frame rate (disable ProMotion adaptive sync)
+
+static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
+    Method original = class_getInstanceMethod(cls, origSel);
+    Method replacement = class_getInstanceMethod(cls, replSel);
+    if (!original || !replacement) return;
+
+    BOOL addedOwnOverride = class_addMethod(cls, origSel,
+                                             method_getImplementation(replacement),
+                                             method_getTypeEncoding(replacement));
+    if (addedOwnOverride) {
+        class_replaceMethod(cls, replSel,
+                             method_getImplementation(original),
+                             method_getTypeEncoding(original));
+    } else {
+        method_exchangeImplementations(original, replacement);
+    }
+}
+
+@interface CADisplayLink (ZSLockedFrameRate)
+- (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range;
+@end
+
+@implementation CADisplayLink (ZSLockedFrameRate)
+- (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
+    float locked = (float)[FPS120Controller shared].targetFPS;
+    if (locked <= 0) locked = (range.preferred > 0) ? range.preferred : range.maximum;
+    CAFrameRateRange fixed = { locked, locked, locked };
+    [self zs_setPreferredFrameRateRange:fixed];
+}
+@end
+
+static void zs_install_locked_framerate_hook(void) {
+    zs_safely_swizzle_class([CADisplayLink class], @selector(setPreferredFrameRateRange:), @selector(zs_setPreferredFrameRateRange:));
+}
+
 #pragma mark - Apply-everything entry points
 
 void zs_reapply_all_settings(void) {
@@ -1043,6 +1079,8 @@ static void *background_worker(void *arg) {
 __attribute__((constructor))
 static void fps120_init(void) {
     ZLog(@"dylib loaded - starting background worker");
+
+    zs_install_locked_framerate_hook();
 
     pthread_t indexThread;
     pthread_create(&indexThread, NULL, file_index_worker, NULL);
