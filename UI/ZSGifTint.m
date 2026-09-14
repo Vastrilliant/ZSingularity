@@ -206,7 +206,6 @@ static const size_t kZSGifDecodeMaxPixelSize = 240;
         _startTime = CACurrentMediaTime();
         _lastFrameIndex = -1;
         _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-        _displayLink.preferredFramesPerSecond = 17;
         [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     } else if (!needsLink && _displayLink) {
         ZLog(@"[ZSGifTint] stopping display link, no registered windows remain");
