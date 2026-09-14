@@ -967,13 +967,20 @@ static BOOL zs_is_unity_display_link_target(id target) {
 
 @implementation CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
-    if (!zs_is_unity_display_link_target(zs_display_link_target(self))) {
+    id target = zs_display_link_target(self);
+    BOOL isUnity = zs_is_unity_display_link_target(target);
+    ZLog(@"[ZSFrameRateDiag] t=%.3f link=%p target=%@ isUnity=%d incoming=(%.1f,%.1f,%.1f)",
+         CACurrentMediaTime(), self, target ? NSStringFromClass([target class]) : @"(nil)", isUnity,
+         range.minimum, range.maximum, range.preferred);
+
+    if (!isUnity) {
         [self zs_setPreferredFrameRateRange:range];
         return;
     }
     float locked = (float)[FPS120Controller shared].targetFPS;
     if (locked <= 0) locked = (range.preferred > 0) ? range.preferred : range.maximum;
     CAFrameRateRange fixed = { locked, locked, locked };
+    ZLog(@"[ZSFrameRateDiag] t=%.3f link=%p forcing=(%.1f,%.1f,%.1f)", CACurrentMediaTime(), self, fixed.minimum, fixed.maximum, fixed.preferred);
     [self zs_setPreferredFrameRateRange:fixed];
 }
 @end
