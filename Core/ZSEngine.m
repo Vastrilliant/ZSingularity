@@ -948,6 +948,12 @@ static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
     }
 }
 
+static id zs_display_link_target(CADisplayLink *link) {
+    Ivar ivar = class_getInstanceVariable([CADisplayLink class], "_target");
+    if (!ivar) return nil;
+    return object_getIvar(link, ivar);
+}
+
 static BOOL zs_is_unity_display_link_target(id target) {
     if (!target) return NO;
     NSString *name = NSStringFromClass([target class]);
@@ -961,7 +967,7 @@ static BOOL zs_is_unity_display_link_target(id target) {
 
 @implementation CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
-    if (!zs_is_unity_display_link_target(self.target)) {
+    if (!zs_is_unity_display_link_target(zs_display_link_target(self))) {
         [self zs_setPreferredFrameRateRange:range];
         return;
     }
