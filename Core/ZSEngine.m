@@ -665,6 +665,9 @@ static const int kInstanceRefreshTicks = 8;
 static int g_ticksSinceLoadCheck;
 static const int kLoadCheckThrottleTicks = 2;
 
+static int g_loadCheckWindowTicksRemaining;
+static const int kLoadCheckWindowTicks = 20;
+
 static void *zs_get_cached_game_manager_instance(void) {
     BOOL needsRefresh = (!g_cachedGameManagerInstance || g_ticksSinceInstanceRefresh >= kInstanceRefreshTicks);
     if (needsRefresh) {
@@ -815,7 +818,13 @@ static void zs_install_scene_loaded_hook(void) {
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
 
-    if (!g_sceneLoadedHookInstalled) {
+    if (haveBattleState && wasInBattle && !isBattle) {
+        g_loadCheckWindowTicksRemaining = kLoadCheckWindowTicks;
+        self.wasLoading = NO;
+    }
+
+    if (!g_sceneLoadedHookInstalled && g_loadCheckWindowTicksRemaining > 0) {
+        g_loadCheckWindowTicksRemaining--;
         BOOL shouldCheckLoad = (g_ticksSinceLoadCheck == 0);
         g_ticksSinceLoadCheck = (g_ticksSinceLoadCheck + 1) % kLoadCheckThrottleTicks;
 
@@ -827,6 +836,7 @@ static void zs_install_scene_loaded_hook(void) {
                     ZLog(@"[ZSScripts] loading screen torn down (LoadingSceneManager gone, isBattle=%d) - reapplying settings", isBattle);
                     zs_reapply_all_settings();
                     if (wasInBattle && g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
+                    g_loadCheckWindowTicksRemaining = 0;
                 }
                 self.wasLoading = isLoading;
             } else if (haveBattleState && wasInBattle && !isBattle) {
@@ -834,6 +844,7 @@ static void zs_install_scene_loaded_hook(void) {
                 ZLog(@"[ZSScripts] loading screen detected (battle-exit fallback, LoadingSceneManager lookup unavailable) - reapplying settings");
                 zs_reapply_all_settings();
                 if (g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
+                g_loadCheckWindowTicksRemaining = 0;
             }
         }
     }
