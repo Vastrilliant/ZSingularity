@@ -948,40 +948,22 @@ static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
     }
 }
 
-static id zs_display_link_target(CADisplayLink *link) {
-    Ivar ivar = class_getInstanceVariable([CADisplayLink class], "_target");
-    if (!ivar) return nil;
-    return object_getIvar(link, ivar);
-}
-
-static BOOL zs_is_unity_display_link_target(id target) {
-    if (!target) return NO;
-    NSString *name = NSStringFromClass([target class]);
-    return [name rangeOfString:@"Unity" options:NSCaseInsensitiveSearch].location != NSNotFound
-        || [name rangeOfString:@"Il2Cpp" options:NSCaseInsensitiveSearch].location != NSNotFound;
-}
-
 @interface CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range;
 @end
 
 @implementation CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
-    id target = zs_display_link_target(self);
-    BOOL isUnity = zs_is_unity_display_link_target(target);
-    ZLog(@"[ZSFrameRateDiag] t=%.3f link=%p target=%@ isUnity=%d incoming=(%.1f,%.1f,%.1f)",
-         CACurrentMediaTime(), self, target ? NSStringFromClass([target class]) : @"(nil)", isUnity,
-         range.minimum, range.maximum, range.preferred);
-
-    if (!isUnity) {
+    float locked = (float)[FPS120Controller shared].targetFPS;
+    if (locked <= 0 || range.minimum >= locked) {
         [self zs_setPreferredFrameRateRange:range];
         return;
     }
-    float locked = (float)[FPS120Controller shared].targetFPS;
-    if (locked <= 0) locked = (range.preferred > 0) ? range.preferred : range.maximum;
-    CAFrameRateRange fixed = { locked, locked, locked };
-    ZLog(@"[ZSFrameRateDiag] t=%.3f link=%p forcing=(%.1f,%.1f,%.1f)", CACurrentMediaTime(), self, fixed.minimum, fixed.maximum, fixed.preferred);
-    [self zs_setPreferredFrameRateRange:fixed];
+    CAFrameRateRange raised = range;
+    raised.minimum = locked;
+    if (raised.preferred < locked) raised.preferred = locked;
+    if (raised.maximum < locked) raised.maximum = locked;
+    [self zs_setPreferredFrameRateRange:raised];
 }
 @end
 
