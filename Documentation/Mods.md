@@ -1,7 +1,7 @@
 # MODS
 The Mods section is a local library of "mod folders" — each folder holds the modded files you've imported, along with their processing status, and is where you dispatch/install/restore them from.
 
-To access this feature, you must fork the Transcoder Proxy repository 
+To access this feature, you must fork the Transcoder Proxy repository. 
 
 [https://github.com/vastrilliant/transcoder-proxy/](https://github.com/vastrilliant/transcoder-proxy/)
 
@@ -9,13 +9,16 @@ To use this, you must also need to provide a PAT (personal access token), see [p
 
 ## Load Mods
 
-Import modded bundles taken from your mod library of choice. Two kinds of file are accepted:
+Import modded bundles taken from your mod library of choice. [NexusMods](https://www.nexusmods.com/games/limbuscompany) is recommended.
 
-- **Raw modded files** — FMOD sound banks or Unity AssetBundles, picked directly.
- 
-- **A Lunartique-format ZIP archive** — a mod package whose internal file tree matches the recognized Lunartique layout. Its entries are matched, extracted, and imported automatically
- 
-- **Carra2** support is coming soon.
+Supported Formats: 
+`__data` unity asset bundles 
+`.assets.bank` FMOD Sound Bank 
+`Lunartique` .zip archives 
+`Carra2` archives 
+
+Coming soon: 
+`Localize` .json files (translation mods, custom announcers, etc.)
 
 ## Processing
 

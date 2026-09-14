@@ -18,7 +18,6 @@ typedef NS_ENUM(NSInteger, LunartiqueModArchiveErrorCode) {
 @property (nonatomic, copy, readonly) NSString *cacheHash1;
 @property (nonatomic, copy, readonly) NSString *cacheHash2;
 @property (nonatomic, copy, readonly) NSString *dataEntryName;
-@property (nonatomic, copy, readonly, nullable) NSString *infoEntryName;
 @end
 
 @interface LunartiqueModArchive : NSObject
@@ -30,7 +29,13 @@ typedef NS_ENUM(NSInteger, LunartiqueModArchiveErrorCode) {
 + (BOOL)extractDataForEntry:(LunartiqueModEntry *)entry
                    fromZipAtURL:(NSURL *)zipURL
                         dataURL:(NSURL * _Nullable * _Nonnull)outDataURL
-                        infoURL:(NSURL * _Nullable * _Nonnull)outInfoURL
+                          error:(NSError **)error;
+
++ (nullable NSArray<NSString *> *)matchedBankEntryNamesInZipAtURL:(NSURL *)zipURL error:(NSError **)error;
+
++ (BOOL)extractBankEntryNamed:(NSString *)entryName
+                   fromZipAtURL:(NSURL *)zipURL
+                        bankURL:(NSURL * _Nullable * _Nonnull)outBankURL
                           error:(NSError **)error;
 
 @end

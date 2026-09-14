@@ -15,12 +15,11 @@ static NSError *LMAError(LunartiqueModArchiveErrorCode code, NSString *message) 
 }
 
 @implementation LunartiqueModEntry
-- (instancetype)initWithHash1:(NSString *)h1 hash2:(NSString *)h2 dataEntryName:(NSString *)dataName infoEntryName:(nullable NSString *)infoName {
+- (instancetype)initWithHash1:(NSString *)h1 hash2:(NSString *)h2 dataEntryName:(NSString *)dataName {
     if ((self = [super init])) {
         _cacheHash1 = [h1 copy];
         _cacheHash2 = [h2 copy];
         _dataEntryName = [dataName copy];
-        _infoEntryName = [infoName copy];
     }
     return self;
 }
@@ -160,9 +159,6 @@ static BOOL lma_isHex32(NSString *s) {
     NSArray<LMACDRecord *> *records = [self lma_centralDirectoryRecordsForData:data error:error];
     if (!records) return nil;
 
-    NSMutableDictionary<NSString *, LMACDRecord *> *byName = [NSMutableDictionary dictionaryWithCapacity:records.count];
-    for (LMACDRecord *rec in records) byName[rec.name] = rec;
-
     NSMutableArray<LunartiqueModEntry *> *matches = [NSMutableArray array];
     for (LMACDRecord *rec in records) {
         NSString *normalized = [rec.name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
@@ -171,19 +167,20 @@ static BOOL lma_isHex32(NSString *s) {
         NSString *last = comps.lastObject;
         if (![last isEqualToString:@"__data"]) continue;
 
+        NSUInteger hash1Index = comps.count - 3;
         NSString *hash2 = comps[comps.count - 2];
-        NSString *hash1 = comps[comps.count - 3];
-        NSString *installComp = comps[comps.count - 4];
-        if ([installComp caseInsensitiveCompare:@"Installation"] != NSOrderedSame) continue;
+        NSString *hash1 = comps[hash1Index];
         if (!lma_isHex32(hash1) || !lma_isHex32(hash2)) continue;
 
-        NSString *infoName = [normalized stringByReplacingCharactersInRange:NSMakeRange(normalized.length - @"__data".length, @"__data".length) withString:@"__info"];
-        LMACDRecord *infoRec = byName[infoName];
+        BOOL underInstallation = NO;
+        for (NSUInteger i = 0; i < hash1Index; i++) {
+            if ([comps[i] caseInsensitiveCompare:@"Installation"] == NSOrderedSame) { underInstallation = YES; break; }
+        }
+        if (!underInstallation) continue;
 
         LunartiqueModEntry *entry = [[LunartiqueModEntry alloc] initWithHash1:hash1.lowercaseString
                                                                           hash2:hash2.lowercaseString
-                                                                  dataEntryName:rec.name
-                                                                  infoEntryName:infoRec ? infoName : nil];
+                                                                  dataEntryName:rec.name];
         [matches addObject:entry];
     }
 
@@ -276,10 +273,8 @@ static BOOL lma_isHex32(NSString *s) {
 + (BOOL)extractDataForEntry:(LunartiqueModEntry *)entry
                    fromZipAtURL:(NSURL *)zipURL
                         dataURL:(NSURL * _Nullable * _Nonnull)outDataURL
-                        infoURL:(NSURL * _Nullable * _Nonnull)outInfoURL
                           error:(NSError **)error {
     *outDataURL = nil;
-    *outInfoURL = nil;
 
     NSData *data = [self lma_mappedDataForZipAtURL:zipURL error:error];
     if (!data) return NO;
@@ -310,24 +305,60 @@ static BOOL lma_isHex32(NSString *s) {
     }
     *outDataURL = dataOut;
 
-    if (entry.infoEntryName) {
-        LMACDRecord *infoRec = [self lma_recordNamed:entry.infoEntryName inRecords:records];
-        if (infoRec) {
-            NSError *infoInflateErr = nil;
-            NSData *infoBytes = [self lma_inflatedDataForRecord:infoRec inData:data error:&infoInflateErr];
-            if (infoBytes) {
-                NSURL *infoOut = [tmpDir URLByAppendingPathComponent:[NSString stringWithFormat:@"lunartique-%@-info", NSUUID.UUID.UUIDString]];
-                if ([infoBytes writeToURL:infoOut options:NSDataWritingAtomic error:nil]) {
-                    *outInfoURL = infoOut;
-                } else {
-                    ZLog(@"[LunartiqueModArchive] extracted __info bytes but couldn't write them to a temp file - continuing without it.");
-                }
-            } else {
-                ZLog(@"[LunartiqueModArchive] couldn't inflate sibling __info for %@: %@ - continuing without it.", entry.dataEntryName, infoInflateErr.localizedDescription);
-            }
+    return YES;
+}
+
++ (nullable NSArray<NSString *> *)matchedBankEntryNamesInZipAtURL:(NSURL *)zipURL error:(NSError **)error {
+    NSData *data = [self lma_mappedDataForZipAtURL:zipURL error:error];
+    if (!data) return nil;
+
+    NSArray<LMACDRecord *> *records = [self lma_centralDirectoryRecordsForData:data error:error];
+    if (!records) return nil;
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (LMACDRecord *rec in records) {
+        NSString *normalized = [rec.name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+        if ([normalized.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
+            [names addObject:rec.name];
         }
     }
+    return names;
+}
 
++ (BOOL)extractBankEntryNamed:(NSString *)entryName
+                   fromZipAtURL:(NSURL *)zipURL
+                        bankURL:(NSURL * _Nullable * _Nonnull)outBankURL
+                          error:(NSError **)error {
+    *outBankURL = nil;
+
+    NSData *data = [self lma_mappedDataForZipAtURL:zipURL error:error];
+    if (!data) return NO;
+
+    NSArray<LMACDRecord *> *records = [self lma_centralDirectoryRecordsForData:data error:error];
+    if (!records) return NO;
+
+    LMACDRecord *rec = [self lma_recordNamed:entryName inRecords:records];
+    if (!rec) {
+        if (error) *error = LMAError(LunartiqueModArchiveErrorCorruptEntry,
+            [NSString stringWithFormat:@"\"%@\" no longer found in the zip's Central Directory.", entryName]);
+        return NO;
+    }
+
+    NSError *inflateErr = nil;
+    NSData *bankBytes = [self lma_inflatedDataForRecord:rec inData:data error:&inflateErr];
+    if (!bankBytes) {
+        if (error) *error = inflateErr;
+        return NO;
+    }
+
+    NSURL *tmpDir = [NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES];
+    NSURL *bankOut = [tmpDir URLByAppendingPathComponent:[NSString stringWithFormat:@"lunartique-%@-%@", NSUUID.UUID.UUIDString, entryName.lastPathComponent]];
+    NSError *writeErr = nil;
+    if (![bankBytes writeToURL:bankOut options:NSDataWritingAtomic error:&writeErr]) {
+        if (error) *error = writeErr ?: LMAError(LunartiqueModArchiveErrorExtractionFailed, @"Couldn't write extracted bank to a temp file.");
+        return NO;
+    }
+    *outBankURL = bankOut;
     return YES;
 }
 
@@ -987,9 +1018,9 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     NSMutableArray<NSString *> *rejectedLines = [NSMutableArray array];
     NSInteger importedCount = 0;
     for (LunartiqueModEntry *lmaEntry in matches) {
-        NSURL *dataURL = nil, *infoURL = nil;
+        NSURL *dataURL = nil;
         NSError *extractErr = nil;
-        if (![LunartiqueModArchive extractDataForEntry:lmaEntry fromZipAtURL:zipURL dataURL:&dataURL infoURL:&infoURL error:&extractErr]) {
+        if (![LunartiqueModArchive extractDataForEntry:lmaEntry fromZipAtURL:zipURL dataURL:&dataURL error:&extractErr]) {
             ZLog(@"[ModAssetLibrary] couldn't extract %@ from %@: %@", lmaEntry.dataEntryName, zipURL.lastPathComponent, extractErr.localizedDescription);
             continue;
         }
@@ -1048,10 +1079,6 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
             continue;
         }
 
-        if (infoURL) {
-            [fm copyItemAtPath:infoURL.path toPath:[subFolderPath stringByAppendingPathComponent:@"__info"] error:nil];
-        }
-
         NSDictionary<NSFileAttributeKey, id> *attrs = [fm attributesOfItemAtPath:destPath error:nil];
 
         ModAssetLibraryEntry *entry = [ModAssetLibraryEntry new];
@@ -1068,6 +1095,36 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
 
         entry.livePathDescription = nil;
         [entries addObject:entry];
+        importedCount++;
+    }
+
+    NSError *bankScanErr = nil;
+    NSArray<NSString *> *bankEntryNames = [LunartiqueModArchive matchedBankEntryNamesInZipAtURL:zipURL error:&bankScanErr] ?: @[];
+    for (NSString *bankEntryName in bankEntryNames) {
+        NSURL *bankURL = nil;
+        NSError *bankExtractErr = nil;
+        if (![LunartiqueModArchive extractBankEntryNamed:bankEntryName fromZipAtURL:zipURL bankURL:&bankURL error:&bankExtractErr]) {
+            ZLog(@"[ModAssetLibrary] couldn't extract bank %@ from %@: %@", bankEntryName, zipURL.lastPathComponent, bankExtractErr.localizedDescription);
+            continue;
+        }
+
+        NSString *destName = [self mal_uniqueFileNameFor:bankEntryName.lastPathComponent inFolder:folderPath];
+        NSString *destPath = [folderPath stringByAppendingPathComponent:destName];
+        NSError *copyErr = nil;
+        if (![fm copyItemAtPath:bankURL.path toPath:destPath error:&copyErr]) {
+            ZLog(@"[ModAssetLibrary] couldn't copy extracted bank %@ into \"%@\": %@", bankEntryName, folderName, copyErr.localizedDescription);
+            continue;
+        }
+
+        NSDictionary<NSFileAttributeKey, id> *bankAttrs = [fm attributesOfItemAtPath:destPath error:nil];
+        ModAssetLibraryEntry *bankEntry = [ModAssetLibraryEntry new];
+        bankEntry.fileName = destName;
+        bankEntry.path = destPath;
+        bankEntry.byteSize = bankAttrs.fileSize;
+        bankEntry.dateAdded = now;
+        bankEntry.isAssetBundle = NO;
+        bankEntry.livePathDescription = [self mal_livePathDescriptionForFileName:destName];
+        [entries addObject:bankEntry];
         importedCount++;
     }
 
