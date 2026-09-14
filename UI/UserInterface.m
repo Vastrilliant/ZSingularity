@@ -3936,6 +3936,26 @@ static UIView *zs_make_title_block(void) {
 static const NSTimeInterval kPostFXReapplyInterval = 1.0;
 static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
+@interface ZSPassthroughEffectView : UIVisualEffectView
+@end
+
+@implementation ZSPassthroughEffectView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+@end
+
+@interface ZSPassthroughView : UIView
+@end
+
+@implementation ZSPassthroughView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+@end
+
 @implementation UserInterface
 
 + (instancetype)shared {
@@ -4410,10 +4430,10 @@ static const CGFloat kContentFadeHeight = 22;
     UIVisualEffectView *chrome = nil;
 
     if (zs_has_liquid_glass()) {
-        chrome = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_container_effect(kGlassMergeSpacing)];
+        chrome = [[ZSPassthroughEffectView alloc] initWithEffect:zs_make_glass_container_effect(kGlassMergeSpacing)];
     } else {
 
-        chrome = [[UIVisualEffectView alloc] initWithEffect:nil];
+        chrome = [[ZSPassthroughEffectView alloc] initWithEffect:nil];
     }
 
     self.glassContainer = chrome;
@@ -4446,7 +4466,7 @@ static const CGFloat kContentFadeHeight = 22;
         [self.glassContainerContent addSubview:self.handle];
     }
 
-    self.contentOverlay = [[UIView alloc] initWithFrame:CGRectZero];
+    self.contentOverlay = [[ZSPassthroughView alloc] initWithFrame:CGRectZero];
     self.contentOverlay.backgroundColor = UIColor.clearColor;
     self.contentOverlay.opaque = NO;
     self.contentOverlay.clipsToBounds = YES;
