@@ -2826,7 +2826,27 @@ static void ZSUID_RedactColdTargets(void) {
 
 @end
 
+static void *UIDRedactor_WaitForUnityThenInstall(void *arg) {
+    (void)arg;
+
+    __block BOOL unityReady = NO;
+    while (!unityReady) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id appController = [[UIApplication sharedApplication] delegate];
+            if (appController && find_unity_view(appController)) unityReady = YES;
+        });
+        if (!unityReady) usleep(200 * 1000);
+    }
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [UIDRedactor install];
+    });
+    return NULL;
+}
+
 __attribute__((constructor))
 static void UIDRedactorConstructor(void) {
-    [UIDRedactor install];
+    pthread_t t;
+    pthread_create(&t, NULL, UIDRedactor_WaitForUnityThenInstall, NULL);
+    pthread_detach(t);
 }
