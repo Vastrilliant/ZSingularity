@@ -948,12 +948,23 @@ static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
     }
 }
 
+static BOOL zs_is_unity_display_link_target(id target) {
+    if (!target) return NO;
+    NSString *name = NSStringFromClass([target class]);
+    return [name rangeOfString:@"Unity" options:NSCaseInsensitiveSearch].location != NSNotFound
+        || [name rangeOfString:@"Il2Cpp" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
 @interface CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range;
 @end
 
 @implementation CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
+    if (!zs_is_unity_display_link_target(self.target)) {
+        [self zs_setPreferredFrameRateRange:range];
+        return;
+    }
     float locked = (float)[FPS120Controller shared].targetFPS;
     if (locked <= 0) locked = (range.preferred > 0) ? range.preferred : range.maximum;
     CAFrameRateRange fixed = { locked, locked, locked };
