@@ -3806,6 +3806,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UIView *handle;
 @property (nonatomic, strong) UILabel *chevron;
+@property (nonatomic, strong) UIView *staticHandle;
+@property (nonatomic, strong) UILabel *staticChevron;
 @property (nonatomic, strong) UIView *scrollViewport;
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stack;
@@ -4003,6 +4005,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     ZLog(@"[UserInterface] installing panel UI");
     [self buildPanel:unityView];
 
+    if (self.panelOpen) {
+        self.staticHandle.hidden = YES;
+    } else {
+        [self zs_detachPanelChromeIfNeeded];
+    }
+
     UILongPressGestureRecognizer *restoreUIPress =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleRestoreUIGesture:)];
     restoreUIPress.numberOfTouchesRequired = 3;
@@ -4062,13 +4070,37 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)zs_attachPanelChromeIfNeeded {
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView || !self.glassContainer) return;
+
+    if (!self.glassContainer.superview) [unityView addSubview:self.glassContainer];
+    if (!self.contentOverlay.superview) [unityView addSubview:self.contentOverlay];
+    if (self.docsContentOverlay && !self.docsContentOverlay.superview) {
+        [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
+    }
+
+    self.staticHandle.hidden = YES;
+}
+
+- (void)zs_detachPanelChromeIfNeeded {
+    [self.glassContainer removeFromSuperview];
+    [self.contentOverlay removeFromSuperview];
+    [self.docsContentOverlay removeFromSuperview];
+
+    self.staticHandle.hidden = self.uiDisabled;
+}
+
 - (void)toggleTapped {
     if (self.docsPanelOpen) {
         [self closeDocsPanel];
         return;
     }
 
-    self.panelOpen = !self.panelOpen;
+    BOOL opening = !self.panelOpen;
+    if (opening) [self zs_attachPanelChromeIfNeeded];
+
+    self.panelOpen = opening;
     [[FPS120Controller shared] setPanelOpen:self.panelOpen];
     [self positionPanel];
     [UIView animateWithDuration:0.25 animations:^{
@@ -4565,6 +4597,27 @@ static const CGFloat kContentFadeHeight = 22;
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleTapped)];
     [self.handle addGestureRecognizer:tap];
     self.handle.userInteractionEnabled = YES;
+
+    self.staticHandle = [[UIView alloc] initWithFrame:CGRectZero];
+    self.staticHandle.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+    self.staticHandle.layer.cornerRadius = kHandleCornerRadius;
+    self.staticHandle.layer.cornerCurve = kCACornerCurveContinuous;
+    self.staticHandle.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+    self.staticHandle.clipsToBounds = NO;
+    self.staticHandle.userInteractionEnabled = YES;
+    self.staticHandle.hidden = YES;
+    [unityView addSubview:self.staticHandle];
+
+    self.staticChevron = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, kHandleWidth, 24)];
+    self.staticChevron.textAlignment = NSTextAlignmentCenter;
+    self.staticChevron.textColor = [UIColor colorWithWhite:1 alpha:0.66];
+    self.staticChevron.font = zs_mono_font(15, UIFontWeightLight);
+    self.staticChevron.text = @"‹";
+    self.staticChevron.center = CGPointMake(kHandleWidth * 0.5, kHandleHeight * 0.5);
+    [self.staticHandle addSubview:self.staticChevron];
+
+    UITapGestureRecognizer *staticTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleTapped)];
+    [self.staticHandle addGestureRecognizer:staticTap];
 
     [self buildDocsPanel:unityView];
 
@@ -10222,6 +10275,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           kHandleWidth,
                                           kHandleHeight);
 
+        self.staticHandle.frame = CGRectMake(targetX,
+                                              (height - kHandleHeight) * 0.5,
+                                              kHandleWidth,
+                                              kHandleHeight);
+
         CGRect docsFrameLocal = CGRectMake(kHandleWidth, 0, docsW, height);
 
         if (docsPanelElement) {
@@ -10265,6 +10323,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         if (!docsVisible) {
             self.docsContentOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;
+        }
+        if (!self.panelOpen) {
+            [self zs_detachPanelChromeIfNeeded];
         }
     };
 
@@ -10411,9 +10472,7 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
     zs_gif_tint_set_paused(YES);
     zs_gif_tint_teardown_all();
 
-    [self.glassContainer removeFromSuperview];
-    [self.contentOverlay removeFromSuperview];
-    [self.docsContentOverlay removeFromSuperview];
+    [self zs_detachPanelChromeIfNeeded];
 
     UIViewController *presenter = zs_key_window().rootViewController;
     if (presenter) {
@@ -10429,14 +10488,14 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     if (!self.uiDisabled) return;
 
-    UIView *unityView = zs_ui_host_view();
-    if (!unityView) return;
-
-    [unityView addSubview:self.glassContainer];
-    [unityView addSubview:self.contentOverlay];
-    [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
-
     self.uiDisabled = NO;
+
+    if (self.panelOpen) {
+        [self zs_attachPanelChromeIfNeeded];
+    } else {
+        self.staticHandle.hidden = NO;
+    }
+
     self.disableUIToggle.on = NO;
 }
 
