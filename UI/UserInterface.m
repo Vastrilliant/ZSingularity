@@ -4007,7 +4007,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleRestoreUIGesture:)];
     restoreUIPress.numberOfTouchesRequired = 3;
     restoreUIPress.minimumPressDuration = 1.0;
-    unityView.isMultipleTouchEnabled = YES;
+    [unityView setMultipleTouchEnabled:YES];
     unityView.exclusiveTouch = NO;
     [unityView addGestureRecognizer:restoreUIPress];
 
