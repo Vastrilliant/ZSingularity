@@ -3812,6 +3812,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIStackView *experimentalSectionContainer;
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, assign) CGFloat panelWidth;
+@property (nonatomic, assign) BOOL uiDisabled;
+@property (nonatomic, weak) UISwitch *disableUIToggle;
 
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
 @property (nonatomic, strong) UIView *docsPanel;
@@ -4000,6 +4002,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     ZLog(@"[UserInterface] installing panel UI");
     [self buildPanel:unityView];
+
+    UILongPressGestureRecognizer *restoreUIPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleRestoreUIGesture:)];
+    restoreUIPress.numberOfTouchesRequired = 3;
+    restoreUIPress.minimumPressDuration = 1.0;
+    [unityView addGestureRecognizer:restoreUIPress];
 
     zs_set_glass_suspended(!self.panelOpen);
     zs_gif_tint_set_paused(!self.panelOpen);
@@ -5039,6 +5047,10 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *disableUIRow = zs_make_switch_row(@"Disable UI", NO);
+    self.disableUIToggle = disableUIRow.toggle;
+    [disableUIRow.toggle addTarget:self action:@selector(disableUIChanged:) forControlEvents:UIControlEventValueChanged];
+
     [self.stack addArrangedSubview:customGreetingRow];
     [self.stack setCustomSpacing:8 afterView:customGreetingRow];
     [self.stack addArrangedSubview:uidRedactorRow];
@@ -5046,7 +5058,9 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack addArrangedSubview:disableLiquidGlassRow];
     [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
     [self.stack addArrangedSubview:disableEnkephalinRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
+    [self.stack setCustomSpacing:8 afterView:disableEnkephalinRow];
+    [self.stack addArrangedSubview:disableUIRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:disableUIRow];
 
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
@@ -10377,6 +10391,39 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 - (void)disableEnkephalinChanged:(UISwitch *)toggle {
     zs_set_enkephalin_disabled_by_user(toggle.on);
     zs_gif_tint_set_disabled(toggle.on);
+}
+
+- (void)disableUIChanged:(UISwitch *)toggle {
+    if (!toggle.on) return;
+
+    self.uiDisabled = YES;
+    [self.glassContainer removeFromSuperview];
+    [self.contentOverlay removeFromSuperview];
+    [self.docsContentOverlay removeFromSuperview];
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (presenter) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"UI Disabled"
+                                                                         message:@"Click and hold with three fingers to bring it back"
+                                                                  preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [presenter presentViewController:alert animated:YES completion:nil];
+    }
+}
+
+- (void)zs_handleRestoreUIGesture:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    if (!self.uiDisabled) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    [unityView addSubview:self.glassContainer];
+    [unityView addSubview:self.contentOverlay];
+    [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
+
+    self.uiDisabled = NO;
+    self.disableUIToggle.on = NO;
 }
 
 - (void)nightlyReleasesEnabledChanged:(UISwitch *)toggle {
