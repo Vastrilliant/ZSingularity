@@ -955,15 +955,15 @@ static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
 @implementation CADisplayLink (ZSLockedFrameRate)
 - (void)zs_setPreferredFrameRateRange:(CAFrameRateRange)range {
     float locked = (float)[FPS120Controller shared].targetFPS;
-    if (locked <= 0 || range.minimum >= locked) {
+    if (locked <= 0) {
         [self zs_setPreferredFrameRateRange:range];
         return;
     }
-    CAFrameRateRange raised = range;
-    raised.minimum = locked;
-    if (raised.preferred < locked) raised.preferred = locked;
-    if (raised.maximum < locked) raised.maximum = locked;
-    [self zs_setPreferredFrameRateRange:raised];
+    CAFrameRateRange pinned = range;
+    pinned.minimum = locked;
+    pinned.preferred = locked;
+    pinned.maximum = locked;
+    [self zs_setPreferredFrameRateRange:pinned];
 }
 @end
 
