@@ -994,27 +994,8 @@ static void zs_safely_swizzle_class(Class cls, SEL origSel, SEL replSel) {
 }
 @end
 
-@interface CALayer (ZSLockedFrameRate)
-- (void)zs_addAnimation:(CAAnimation *)animation forKey:(NSString *)key;
-@end
-
-@implementation CALayer (ZSLockedFrameRate)
-- (void)zs_addAnimation:(CAAnimation *)animation forKey:(NSString *)key {
-    float locked = (float)[FPS120Controller shared].targetFPS;
-    if (locked > 0) {
-        CAFrameRateRange pinned;
-        pinned.minimum = locked;
-        pinned.preferred = locked;
-        pinned.maximum = locked;
-        animation.preferredFrameRateRange = pinned;
-    }
-    [self zs_addAnimation:animation forKey:key];
-}
-@end
-
 static void zs_install_locked_framerate_hook(void) {
     zs_safely_swizzle_class([CADisplayLink class], @selector(setPreferredFrameRateRange:), @selector(zs_setPreferredFrameRateRange:));
-    zs_safely_swizzle_class([CALayer class], @selector(addAnimation:forKey:), @selector(zs_addAnimation:forKey:));
 }
 
 #pragma mark - Apply-everything entry points
