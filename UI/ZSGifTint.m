@@ -63,9 +63,14 @@ typedef NS_ENUM(NSInteger, ZSGifWindowKind) {
 @property (nonatomic, assign) ZSGifWindowKind kind;
 @property (nonatomic, assign) CGFloat panUnit;
 @property (nonatomic, assign) BOOL active;
+@property (nonatomic, assign) CGRect texLayerFrame;
+@property (nonatomic, assign) BOOL atBack;
 @end
 @implementation ZSGifWindow
 @end
+
+static void zs_teardown_window(ZSGifWindow *w);
+static void zs_reapply_window(ZSGifWindow *w);
 
 #pragma mark - Engine: decode + per-tick contents swap only
 
@@ -74,6 +79,10 @@ typedef NS_ENUM(NSInteger, ZSGifWindowKind) {
 - (nullable UIImage *)currentOrFirstFrame;
 - (void)addWindow:(ZSGifWindow *)window;
 - (void)setEnginePaused:(BOOL)paused;
+- (void)teardownAllWindows;
+- (void)reconstructAllWindows;
+- (void)setDisabled:(BOOL)disabled;
+- (BOOL)isDisabled;
 @end
 
 @implementation ZSGifTintEngine {
@@ -85,6 +94,7 @@ typedef NS_ENUM(NSInteger, ZSGifWindowKind) {
     NSTimeInterval _startTime;
     NSInteger _lastFrameIndex;
     BOOL _paused;
+    BOOL _disabled;
 
     NSHashTable<ZSGifWindow *> *_windows;
 }
@@ -199,6 +209,33 @@ static const size_t kZSGifDecodeMaxPixelSize = 240;
     [self startOrStopDisplayLinkAsNeeded];
 }
 
+- (void)teardownAllWindows {
+    for (ZSGifWindow *w in _windows) {
+        zs_teardown_window(w);
+    }
+}
+
+- (void)reconstructAllWindows {
+    if (_disabled) return;
+    for (ZSGifWindow *w in _windows) {
+        zs_reapply_window(w);
+    }
+}
+
+- (void)setDisabled:(BOOL)disabled {
+    if (_disabled == disabled) return;
+    _disabled = disabled;
+    if (disabled) {
+        [self teardownAllWindows];
+    } else if (!_paused) {
+        [self reconstructAllWindows];
+    }
+}
+
+- (BOOL)isDisabled {
+    return _disabled;
+}
+
 - (void)startOrStopDisplayLinkAsNeeded {
     BOOL needsLink = (_windows.count > 0) && (_frames.count > 0) && !_paused;
     if (needsLink && !_displayLink) {
@@ -255,6 +292,22 @@ void zs_gif_tint_set_paused(BOOL paused) {
     [[ZSGifTintEngine sharedEngine] setEnginePaused:paused];
 }
 
+void zs_gif_tint_teardown_all(void) {
+    [[ZSGifTintEngine sharedEngine] teardownAllWindows];
+}
+
+void zs_gif_tint_reconstruct_all(void) {
+    [[ZSGifTintEngine sharedEngine] reconstructAllWindows];
+}
+
+void zs_gif_tint_set_disabled(BOOL disabled) {
+    [[ZSGifTintEngine sharedEngine] setDisabled:disabled];
+}
+
+BOOL zs_gif_tint_is_disabled(void) {
+    return [[ZSGifTintEngine sharedEngine] isDisabled];
+}
+
 #pragma mark - Associated-object bookkeeping shared by all three kinds
 
 static const void *kZSGifWindowKey = &kZSGifWindowKey;
@@ -307,6 +360,8 @@ static ZSGifWindow *zs_register(UIView *owner, ZSGifWindowKind kind, CALayer *ma
     w.kind = kind;
     w.texLayer = tex;
     w.maskLayer = maskLayer;
+    w.texLayerFrame = texLayerFrame;
+    w.atBack = atBack;
     [[ZSGifTintEngine sharedEngine] addWindow:w];
     return w;
 }
@@ -315,6 +370,16 @@ static void zs_unregister(UIView *owner) {
     ZSGifWindow *w = objc_getAssociatedObject(owner, kZSGifWindowKey);
     [w.texLayer removeFromSuperlayer];
     objc_setAssociatedObject(owner, kZSGifWindowKey, nil, OBJC_ASSOCIATION_RETAIN);
+}
+
+static void zs_teardown_window(ZSGifWindow *w) {
+    if (!w || !w.texLayer) return;
+    [w.texLayer removeFromSuperlayer];
+    w.texLayer.contents = nil;
+    w.texLayer.mask = nil;
+    w.texLayer = nil;
+    w.maskLayer = nil;
+    w.active = NO;
 }
 
 void zs_set_gif_window_active(UIView *view, BOOL active) {
@@ -545,4 +610,44 @@ void zs_remove_gif_switch_tint(UISwitch *sw) {
     sw.onTintColor = nil;
     [sw removeTarget:sw action:@selector(zs_gifTint_switchValueChanged) forControlEvents:UIControlEventValueChanged];
     zs_unregister(sw);
+}
+
+#pragma mark - Teardown / reconstruct dispatch
+
+static void zs_reapply_window(ZSGifWindow *w) {
+    if (!w || !w.ownerView || w.texLayer) return;
+
+    CALayer *mask = nil;
+    switch (w.kind) {
+        case ZSGifWindowKindText: mask = [CATextLayer new]; break;
+        case ZSGifWindowKindIcon: mask = [CALayer new]; break;
+        case ZSGifWindowKindShape: mask = [CAShapeLayer new]; break;
+        case ZSGifWindowKindSwitch: mask = [CAShapeLayer new]; break;
+    }
+    zs_register(w.ownerView, w.kind, mask, w.texLayerFrame, w.atBack);
+
+    switch (w.kind) {
+        case ZSGifWindowKindText:
+            zs_refresh_text_mask_if_registered((UILabel *)w.ownerView);
+            break;
+        case ZSGifWindowKindIcon: {
+            UIImageView *iv = (UIImageView *)w.ownerView;
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            w.texLayer.frame = iv.bounds;
+            w.texLayer.contentsGravity = kCAGravityResizeAspect;
+            if (iv.image) w.texLayer.contents = (__bridge id)iv.image.CGImage;
+            [CATransaction commit];
+            break;
+        }
+        case ZSGifWindowKindShape:
+            zs_refresh_gif_view_tint(w.ownerView, w.ownerView.bounds);
+            break;
+        case ZSGifWindowKindSwitch: {
+            UISwitch *sw = (UISwitch *)w.ownerView;
+            w.texLayer.opacity = sw.isOn ? 1.0f : 0.0f;
+            zs_refresh_switch_mask_if_registered(sw);
+            break;
+        }
+    }
 }

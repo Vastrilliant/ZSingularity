@@ -7,6 +7,12 @@ void zs_gif_tint_preload(void);
 
 void zs_gif_tint_set_paused(BOOL paused);
 
+void zs_gif_tint_teardown_all(void);
+void zs_gif_tint_reconstruct_all(void);
+
+void zs_gif_tint_set_disabled(BOOL disabled);
+BOOL zs_gif_tint_is_disabled(void);
+
 void zs_set_gif_window_active(UIView *view, BOOL active);
 
 void zs_apply_gif_text_tint(UILabel *label);

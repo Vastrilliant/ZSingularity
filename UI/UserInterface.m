@@ -118,6 +118,30 @@ static void zs_set_liquid_glass_disabled_by_user(BOOL disabled) {
     gZSLiquidGlassDisabledCacheLoaded = YES;
 }
 
+static NSString * const kZSEnkephalinSettingsSection = @"enkephalin";
+static NSString * const kZSEnkephalinDisabledKey = @"disabled";
+
+static BOOL gZSEnkephalinDisabledCache;
+static BOOL gZSEnkephalinDisabledCacheLoaded;
+
+static BOOL zs_enkephalin_disabled_by_user(void) {
+    if (!gZSEnkephalinDisabledCacheLoaded) {
+        NSDictionary *section = zs_settings_section(kZSEnkephalinSettingsSection);
+        id stored = section[kZSEnkephalinDisabledKey];
+        gZSEnkephalinDisabledCache = stored ? [stored boolValue] : NO;
+        gZSEnkephalinDisabledCacheLoaded = YES;
+    }
+    return gZSEnkephalinDisabledCache;
+}
+
+static void zs_set_enkephalin_disabled_by_user(BOOL disabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSEnkephalinSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSEnkephalinDisabledKey] = @(disabled);
+    zs_write_settings_section(kZSEnkephalinSettingsSection, section);
+    gZSEnkephalinDisabledCache = disabled;
+    gZSEnkephalinDisabledCacheLoaded = YES;
+}
+
 #pragma mark - Social links
 
 static NSString * const kZSSocialGitHubURL = @"https://github.com/Vastrilliant/ZSingularity";
@@ -3979,6 +4003,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     zs_set_glass_suspended(!self.panelOpen);
     zs_gif_tint_set_paused(!self.panelOpen);
+    zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
+    if (self.panelOpen) {
+        zs_gif_tint_reconstruct_all();
+    } else {
+        zs_gif_tint_teardown_all();
+    }
     [self zs_updateSliderGlassVisibility];
 
     [self zs_presentRestartPromptIfNeeded];
@@ -4037,6 +4067,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     zs_set_glass_suspended(!self.panelOpen);
     zs_gif_tint_set_paused(!self.panelOpen);
+    if (self.panelOpen) {
+        zs_gif_tint_reconstruct_all();
+    } else {
+        zs_gif_tint_teardown_all();
+    }
 
     if (self.panelOpen) [self zs_pollAllActiveDoctorEntriesImmediately];
 }
@@ -5001,12 +5036,17 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
     [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
+    [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
+
     [self.stack addArrangedSubview:customGreetingRow];
     [self.stack setCustomSpacing:8 afterView:customGreetingRow];
     [self.stack addArrangedSubview:uidRedactorRow];
     [self.stack setCustomSpacing:8 afterView:uidRedactorRow];
     [self.stack addArrangedSubview:disableLiquidGlassRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:disableLiquidGlassRow];
+    [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
+    [self.stack addArrangedSubview:disableEnkephalinRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
 
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
@@ -10332,6 +10372,11 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         [presenter presentViewController:alert animated:YES completion:nil];
     }
+}
+
+- (void)disableEnkephalinChanged:(UISwitch *)toggle {
+    zs_set_enkephalin_disabled_by_user(toggle.on);
+    zs_gif_tint_set_disabled(toggle.on);
 }
 
 - (void)nightlyReleasesEnabledChanged:(UISwitch *)toggle {
