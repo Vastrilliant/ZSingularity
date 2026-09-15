@@ -61,6 +61,10 @@ static UIWindow *zs_key_window(void) {
     return [UIApplication sharedApplication].delegate.window;
 }
 
+static UIView *zs_ui_host_view(void) {
+    return zs_unity_view() ?: zs_key_window();
+}
+
 static void zs_force_dark(UIView *view) {
     if (@available(iOS 13.0, *)) {
         view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -3967,11 +3971,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
 - (void)installIfNeeded {
     if (self.panel) return;
-    UIWindow *window = zs_key_window();
-    if (!window) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
 
     ZLog(@"[UserInterface] installing panel UI");
-    [self buildPanel:window];
+    [self buildPanel:unityView];
 
     zs_set_glass_suspended(!self.panelOpen);
     zs_gif_tint_set_paused(!self.panelOpen);
@@ -3997,12 +4001,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *w = zs_key_window();
-        if (w && weakSelf.panel) [weakSelf layoutPanelForWindow:w];
+        UIView *v = zs_ui_host_view();
+        if (v && weakSelf.panel) [weakSelf layoutPanelForWindow:v];
     });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *w = zs_key_window();
-        if (w && weakSelf.panel) [weakSelf layoutPanelForWindow:w];
+        UIView *v = zs_ui_host_view();
+        if (v && weakSelf.panel) [weakSelf layoutPanelForWindow:v];
     });
 }
 
@@ -4424,7 +4428,7 @@ static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
 static const CGFloat kContentFadeHeight = 22;
 
-- (void)buildPanel:(UIWindow *)window {
+- (void)buildPanel:(UIView *)unityView {
     self.panelWidth = kPanelWidth;
 
     UIVisualEffectView *chrome = nil;
@@ -4439,7 +4443,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.glassContainer = chrome;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
-    [window addSubview:self.glassContainer];
+    [unityView addSubview:self.glassContainer];
     zs_force_dark(self.glassContainer);
 
     if (zs_has_liquid_glass()) {
@@ -4473,7 +4477,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.contentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
     self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
     self.contentOverlay.userInteractionEnabled = YES;
-    [window addSubview:self.contentOverlay];
+    [unityView addSubview:self.contentOverlay];
     zs_force_dark(self.contentOverlay);
 
     UIPanGestureRecognizer *closeSwipe = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panelSwiped:)];
@@ -4517,7 +4521,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.handle addGestureRecognizer:tap];
     self.handle.userInteractionEnabled = YES;
 
-    [self buildDocsPanel:window];
+    [self buildDocsPanel:unityView];
 
     if (!zs_has_liquid_glass()) {
         [self.glassContainerContent sendSubviewToBack:self.handle];
@@ -5869,7 +5873,7 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self.stack addArrangedSubview:socialLinksStack];
 
-    [self layoutPanelForWindow:window];
+    [self layoutPanelForWindow:unityView];
 
     zs_gif_tint_preload();
 
@@ -5894,7 +5898,7 @@ static const CGFloat kContentFadeHeight = 22;
 
 #pragma mark Docs panel
 
-- (void)buildDocsPanel:(UIWindow *)window {
+- (void)buildDocsPanel:(UIView *)unityView {
     self.docsPanelWidth = self.panelWidth;
 
     if (zs_has_liquid_glass()) {
@@ -5924,10 +5928,10 @@ static const CGFloat kContentFadeHeight = 22;
     self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
     self.docsContentOverlay.userInteractionEnabled = YES;
     self.docsContentOverlay.hidden = YES;
-    [window addSubview:self.docsContentOverlay];
+    [unityView addSubview:self.docsContentOverlay];
     zs_force_dark(self.docsContentOverlay);
     if (self.contentOverlay) {
-        [window insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
+        [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
     }
 
     self.docsPanelSeparator = [[UIView alloc] init];
@@ -6355,12 +6359,12 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     }];
 }
 
-- (void)layoutDocsPanelForWindow:(UIWindow *)window {
+- (void)layoutDocsPanelForWindow:(UIView *)unityView {
     if (!self.docsPanel) return;
 
     self.docsScrollView.contentInset = UIEdgeInsetsMake(0,
                                                           0,
-                                                          window.safeAreaInsets.bottom + 12,
+                                                          unityView.safeAreaInsets.bottom + 12,
                                                           0);
 }
 
@@ -8422,8 +8426,8 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                                         placeholder:(NSString *)placeholder
                                              secure:(BOOL)secure
                                          completion:(void (^)(NSString * _Nullable trimmedText))completion {
-    UIWindow *window = zs_key_window();
-    if (!window) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
     if (self.zsFloatingField) {
         [self zs_commitFloatingFieldSaving:YES];
     }
@@ -8435,14 +8439,14 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     backdrop.backgroundColor = UIColor.clearColor;
     backdrop.userInteractionEnabled = YES;
     [backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_floatingFieldBackdropTapped)]];
-    [window addSubview:backdrop];
+    [unityView addSubview:backdrop];
     zs_force_dark(backdrop);
     self.zsFloatingFieldBackdrop = backdrop;
     [NSLayoutConstraint activateConstraints:@[
-        [backdrop.leadingAnchor constraintEqualToAnchor:window.leadingAnchor],
-        [backdrop.trailingAnchor constraintEqualToAnchor:window.trailingAnchor],
-        [backdrop.topAnchor constraintEqualToAnchor:window.topAnchor],
-        [backdrop.bottomAnchor constraintEqualToAnchor:window.bottomAnchor],
+        [backdrop.leadingAnchor constraintEqualToAnchor:unityView.leadingAnchor],
+        [backdrop.trailingAnchor constraintEqualToAnchor:unityView.trailingAnchor],
+        [backdrop.topAnchor constraintEqualToAnchor:unityView.topAnchor],
+        [backdrop.bottomAnchor constraintEqualToAnchor:unityView.bottomAnchor],
     ]];
 
     UITextField *field = [[UITextField alloc] init];
@@ -8461,28 +8465,28 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     UIVisualEffectView *glass = zs_wrap_field_in_native_glass(field, 6);
     UIView *container = glass ?: field;
     container.translatesAutoresizingMaskIntoConstraints = NO;
-    [window addSubview:container];
+    [unityView addSubview:container];
     zs_force_dark(container);
-    [window bringSubviewToFront:container];
+    [unityView bringSubviewToFront:container];
     self.zsFloatingFieldContainer = container;
 
     container.alpha = 0;
-    NSLayoutConstraint *bottom = [container.bottomAnchor constraintEqualToAnchor:window.bottomAnchor constant:-8];
+    NSLayoutConstraint *bottom = [container.bottomAnchor constraintEqualToAnchor:unityView.bottomAnchor constant:-8];
     self.zsFloatingFieldBottomConstraint = bottom;
     [NSLayoutConstraint activateConstraints:@[
-        [container.leadingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.leadingAnchor constant:16],
-        [container.trailingAnchor constraintEqualToAnchor:window.safeAreaLayoutGuide.trailingAnchor constant:-16],
+        [container.leadingAnchor constraintEqualToAnchor:unityView.safeAreaLayoutGuide.leadingAnchor constant:16],
+        [container.trailingAnchor constraintEqualToAnchor:unityView.safeAreaLayoutGuide.trailingAnchor constant:-16],
         bottom,
         [container.heightAnchor constraintEqualToConstant:44],
     ]];
 
-    CGFloat bottomInset = window.safeAreaInsets.bottom + 291;
+    CGFloat bottomInset = unityView.safeAreaInsets.bottom + 291;
     if (!CGRectIsEmpty(self.zs_lastKeyboardFrame)) {
-        CGFloat inset = CGRectGetHeight(window.bounds) - CGRectGetMinY(self.zs_lastKeyboardFrame);
+        CGFloat inset = CGRectGetHeight(unityView.bounds) - CGRectGetMinY(self.zs_lastKeyboardFrame);
         if (inset >= 8) bottomInset = inset;
     }
     bottom.constant = -(bottomInset + 8);
-    [window layoutIfNeeded];
+    [unityView layoutIfNeeded];
 
     [UIView animateWithDuration:0.15 animations:^{
         container.alpha = 1;
@@ -9301,9 +9305,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         ZLog(@"[UserInterface] syslog console closed");
     }
 
-    UIWindow *window = zs_key_window();
-    if (window) {
-        [self layoutPanelForWindow:window];
+    UIView *unityView = zs_ui_host_view();
+    if (unityView) {
+        [self layoutPanelForWindow:unityView];
     }
 
     UIImpactFeedbackGenerator *haptic =
@@ -9391,9 +9395,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
     }
 
-    UIWindow *window = zs_key_window();
-    if (window) {
-        [self layoutPanelForWindow:window];
+    UIView *unityView = zs_ui_host_view();
+    if (unityView) {
+        [self layoutPanelForWindow:unityView];
     }
 
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
@@ -9413,9 +9417,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     self.syslogButtonFillLayer.cornerRadius = kZSAuthFieldCornerRadius;
     [CATransaction commit];
 
-    UIWindow *window = zs_key_window();
-    if (window) {
-        [self layoutPanelForWindow:window];
+    UIView *unityView = zs_ui_host_view();
+    if (unityView) {
+        [self layoutPanelForWindow:unityView];
     }
     [self zs_renderSyslogBuffer];
 
@@ -9880,22 +9884,22 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 }
 
 - (void)zs_keyboardWillChangeFrame:(NSNotification *)note {
-    UIWindow *window = zs_key_window();
-    if (!window) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
 
     CGRect endFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGRect endFrameInWindow = [window convertRect:endFrame fromView:nil];
+    CGRect endFrameInWindow = [unityView convertRect:endFrame fromView:nil];
     self.zs_lastKeyboardFrame = endFrameInWindow;
 
-    BOOL keyboardVisible = CGRectGetMinY(endFrameInWindow) < CGRectGetMaxY(window.bounds);
+    BOOL keyboardVisible = CGRectGetMinY(endFrameInWindow) < CGRectGetMaxY(unityView.bounds);
     NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
     if (duration <= 0) duration = 0.25;
 
     if (self.zsFloatingField && keyboardVisible) {
-        CGFloat bottomInset = CGRectGetHeight(window.bounds) - CGRectGetMinY(endFrameInWindow);
+        CGFloat bottomInset = CGRectGetHeight(unityView.bounds) - CGRectGetMinY(endFrameInWindow);
         self.zsFloatingFieldBottomConstraint.constant = -(bottomInset + 8);
         [UIView animateWithDuration:duration animations:^{
-            [window layoutIfNeeded];
+            [unityView layoutIfNeeded];
         }];
     } else if (self.zsFloatingField && !keyboardVisible) {
         [self.zsFloatingField resignFirstResponder];
@@ -10005,7 +10009,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 #pragma mark Pull tab
 
-- (void)layoutPanelForWindow:(UIWindow *)window {
+- (void)layoutPanelForWindow:(UIView *)unityView {
     if (!self.glassContainer || !self.panel || !self.handle) return;
 
     [self positionPanelAnimated:NO];
@@ -10016,13 +10020,13 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     }
 
     if (self.docsPanel) {
-        [window bringSubviewToFront:self.docsContentOverlay];
-        if (self.contentOverlay) [window bringSubviewToFront:self.contentOverlay];
+        [unityView bringSubviewToFront:self.docsContentOverlay];
+        if (self.contentOverlay) [unityView bringSubviewToFront:self.contentOverlay];
     }
 
-    self.scrollView.contentInset = UIEdgeInsetsMake(window.safeAreaInsets.top + 12,
+    self.scrollView.contentInset = UIEdgeInsetsMake(unityView.safeAreaInsets.top + 12,
                                                     0,
-                                                    window.safeAreaInsets.bottom + 12,
+                                                    unityView.safeAreaInsets.bottom + 12,
                                                     0);
     self.scrollView.scrollIndicatorInsets = UIEdgeInsetsZero;
 
@@ -10035,7 +10039,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
     [self installStaticContentFadeMask];
     [self zs_updateSliderGlassVisibility];
-    [self layoutDocsPanelForWindow:window];
+    [self layoutDocsPanelForWindow:unityView];
 
 }
 
@@ -10121,9 +10125,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 }
 
 - (void)deviceOrientationChanged {
-    UIWindow *window = zs_key_window();
-    if (!window || !self.panel) return;
-    [self layoutPanelForWindow:window];
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView || !self.panel) return;
+    [self layoutPanelForWindow:unityView];
 }
 
 - (void)positionPanel {
@@ -10131,18 +10135,18 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 }
 
 - (void)positionPanelAnimated:(BOOL)animated {
-    UIWindow *window = zs_key_window();
-    if (!window || !self.glassContainer) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView || !self.glassContainer) return;
 
     CGFloat panelW = self.panelWidth > 0 ? self.panelWidth : kPanelWidth;
     BOOL docsVisible = self.docsPanelOpen && self.docsPanel != nil;
     CGFloat docsW = docsVisible ? (self.docsPanelWidth > 0 ? self.docsPanelWidth : panelW) : 0;
     CGFloat chromeWidth = kHandleWidth + docsW + panelW;
-    CGFloat height = window.bounds.size.height;
+    CGFloat height = unityView.bounds.size.height;
 
     CGFloat targetX = self.panelOpen
-        ? (window.bounds.size.width - chromeWidth)
-        : (window.bounds.size.width - kHandleWidth);
+        ? (unityView.bounds.size.width - chromeWidth)
+        : (unityView.bounds.size.width - kHandleWidth);
 
     UIView *panelElement = self.panelGlass ?: self.panel;
     UIView *handleElement = self.handleGlass ?: self.handle;
@@ -10172,7 +10176,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         panelElement.frame = CGRectMake(kHandleWidth + docsW, 0, panelW, height);
 
         if (self.docsPanelSeparator) {
-            CGFloat hairline = 1.0 / MAX(window.screen.scale, 1.0);
+            CGFloat hairline = 1.0 / MAX(unityView.traitCollection.displayScale, 1.0);
             self.docsPanelSeparator.frame = CGRectMake(kHandleWidth + docsW - hairline, 0, hairline, height);
             [self.glassContainerContent bringSubviewToFront:self.docsPanelSeparator];
         }
@@ -10188,12 +10192,12 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
 
         if (self.contentOverlay) {
-            self.contentOverlay.frame = [panelElement convertRect:panelElement.bounds toView:window];
+            self.contentOverlay.frame = [panelElement convertRect:panelElement.bounds toView:unityView];
             self.contentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
         if (self.docsContentOverlay && docsPanelElement) {
-            self.docsContentOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:window];
+            self.docsContentOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
             self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }

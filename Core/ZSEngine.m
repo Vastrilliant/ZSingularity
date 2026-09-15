@@ -1069,6 +1069,17 @@ static UIView *find_unity_view(id appController) {
     return found;
 }
 
+static UIView *gZSUnityView;
+
+UIView *zs_unity_view(void) {
+    if (gZSUnityView) return gZSUnityView;
+    id appController = [[UIApplication sharedApplication] delegate];
+    if (!appController) return nil;
+    UIView *found = find_unity_view(appController);
+    if (found) gZSUnityView = found;
+    return found;
+}
+
 static void configure_metal_layer(UIView *unityView) {
     if (!unityView) return;
     if (![unityView.layer isKindOfClass:[CAMetalLayer class]]) return;
@@ -1095,14 +1106,11 @@ static void *background_worker(void *arg) {
 
     while (!metalConfigured) {
         dispatch_sync(dispatch_get_main_queue(), ^{
-            id appController = [[UIApplication sharedApplication] delegate];
-            if (appController) {
-                UIView *unityView = find_unity_view(appController);
-                if (unityView) {
-                    configure_metal_layer(unityView);
-                    metalConfigured = YES;
-                    ZLog(@"Unity view found, Metal layer configured");
-                }
+            UIView *unityView = zs_unity_view();
+            if (unityView) {
+                configure_metal_layer(unityView);
+                metalConfigured = YES;
+                ZLog(@"Unity view found, Metal layer configured");
             }
         });
         if (!metalConfigured) usleep(200 * 1000);

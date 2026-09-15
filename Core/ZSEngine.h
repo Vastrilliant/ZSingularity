@@ -2,6 +2,10 @@
 #import <Foundation/Foundation.h>
 #import <stdint.h>
 
+@class UIView;
+
+UIView *zs_unity_view(void);
+
 #pragma mark - FPS120Controller
 
 @interface FPS120Controller : NSObject
