@@ -4007,6 +4007,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleRestoreUIGesture:)];
     restoreUIPress.numberOfTouchesRequired = 3;
     restoreUIPress.minimumPressDuration = 1.0;
+    unityView.isMultipleTouchEnabled = YES;
+    unityView.exclusiveTouch = NO;
     [unityView addGestureRecognizer:restoreUIPress];
 
     zs_set_glass_suspended(!self.panelOpen);
@@ -10397,6 +10399,18 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
     if (!toggle.on) return;
 
     self.uiDisabled = YES;
+
+    if (self.docsPanelOpen) [self closeDocsPanel];
+    if (self.panelOpen) {
+        self.panelOpen = NO;
+        [[FPS120Controller shared] setPanelOpen:NO];
+        [self positionPanel];
+        self.chevron.transform = CGAffineTransformIdentity;
+    }
+    zs_set_glass_suspended(YES);
+    zs_gif_tint_set_paused(YES);
+    zs_gif_tint_teardown_all();
+
     [self.glassContainer removeFromSuperview];
     [self.contentOverlay removeFromSuperview];
     [self.docsContentOverlay removeFromSuperview];
