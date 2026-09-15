@@ -646,14 +646,41 @@ void zs_persist_current_settings(void) {
 
 #pragma mark - FPS120Controller
 
+static CADisplayLink *find_display_link(id appController) {
+    CADisplayLink *found = nil;
+    Class cls = [appController class];
+
+    while (cls && !found) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (type && strstr(type, "CADisplayLink")) {
+                id value = object_getIvar(appController, ivars[i]);
+                if ([value isKindOfClass:[CADisplayLink class]]) {
+                    found = (CADisplayLink *)value;
+                    break;
+                }
+            }
+        }
+        free(ivars);
+        cls = class_getSuperclass(cls);
+    }
+
+    return found;
+}
+
+static CADisplayLink *g_unityDisplayLink;
+
 static BOOL zs_set_application_target_fps(int32_t fps) {
-    void *klass = zs_class("UnityEngine", "Application", "CoreModule");
-    const void *setter = zs_method(klass, "set_targetFrameRate", 1);
-    if (!setter) return NO;
-    void *exc = NULL;
-    void *args[1] = { &fps };
-    [IL2CppBridge invokeMethod:setter onInstance:NULL args:args outException:&exc];
-    return (exc == NULL);
+    if (!g_unityDisplayLink) {
+        id appController = [[UIApplication sharedApplication] delegate];
+        if (!appController) return NO;
+        g_unityDisplayLink = find_display_link(appController);
+        if (!g_unityDisplayLink) return NO;
+    }
+    g_unityDisplayLink.preferredFramesPerSecond = fps;
+    return YES;
 }
 
 static const int32_t kSceneStateBattle = 1;
