@@ -10,6 +10,60 @@ static NSString * const kZSDocsRepoOwner  = @"vastrilliant";
 static NSString * const kZSDocsRepoName   = @"ZSingularity";
 static NSString * const kZSDocsRepoBranch = @"main";
 
+#pragma mark - Language
+
+static NSString * const kZSDocsSettingsSection   = @"docs";
+static NSString * const kZSDocsLanguageKey       = @"language";
+static NSString * const kZSDocsDefaultLanguageCode = @"en";
+
+static NSArray<NSDictionary<NSString *, NSString *> *> *zs_docs_language_options(void) {
+    static NSArray<NSDictionary<NSString *, NSString *> *> *options;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        options = @[
+            @{@"code": @"en", @"name": @"English"},
+            @{@"code": @"kr", @"name": @"Korean"},
+            @{@"code": @"jp", @"name": @"Japanese"},
+            @{@"code": @"cn", @"name": @"Chinese"},
+            @{@"code": @"es", @"name": @"Spanish"},
+            @{@"code": @"ru", @"name": @"Russian"},
+        ];
+    });
+    return options;
+}
+
+static BOOL zs_docs_language_code_is_valid(NSString *code) {
+    if (code.length == 0) return NO;
+    for (NSDictionary<NSString *, NSString *> *option in zs_docs_language_options()) {
+        if ([option[@"code"] isEqualToString:code]) return YES;
+    }
+    return NO;
+}
+
+static NSString *gZSDocsCurrentLanguageCache;
+static BOOL gZSDocsCurrentLanguageCacheLoaded;
+
+static NSString *zs_docs_current_language(void) {
+    if (!gZSDocsCurrentLanguageCacheLoaded) {
+        NSDictionary *section = zs_settings_section(kZSDocsSettingsSection);
+        NSString *stored = section[kZSDocsLanguageKey];
+        gZSDocsCurrentLanguageCache = zs_docs_language_code_is_valid(stored) ? stored : kZSDocsDefaultLanguageCode;
+        gZSDocsCurrentLanguageCacheLoaded = YES;
+    }
+    return gZSDocsCurrentLanguageCache;
+}
+
+static void zs_docs_set_current_language(NSString *code) {
+    if (!zs_docs_language_code_is_valid(code)) return;
+
+    NSMutableDictionary *section = [zs_settings_section(kZSDocsSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSDocsLanguageKey] = code;
+    zs_write_settings_section(kZSDocsSettingsSection, section);
+
+    gZSDocsCurrentLanguageCache = code;
+    gZSDocsCurrentLanguageCacheLoaded = YES;
+}
+
 static NSDictionary<NSString *, NSString *> *zs_docs_section_files(void) {
     static NSDictionary<NSString *, NSString *> *files;
     static dispatch_once_t onceToken;
@@ -44,6 +98,13 @@ static NSString *zs_docs_key_for_filename(NSString *filename) {
 
 static NSURL *zs_docs_remote_url(NSString *filename) {
     NSString *urlString = [NSString stringWithFormat:
+        @"https://raw.githubusercontent.com/%@/%@/%@/Documentation/%@/%@",
+        kZSDocsRepoOwner, kZSDocsRepoName, kZSDocsRepoBranch, zs_docs_current_language(), filename];
+    return [NSURL URLWithString:urlString];
+}
+
+static NSURL *zs_docs_image_remote_url(NSString *filename) {
+    NSString *urlString = [NSString stringWithFormat:
         @"https://raw.githubusercontent.com/%@/%@/%@/Documentation/%@",
         kZSDocsRepoOwner, kZSDocsRepoName, kZSDocsRepoBranch, filename];
     return [NSURL URLWithString:urlString];
@@ -56,8 +117,12 @@ static NSString *zs_docs_cache_directory(void) {
     return dir;
 }
 
+static NSString *zs_docs_cache_key(NSString *key) {
+    return [NSString stringWithFormat:@"%@_%@", zs_docs_current_language(), key];
+}
+
 static NSString *zs_docs_cache_path(NSString *key) {
-    NSString *safeName = [key stringByReplacingOccurrencesOfString:@"/" withString:@"-"];
+    NSString *safeName = [zs_docs_cache_key(key) stringByReplacingOccurrencesOfString:@"/" withString:@"-"];
     return [zs_docs_cache_directory() stringByAppendingPathComponent:[safeName stringByAppendingPathExtension:@"md"]];
 }
 
@@ -73,14 +138,15 @@ static NSMutableDictionary<NSString *, NSString *> *zs_docs_memory_cache(void) {
 static NSString *zs_docs_cached_content(NSString *key) {
     if (!key) return nil;
 
+    NSString *cacheKey = zs_docs_cache_key(key);
     NSMutableDictionary<NSString *, NSString *> *cache = zs_docs_memory_cache();
-    NSString *cached = cache[key];
+    NSString *cached = cache[cacheKey];
     if (cached) return cached;
 
     NSString *fromDisk = [NSString stringWithContentsOfFile:zs_docs_cache_path(key)
                                                     encoding:NSUTF8StringEncoding
                                                        error:nil];
-    if (fromDisk) cache[key] = fromDisk;
+    if (fromDisk) cache[cacheKey] = fromDisk;
     return fromDisk;
 }
 
@@ -105,7 +171,7 @@ static void zs_docs_perform_markdown_fetch(NSURL *url, NSString *filename, NSStr
                 : nil;
 
             if (markdown) {
-                zs_docs_memory_cache()[key] = markdown;
+                zs_docs_memory_cache()[zs_docs_cache_key(key)] = markdown;
                 [markdown writeToFile:zs_docs_cache_path(key) atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 if (completion) {
                     dispatch_async(dispatch_get_main_queue(), ^{ completion(markdown, nil); });
@@ -237,7 +303,7 @@ static void zs_docs_perform_image_fetch(NSURL *url, NSString *filename, NSString
 }
 
 static void zs_docs_fetch_image(NSString *filename, void (^completion)(UIImage * _Nullable image)) {
-    NSURL *url = filename.length > 0 ? zs_docs_remote_url(filename) : nil;
+    NSURL *url = filename.length > 0 ? zs_docs_image_remote_url(filename) : nil;
     if (!url) {
         if (completion) {
             dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });

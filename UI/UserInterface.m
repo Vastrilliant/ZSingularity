@@ -3846,8 +3846,13 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIScrollView *docsScrollView;
 @property (nonatomic, strong) UILabel *docsTitleLabel;
 @property (nonatomic, strong) UIButton *docsHeaderModeChevronButton;
+@property (nonatomic, strong) UIButton *docsLanguageButton;
+@property (nonatomic, strong) UIView *docsLanguageDropdownOverlay;
+@property (nonatomic, strong) UIControl *docsLanguageDropdownScrim;
+@property (nonatomic, assign) BOOL docsLanguageDropdownOpen;
 @property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingFullConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingToChevronConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingToLanguageConstraint;
 @property (nonatomic, strong) UIStackView *docsSubheaderRow;
 @property (nonatomic, strong) UILabel *docsSubheaderLabel;
 @property (nonatomic, strong) UIStackView *docsSubheaderPageGroup;
@@ -4533,8 +4538,13 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.docsScrollView = nil;
     self.docsTitleLabel = nil;
     self.docsHeaderModeChevronButton = nil;
+    self.docsLanguageButton = nil;
+    self.docsLanguageDropdownOverlay = nil;
+    self.docsLanguageDropdownScrim = nil;
+    self.docsLanguageDropdownOpen = NO;
     self.docsTitleTrailingFullConstraint = nil;
     self.docsTitleTrailingToChevronConstraint = nil;
+    self.docsTitleTrailingToLanguageConstraint = nil;
     self.docsSubheaderRow = nil;
     self.docsSubheaderLabel = nil;
     self.docsSubheaderPageGroup = nil;
@@ -6511,6 +6521,32 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
     }
 }
 
+#pragma mark Docs language switcher
+
+static const CGFloat kZSDocsLanguageDropdownWidth = 132;
+
+static UIImage *zs_make_docs_language_globe_image(void) {
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
+    UIImage *globeImage = [UIImage systemImageNamed:@"globe" withConfiguration:symbolConfig];
+    globeImage = [globeImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.55]
+                                   renderingMode:UIImageRenderingModeAlwaysOriginal];
+    return globeImage;
+}
+
+static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NSString *> *option, BOOL selected, NSInteger tag, id target, SEL action) {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.tag = tag;
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    button.titleEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12);
+    button.titleLabel.font = zs_mono_font(12, UIFontWeightRegular);
+    [button setTitle:option[@"name"] forState:UIControlStateNormal];
+    [button setTitleColor:(selected ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.6])
+                  forState:UIControlStateNormal];
+    button.backgroundColor = UIColor.clearColor;
+    [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
 #pragma mark Docs panel
 
 - (void)buildDocsPanel:(UIView *)unityView {
@@ -6567,6 +6603,13 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
     self.docsHeaderModeChevronButton.hidden = YES;
     [self.docsHeaderModeChevronButton addTarget:self action:@selector(docsHeaderModeChevronTapped:) forControlEvents:UIControlEventTouchUpInside];
     [self.docsContentOverlay addSubview:self.docsHeaderModeChevronButton];
+
+    self.docsLanguageButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.docsLanguageButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.docsLanguageButton setImage:zs_make_docs_language_globe_image() forState:UIControlStateNormal];
+    self.docsLanguageButton.hidden = YES;
+    [self.docsLanguageButton addTarget:self action:@selector(docsLanguageButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.docsContentOverlay addSubview:self.docsLanguageButton];
 
     self.docsSubheaderRow = [[UIStackView alloc] init];
     self.docsSubheaderRow.translatesAutoresizingMaskIntoConstraints = NO;
@@ -6694,6 +6737,10 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
         [self.docsTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.docsHeaderModeChevronButton.leadingAnchor constant:-8];
     self.docsTitleTrailingToChevronConstraint.active = NO;
 
+    self.docsTitleTrailingToLanguageConstraint =
+        [self.docsTitleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:self.docsLanguageButton.leadingAnchor constant:-8];
+    self.docsTitleTrailingToLanguageConstraint.active = NO;
+
     [NSLayoutConstraint activateConstraints:@[
         [self.docsTitleLabel.topAnchor constraintEqualToAnchor:self.docsContentOverlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
         [self.docsTitleLabel.leadingAnchor constraintEqualToAnchor:self.docsContentOverlay.leadingAnchor constant:kPanelPadding],
@@ -6701,6 +6748,9 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
         [self.docsHeaderModeChevronButton.centerYAnchor constraintEqualToAnchor:self.docsTitleLabel.centerYAnchor],
         [self.docsHeaderModeChevronButton.trailingAnchor constraintEqualToAnchor:self.docsContentOverlay.trailingAnchor constant:-kPanelPadding],
+
+        [self.docsLanguageButton.centerYAnchor constraintEqualToAnchor:self.docsTitleLabel.centerYAnchor],
+        [self.docsLanguageButton.trailingAnchor constraintEqualToAnchor:self.docsContentOverlay.trailingAnchor constant:-kPanelPadding],
 
         [self.docsSubheaderRow.topAnchor constraintEqualToAnchor:self.docsTitleLabel.bottomAnchor constant:2],
         [self.docsSubheaderRow.leadingAnchor constraintEqualToAnchor:self.docsContentOverlay.leadingAnchor constant:kPanelPadding],
@@ -6900,10 +6950,25 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     }
 }
 
+- (void)zs_updateDocsHeaderTrailingConstraints {
+    BOOL chevronVisible = !self.docsHeaderModeChevronButton.hidden;
+    BOOL languageVisible = !self.docsLanguageButton.hidden;
+    self.docsTitleTrailingToChevronConstraint.active = chevronVisible;
+    self.docsTitleTrailingToLanguageConstraint.active = languageVisible && !chevronVisible;
+    self.docsTitleTrailingFullConstraint.active = !chevronVisible && !languageVisible;
+}
+
 - (void)zs_setDocsHeaderChevronVisible:(BOOL)visible {
     self.docsHeaderModeChevronButton.hidden = !visible;
-    self.docsTitleTrailingToChevronConstraint.active = visible;
-    self.docsTitleTrailingFullConstraint.active = !visible;
+    [self zs_updateDocsHeaderTrailingConstraints];
+}
+
+- (void)zs_setDocsLanguageButtonVisible:(BOOL)visible {
+    self.docsLanguageButton.hidden = !visible;
+    if (!visible && self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:NO];
+    }
+    [self zs_updateDocsHeaderTrailingConstraints];
 }
 
 - (void)zs_setDocsSubheaderArrowsVisible:(BOOL)visible hasOlder:(BOOL)hasOlder atLatest:(BOOL)atLatest {
@@ -6923,6 +6988,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     self.docsActiveKey = key;
     self.docsTitleLabel.text = [key uppercaseString];
     [self zs_setDocsHeaderChevronVisible:NO];
+    [self zs_setDocsLanguageButtonVisible:YES];
     [self zs_setDocsSubheaderText:nil];
     [self zs_setDocsUpdateActionsVisible:NO];
 
@@ -6966,6 +7032,10 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
 - (void)closeDocsPanel {
     if (!self.docsPanelOpen) return;
 
+    if (self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:NO];
+    }
+
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
     [self positionPanelAnimated:YES];
@@ -6976,6 +7046,10 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
 
 - (void)layoutDocsPanelForWindow:(UIView *)unityView {
     if (!self.docsPanel) return;
+
+    if (self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:NO];
+    }
 
     self.docsScrollView.contentInset = UIEdgeInsetsMake(0,
                                                           0,
@@ -11211,6 +11285,160 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)docsLanguageButtonTapped:(UIButton *)sender {
+    if (self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:YES];
+    } else {
+        [self zs_openDocsLanguageDropdown];
+    }
+}
+
+- (void)zs_openDocsLanguageDropdown {
+    if (!self.docsLanguageButton || !self.docsContentOverlay || self.docsLanguageDropdownOpen) return;
+
+    NSArray<NSDictionary<NSString *, NSString *> *> *options = zs_docs_language_options();
+    if (options.count == 0) return;
+
+    NSString *currentCode = zs_docs_current_language();
+
+    CGRect buttonFrame = [self.docsLanguageButton convertRect:self.docsLanguageButton.bounds toView:self.docsContentOverlay];
+    CGFloat dropdownWidth = kZSDocsLanguageDropdownWidth;
+    CGFloat rowHeight = kZSReencodeFieldHeight;
+    CGFloat dropdownHeight = rowHeight * options.count;
+
+    CGFloat originX = CGRectGetMaxX(buttonFrame) - dropdownWidth;
+    originX = MIN(originX, CGRectGetWidth(self.docsContentOverlay.bounds) - dropdownWidth - kPanelPadding);
+    originX = MAX(originX, kPanelPadding);
+    CGFloat originY = CGRectGetMaxY(buttonFrame) + 6;
+    CGRect dropdownFrame = CGRectMake(originX, originY, dropdownWidth, dropdownHeight);
+
+    UIControl *scrim = [[UIControl alloc] initWithFrame:self.docsContentOverlay.bounds];
+    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scrim.backgroundColor = UIColor.clearColor;
+    [scrim addTarget:self action:@selector(zs_docsLanguageDropdownScrimTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.docsContentOverlay addSubview:scrim];
+    self.docsLanguageDropdownScrim = scrim;
+
+    UIView *overlay;
+    UIVisualEffectView *glassOverlay = nil;
+    if (zs_has_liquid_glass()) {
+        glassOverlay = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(YES)];
+        glassOverlay.frame = dropdownFrame;
+        glassOverlay.clipsToBounds = YES;
+        zs_configure_glass_corners(glassOverlay, kZSAuthFieldCornerRadius, NO);
+        glassOverlay.layer.borderWidth = 1;
+        glassOverlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        zs_register_suspendable_glass(glassOverlay);
+        overlay = glassOverlay;
+    } else {
+        overlay = [[UIView alloc] initWithFrame:dropdownFrame];
+        overlay.clipsToBounds = YES;
+        overlay.layer.cornerRadius = kZSAuthFieldCornerRadius;
+        overlay.layer.cornerCurve = kCACornerCurveContinuous;
+        overlay.layer.borderWidth = 1;
+        overlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        overlay.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
+    }
+    [self.docsContentOverlay addSubview:overlay];
+    self.docsLanguageDropdownOverlay = overlay;
+
+    UIView *rowHost = glassOverlay ? glassOverlay.contentView : overlay;
+
+    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
+        NSDictionary<NSString *, NSString *> *option = options[i];
+        BOOL selected = [option[@"code"] isEqualToString:currentCode];
+        UIButton *optionButton = zs_make_docs_language_option_button(option, selected, i, self,
+                                                                       @selector(zs_docsLanguageDropdownOptionTapped:));
+        optionButton.frame = CGRectMake(0, i * rowHeight, dropdownWidth, rowHeight);
+        optionButton.alpha = 0;
+        [rowHost addSubview:optionButton];
+
+        if (i > 0) {
+            CGFloat hairline = 1.0 / MAX(UIScreen.mainScreen.scale, (CGFloat)1.0);
+            UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, i * rowHeight - hairline, dropdownWidth, hairline)];
+            divider.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.5];
+            divider.alpha = 0;
+            [rowHost addSubview:divider];
+        }
+    }
+
+    self.docsLanguageDropdownOpen = YES;
+    overlay.alpha = 0;
+    overlay.transform = CGAffineTransformMakeScale(0.92, 0.92);
+
+    [UIView animateWithDuration:0.2
+                          delay:0
+         usingSpringWithDamping:0.86
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        overlay.alpha = 1;
+        overlay.transform = CGAffineTransformIdentity;
+        for (UIView *subview in rowHost.subviews) {
+            subview.alpha = 1;
+        }
+    } completion:nil];
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+- (void)zs_closeDocsLanguageDropdownAnimated:(BOOL)animated {
+    if (!self.docsLanguageDropdownOpen) return;
+
+    UIView *overlay = self.docsLanguageDropdownOverlay;
+    UIControl *scrim = self.docsLanguageDropdownScrim;
+    self.docsLanguageDropdownOverlay = nil;
+    self.docsLanguageDropdownScrim = nil;
+    self.docsLanguageDropdownOpen = NO;
+
+    void (^finish)(void) = ^{
+        [overlay removeFromSuperview];
+        [scrim removeFromSuperview];
+    };
+
+    if (!animated) {
+        finish();
+        return;
+    }
+
+    [UIView animateWithDuration:0.16
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        overlay.alpha = 0;
+        overlay.transform = CGAffineTransformMakeScale(0.92, 0.92);
+    } completion:^(BOOL finished) {
+        finish();
+    }];
+}
+
+- (void)zs_docsLanguageDropdownOptionTapped:(UIButton *)sender {
+    NSArray<NSDictionary<NSString *, NSString *> *> *options = zs_docs_language_options();
+    if (sender.tag < 0 || sender.tag >= (NSInteger)options.count) return;
+
+    NSString *code = options[sender.tag][@"code"];
+    [self zs_docsLanguageSelected:code];
+    [self zs_closeDocsLanguageDropdownAnimated:YES];
+}
+
+- (void)zs_docsLanguageDropdownScrimTapped:(UIControl *)sender {
+    [self zs_closeDocsLanguageDropdownAnimated:YES];
+}
+
+- (void)zs_docsLanguageSelected:(NSString *)code {
+    if ([code isEqualToString:zs_docs_current_language()]) return;
+    zs_docs_set_current_language(code);
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+
+    NSString *key = self.docsActiveKey;
+    if (key.length > 0 && ![key isEqualToString:kZSReleaseInfoDocsKey]) {
+        [self showDocsForKey:key];
+    }
+}
+
 - (void)docsSubheaderOlderReleaseTapped:(UIButton *)sender {
     if (!sender.enabled) return;
     [self zs_showReleaseInfoWithMode:self.docsReleaseViewMode index:(self.docsReleaseHistoryIndex + 1)];
@@ -11233,6 +11461,7 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     self.docsTitleLabel.text = zs_docs_release_header_title(mode, placeholderVersion);
     [self zs_setDocsSubheaderText:@"What's New"];
     [self zs_setDocsHeaderChevronVisible:YES];
+    [self zs_setDocsLanguageButtonVisible:NO];
     [self zs_setDocsSubheaderArrowsVisible:(mode == ZSUpdateCheckModeReleases) hasOlder:NO atLatest:(index == 0)];
 
     CGFloat docsContentWidth = (self.docsPanelWidth > 0 ? self.docsPanelWidth : self.panelWidth) - (kPanelPadding * 2);
