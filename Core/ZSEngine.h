@@ -114,6 +114,7 @@ void zs_write_settings_section(NSString *sectionKey, NSDictionary *sectionValue)
 
 NSDictionary *zs_current_settings_dictionary(void);
 void zs_persist_current_settings(void);
+void zs_ensure_settings_loaded_from_disk(void);
 
 #pragma mark - Tracked asset paths (Hard Assets Reset)
 

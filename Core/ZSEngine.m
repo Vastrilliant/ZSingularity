@@ -499,6 +499,42 @@ static NSString *zs_settings_file_path(void) {
     return [documentsDir stringByAppendingPathComponent:@"settings.json"];
 }
 
+static NSString *zs_file_index_file_path(void) {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = paths.firstObject;
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:@"Index.json"];
+}
+
+static NSDictionary *zs_load_file_index_dictionary(void) {
+    NSString *path = zs_file_index_file_path();
+    if (!path) return nil;
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    if (!data) return nil;
+    NSError *error = nil;
+    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    if (error || ![obj isKindOfClass:[NSDictionary class]]) {
+        if (error) ZLog(@"[ZSScripts] failed to parse Index.json: %@", error);
+        return nil;
+    }
+    return (NSDictionary *)obj;
+}
+
+static void zs_write_file_index_dictionary(NSDictionary *dict) {
+    NSString *path = zs_file_index_file_path();
+    if (!path) return;
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:&error];
+    if (error || !data) {
+        ZLog(@"[ZSScripts] failed to encode Index.json: %@", error);
+        return;
+    }
+    NSError *writeError = nil;
+    if (![data writeToFile:path options:NSDataWritingAtomic error:&writeError]) {
+        ZLog(@"[ZSScripts] failed to write Index.json: %@", writeError);
+    }
+}
+
 NSDictionary *zs_load_settings_dictionary(void) {
     NSString *path = zs_settings_file_path();
     if (!path) return nil;
@@ -572,14 +608,11 @@ void zs_clear_tracked_asset_paths(void) {
     zs_persist_current_settings();
 }
 
-#pragma mark - File index (Mod Loader Pipeline caching)
+#pragma mark - File index (Mod Loader Pipeline caching, stored in its own Index.json)
 
 static void zs_ensure_file_index_snapshot_loaded_impl(void) {
     if (g_fileIndexSnapshot) return;
-    NSDictionary *modLoader = zs_settings_section(@"modLoader");
-    NSDictionary *savedIndex = [modLoader[@"fileIndex"] isKindOfClass:[NSDictionary class]] ? modLoader[@"fileIndex"] : nil;
-
-    g_fileIndexSnapshot = savedIndex ?: @{};
+    g_fileIndexSnapshot = zs_load_file_index_dictionary() ?: @{};
 }
 
 void zs_ensure_file_index_snapshot_loaded(void) {
@@ -588,10 +621,71 @@ void zs_ensure_file_index_snapshot_loaded(void) {
 
 void zs_set_file_index_snapshot(NSDictionary *snapshot) {
     g_fileIndexSnapshot = snapshot ?: @{};
-    zs_persist_current_settings();
+    zs_write_file_index_dictionary(g_fileIndexSnapshot);
+}
+
+#pragma mark - Guaranteed-once settings load
+
+void zs_ensure_settings_loaded_from_disk(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSDictionary *saved = zs_load_settings_dictionary();
+
+        NSDictionary *savedDisplay      = [saved[@"display"] isKindOfClass:[NSDictionary class]] ? saved[@"display"] : @{};
+        NSDictionary *savedRendering    = [saved[@"rendering"] isKindOfClass:[NSDictionary class]] ? saved[@"rendering"] : @{};
+        NSDictionary *savedAntiAliasing = [saved[@"antiAliasing"] isKindOfClass:[NSDictionary class]] ? saved[@"antiAliasing"] : @{};
+        NSDictionary *savedPostFX       = [saved[@"postFX"] isKindOfClass:[NSDictionary class]] ? saved[@"postFX"] : @{};
+        NSDictionary *savedDiagnostics  = [saved[@"diagnostics"] isKindOfClass:[NSDictionary class]] ? saved[@"diagnostics"] : @{};
+        NSDictionary *savedConfig       = [saved[@"config"] isKindOfClass:[NSDictionary class]] ? saved[@"config"] : @{};
+
+        NSNumber *(^num)(NSDictionary *, NSString *) = ^NSNumber *(NSDictionary *section, NSString *key) {
+            id v = section[key];
+            return [v isKindOfClass:[NSNumber class]] ? (NSNumber *)v : nil;
+        };
+
+        g_menuFPS      = num(savedDisplay, @"menuFPS") ? num(savedDisplay, @"menuFPS").integerValue : kDefaultMenuFPS;
+        g_combatFPS    = num(savedDisplay, @"combatFPS") ? num(savedDisplay, @"combatFPS").integerValue : kDefaultCombatFPS;
+        g_textureMip   = num(savedRendering, @"textureMip") ? num(savedRendering, @"textureMip").intValue : kDefaultTextureMipEngine;
+        g_renderScale  = (num(savedRendering, @"renderScalePercent") ? num(savedRendering, @"renderScalePercent").floatValue : kDefaultRenderScalePct) / 100.0f;
+        g_battleRenderScale = (num(savedRendering, @"battleRenderScalePercent") ? num(savedRendering, @"battleRenderScalePercent").floatValue : kDefaultBattleRenderScalePct) / 100.0f;
+        g_msaaIndex    = num(savedRendering, @"msaaIndex") ? num(savedRendering, @"msaaIndex").intValue : kDefaultMSAAIndex;
+        g_hdrOn        = num(savedPostFX, @"hdr") ? num(savedPostFX, @"hdr").boolValue : kDefaultHDR;
+        g_blurIntensity = num(savedPostFX, @"motionBlur") ? num(savedPostFX, @"motionBlur").floatValue : kDefaultMotionBlur;
+        g_tonemapMode  = num(savedPostFX, @"tonemapIndex") ? num(savedPostFX, @"tonemapIndex").intValue : kDefaultTonemapIndex;
+        g_aaModeIndex  = num(savedAntiAliasing, @"aaModeIndex") ? num(savedAntiAliasing, @"aaModeIndex").intValue : kDefaultAAModeIndex;
+        g_aaQualityIndex = num(savedAntiAliasing, @"aaQualityIndex") ? num(savedAntiAliasing, @"aaQualityIndex").intValue : kDefaultAAQualityIndex;
+        g_ditheringOn  = num(savedAntiAliasing, @"dithering") ? num(savedAntiAliasing, @"dithering").boolValue : kDefaultDithering;
+        g_experimentalSettingsEnabled = num(savedConfig, @"experimentalSettingsEnabled") ? num(savedConfig, @"experimentalSettingsEnabled").boolValue : NO;
+
+        zs_exp_load_from_dictionary(saved[@"experimental"]);
+
+        if (!g_urpActive) g_urpActive = [NSMutableDictionary new];
+        if (!g_urpValue) g_urpValue = [NSMutableDictionary new];
+        NSDictionary *savedUrp = [savedPostFX[@"urpEffects"] isKindOfClass:[NSDictionary class]] ? savedPostFX[@"urpEffects"] : nil;
+        for (int i = 0; i < kURPPostEffectCount; i++) {
+            const ZSVolumeEffectDef *def = &kURPPostEffects[i];
+            NSString *name = [NSString stringWithUTF8String:def->name];
+            g_urpActive[name] = @YES;
+            if (def->floatField) {
+                NSNumber *savedVal = [savedUrp[name] isKindOfClass:[NSNumber class]] ? savedUrp[name] : nil;
+                g_urpValue[name] = @(savedVal ? savedVal.floatValue : def->defaultV);
+            }
+        }
+
+        NSArray *savedBlacklist = [savedDiagnostics[@"syslogBlacklist"] isKindOfClass:[NSArray class]] ? savedDiagnostics[@"syslogBlacklist"] : nil;
+        NSMutableArray<NSString *> *blacklist = [NSMutableArray array];
+        for (id term in savedBlacklist) {
+            if ([term isKindOfClass:[NSString class]]) [blacklist addObject:term];
+        }
+        g_syslogBlacklist = blacklist;
+
+        zs_ensure_tracked_asset_paths_loaded();
+        zs_ensure_file_index_snapshot_loaded_impl();
+    });
 }
 
 NSDictionary *zs_current_settings_dictionary(void) {
+    zs_ensure_settings_loaded_from_disk();
     zs_ensure_tracked_asset_paths_loaded();
     zs_ensure_file_index_snapshot_loaded_impl();
 
@@ -630,7 +724,6 @@ NSDictionary *zs_current_settings_dictionary(void) {
         },
         @"modLoader": @{
             @"trackedAssetPaths": g_trackedAssetPaths ?: @[],
-            @"fileIndex": g_fileIndexSnapshot ?: @{},
         },
         @"diagnostics": @{
             @"syslogBlacklist": g_syslogBlacklist ?: @[],
@@ -816,9 +909,10 @@ static void zs_install_scene_loaded_hook(void) {
     static FPS120Controller *instance;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        zs_ensure_settings_loaded_from_disk();
         instance = [FPS120Controller new];
-        instance.menuFPS = 120;
-        instance.combatFPS = 60;
+        instance.menuFPS = g_menuFPS;
+        instance.combatFPS = g_combatFPS;
         instance.targetFPS = instance.menuFPS;
     });
     return instance;
@@ -1089,6 +1183,8 @@ static void *background_worker(void *arg) {
 __attribute__((constructor))
 static void fps120_init(void) {
     ZLog(@"dylib loaded - starting background worker");
+
+    zs_ensure_settings_loaded_from_disk();
 
     pthread_t indexThread;
     pthread_create(&indexThread, NULL, file_index_worker, NULL);

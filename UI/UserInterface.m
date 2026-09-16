@@ -4083,6 +4083,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                             restingFrame.size.width,
                                             restingFrame.size.height);
 
+    [unityView layoutIfNeeded];
+    self.glassContainer.hidden = NO;
+    self.contentOverlay.hidden = NO;
+
     [[FPS120Controller shared] setPanelOpen:YES];
     zs_set_glass_suspended(NO);
     zs_gif_tint_set_paused(NO);
@@ -4203,6 +4207,97 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.doctorInstallPendingFolderName = nil;
 
     [ZSyslogController sharedController].lineHandler = nil;
+
+    [self destroyPanelHierarchy];
+}
+
+- (void)destroyPanelHierarchy {
+    [self.glassContainer removeFromSuperview];
+    [self.contentOverlay removeFromSuperview];
+    [self.docsContentOverlay removeFromSuperview];
+
+    self.glassContainer = nil;
+    self.panelGlass = nil;
+    self.handleGlass = nil;
+    self.contentOverlay = nil;
+    self.glassContainerContent = nil;
+    self.panel = nil;
+    self.handle = nil;
+    self.chevron = nil;
+    self.scrollViewport = nil;
+    self.scrollView = nil;
+    self.stack = nil;
+    self.experimentalSectionContainer = nil;
+
+    self.docsPanelGlass = nil;
+    self.docsPanel = nil;
+    self.docsContentOverlay = nil;
+    self.docsPanelSeparator = nil;
+    self.docsScrollView = nil;
+    self.docsTitleLabel = nil;
+    self.docsHeaderModeChevronButton = nil;
+    self.docsTitleTrailingFullConstraint = nil;
+    self.docsTitleTrailingToChevronConstraint = nil;
+    self.docsSubheaderRow = nil;
+    self.docsSubheaderLabel = nil;
+    self.docsSubheaderPageGroup = nil;
+    self.docsSubheaderPageLabel = nil;
+    self.docsSubheaderLeftArrowButton = nil;
+    self.docsSubheaderRightArrowButton = nil;
+    self.docsScrollViewTopToTitleConstraint = nil;
+    self.docsScrollViewTopToSubheaderConstraint = nil;
+    self.docsBodyLabel = nil;
+    self.docsUpdateActionsStack = nil;
+    self.docsLiveContainerInstallButton = nil;
+    self.docsGitHubReleaseLinkButton = nil;
+    self.docsUpdateActionsDisabledNoteLabel = nil;
+    self.docsScrollViewBottomToOverlayConstraint = nil;
+
+    self.syslogConsoleContainer = nil;
+    self.syslogConsoleScrollView = nil;
+    self.syslogTextLabel = nil;
+    self.syslogBlacklistField = nil;
+    self.syslogBlacklistStatusLabel = nil;
+    self.syslogBlacklistEntriesStack = nil;
+    self.syslogButton = nil;
+    self.syslogButtonFillLayer = nil;
+
+    self.authRepoLinkField = nil;
+    self.authTokenField = nil;
+    self.authRepoLinkFieldContainer = nil;
+    self.authTokenFieldContainer = nil;
+    self.authVerifyButton = nil;
+    self.authStatusLabel = nil;
+
+    self.customGreetingTextButton = nil;
+    self.reencodeFormatButton = nil;
+    self.reencodeDropdownOverlay = nil;
+    self.reencodeDropdownScrim = nil;
+    self.reencodeDropdownOpen = NO;
+
+    self.modsOptionsDropdownOverlay = nil;
+    self.modsOptionsDropdownScrim = nil;
+    self.modsOptionsDropdownOpen = NO;
+    self.modsOptionsDropdownEntry = nil;
+    self.modsOptionsDropdownFolderName = nil;
+
+    self.modsLibraryStack = nil;
+
+    self.zsFloatingFieldBackdrop = nil;
+    self.zsFloatingFieldContainer = nil;
+    self.zsFloatingField = nil;
+
+    self.normalFpsSlider = nil;
+    self.normalFpsValueLabel = nil;
+    self.combatFpsSlider = nil;
+    self.combatFpsValueLabel = nil;
+
+    self.updateStatusLabel = nil;
+    self.updateStatusDot = nil;
+
+    self.browseCategoryButton = nil;
+    self.browseClassButton = nil;
+    self.browseFieldsContainer = nil;
 }
 
 - (void)zs_closeButtonTapped {
@@ -4601,13 +4696,10 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
 static const CGFloat kContentFadeHeight = 22;
 
 - (void)buildPanel:(UIView *)unityView {
-    if (self.glassContainer) {
-        [unityView addSubview:self.glassContainer];
-        [unityView addSubview:self.contentOverlay];
-        if (self.docsContentOverlay) [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
-        [self layoutPanelForWindow:unityView];
-        return;
-    }
+    if (self.glassContainer) [self destroyPanelHierarchy];
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
 
     self.panelWidth = kPanelWidth;
 
@@ -4623,6 +4715,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.glassContainer = chrome;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
+    self.glassContainer.hidden = YES;
     [unityView addSubview:self.glassContainer];
     zs_force_dark(self.glassContainer);
 
@@ -4657,6 +4750,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.contentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
     self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
     self.contentOverlay.userInteractionEnabled = YES;
+    self.contentOverlay.hidden = YES;
     [unityView addSubview:self.contentOverlay];
     zs_force_dark(self.contentOverlay);
 
@@ -4768,57 +4862,14 @@ static const CGFloat kContentFadeHeight = 22;
         [self.stack.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-(kPanelPadding * 2)],
     ]];
 
-    if (!g_urpActive) g_urpActive = [NSMutableDictionary new];
-    if (!g_urpValue) g_urpValue = [NSMutableDictionary new];
-
-    NSDictionary *saved = zs_load_settings_dictionary();
-    zs_exp_load_from_dictionary(saved[@"experimental"]);
-
-    NSDictionary *savedDisplay      = [saved[@"display"] isKindOfClass:[NSDictionary class]] ? saved[@"display"] : @{};
-    NSDictionary *savedRendering    = [saved[@"rendering"] isKindOfClass:[NSDictionary class]] ? saved[@"rendering"] : @{};
-    NSDictionary *savedAntiAliasing = [saved[@"antiAliasing"] isKindOfClass:[NSDictionary class]] ? saved[@"antiAliasing"] : @{};
-    NSDictionary *savedPostFX       = [saved[@"postFX"] isKindOfClass:[NSDictionary class]] ? saved[@"postFX"] : @{};
-    NSDictionary *savedDiagnostics  = [saved[@"diagnostics"] isKindOfClass:[NSDictionary class]] ? saved[@"diagnostics"] : @{};
-    NSDictionary *savedConfig       = [saved[@"config"] isKindOfClass:[NSDictionary class]] ? saved[@"config"] : @{};
-
-    NSNumber *(^num)(NSDictionary *, NSString *) = ^NSNumber *(NSDictionary *section, NSString *key) {
-        id v = section[key];
-        return [v isKindOfClass:[NSNumber class]] ? (NSNumber *)v : nil;
-    };
-
-    g_menuFPS      = num(savedDisplay, @"menuFPS") ? num(savedDisplay, @"menuFPS").integerValue : kDefaultMenuFPS;
-    g_combatFPS    = num(savedDisplay, @"combatFPS") ? num(savedDisplay, @"combatFPS").integerValue : kDefaultCombatFPS;
-    g_textureMip   = num(savedRendering, @"textureMip") ? num(savedRendering, @"textureMip").intValue : kDefaultTextureMipEngine;
-    g_renderScale  = (num(savedRendering, @"renderScalePercent") ? num(savedRendering, @"renderScalePercent").floatValue : kDefaultRenderScalePct) / 100.0f;
-    g_battleRenderScale = (num(savedRendering, @"battleRenderScalePercent") ? num(savedRendering, @"battleRenderScalePercent").floatValue : kDefaultBattleRenderScalePct) / 100.0f;
-    g_msaaIndex    = num(savedRendering, @"msaaIndex") ? num(savedRendering, @"msaaIndex").intValue : kDefaultMSAAIndex;
-    g_hdrOn        = num(savedPostFX, @"hdr") ? num(savedPostFX, @"hdr").boolValue : kDefaultHDR;
-    g_blurIntensity = num(savedPostFX, @"motionBlur") ? num(savedPostFX, @"motionBlur").floatValue : kDefaultMotionBlur;
-    g_tonemapMode  = num(savedPostFX, @"tonemapIndex") ? num(savedPostFX, @"tonemapIndex").intValue : kDefaultTonemapIndex;
-    g_aaModeIndex  = num(savedAntiAliasing, @"aaModeIndex") ? num(savedAntiAliasing, @"aaModeIndex").intValue : kDefaultAAModeIndex;
-    g_aaQualityIndex = num(savedAntiAliasing, @"aaQualityIndex") ? num(savedAntiAliasing, @"aaQualityIndex").intValue : kDefaultAAQualityIndex;
-    g_ditheringOn  = num(savedAntiAliasing, @"dithering") ? num(savedAntiAliasing, @"dithering").boolValue : kDefaultDithering;
-    g_experimentalSettingsEnabled = num(savedConfig, @"experimentalSettingsEnabled") ? num(savedConfig, @"experimentalSettingsEnabled").boolValue : NO;
+    zs_ensure_settings_loaded_from_disk();
 
     zs_set_auto_unload_on_memory_warning(g_expAutoUnloadOnMemoryWarning);
     zs_set_debug_log_memory_usage_tier(g_expDebugLogMemoryUsageTier);
     zs_set_auto_unload_on_elevated_memory_usage(g_expAutoUnloadOnElevatedMemoryUsage);
 
-    NSArray *savedBlacklist = [savedDiagnostics[@"syslogBlacklist"] isKindOfClass:[NSArray class]] ? savedDiagnostics[@"syslogBlacklist"] : nil;
-    for (id term in savedBlacklist) {
-        if ([term isKindOfClass:[NSString class]]) [self.syslogBlacklist addObject:term];
-    }
-    g_syslogBlacklist = self.syslogBlacklist.array;
-
-    NSDictionary *savedUrp = [savedPostFX[@"urpEffects"] isKindOfClass:[NSDictionary class]] ? savedPostFX[@"urpEffects"] : nil;
-    for (int i = 0; i < kURPPostEffectCount; i++) {
-        const ZSVolumeEffectDef *def = &kURPPostEffects[i];
-        NSString *name = [NSString stringWithUTF8String:def->name];
-        g_urpActive[name] = @YES;
-        if (def->floatField) {
-            NSNumber *savedVal = [savedUrp[name] isKindOfClass:[NSNumber class]] ? savedUrp[name] : nil;
-            g_urpValue[name] = @(savedVal ? savedVal.floatValue : def->defaultV);
-        }
+    for (NSString *term in g_syslogBlacklist) {
+        [self.syslogBlacklist addObject:term];
     }
 
     NSString *(^fpsFormat)(float) = ^NSString *(float v) { return [NSString stringWithFormat:@"%d", (int)roundf(v)]; };
@@ -6063,6 +6114,8 @@ static const CGFloat kContentFadeHeight = 22;
     zs_gif_tint_preload();
 
     [self zs_restoreCollapsedSectionsInView:self.stack states:zs_load_collapsed_section_states()];
+
+    [CATransaction commit];
 }
 
 - (void)zs_applyExperimentalAvailabilityTint {
