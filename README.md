@@ -15,10 +15,9 @@ Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's 
 Need some help, have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
 
 <p align="center">
-  <img src="demo/settings_demo.jpg" width="300">
-  <img src="demo/mods_demo.jpg" width="300">
+  <img src="demo/settings_demo.jpg" width="40.18%" />
+  <img src="demo/mods_demo.jpg" width="50%" />
 </p>
-
 ## Features
 
 Adjust various graphical settings such as: 
