@@ -164,6 +164,21 @@ static void zs_style_social_text_button(UIButton *button, NSString *text) {
     [button.titleLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
 }
 
+
+static NSString * const kZSTutorialSettingsSection = @"tutorial";
+static NSString * const kZSTutorialCompletedKey = @"completed";
+
+static BOOL zs_tutorial_completed(void) {
+    NSDictionary *section = zs_settings_section(kZSTutorialSettingsSection);
+    return [section[kZSTutorialCompletedKey] boolValue];
+}
+
+static void zs_set_tutorial_completed(BOOL completed) {
+    NSMutableDictionary *section = [zs_settings_section(kZSTutorialSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSTutorialCompletedKey] = @(completed);
+    zs_write_settings_section(kZSTutorialSettingsSection, section);
+}
+
 #pragma mark - Update pipeline settings
 
 static NSString * const kZSUpdatePipelineSettingsSection = @"updatePipeline";
@@ -3816,6 +3831,12 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, assign) BOOL installed;
 @property (nonatomic, assign) CGFloat panelWidth;
+@property (nonatomic, strong) UIView *tutorialOverlay;
+@property (nonatomic, strong) UIView *tutorialPanel;
+@property (nonatomic, strong) UIButton *tutorialOKButton;
+@property (nonatomic, assign) BOOL tutorialCanDismiss;
+@property (nonatomic, assign) BOOL tutorialPresented;
+@property (nonatomic, strong) NSTimer *tutorialUnlockTimer;
 
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
 @property (nonatomic, strong) UIView *docsPanel;
@@ -4017,7 +4038,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
 
-    [self zs_presentRestartPromptIfNeeded];
+    [self zs_presentTutorialIfNeeded];
+    if (zs_tutorial_completed()) {
+        [self zs_presentRestartPromptIfNeeded];
+    }
 
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -4039,6 +4063,225 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 - (void)zs_handleOpenPanelGesture:(UISwipeGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) return;
     [self openPanel];
+}
+
+- (void)zs_presentTutorialIfNeeded {
+    if (zs_tutorial_completed() || self.tutorialPresented) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    self.tutorialPresented = YES;
+    self.tutorialCanDismiss = NO;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:unityView.bounds];
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.userInteractionEnabled = YES;
+    [unityView addSubview:overlay];
+    self.tutorialOverlay = overlay;
+    zs_force_dark(overlay);
+
+    UIView *panelHost;
+    UIView *panel;
+    if (zs_has_liquid_glass()) {
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
+        glass.translatesAutoresizingMaskIntoConstraints = NO;
+        glass.userInteractionEnabled = YES;
+        zs_configure_glass_corners(glass, 24, NO);
+        glass.layer.borderWidth = 1;
+        glass.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        panel = glass;
+        panelHost = glass.contentView;
+    } else {
+        UIView *plain = [[UIView alloc] init];
+        plain.translatesAutoresizingMaskIntoConstraints = NO;
+        plain.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.96];
+        plain.layer.cornerRadius = 24;
+        plain.layer.cornerCurve = kCACornerCurveContinuous;
+        plain.layer.borderWidth = 1;
+        plain.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        plain.clipsToBounds = YES;
+        panel = plain;
+        panelHost = plain;
+    }
+
+    [overlay addSubview:panel];
+    self.tutorialPanel = panel;
+
+    UILabel *header = [[UILabel alloc] init];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    header.textAlignment = NSTextAlignmentRight;
+    NSString *fullTitle = @"ZSingularity";
+    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
+                                                                                 attributes:@{
+        NSFontAttributeName: zs_excelsior_sans_font(20.5, UIFontWeightBold),
+        NSForegroundColorAttributeName: zs_accent_green_color()
+    }];
+    [title addAttribute:NSFontAttributeName
+                 value:zs_excelsior_sans_font(27.5, UIFontWeightBold)
+                 range:NSMakeRange(0, 2)];
+    header.attributedText = title;
+    zs_apply_gif_text_tint(header);
+    [panelHost addSubview:header];
+
+    UILabel *welcome = [[UILabel alloc] init];
+    welcome.translatesAutoresizingMaskIntoConstraints = NO;
+    welcome.text = @"## Welcome to ZSingularity!";
+    welcome.font = zs_mono_font(16, UIFontWeightBold);
+    welcome.textColor = UIColor.whiteColor;
+    welcome.numberOfLines = 1;
+    [panelHost addSubview:welcome];
+
+    UITextView *body = [[UITextView alloc] init];
+    body.translatesAutoresizingMaskIntoConstraints = NO;
+    body.backgroundColor = UIColor.clearColor;
+    body.opaque = NO;
+    body.editable = NO;
+    body.selectable = NO;
+    body.scrollEnabled = NO;
+    body.textContainerInset = UIEdgeInsetsZero;
+    body.textContainer.lineFragmentPadding = 0;
+    body.textColor = [UIColor colorWithWhite:1 alpha:0.72];
+    body.font = zs_mono_font(12, UIFontWeightRegular);
+    body.userInteractionEnabled = NO;
+
+    NSMutableAttributedString *bodyText = [[NSMutableAttributedString alloc] initWithString:@"To get started, click and hold the screen with two of your fingers, then swipe left to open the menu.\n\nMake sure to read the documentation by clicking the " attributes:@{
+        NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
+    }];
+
+    UIImageSymbolConfiguration *infoConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightRegular];
+    UIImage *infoImage = [UIImage systemImageNamed:@"info.circle" withConfiguration:infoConfig];
+    if (infoImage) {
+        NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
+        attachment.image = [infoImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.6]];
+        attachment.bounds = CGRectMake(0, -2, 12, 12);
+        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithAttachment:attachment]];
+        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithString:@" icon next to each section." attributes:@{
+            NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
+        }]];
+    } else {
+        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithString:@"info.circle icon next to each section." attributes:@{
+            NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
+        }]];
+    }
+    body.attributedText = bodyText;
+    [panelHost addSubview:body];
+
+    UIButton *discord = [UIButton buttonWithType:UIButtonTypeSystem];
+    discord.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_social_text_button(discord, @"Discord Server");
+    [discord addTarget:self action:@selector(zs_tutorialDiscordTapped) forControlEvents:UIControlEventTouchUpInside];
+    [panelHost addSubview:discord];
+
+    UIButton *github = [UIButton buttonWithType:UIButtonTypeSystem];
+    github.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_social_text_button(github, @"GitHub Repository");
+    [github addTarget:self action:@selector(zs_tutorialGitHubTapped) forControlEvents:UIControlEventTouchUpInside];
+    [panelHost addSubview:github];
+
+    self.tutorialOKButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.tutorialOKButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_solid_glass_with_font(self.tutorialOKButton, @"OK", UIColor.whiteColor, zs_mono_font(18, UIFontWeightBold));
+    self.tutorialOKButton.enabled = NO;
+    self.tutorialOKButton.alpha = 0.38;
+    [self.tutorialOKButton addTarget:self action:@selector(zs_tutorialOKTapped) forControlEvents:UIControlEventTouchUpInside];
+    [panelHost addSubview:self.tutorialOKButton];
+
+    CGFloat panelWidth = MIN(440.0, MAX(300.0, unityView.bounds.size.width - 32.0));
+    CGFloat panelHeight = MIN(390.0, MAX(320.0, unityView.bounds.size.height - 48.0));
+
+    [NSLayoutConstraint activateConstraints:@[
+        [panel.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [panel.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+        [panel.widthAnchor constraintEqualToConstant:panelWidth],
+        [panel.heightAnchor constraintEqualToConstant:panelHeight],
+
+        [header.topAnchor constraintEqualToAnchor:panelHost.topAnchor constant:18],
+        [header.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-20],
+        [header.leadingAnchor constraintGreaterThanOrEqualToAnchor:panelHost.leadingAnchor constant:20],
+        [header.heightAnchor constraintEqualToConstant:34],
+
+        [welcome.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [welcome.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [welcome.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:18],
+
+        [body.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [body.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [body.topAnchor constraintEqualToAnchor:welcome.bottomAnchor constant:18],
+
+        [discord.trailingAnchor constraintEqualToAnchor:github.leadingAnchor constant:-16],
+        [github.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [discord.bottomAnchor constraintEqualToAnchor:self.tutorialOKButton.topAnchor constant:-12],
+        [github.bottomAnchor constraintEqualToAnchor:self.tutorialOKButton.topAnchor constant:-12],
+        [discord.heightAnchor constraintEqualToConstant:24],
+        [github.heightAnchor constraintEqualToConstant:24],
+
+        [self.tutorialOKButton.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor],
+        [self.tutorialOKButton.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor],
+        [self.tutorialOKButton.bottomAnchor constraintEqualToAnchor:panelHost.bottomAnchor],
+        [self.tutorialOKButton.heightAnchor constraintEqualToConstant:58],
+    ]];
+
+    panel.alpha = 0;
+    panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    [UIView animateWithDuration:0.22 animations:^{
+        panel.alpha = 1;
+        panel.transform = CGAffineTransformIdentity;
+    }];
+
+    self.tutorialUnlockTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self selector:@selector(zs_tutorialUnlock) userInfo:nil repeats:NO];
+}
+
+- (void)zs_tutorialUnlock {
+    self.tutorialUnlockTimer = nil;
+    self.tutorialCanDismiss = YES;
+    self.tutorialOKButton.enabled = YES;
+    [UIView animateWithDuration:0.18 animations:^{
+        self.tutorialOKButton.alpha = 1.0;
+    }];
+}
+
+- (void)zs_tutorialDiscordTapped {
+    NSURL *url = [NSURL URLWithString:kZSSocialDiscordURL];
+    if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+}
+
+- (void)zs_tutorialGitHubTapped {
+    NSURL *url = [NSURL URLWithString:kZSSocialGitHubURL];
+    if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+}
+
+- (void)zs_tutorialOKTapped {
+    if (!self.tutorialCanDismiss) return;
+
+    zs_set_tutorial_completed(YES);
+    [self.tutorialUnlockTimer invalidate];
+    self.tutorialUnlockTimer = nil;
+
+    UIView *panel = self.tutorialPanel;
+    UIView *overlay = self.tutorialOverlay;
+    self.tutorialPanel = nil;
+    self.tutorialOverlay = nil;
+    self.tutorialOKButton = nil;
+    self.tutorialPresented = NO;
+
+    [UIView animateWithDuration:0.18 animations:^{
+        panel.alpha = 0;
+        panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
+        [overlay removeFromSuperview];
+        [self zs_presentRestartPromptIfNeeded];
+    }];
+}
+
+- (void)zs_layoutTutorialForWindow:(UIView *)unityView {
+    if (!self.tutorialOverlay || !self.tutorialPanel) return;
+    self.tutorialOverlay.frame = unityView.bounds;
 }
 
 - (void)zs_presentRestartPromptIfNeeded {
@@ -4216,6 +4459,14 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 }
 
 - (void)destroyPanelHierarchy {
+    [self.tutorialUnlockTimer invalidate];
+    self.tutorialUnlockTimer = nil;
+    [self.tutorialOverlay removeFromSuperview];
+    self.tutorialOverlay = nil;
+    self.tutorialPanel = nil;
+    self.tutorialOKButton = nil;
+    self.tutorialPresented = NO;
+    self.tutorialCanDismiss = NO;
     [self.glassContainer removeFromSuperview];
     [self.contentOverlay removeFromSuperview];
     [self.docsContentOverlay removeFromSuperview];
@@ -10454,7 +10705,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
 - (void)deviceOrientationChanged {
     UIView *unityView = zs_ui_host_view();
-    if (!unityView || !self.panel) return;
+    if (!unityView) return;
+    [self zs_layoutTutorialForWindow:unityView];
+    if (!self.panel) return;
     [self layoutPanelForWindow:unityView];
 }
 
