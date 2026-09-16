@@ -16,6 +16,7 @@
 static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
+static void *ZSUID_FindActiveInstance(void *klass);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -791,6 +792,27 @@ static const int kLoadCheckWindowTicks = 20;
 
 static int32_t g_lastGlobalSceneStateForReapply = INT32_MIN;
 
+static void *gZSBootMainMenuUserInfoCardClass;
+static BOOL gZSBootIntoMainMenuReapplyDone;
+
+static void zs_check_boot_into_main_menu_reapply(void) {
+    if (gZSBootIntoMainMenuReapplyDone) return;
+
+    if (!gZSBootMainMenuUserInfoCardClass) {
+        gZSBootMainMenuUserInfoCardClass = [IL2CppBridge classNamed:"UserInfoCard"
+                                                         inNamespace:"MainUI"
+                                                    assemblyContains:"Assembly-CSharp"];
+        if (!gZSBootMainMenuUserInfoCardClass) return;
+    }
+
+    void *instance = ZSUID_FindActiveInstance(gZSBootMainMenuUserInfoCardClass);
+    if (!instance) return;
+
+    ZLog(@"[ZSScripts] landed on main menu (UserInfoCard found) - reapplying settings once for login->main menu transition");
+    zs_reapply_all_settings();
+    gZSBootIntoMainMenuReapplyDone = YES;
+}
+
 static void *zs_get_cached_game_manager_instance(void) {
     BOOL needsRefresh = (!g_cachedGameManagerInstance || g_ticksSinceInstanceRefresh >= kInstanceRefreshTicks);
     if (needsRefresh) {
@@ -936,6 +958,8 @@ static void zs_install_scene_loaded_hook(void) {
 }
 
 - (void)battleStatePoll {
+    if (!gZSBootIntoMainMenuReapplyDone) zs_check_boot_into_main_menu_reapply();
+
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
     BOOL wasInBattle = self.isInBattle;
@@ -944,9 +968,10 @@ static void zs_install_scene_loaded_hook(void) {
 
     int32_t currentGlobalSceneState = 0;
     BOOL haveGlobalSceneState = ZSGlobalScene_Current(&currentGlobalSceneState);
+    BOOL isFirstGlobalSceneObservation = (haveGlobalSceneState && g_lastGlobalSceneStateForReapply == INT32_MIN);
     BOOL globalSceneStateChanged = (haveGlobalSceneState
-                                     && g_lastGlobalSceneStateForReapply != INT32_MIN
-                                     && currentGlobalSceneState != g_lastGlobalSceneStateForReapply);
+                                     && (isFirstGlobalSceneObservation
+                                         || currentGlobalSceneState != g_lastGlobalSceneStateForReapply));
     if (haveGlobalSceneState) g_lastGlobalSceneStateForReapply = currentGlobalSceneState;
 
     if (globalSceneStateChanged || (haveBattleState && wasInBattle && !isBattle)) {
