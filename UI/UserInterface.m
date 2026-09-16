@@ -4158,7 +4158,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         NSTextAttachment *attachment = [[NSTextAttachment alloc] init];
         attachment.image = [infoImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.6]];
         attachment.bounds = CGRectMake(0, -2, 12, 12);
-        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithAttachment:attachment]];
+        [bodyText appendAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
         [bodyText appendAttributedString:[[NSAttributedString alloc] initWithString:@" icon next to each section." attributes:@{
             NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
             NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
