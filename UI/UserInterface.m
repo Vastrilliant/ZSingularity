@@ -4322,18 +4322,13 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.tutorialGestureWarningLabel = nil;
     self.tutorialPresented = NO;
 
-    UIVisualEffectView *glassPanel = [panel isKindOfClass:[UIVisualEffectView class]] ? (UIVisualEffectView *)panel : nil;
-
-    UIViewPropertyAnimator *dissipate = [[UIViewPropertyAnimator alloc] initWithDuration:0.4 curve:UIViewAnimationCurveEaseIn animations:^{
+    [UIView animateWithDuration:0.18 animations:^{
         panel.alpha = 0;
-        panel.transform = CGAffineTransformMakeScale(1.1, 1.1);
-        if (glassPanel) glassPanel.effect = nil;
-    }];
-    [dissipate addCompletion:^(UIViewAnimatingPosition finalPosition) {
+        panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
         [overlay removeFromSuperview];
         [self zs_presentRestartPromptIfNeeded];
     }];
-    [dissipate startAnimation];
 }
 
 - (void)zs_layoutTutorialForWindow:(UIView *)unityView {
