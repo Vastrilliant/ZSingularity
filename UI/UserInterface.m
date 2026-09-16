@@ -3811,6 +3811,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UIStackView *experimentalSectionContainer;
 @property (nonatomic, strong) NSMutableArray<dispatch_block_t> *pendingSectionBuilders;
+@property (nonatomic, strong) NSMutableArray<dispatch_block_t> *pendingExperimentalSectionBuilders;
 @property (nonatomic, strong) NSDictionary *pendingCollapsedStates;
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, assign) BOOL installed;
@@ -4232,6 +4233,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.stack = nil;
     self.experimentalSectionContainer = nil;
     self.pendingSectionBuilders = nil;
+    self.pendingExperimentalSectionBuilders = nil;
     self.pendingCollapsedStates = nil;
 
     self.docsPanelGlass = nil;
@@ -4896,6 +4898,7 @@ static const CGFloat kContentFadeHeight = 22;
 
     self.pendingCollapsedStates = zs_load_collapsed_section_states();
     self.pendingSectionBuilders = [NSMutableArray array];
+    self.pendingExperimentalSectionBuilders = [NSMutableArray array];
 
     [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Display", self, @selector(docsInfoTapped:));
@@ -5342,7 +5345,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack setCustomSpacing:kSectionSpacing afterView:configActionsCard];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Camera & Rendering", self);
     ZSRow *expPixelLightCountRow = zs_make_slider_row(@"Pixel Light Count", 0, 8, zs_exp_get_number(@"PixelLightCount"), ^NSString *(float v){ return [NSString stringWithFormat:@"%.0f", v]; });
     expPixelLightCountRow.slider.defaultValue = zs_exp_get_default_number(@"PixelLightCount");
@@ -5492,7 +5495,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expFSRSharpnessRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"URP Pipeline", self);
     ZSRow *expURPHDRRow = zs_make_switch_row(@"URP HDR", zs_exp_get_bool(@"URPHDR"));
     objc_setAssociatedObject(expURPHDRRow.toggle, @"zs_exp_key", @"URPHDR", OBJC_ASSOCIATION_RETAIN);
@@ -5651,7 +5654,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expBurstSafetyChecksRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Light Probes", self);
     NSInteger ShEvalModeSelIdx, ShEvalModeDefIdx;
     ShEvalModeSelIdx = MAX(0, MIN(2, (NSInteger)zs_exp_get_number(@"ShEvalMode")));
@@ -5710,7 +5713,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expProbeVolumeSHBandsRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Shadows", self);
     NSInteger AdditionalShadowTierLowSelIdx, AdditionalShadowTierLowDefIdx;
     { int32_t v = (int32_t)zs_exp_get_number(@"AdditionalShadowTierLow"); AdditionalShadowTierLowSelIdx = zs_exp_idx_AdditionalShadowTierLow(v); }
@@ -5820,7 +5823,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expCascade4SplitZRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Adaptive Performance", self);
     ZSRow *expAdaptivePerformanceRow = zs_make_switch_row(@"Adaptive Performance", zs_exp_get_bool(@"AdaptivePerformance"));
     self.expAdaptivePerformanceToggle = expAdaptivePerformanceRow.toggle;
@@ -5886,7 +5889,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expAPSkipTransparentObjectsRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Particles & Animator", self);
     ZSRow *expParticleGPUInstancingRow = zs_make_switch_row(@"Particle GPU Instancing", zs_exp_get_bool(@"ParticleGPUInstancing"));
     objc_setAssociatedObject(expParticleGPUInstancingRow.toggle, @"zs_exp_key", @"ParticleGPUInstancing", OBJC_ASSOCIATION_RETAIN);
@@ -6009,7 +6012,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expAnimatorKeepControllerStateOnDisableRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Physics", self);
     NSInteger RigidbodySolverIterationsSelIdx, RigidbodySolverIterationsDefIdx;
     { int32_t v = (int32_t)zs_exp_get_number(@"RigidbodySolverIterations"); RigidbodySolverIterationsSelIdx = zs_exp_idx_RigidbodySolverIterations(v); }
@@ -6099,7 +6102,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.experimentalSectionContainer addArrangedSubview:expAdaptivePhysicsRow];
     }];
 
-    [self.pendingSectionBuilders addObject:^{
+    [self.pendingExperimentalSectionBuilders addObject:^{
     [self zs_applyExperimentalAvailabilityTint];
 
     zs_add_section_header(self.experimentalSectionContainer, @"Browse All Settings", self);
@@ -6163,11 +6166,20 @@ static const CGFloat kContentFadeHeight = 22;
 
 static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
-- (void)zs_runNextPendingSectionBuilder {
-    if (self.pendingSectionBuilders.count == 0 || !self.stack) return;
+- (BOOL)zs_hasPendingExperimentalSectionBuilders {
+    return g_experimentalSettingsEnabled && self.pendingExperimentalSectionBuilders.count > 0;
+}
 
-    dispatch_block_t builder = self.pendingSectionBuilders.firstObject;
-    [self.pendingSectionBuilders removeObjectAtIndex:0];
+- (void)zs_runNextPendingSectionBuilder {
+    if (!self.stack) return;
+
+    NSMutableArray<dispatch_block_t> *queue = [self zs_hasPendingExperimentalSectionBuilders]
+        ? self.pendingExperimentalSectionBuilders
+        : self.pendingSectionBuilders;
+    if (queue.count == 0) return;
+
+    dispatch_block_t builder = queue.firstObject;
+    [queue removeObjectAtIndex:0];
 
     NSUInteger before = self.stack.arrangedSubviews.count;
     builder();
@@ -6184,7 +6196,7 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
     CGFloat targetHeight = self.scrollView.bounds.size.height + self.scrollView.contentOffset.y + kZSPanelSectionBuildHeadroom;
 
-    while (self.pendingSectionBuilders.count > 0) {
+    while (self.pendingSectionBuilders.count > 0 || [self zs_hasPendingExperimentalSectionBuilders]) {
         [self.stack setNeedsLayout];
         [self.stack layoutIfNeeded];
         if (self.stack.bounds.size.height >= targetHeight) break;
@@ -10653,6 +10665,10 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 - (void)experimentalSettingsEnabledChanged:(UISwitch *)toggle {
     g_experimentalSettingsEnabled = toggle.on;
     self.experimentalSectionContainer.hidden = !toggle.on;
+
+    if (toggle.on) {
+        [self zs_fillVisiblePanelSectionsWithHeadroom];
+    }
 
     [self.stack setNeedsLayout];
     [self.stack layoutIfNeeded];
