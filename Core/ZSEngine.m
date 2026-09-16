@@ -15,6 +15,7 @@
 
 static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
+static BOOL ZSGlobalScene_Current(int32_t *outState);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -788,6 +789,8 @@ static const int kLoadCheckThrottleTicks = 2;
 static int g_loadCheckWindowTicksRemaining;
 static const int kLoadCheckWindowTicks = 20;
 
+static int32_t g_lastGlobalSceneStateForReapply = INT32_MIN;
+
 static void *zs_get_cached_game_manager_instance(void) {
     BOOL needsRefresh = (!g_cachedGameManagerInstance || g_ticksSinceInstanceRefresh >= kInstanceRefreshTicks);
     if (needsRefresh) {
@@ -939,7 +942,14 @@ static void zs_install_scene_loaded_hook(void) {
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
 
-    if (haveBattleState && wasInBattle && !isBattle) {
+    int32_t currentGlobalSceneState = 0;
+    BOOL haveGlobalSceneState = ZSGlobalScene_Current(&currentGlobalSceneState);
+    BOOL globalSceneStateChanged = (haveGlobalSceneState
+                                     && g_lastGlobalSceneStateForReapply != INT32_MIN
+                                     && currentGlobalSceneState != g_lastGlobalSceneStateForReapply);
+    if (haveGlobalSceneState) g_lastGlobalSceneStateForReapply = currentGlobalSceneState;
+
+    if (globalSceneStateChanged || (haveBattleState && wasInBattle && !isBattle)) {
         g_loadCheckWindowTicksRemaining = kLoadCheckWindowTicks;
         self.wasLoading = NO;
     }
@@ -956,12 +966,11 @@ static void zs_install_scene_loaded_hook(void) {
                 if (self.wasLoading && !isLoading) {
                     ZLog(@"[ZSScripts] loading screen torn down (LoadingSceneManager gone, isBattle=%d) - reapplying settings", isBattle);
                     zs_reapply_all_settings();
-                    if (wasInBattle && g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
+                    if (wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
                     g_loadCheckWindowTicksRemaining = 0;
                 }
                 self.wasLoading = isLoading;
             } else if (haveBattleState && wasInBattle && !isBattle) {
-
                 ZLog(@"[ZSScripts] loading screen detected (battle-exit fallback, LoadingSceneManager lookup unavailable) - reapplying settings");
                 zs_reapply_all_settings();
                 if (g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
