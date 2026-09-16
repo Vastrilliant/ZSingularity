@@ -6167,7 +6167,7 @@ static const CGFloat kContentFadeHeight = 22;
 static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
 - (BOOL)zs_hasPendingExperimentalSectionBuilders {
-    return g_experimentalSettingsEnabled && self.pendingExperimentalSectionBuilders.count > 0;
+    return g_experimentalSettingsEnabled && self.experimentalSectionContainer && self.pendingExperimentalSectionBuilders.count > 0;
 }
 
 - (void)zs_runNextPendingSectionBuilder {
