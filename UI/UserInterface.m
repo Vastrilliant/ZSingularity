@@ -3834,6 +3834,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *tutorialOverlay;
 @property (nonatomic, strong) UIView *tutorialPanel;
 @property (nonatomic, strong) UIButton *tutorialOKButton;
+@property (nonatomic, strong) UILabel *tutorialGestureWarningLabel;
 @property (nonatomic, assign) BOOL tutorialCanDismiss;
 @property (nonatomic, assign) BOOL tutorialPresented;
 @property (nonatomic, strong) NSTimer *tutorialUnlockTimer;
@@ -4062,7 +4063,30 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
 - (void)zs_handleOpenPanelGesture:(UISwipeGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) return;
+    if (self.tutorialPresented) {
+        [self zs_flashTutorialGestureWarning];
+        return;
+    }
     [self openPanel];
+}
+
+- (void)zs_flashTutorialGestureWarning {
+    if (!self.tutorialGestureWarningLabel) return;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(zs_hideTutorialGestureWarning) object:nil];
+    self.tutorialGestureWarningLabel.hidden = NO;
+    [UIView animateWithDuration:0.18 animations:^{
+        self.tutorialGestureWarningLabel.alpha = 1;
+    }];
+    [self performSelector:@selector(zs_hideTutorialGestureWarning) withObject:nil afterDelay:1.6];
+}
+
+- (void)zs_hideTutorialGestureWarning {
+    UILabel *label = self.tutorialGestureWarningLabel;
+    [UIView animateWithDuration:0.18 animations:^{
+        label.alpha = 0;
+    } completion:^(BOOL finished) {
+        label.hidden = YES;
+    }];
 }
 
 - (void)zs_presentTutorialIfNeeded {
@@ -4183,6 +4207,16 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [github addTarget:self action:@selector(zs_tutorialGitHubTapped) forControlEvents:UIControlEventTouchUpInside];
     [panelHost addSubview:github];
 
+    self.tutorialGestureWarningLabel = [[UILabel alloc] init];
+    self.tutorialGestureWarningLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    self.tutorialGestureWarningLabel.text = @"Close the tutorial UI first";
+    self.tutorialGestureWarningLabel.font = zs_mono_font(kZSSubtitleFontSize, UIFontWeightMedium);
+    self.tutorialGestureWarningLabel.textColor = UIColor.systemRedColor;
+    self.tutorialGestureWarningLabel.numberOfLines = 1;
+    self.tutorialGestureWarningLabel.alpha = 0;
+    self.tutorialGestureWarningLabel.hidden = YES;
+    [panelHost addSubview:self.tutorialGestureWarningLabel];
+
     self.tutorialOKButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tutorialOKButton.translatesAutoresizingMaskIntoConstraints = NO;
     if (@available(iOS 15.0, *)) {
@@ -4233,10 +4267,14 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         [discord.heightAnchor constraintEqualToConstant:24],
         [github.heightAnchor constraintEqualToConstant:24],
 
-        [self.tutorialOKButton.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor],
-        [self.tutorialOKButton.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor],
-        [self.tutorialOKButton.bottomAnchor constraintEqualToAnchor:panelHost.bottomAnchor],
-        [self.tutorialOKButton.heightAnchor constraintEqualToConstant:58],
+        [self.tutorialGestureWarningLabel.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [self.tutorialGestureWarningLabel.trailingAnchor constraintLessThanOrEqualToAnchor:discord.leadingAnchor constant:-8],
+        [self.tutorialGestureWarningLabel.centerYAnchor constraintEqualToAnchor:discord.centerYAnchor],
+
+        [self.tutorialOKButton.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [self.tutorialOKButton.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [self.tutorialOKButton.bottomAnchor constraintEqualToAnchor:panelHost.bottomAnchor constant:-20],
+        [self.tutorialOKButton.heightAnchor constraintEqualToConstant:46],
     ]];
 
     panel.alpha = 0;
@@ -4274,12 +4312,14 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     zs_set_tutorial_completed(YES);
     [self.tutorialUnlockTimer invalidate];
     self.tutorialUnlockTimer = nil;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(zs_hideTutorialGestureWarning) object:nil];
 
     UIView *panel = self.tutorialPanel;
     UIView *overlay = self.tutorialOverlay;
     self.tutorialPanel = nil;
     self.tutorialOverlay = nil;
     self.tutorialOKButton = nil;
+    self.tutorialGestureWarningLabel = nil;
     self.tutorialPresented = NO;
 
     UIVisualEffectView *glassPanel = [panel isKindOfClass:[UIVisualEffectView class]] ? (UIVisualEffectView *)panel : nil;
