@@ -4112,7 +4112,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     UILabel *header = [[UILabel alloc] init];
     header.translatesAutoresizingMaskIntoConstraints = NO;
-    header.textAlignment = NSTextAlignmentRight;
+    header.textAlignment = NSTextAlignmentLeft;
     NSString *fullTitle = @"ZSingularity";
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
                                                                                  attributes:@{
@@ -4123,12 +4123,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                  value:zs_excelsior_sans_font(27.5, UIFontWeightBold)
                  range:NSMakeRange(0, 2)];
     header.attributedText = title;
-    zs_apply_gif_text_tint(header);
     [panelHost addSubview:header];
 
     UILabel *welcome = [[UILabel alloc] init];
     welcome.translatesAutoresizingMaskIntoConstraints = NO;
-    welcome.text = @"## Welcome to ZSingularity!";
+    welcome.text = @"Welcome to ZSingularity!";
     welcome.font = zs_mono_font(16, UIFontWeightBold);
     welcome.textColor = UIColor.whiteColor;
     welcome.numberOfLines = 1;
@@ -4186,7 +4185,20 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     self.tutorialOKButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tutorialOKButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_solid_glass_with_font(self.tutorialOKButton, @"OK", UIColor.whiteColor, zs_mono_font(18, UIFontWeightBold));
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *okConfig = [UIButtonConfiguration filledButtonConfiguration];
+        okConfig.baseBackgroundColor = zs_accent_green_color();
+        okConfig.baseForegroundColor = UIColor.blackColor;
+        okConfig.attributedTitle = [[NSAttributedString alloc] initWithString:@"OK" attributes:@{NSFontAttributeName: zs_mono_font(18, UIFontWeightBold)}];
+        self.tutorialOKButton.configuration = okConfig;
+    } else {
+        [self.tutorialOKButton setTitle:@"OK" forState:UIControlStateNormal];
+        self.tutorialOKButton.titleLabel.font = zs_mono_font(18, UIFontWeightBold);
+        [self.tutorialOKButton setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
+        self.tutorialOKButton.backgroundColor = zs_accent_green_color();
+        self.tutorialOKButton.layer.cornerRadius = 14;
+        self.tutorialOKButton.clipsToBounds = YES;
+    }
     self.tutorialOKButton.enabled = NO;
     self.tutorialOKButton.alpha = 0.38;
     [self.tutorialOKButton addTarget:self action:@selector(zs_tutorialOKTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -4202,8 +4214,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         [panel.heightAnchor constraintEqualToConstant:panelHeight],
 
         [header.topAnchor constraintEqualToAnchor:panelHost.topAnchor constant:18],
-        [header.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-20],
-        [header.leadingAnchor constraintGreaterThanOrEqualToAnchor:panelHost.leadingAnchor constant:20],
+        [header.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:20],
+        [header.trailingAnchor constraintLessThanOrEqualToAnchor:panelHost.trailingAnchor constant:-20],
         [header.heightAnchor constraintEqualToConstant:34],
 
         [welcome.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
@@ -4270,13 +4282,18 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.tutorialOKButton = nil;
     self.tutorialPresented = NO;
 
-    [UIView animateWithDuration:0.18 animations:^{
+    UIVisualEffectView *glassPanel = [panel isKindOfClass:[UIVisualEffectView class]] ? (UIVisualEffectView *)panel : nil;
+
+    UIViewPropertyAnimator *dissipate = [[UIViewPropertyAnimator alloc] initWithDuration:0.4 curve:UIViewAnimationCurveEaseIn animations:^{
         panel.alpha = 0;
-        panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
-    } completion:^(BOOL finished) {
+        panel.transform = CGAffineTransformMakeScale(1.1, 1.1);
+        if (glassPanel) glassPanel.effect = nil;
+    }];
+    [dissipate addCompletion:^(UIViewAnimatingPosition finalPosition) {
         [overlay removeFromSuperview];
         [self zs_presentRestartPromptIfNeeded];
     }];
+    [dissipate startAnimation];
 }
 
 - (void)zs_layoutTutorialForWindow:(UIView *)unityView {
