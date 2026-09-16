@@ -18,6 +18,7 @@ Need some help, have a bug to report or want to suggest new features? [Join the 
   <img src="demo/settings_demo.jpg" width="40.18%" />
   <img src="demo/mods_demo.jpg" width="50%" />
 </p>
+
 ## Features
 
 Adjust various graphical settings such as: 
