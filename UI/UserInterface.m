@@ -3806,16 +3806,13 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *panel;
 @property (nonatomic, strong) UIView *handle;
 @property (nonatomic, strong) UILabel *chevron;
-@property (nonatomic, strong) UIView *staticHandle;
-@property (nonatomic, strong) UILabel *staticChevron;
 @property (nonatomic, strong) UIView *scrollViewport;
 @property (nonatomic, strong) UIScrollView *scrollView;
 @property (nonatomic, strong) UIStackView *stack;
 @property (nonatomic, strong) UIStackView *experimentalSectionContainer;
 @property (nonatomic, assign) BOOL panelOpen;
+@property (nonatomic, assign) BOOL installed;
 @property (nonatomic, assign) CGFloat panelWidth;
-@property (nonatomic, assign) BOOL uiDisabled;
-@property (nonatomic, weak) UISwitch *disableUIToggle;
 
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
 @property (nonatomic, strong) UIView *docsPanel;
@@ -3998,36 +3995,24 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 }
 
 - (void)installIfNeeded {
-    if (self.panel) return;
+    if (self.installed) return;
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
 
-    ZLog(@"[UserInterface] installing panel UI");
-    [self buildPanel:unityView];
+    ZLog(@"[UserInterface] installing gesture-based panel opener");
+    self.installed = YES;
 
-    if (self.panelOpen) {
-        self.staticHandle.hidden = YES;
-    } else {
-        [self zs_detachPanelChromeIfNeeded];
-    }
-
-    UILongPressGestureRecognizer *restoreUIPress =
-        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleRestoreUIGesture:)];
-    restoreUIPress.numberOfTouchesRequired = 3;
-    restoreUIPress.minimumPressDuration = 1.0;
     [unityView setMultipleTouchEnabled:YES];
     unityView.exclusiveTouch = NO;
-    [unityView addGestureRecognizer:restoreUIPress];
 
-    zs_set_glass_suspended(!self.panelOpen);
-    zs_gif_tint_set_paused(!self.panelOpen);
+    UISwipeGestureRecognizer *openSwipe =
+        [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleOpenPanelGesture:)];
+    openSwipe.direction = UISwipeGestureRecognizerDirectionLeft;
+    openSwipe.numberOfTouchesRequired = 2;
+    openSwipe.delegate = self;
+    [unityView addGestureRecognizer:openSwipe];
+
     zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
-    if (self.panelOpen) {
-        zs_gif_tint_reconstruct_all();
-    } else {
-        zs_gif_tint_teardown_all();
-    }
-    [self zs_updateSliderGlassVisibility];
 
     [self zs_presentRestartPromptIfNeeded];
 
@@ -4046,16 +4031,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                               selector:@selector(zs_pollAllActiveDoctorEntriesImmediately)
                                                   name:UIApplicationWillEnterForegroundNotification
                                                 object:nil];
+}
 
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIView *v = zs_ui_host_view();
-        if (v && weakSelf.panel) [weakSelf layoutPanelForWindow:v];
-    });
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIView *v = zs_ui_host_view();
-        if (v && weakSelf.panel) [weakSelf layoutPanelForWindow:v];
-    });
+- (void)zs_handleOpenPanelGesture:(UISwipeGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateRecognized) return;
+    [self openPanel];
 }
 
 - (void)zs_presentRestartPromptIfNeeded {
@@ -4070,52 +4050,247 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)zs_attachPanelChromeIfNeeded {
+- (void)openPanel {
+    if (self.panelOpen) return;
     UIView *unityView = zs_ui_host_view();
-    if (!unityView || !self.glassContainer) return;
+    if (!unityView) return;
 
-    if (!self.glassContainer.superview) [unityView addSubview:self.glassContainer];
-    if (!self.contentOverlay.superview) [unityView addSubview:self.contentOverlay];
-    if (self.docsContentOverlay && !self.docsContentOverlay.superview) {
-        [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
-    }
+    self.panelOpen = YES;
+    [self buildPanel:unityView];
 
-    self.staticHandle.hidden = YES;
+    CGRect restingFrame = self.glassContainer.frame;
+    self.glassContainer.frame = CGRectMake(unityView.bounds.size.width,
+                                            restingFrame.origin.y,
+                                            restingFrame.size.width,
+                                            restingFrame.size.height);
+
+    [[FPS120Controller shared] setPanelOpen:YES];
+    zs_set_glass_suspended(NO);
+    zs_gif_tint_set_paused(NO);
+    zs_gif_tint_reconstruct_all();
+    [self zs_updateSliderGlassVisibility];
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.28
+                          delay:0
+         usingSpringWithDamping:0.85
+          initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        weakSelf.glassContainer.frame = restingFrame;
+    } completion:^(BOOL finished) {
+        [weakSelf zs_pollAllActiveDoctorEntriesImmediately];
+    }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIView *v = zs_ui_host_view();
+        if (v && weakSelf.panel) [weakSelf layoutPanelForWindow:v];
+    });
 }
 
-- (void)zs_detachPanelChromeIfNeeded {
+- (void)closePanel {
+    if (!self.panelOpen || !self.glassContainer) return;
+    UIView *unityView = zs_ui_host_view();
+
+    self.panelOpen = NO;
+    self.docsPanelOpen = NO;
+    self.docsActiveKey = nil;
+
+    if (self.zsFloatingField) [self zs_commitFloatingFieldSaving:NO];
+
+    [[FPS120Controller shared] setPanelOpen:NO];
+    zs_set_glass_suspended(YES);
+    zs_gif_tint_set_paused(YES);
+    zs_gif_tint_teardown_all();
+    [self stopPostFXReapply];
+
+    if (!unityView) {
+        [self teardownPanel];
+        return;
+    }
+
+    CGRect offscreenFrame = CGRectMake(unityView.bounds.size.width,
+                                        self.glassContainer.frame.origin.y,
+                                        self.glassContainer.frame.size.width,
+                                        self.glassContainer.frame.size.height);
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.28
+                          delay:0
+         usingSpringWithDamping:0.85
+          initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        weakSelf.glassContainer.frame = offscreenFrame;
+    } completion:^(BOOL finished) {
+        [weakSelf teardownPanel];
+    }];
+}
+
+- (void)teardownPanel {
+    [self.postFXReapplyTimer invalidate];
+    self.postFXReapplyTimer = nil;
+
+    if (self.saveDebounceTimer) {
+        [self.saveDebounceTimer invalidate];
+        self.saveDebounceTimer = nil;
+        zs_persist_current_settings();
+    }
+
+    [self.holdConfirmDisplayLink invalidate];
+    self.holdConfirmDisplayLink = nil;
+    self.holdConfirmActiveButton = nil;
+    self.holdConfirmTriggered = NO;
+    self.holdConfirmStartTime = 0;
+
+    [self.syslogHoldDisplayLink invalidate];
+    self.syslogHoldDisplayLink = nil;
+    self.syslogHoldTriggered = NO;
+    self.syslogHoldStartTime = 0;
+    self.syslogDebugModeEnabled = NO;
+
+    for (NSTimer *timer in self.doctorPollTimers.allValues) {
+        [timer invalidate];
+    }
+    self.doctorPollTimers = nil;
+    self.doctorUploadProgressLastUpdate = nil;
+    self.doctorProcessProgressLastPercent = nil;
+    self.doctorDownloadProgressLastUpdate = nil;
+    self.doctorDownloadProgressPersistLastUpdate = nil;
+    self.doctorDownloadLiveEntryCache = nil;
+    self.doctorDownloadInFlightPaths = nil;
+    self.doctorInstallTargetPicker = nil;
+    self.doctorInstallPendingDoctoredURL = nil;
+    self.doctorInstallPendingEntryPath = nil;
+    self.doctorInstallPendingFolderName = nil;
+
+    [ZSyslogController sharedController].lineHandler = nil;
+
     [self.glassContainer removeFromSuperview];
     [self.contentOverlay removeFromSuperview];
     [self.docsContentOverlay removeFromSuperview];
 
-    self.staticHandle.hidden = self.uiDisabled;
+    self.glassContainer = nil;
+    self.glassContainerContent = nil;
+    self.panelGlass = nil;
+    self.handleGlass = nil;
+    self.panel = nil;
+    self.handle = nil;
+    self.chevron = nil;
+    self.contentOverlay = nil;
+    self.scrollViewport = nil;
+    self.scrollView = nil;
+    self.stack = nil;
+    self.experimentalSectionContainer = nil;
+
+    self.docsPanelGlass = nil;
+    self.docsPanel = nil;
+    self.docsContentOverlay = nil;
+    self.docsPanelSeparator = nil;
+    self.docsScrollView = nil;
+    self.docsTitleLabel = nil;
+    self.docsHeaderModeChevronButton = nil;
+    self.docsTitleTrailingFullConstraint = nil;
+    self.docsTitleTrailingToChevronConstraint = nil;
+    self.docsSubheaderRow = nil;
+    self.docsSubheaderLabel = nil;
+    self.docsSubheaderPageGroup = nil;
+    self.docsSubheaderPageLabel = nil;
+    self.docsSubheaderLeftArrowButton = nil;
+    self.docsSubheaderRightArrowButton = nil;
+    self.docsScrollViewTopToTitleConstraint = nil;
+    self.docsScrollViewTopToSubheaderConstraint = nil;
+    self.docsBodyLabel = nil;
+    self.docsUpdateActionsStack = nil;
+    self.docsLiveContainerInstallButton = nil;
+    self.docsGitHubReleaseLinkButton = nil;
+    self.docsUpdateActionsDisabledNoteLabel = nil;
+    self.docsScrollViewBottomToOverlayConstraint = nil;
+    self.docsPanelOpen = NO;
+    self.docsActiveKey = nil;
+    self.docsReleaseViewMode = 0;
+    self.docsReleaseHistoryIndex = 0;
+
+    self.syslogConsoleContainer = nil;
+    self.syslogConsoleScrollView = nil;
+    self.syslogTextLabel = nil;
+    self.syslogTabEnabled = NO;
+    self.syslogLines = nil;
+    self.syslogBlacklistField = nil;
+    self.syslogBlacklistStatusLabel = nil;
+    self.syslogBlacklistEntriesStack = nil;
+    self.syslogBlacklist = nil;
+    self.syslogButton = nil;
+    self.syslogButtonFillLayer = nil;
+
+    self.authRepoLinkField = nil;
+    self.authTokenField = nil;
+    self.authRepoLinkFieldContainer = nil;
+    self.authTokenFieldContainer = nil;
+    self.authVerifyButton = nil;
+    self.authStatusLabel = nil;
+    self.authInRemoveMode = NO;
+    self.authCredentialsStale = NO;
+
+    self.customGreetingTextButton = nil;
+
+    self.reencodeFormatButton = nil;
+    self.reencodeDropdownOverlay = nil;
+    self.reencodeDropdownScrim = nil;
+    self.reencodeDropdownOpen = NO;
+
+    self.modsOptionsDropdownButton = nil;
+    self.modsOptionsDropdownOverlay = nil;
+    self.modsOptionsDropdownScrim = nil;
+    self.modsOptionsDropdownOpen = NO;
+    self.modsOptionsDropdownEntry = nil;
+    self.modsOptionsDropdownFolderName = nil;
+
+    self.loadModsPicker = nil;
+    self.loadModsTargetFolder = nil;
+    self.loadModsSummaryLines = nil;
+
+    self.modsLibraryStack = nil;
+    self.modsLibraryExpandedFolders = nil;
+    self.modsLibraryExpandedInfoEntries = nil;
+    self.modsLibraryExpandedProcessedBundles = nil;
+
+    self.libraryImportPicker = nil;
+    self.libraryImportTargetFolder = nil;
+
+    self.processedBundlesReleases = nil;
+    self.processedBundlesLoading = NO;
+    self.processedBundlesErrorMessage = nil;
+    self.processedBundleInstallInFlight = nil;
+
+    self.zsFloatingFieldBackdrop = nil;
+    self.zsFloatingFieldContainer = nil;
+    self.zsFloatingField = nil;
+    self.zsFloatingFieldBottomConstraint = nil;
+    self.zsFloatingFieldCompletion = nil;
+
+    self.normalFpsSlider = nil;
+    self.normalFpsValueLabel = nil;
+    self.combatFpsSlider = nil;
+    self.combatFpsValueLabel = nil;
+    self.expAdaptivePerformanceToggle = nil;
+
+    self.updateStatusLabel = nil;
+    self.updateStatusDot = nil;
+
+    self.browseSelectedCategory = nil;
+    self.browseSelectedEntry = nil;
+    self.browseCategoryButton = nil;
+    self.browseClassButton = nil;
+    self.browseFieldsContainer = nil;
 }
 
-- (void)toggleTapped {
+- (void)zs_closeButtonTapped {
     if (self.docsPanelOpen) {
         [self closeDocsPanel];
         return;
     }
-
-    BOOL opening = !self.panelOpen;
-    if (opening) [self zs_attachPanelChromeIfNeeded];
-
-    self.panelOpen = opening;
-    [[FPS120Controller shared] setPanelOpen:self.panelOpen];
-    [self positionPanel];
-    [UIView animateWithDuration:0.25 animations:^{
-        self.chevron.transform = self.panelOpen ? CGAffineTransformMakeRotation(M_PI) : CGAffineTransformIdentity;
-    }];
-
-    zs_set_glass_suspended(!self.panelOpen);
-    zs_gif_tint_set_paused(!self.panelOpen);
-    if (self.panelOpen) {
-        zs_gif_tint_reconstruct_all();
-    } else {
-        zs_gif_tint_teardown_all();
-    }
-
-    if (self.panelOpen) [self zs_pollAllActiveDoctorEntriesImmediately];
+    [self closePanel];
 }
 
 - (void)panelSwiped:(UIPanGestureRecognizer *)gesture {
@@ -4124,7 +4299,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     CGPoint translation = [gesture translationInView:self.contentOverlay ?: gesture.view];
     BOOL mostlyHorizontal = fabs(translation.x) > fabs(translation.y) * 1.5;
     if (mostlyHorizontal && translation.x > 40) {
-        [self toggleTapped];
+        [self zs_closeButtonTapped];
     }
 }
 
@@ -4594,30 +4769,9 @@ static const CGFloat kContentFadeHeight = 22;
     self.chevron.center = CGPointMake(kHandleWidth * 0.5, kHandleHeight * 0.5);
     [self.handle addSubview:self.chevron];
 
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleTapped)];
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_closeButtonTapped)];
     [self.handle addGestureRecognizer:tap];
     self.handle.userInteractionEnabled = YES;
-
-    self.staticHandle = [[UIView alloc] initWithFrame:CGRectZero];
-    self.staticHandle.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
-    self.staticHandle.layer.cornerRadius = kHandleCornerRadius;
-    self.staticHandle.layer.cornerCurve = kCACornerCurveContinuous;
-    self.staticHandle.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
-    self.staticHandle.clipsToBounds = NO;
-    self.staticHandle.userInteractionEnabled = YES;
-    self.staticHandle.hidden = YES;
-    [unityView addSubview:self.staticHandle];
-
-    self.staticChevron = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, kHandleWidth, 24)];
-    self.staticChevron.textAlignment = NSTextAlignmentCenter;
-    self.staticChevron.textColor = [UIColor colorWithWhite:1 alpha:0.66];
-    self.staticChevron.font = zs_mono_font(15, UIFontWeightLight);
-    self.staticChevron.text = @"‹";
-    self.staticChevron.center = CGPointMake(kHandleWidth * 0.5, kHandleHeight * 0.5);
-    [self.staticHandle addSubview:self.staticChevron];
-
-    UITapGestureRecognizer *staticTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleTapped)];
-    [self.staticHandle addGestureRecognizer:staticTap];
 
     [self buildDocsPanel:unityView];
 
@@ -5102,10 +5256,6 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
-    ZSRow *disableUIRow = zs_make_switch_row(@"Disable UI", NO);
-    self.disableUIToggle = disableUIRow.toggle;
-    [disableUIRow.toggle addTarget:self action:@selector(disableUIChanged:) forControlEvents:UIControlEventValueChanged];
-
     [self.stack addArrangedSubview:customGreetingRow];
     [self.stack setCustomSpacing:8 afterView:customGreetingRow];
     [self.stack addArrangedSubview:uidRedactorRow];
@@ -5113,9 +5263,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack addArrangedSubview:disableLiquidGlassRow];
     [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
     [self.stack addArrangedSubview:disableEnkephalinRow];
-    [self.stack setCustomSpacing:8 afterView:disableEnkephalinRow];
-    [self.stack addArrangedSubview:disableUIRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:disableUIRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
 
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
@@ -10239,10 +10387,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     [self layoutPanelForWindow:unityView];
 }
 
-- (void)positionPanel {
-    [self positionPanelAnimated:YES];
-}
-
 - (void)positionPanelAnimated:(BOOL)animated {
     UIView *unityView = zs_ui_host_view();
     if (!unityView || !self.glassContainer) return;
@@ -10253,9 +10397,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     CGFloat chromeWidth = kHandleWidth + docsW + panelW;
     CGFloat height = unityView.bounds.size.height;
 
-    CGFloat targetX = self.panelOpen
-        ? (unityView.bounds.size.width - chromeWidth)
-        : (unityView.bounds.size.width - kHandleWidth);
+    CGFloat targetX = unityView.bounds.size.width - chromeWidth;
 
     UIView *panelElement = self.panelGlass ?: self.panel;
     UIView *handleElement = self.handleGlass ?: self.handle;
@@ -10274,11 +10416,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           (height - kHandleHeight) * 0.5,
                                           kHandleWidth,
                                           kHandleHeight);
-
-        self.staticHandle.frame = CGRectMake(targetX,
-                                              (height - kHandleHeight) * 0.5,
-                                              kHandleWidth,
-                                              kHandleHeight);
 
         CGRect docsFrameLocal = CGRectMake(kHandleWidth, 0, docsW, height);
 
@@ -10324,9 +10461,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.docsContentOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;
         }
-        if (!self.panelOpen) {
-            [self zs_detachPanelChromeIfNeeded];
-        }
     };
 
     if (!animated) {
@@ -10342,11 +10476,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                          completion:completion];
     }
 
-    if (self.panelOpen) {
-        [self startPostFXReapply];
-    } else {
-        [self stopPostFXReapply];
-    }
+    [self startPostFXReapply];
 }
 
 #pragma mark Post FX continuous reapply
@@ -10454,49 +10584,6 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 - (void)disableEnkephalinChanged:(UISwitch *)toggle {
     zs_set_enkephalin_disabled_by_user(toggle.on);
     zs_gif_tint_set_disabled(toggle.on);
-}
-
-- (void)disableUIChanged:(UISwitch *)toggle {
-    if (!toggle.on) return;
-
-    self.uiDisabled = YES;
-
-    if (self.docsPanelOpen) [self closeDocsPanel];
-    if (self.panelOpen) {
-        self.panelOpen = NO;
-        [[FPS120Controller shared] setPanelOpen:NO];
-        [self positionPanel];
-        self.chevron.transform = CGAffineTransformIdentity;
-    }
-    zs_set_glass_suspended(YES);
-    zs_gif_tint_set_paused(YES);
-    zs_gif_tint_teardown_all();
-
-    [self zs_detachPanelChromeIfNeeded];
-
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (presenter) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"UI Disabled"
-                                                                         message:@"Click and hold with three fingers to bring it back"
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [presenter presentViewController:alert animated:YES completion:nil];
-    }
-}
-
-- (void)zs_handleRestoreUIGesture:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    if (!self.uiDisabled) return;
-
-    self.uiDisabled = NO;
-
-    if (self.panelOpen) {
-        [self zs_attachPanelChromeIfNeeded];
-    } else {
-        self.staticHandle.hidden = NO;
-    }
-
-    self.disableUIToggle.on = NO;
 }
 
 - (void)nightlyReleasesEnabledChanged:(UISwitch *)toggle {
@@ -11272,7 +11359,7 @@ static void graphics_debug_overlay_init(void) {
     __block NSTimer *installTimer;
     installTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         [[UserInterface shared] installIfNeeded];
-        if ([UserInterface shared].panel) {
+        if ([UserInterface shared].installed) {
             zs_dump_glass_effect_instance_info();
             [timer invalidate];
         }
