@@ -4057,8 +4057,27 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     self.panelOpen = YES;
     [self buildPanel:unityView];
+    zs_reapply_all_settings();
 
     CGRect restingFrame = self.glassContainer.frame;
+    CGFloat offscreenDeltaX = unityView.bounds.size.width - restingFrame.origin.x;
+
+    CGRect contentOverlayRestingFrame = self.contentOverlay.frame;
+    self.contentOverlay.frame = CGRectOffset(contentOverlayRestingFrame, offscreenDeltaX, 0);
+
+    BOOL docsOverlayVisible = self.docsContentOverlay && !self.docsContentOverlay.hidden;
+    CGRect docsContentOverlayRestingFrame = docsOverlayVisible ? self.docsContentOverlay.frame : CGRectZero;
+    if (docsOverlayVisible) {
+        self.docsContentOverlay.frame = CGRectOffset(docsContentOverlayRestingFrame, offscreenDeltaX, 0);
+    }
+
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    CGRect handleRestingFrame = handleElement.frame;
+    handleElement.frame = CGRectMake(handleRestingFrame.origin.x + kHandleWidth,
+                                      handleRestingFrame.origin.y,
+                                      handleRestingFrame.size.width,
+                                      handleRestingFrame.size.height);
+
     self.glassContainer.frame = CGRectMake(unityView.bounds.size.width,
                                             restingFrame.origin.y,
                                             restingFrame.size.width,
@@ -4078,6 +4097,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
         weakSelf.glassContainer.frame = restingFrame;
+        weakSelf.contentOverlay.frame = contentOverlayRestingFrame;
+        if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayRestingFrame;
+        handleElement.frame = handleRestingFrame;
     } completion:^(BOOL finished) {
         [weakSelf zs_pollAllActiveDoctorEntriesImmediately];
     }];
@@ -4105,7 +4127,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [self stopPostFXReapply];
 
     if (!unityView) {
-        [self teardownPanel];
+        [self teardownPanelState];
         return;
     }
 
@@ -4113,6 +4135,19 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                         self.glassContainer.frame.origin.y,
                                         self.glassContainer.frame.size.width,
                                         self.glassContainer.frame.size.height);
+
+    CGFloat offscreenDeltaX = offscreenFrame.origin.x - self.glassContainer.frame.origin.x;
+
+    CGRect contentOverlayOffscreenFrame = CGRectOffset(self.contentOverlay.frame, offscreenDeltaX, 0);
+
+    BOOL docsOverlayVisible = self.docsContentOverlay && !self.docsContentOverlay.hidden;
+    CGRect docsContentOverlayOffscreenFrame = docsOverlayVisible ? CGRectOffset(self.docsContentOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
+
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
+                                              handleElement.frame.origin.y,
+                                              handleElement.frame.size.width,
+                                              handleElement.frame.size.height);
 
     __weak typeof(self) weakSelf = self;
     [UIView animateWithDuration:0.28
@@ -4122,12 +4157,15 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
         weakSelf.glassContainer.frame = offscreenFrame;
+        weakSelf.contentOverlay.frame = contentOverlayOffscreenFrame;
+        if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayOffscreenFrame;
+        handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
-        [weakSelf teardownPanel];
+        [weakSelf teardownPanelState];
     }];
 }
 
-- (void)teardownPanel {
+- (void)teardownPanelState {
     [self.postFXReapplyTimer invalidate];
     self.postFXReapplyTimer = nil;
 
@@ -4165,124 +4203,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.doctorInstallPendingFolderName = nil;
 
     [ZSyslogController sharedController].lineHandler = nil;
-
-    [self.glassContainer removeFromSuperview];
-    [self.contentOverlay removeFromSuperview];
-    [self.docsContentOverlay removeFromSuperview];
-
-    self.glassContainer = nil;
-    self.glassContainerContent = nil;
-    self.panelGlass = nil;
-    self.handleGlass = nil;
-    self.panel = nil;
-    self.handle = nil;
-    self.chevron = nil;
-    self.contentOverlay = nil;
-    self.scrollViewport = nil;
-    self.scrollView = nil;
-    self.stack = nil;
-    self.experimentalSectionContainer = nil;
-
-    self.docsPanelGlass = nil;
-    self.docsPanel = nil;
-    self.docsContentOverlay = nil;
-    self.docsPanelSeparator = nil;
-    self.docsScrollView = nil;
-    self.docsTitleLabel = nil;
-    self.docsHeaderModeChevronButton = nil;
-    self.docsTitleTrailingFullConstraint = nil;
-    self.docsTitleTrailingToChevronConstraint = nil;
-    self.docsSubheaderRow = nil;
-    self.docsSubheaderLabel = nil;
-    self.docsSubheaderPageGroup = nil;
-    self.docsSubheaderPageLabel = nil;
-    self.docsSubheaderLeftArrowButton = nil;
-    self.docsSubheaderRightArrowButton = nil;
-    self.docsScrollViewTopToTitleConstraint = nil;
-    self.docsScrollViewTopToSubheaderConstraint = nil;
-    self.docsBodyLabel = nil;
-    self.docsUpdateActionsStack = nil;
-    self.docsLiveContainerInstallButton = nil;
-    self.docsGitHubReleaseLinkButton = nil;
-    self.docsUpdateActionsDisabledNoteLabel = nil;
-    self.docsScrollViewBottomToOverlayConstraint = nil;
-    self.docsPanelOpen = NO;
-    self.docsActiveKey = nil;
-    self.docsReleaseViewMode = 0;
-    self.docsReleaseHistoryIndex = 0;
-
-    self.syslogConsoleContainer = nil;
-    self.syslogConsoleScrollView = nil;
-    self.syslogTextLabel = nil;
-    self.syslogTabEnabled = NO;
-    self.syslogLines = nil;
-    self.syslogBlacklistField = nil;
-    self.syslogBlacklistStatusLabel = nil;
-    self.syslogBlacklistEntriesStack = nil;
-    self.syslogBlacklist = nil;
-    self.syslogButton = nil;
-    self.syslogButtonFillLayer = nil;
-
-    self.authRepoLinkField = nil;
-    self.authTokenField = nil;
-    self.authRepoLinkFieldContainer = nil;
-    self.authTokenFieldContainer = nil;
-    self.authVerifyButton = nil;
-    self.authStatusLabel = nil;
-    self.authInRemoveMode = NO;
-    self.authCredentialsStale = NO;
-
-    self.customGreetingTextButton = nil;
-
-    self.reencodeFormatButton = nil;
-    self.reencodeDropdownOverlay = nil;
-    self.reencodeDropdownScrim = nil;
-    self.reencodeDropdownOpen = NO;
-
-    self.modsOptionsDropdownButton = nil;
-    self.modsOptionsDropdownOverlay = nil;
-    self.modsOptionsDropdownScrim = nil;
-    self.modsOptionsDropdownOpen = NO;
-    self.modsOptionsDropdownEntry = nil;
-    self.modsOptionsDropdownFolderName = nil;
-
-    self.loadModsPicker = nil;
-    self.loadModsTargetFolder = nil;
-    self.loadModsSummaryLines = nil;
-
-    self.modsLibraryStack = nil;
-    self.modsLibraryExpandedFolders = nil;
-    self.modsLibraryExpandedInfoEntries = nil;
-    self.modsLibraryExpandedProcessedBundles = nil;
-
-    self.libraryImportPicker = nil;
-    self.libraryImportTargetFolder = nil;
-
-    self.processedBundlesReleases = nil;
-    self.processedBundlesLoading = NO;
-    self.processedBundlesErrorMessage = nil;
-    self.processedBundleInstallInFlight = nil;
-
-    self.zsFloatingFieldBackdrop = nil;
-    self.zsFloatingFieldContainer = nil;
-    self.zsFloatingField = nil;
-    self.zsFloatingFieldBottomConstraint = nil;
-    self.zsFloatingFieldCompletion = nil;
-
-    self.normalFpsSlider = nil;
-    self.normalFpsValueLabel = nil;
-    self.combatFpsSlider = nil;
-    self.combatFpsValueLabel = nil;
-    self.expAdaptivePerformanceToggle = nil;
-
-    self.updateStatusLabel = nil;
-    self.updateStatusDot = nil;
-
-    self.browseSelectedCategory = nil;
-    self.browseSelectedEntry = nil;
-    self.browseCategoryButton = nil;
-    self.browseClassButton = nil;
-    self.browseFieldsContainer = nil;
 }
 
 - (void)zs_closeButtonTapped {
@@ -4681,6 +4601,14 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
 static const CGFloat kContentFadeHeight = 22;
 
 - (void)buildPanel:(UIView *)unityView {
+    if (self.glassContainer) {
+        [unityView addSubview:self.glassContainer];
+        [unityView addSubview:self.contentOverlay];
+        if (self.docsContentOverlay) [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
+        [self layoutPanelForWindow:unityView];
+        return;
+    }
+
     self.panelWidth = kPanelWidth;
 
     UIVisualEffectView *chrome = nil;
@@ -6135,8 +6063,6 @@ static const CGFloat kContentFadeHeight = 22;
     zs_gif_tint_preload();
 
     [self zs_restoreCollapsedSectionsInView:self.stack states:zs_load_collapsed_section_states()];
-
-    zs_reapply_all_settings();
 }
 
 - (void)zs_applyExperimentalAvailabilityTint {
