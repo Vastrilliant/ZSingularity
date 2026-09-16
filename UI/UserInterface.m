@@ -5338,7 +5338,11 @@ static const CGFloat kContentFadeHeight = 22;
     self.experimentalSectionContainer.axis = UILayoutConstraintAxisVertical;
     self.experimentalSectionContainer.spacing = kRowSpacing;
     self.experimentalSectionContainer.hidden = !g_experimentalSettingsEnabled;
+    [self.stack addArrangedSubview:self.experimentalSectionContainer];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:configActionsCard];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Camera & Rendering", self);
     ZSRow *expPixelLightCountRow = zs_make_slider_row(@"Pixel Light Count", 0, 8, zs_exp_get_number(@"PixelLightCount"), ^NSString *(float v){ return [NSString stringWithFormat:@"%.0f", v]; });
     expPixelLightCountRow.slider.defaultValue = zs_exp_get_default_number(@"PixelLightCount");
@@ -5486,7 +5490,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expFSRSharpnessRow.slider, @"zs_exp_key", @"FSRSharpness", OBJC_ASSOCIATION_RETAIN);
     [expFSRSharpnessRow.slider addTarget:self action:@selector(expSliderChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expFSRSharpnessRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"URP Pipeline", self);
     ZSRow *expURPHDRRow = zs_make_switch_row(@"URP HDR", zs_exp_get_bool(@"URPHDR"));
     objc_setAssociatedObject(expURPHDRRow.toggle, @"zs_exp_key", @"URPHDR", OBJC_ASSOCIATION_RETAIN);
@@ -5643,7 +5649,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expBurstSafetyChecksRow.toggle, @"zs_exp_key", @"BurstSafetyChecks", OBJC_ASSOCIATION_RETAIN);
     [expBurstSafetyChecksRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expBurstSafetyChecksRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Light Probes", self);
     NSInteger ShEvalModeSelIdx, ShEvalModeDefIdx;
     ShEvalModeSelIdx = MAX(0, MIN(2, (NSInteger)zs_exp_get_number(@"ShEvalMode")));
@@ -5700,7 +5708,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expProbeVolumeSHBandsRow.modeSlider, @"zs_exp_key", @"ProbeVolumeSHBands", OBJC_ASSOCIATION_RETAIN);
     [expProbeVolumeSHBandsRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expProbeVolumeSHBandsRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Shadows", self);
     NSInteger AdditionalShadowTierLowSelIdx, AdditionalShadowTierLowDefIdx;
     { int32_t v = (int32_t)zs_exp_get_number(@"AdditionalShadowTierLow"); AdditionalShadowTierLowSelIdx = zs_exp_idx_AdditionalShadowTierLow(v); }
@@ -5808,7 +5818,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expCascade4SplitZRow.slider, @"zs_exp_key", @"Cascade4SplitZ", OBJC_ASSOCIATION_RETAIN);
     [expCascade4SplitZRow.slider addTarget:self action:@selector(expSliderChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expCascade4SplitZRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Adaptive Performance", self);
     ZSRow *expAdaptivePerformanceRow = zs_make_switch_row(@"Adaptive Performance", zs_exp_get_bool(@"AdaptivePerformance"));
     self.expAdaptivePerformanceToggle = expAdaptivePerformanceRow.toggle;
@@ -5872,7 +5884,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expAPSkipTransparentObjectsRow.toggle, @"zs_exp_key", @"APSkipTransparentObjects", OBJC_ASSOCIATION_RETAIN);
     [expAPSkipTransparentObjectsRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expAPSkipTransparentObjectsRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Particles & Animator", self);
     ZSRow *expParticleGPUInstancingRow = zs_make_switch_row(@"Particle GPU Instancing", zs_exp_get_bool(@"ParticleGPUInstancing"));
     objc_setAssociatedObject(expParticleGPUInstancingRow.toggle, @"zs_exp_key", @"ParticleGPUInstancing", OBJC_ASSOCIATION_RETAIN);
@@ -5993,7 +6007,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expAnimatorKeepControllerStateOnDisableRow.toggle, @"zs_exp_key", @"AnimatorKeepControllerStateOnDisable", OBJC_ASSOCIATION_RETAIN);
     [expAnimatorKeepControllerStateOnDisableRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expAnimatorKeepControllerStateOnDisableRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header(self.experimentalSectionContainer, @"Physics", self);
     NSInteger RigidbodySolverIterationsSelIdx, RigidbodySolverIterationsDefIdx;
     { int32_t v = (int32_t)zs_exp_get_number(@"RigidbodySolverIterations"); RigidbodySolverIterationsSelIdx = zs_exp_idx_RigidbodySolverIterations(v); }
@@ -6081,7 +6097,9 @@ static const CGFloat kContentFadeHeight = 22;
     objc_setAssociatedObject(expAdaptivePhysicsRow.toggle, @"zs_exp_key", @"AdaptivePhysics", OBJC_ASSOCIATION_RETAIN);
     [expAdaptivePhysicsRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.experimentalSectionContainer addArrangedSubview:expAdaptivePhysicsRow];
+    }];
 
+    [self.pendingSectionBuilders addObject:^{
     [self zs_applyExperimentalAvailabilityTint];
 
     zs_add_section_header(self.experimentalSectionContainer, @"Browse All Settings", self);
@@ -6100,10 +6118,9 @@ static const CGFloat kContentFadeHeight = 22;
     self.browseFieldsContainer.spacing = kRowSpacing;
     [self.experimentalSectionContainer addArrangedSubview:self.browseFieldsContainer];
     [self zs_rebuildBrowseFields];
+    }];
 
-    [self.stack addArrangedSubview:self.experimentalSectionContainer];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:configActionsCard];
-
+    [self.pendingSectionBuilders addObject:^{
     UIView *socialLinksSeparator = zs_make_section_separator();
     [self.stack addArrangedSubview:socialLinksSeparator];
     [self.stack setCustomSpacing:kSectionSpacing afterView:self.experimentalSectionContainer];
