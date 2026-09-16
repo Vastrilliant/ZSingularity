@@ -4219,20 +4219,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     self.tutorialOKButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tutorialOKButton.translatesAutoresizingMaskIntoConstraints = NO;
-    if (@available(iOS 15.0, *)) {
-        UIButtonConfiguration *okConfig = [UIButtonConfiguration filledButtonConfiguration];
-        okConfig.baseBackgroundColor = zs_accent_green_color();
-        okConfig.baseForegroundColor = UIColor.blackColor;
-        okConfig.attributedTitle = [[NSAttributedString alloc] initWithString:@"OK" attributes:@{NSFontAttributeName: zs_mono_font(18, UIFontWeightBold)}];
-        self.tutorialOKButton.configuration = okConfig;
-    } else {
-        [self.tutorialOKButton setTitle:@"OK" forState:UIControlStateNormal];
-        self.tutorialOKButton.titleLabel.font = zs_mono_font(18, UIFontWeightBold);
-        [self.tutorialOKButton setTitleColor:UIColor.blackColor forState:UIControlStateNormal];
-        self.tutorialOKButton.backgroundColor = zs_accent_green_color();
-        self.tutorialOKButton.layer.cornerRadius = 14;
-        self.tutorialOKButton.clipsToBounds = YES;
-    }
+    zs_style_button_as_solid_glass_with_font(self.tutorialOKButton, @"OK", zs_accent_green_color(), zs_mono_font(18, UIFontWeightBold));
     self.tutorialOKButton.enabled = NO;
     self.tutorialOKButton.alpha = 0.38;
     [self.tutorialOKButton addTarget:self action:@selector(zs_tutorialOKTapped) forControlEvents:UIControlEventTouchUpInside];
