@@ -472,12 +472,6 @@ static void zs_style_button_as_native_glass(UIButton *button, NSString *title, U
 }
 
 static void zs_style_button_as_liquid_glass_fallback_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
-    SEL setAutoUpdatesConfig = NSSelectorFromString(@"setAutomaticallyUpdatesConfiguration:");
-    if ([button respondsToSelector:setAutoUpdatesConfig]) {
-        ((void (*)(id, SEL, BOOL))objc_msgSend)(button, setAutoUpdatesConfig, NO);
-    }
-    zs_clear_button_configuration(button);
-
     NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
     paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
     NSDictionary *titleAttributes = @{
@@ -509,7 +503,7 @@ static void zs_style_button_mirroring_glass_state(UIButton *button, NSString *ti
 }
 
 static UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSString *title, UIColor *tintColor, UIFont *font) {
-    UIButton *fallback = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *fallback = [UIButton buttonWithType:UIButtonTypeCustom];
     fallback.translatesAutoresizingMaskIntoConstraints = NO;
     zs_style_button_as_liquid_glass_fallback_with_font(fallback, title, tintColor, font);
     [primaryButton.superview addSubview:fallback];
