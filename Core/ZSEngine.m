@@ -767,14 +767,18 @@ static CADisplayLink *find_display_link(id appController) {
 
 static CADisplayLink *g_unityDisplayLink;
 
+static CADisplayLink *zs_refresh_unity_display_link(void) {
+    id appController = [[UIApplication sharedApplication] delegate];
+    if (!appController) return g_unityDisplayLink;
+    CADisplayLink *link = find_display_link(appController);
+    if (link) g_unityDisplayLink = link;
+    return g_unityDisplayLink;
+}
+
 static BOOL zs_set_application_target_fps(int32_t fps) {
-    if (!g_unityDisplayLink) {
-        id appController = [[UIApplication sharedApplication] delegate];
-        if (!appController) return NO;
-        g_unityDisplayLink = find_display_link(appController);
-        if (!g_unityDisplayLink) return NO;
-    }
-    g_unityDisplayLink.preferredFramesPerSecond = fps;
+    CADisplayLink *link = zs_refresh_unity_display_link();
+    if (!link) return NO;
+    link.preferredFramesPerSecond = fps;
     return YES;
 }
 
@@ -877,7 +881,7 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (!zs_set_application_target_fps((int32_t)self.targetFPS)) return;
     if (!g_unityDisplayLink) return;
 
-    self.lastObservedPreferredFPS = g_unityDisplayLink.preferredFramesPerSecond;
+    self.lastObservedPreferredFPS = zs_refresh_unity_display_link().preferredFramesPerSecond;
 
     self.fpsWatchdogTimer = [NSTimer timerWithTimeInterval:1.0
                                                       target:self
@@ -889,10 +893,14 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 }
 
 - (void)fpsWatchdogTick {
-    if (!g_unityDisplayLink) return;
+    CADisplayLink *previousLink = g_unityDisplayLink;
+    CADisplayLink *link = zs_refresh_unity_display_link();
+    if (!link) return;
 
-    NSInteger current = g_unityDisplayLink.preferredFramesPerSecond;
-    if (current == self.lastObservedPreferredFPS) return;
+    BOOL linkWasReplaced = (link != previousLink);
+
+    NSInteger current = link.preferredFramesPerSecond;
+    if (!linkWasReplaced && current == self.lastObservedPreferredFPS) return;
     self.lastObservedPreferredFPS = current;
 
     if (self.panelOpen) return;
@@ -902,9 +910,9 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (!isBattle && self.manualOverrideActiveMenu) return;
 
     NSInteger expected = isBattle ? self.combatFPS : self.menuFPS;
-    if (current == expected) return;
+    if (!linkWasReplaced && current == expected) return;
 
-    ZLog(@"[ZSScripts] preferredFramesPerSecond drifted to %ld (expected %ld, isBattle=%d) - reapplying settings", (long)current, (long)expected, isBattle);
+    ZLog(@"[ZSScripts] preferredFramesPerSecond drifted to %ld (expected %ld, isBattle=%d, linkReplaced=%d) - reapplying settings", (long)current, (long)expected, isBattle, linkWasReplaced);
     zs_reapply_all_settings();
 }
 
