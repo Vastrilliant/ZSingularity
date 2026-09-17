@@ -472,9 +472,25 @@ static void zs_style_button_as_native_glass(UIButton *button, NSString *title, U
 }
 
 static void zs_style_button_as_liquid_glass_fallback_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
+    SEL setAutoUpdatesConfig = NSSelectorFromString(@"setAutomaticallyUpdatesConfiguration:");
+    if ([button respondsToSelector:setAutoUpdatesConfig]) {
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(button, setAutoUpdatesConfig, NO);
+    }
+    zs_clear_button_configuration(button);
+
+    NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
+    paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
+    NSDictionary *titleAttributes = @{
+        NSFontAttributeName: font ?: [UIFont systemFontOfSize:13],
+        NSForegroundColorAttributeName: tintColor ?: UIColor.whiteColor,
+        NSParagraphStyleAttributeName: paragraphStyle,
+    };
+    NSAttributedString *attributedTitle = [[NSAttributedString alloc] initWithString:title ?: @"" attributes:titleAttributes];
+    [button setAttributedTitle:attributedTitle forState:UIControlStateNormal];
     [button setTitle:title forState:UIControlStateNormal];
     if (tintColor) [button setTitleColor:tintColor forState:UIControlStateNormal];
     if (font) button.titleLabel.font = font;
+    button.tintColor = tintColor ?: UIColor.whiteColor;
     button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
     button.layer.borderWidth = 1;
     button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
