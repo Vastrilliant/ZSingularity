@@ -457,9 +457,9 @@ static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString
     [button setTitle:title forState:UIControlStateNormal];
     if (tintColor) [button setTitleColor:tintColor forState:UIControlStateNormal];
     if (font) button.titleLabel.font = font;
-    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
     button.layer.borderWidth = 1;
-    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
     button.layer.cornerCurve = kCACornerCurveContinuous;
 
     button.layer.cornerRadius = 200;
@@ -557,9 +557,9 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
     zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
-    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
     button.layer.borderWidth = 1;
-    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
     button.layer.cornerCurve = kCACornerCurveContinuous;
     button.layer.cornerRadius = 200;
     button.clipsToBounds = YES;
@@ -599,10 +599,10 @@ static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *imag
     zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
-    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
     button.layer.cornerRadius = 9;
     button.layer.borderWidth = 1;
-    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
     button.clipsToBounds = YES;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
@@ -6673,7 +6673,14 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
     docsContent.spacing = 18;
     [self.docsScrollView addSubview:docsContent];
 
-    self.docsBodyLabel = [[UITextView alloc] init];
+    NSTextStorage *docsBodyTextStorage = [[NSTextStorage alloc] init];
+    ZSDocsQuoteLayoutManager *docsBodyLayoutManager = [[ZSDocsQuoteLayoutManager alloc] init];
+    [docsBodyTextStorage addLayoutManager:docsBodyLayoutManager];
+    NSTextContainer *docsBodyTextContainer = [[NSTextContainer alloc] initWithSize:CGSizeZero];
+    docsBodyTextContainer.widthTracksTextView = YES;
+    [docsBodyLayoutManager addTextContainer:docsBodyTextContainer];
+
+    self.docsBodyLabel = [[UITextView alloc] initWithFrame:CGRectZero textContainer:docsBodyTextContainer];
     self.docsBodyLabel.translatesAutoresizingMaskIntoConstraints = NO;
     self.docsBodyLabel.editable = NO;
     self.docsBodyLabel.selectable = YES;

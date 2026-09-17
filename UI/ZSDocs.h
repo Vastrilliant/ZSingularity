@@ -317,6 +317,50 @@ static void zs_docs_fetch_image(NSString *filename, void (^completion)(UIImage *
 
 #pragma mark - Minimal markdown renderer
 
+static NSString * const kZSDocsQuoteBarColorAttributeName = @"ZSDocsQuoteBarColor";
+static const CGFloat kZSDocsQuoteBarWidth = 2.5;
+static const CGFloat kZSDocsQuoteBarIndent = 14;
+
+@interface ZSDocsQuoteLayoutManager : NSLayoutManager
+@end
+
+@implementation ZSDocsQuoteLayoutManager
+
+- (void)drawBackgroundForGlyphRange:(NSRange)glyphsToShow atPoint:(CGPoint)origin {
+    [super drawBackgroundForGlyphRange:glyphsToShow atPoint:origin];
+
+    NSTextStorage *textStorage = self.textStorage;
+    NSTextContainer *textContainer = self.textContainers.firstObject;
+    if (!textStorage || !textContainer) return;
+
+    NSRange characterRange = [self characterRangeForGlyphRange:glyphsToShow actualGlyphRange:NULL];
+
+    [textStorage enumerateAttribute:kZSDocsQuoteBarColorAttributeName
+                             inRange:characterRange
+                             options:0
+                          usingBlock:^(UIColor *color, NSRange range, BOOL *stop) {
+        if (![color isKindOfClass:[UIColor class]] || range.length == 0) return;
+
+        NSRange runGlyphRange = [self glyphRangeForCharacterRange:range actualCharacterRange:NULL];
+
+        __block CGRect unionRect = CGRectNull;
+        [self enumerateLineFragmentsForGlyphRange:runGlyphRange usingBlock:^(CGRect rect, CGRect usedRect, NSTextContainer *container, NSRange lineGlyphRange, BOOL *innerStop) {
+            unionRect = CGRectIsNull(unionRect) ? usedRect : CGRectUnion(unionRect, usedRect);
+        }];
+        if (CGRectIsNull(unionRect)) return;
+
+        CGRect barRect = CGRectMake(origin.x + textContainer.lineFragmentPadding,
+                                     origin.y + unionRect.origin.y,
+                                     kZSDocsQuoteBarWidth,
+                                     unionRect.size.height);
+        UIBezierPath *barPath = [UIBezierPath bezierPathWithRoundedRect:barRect cornerRadius:kZSDocsQuoteBarWidth / 2];
+        [color setFill];
+        [barPath fill];
+    }];
+}
+
+@end
+
 static NSAttributedString *zs_render_markdown_inline(NSString *line, UIFont *baseFont, UIColor *baseColor) {
     NSMutableAttributedString *result = [[NSMutableAttributedString alloc] init];
     NSUInteger length = line.length;
@@ -398,7 +442,7 @@ static NSAttributedString *zs_render_markdown_inline(NSString *line, UIFont *bas
 }
 
 static BOOL zs_docs_admonition_for_marker(NSString *marker, NSString **outLabel, UIColor **outColor, NSString **outSymbolName) {
-    NSString *normalized = [[marker stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] uppercaseString];
+    NSString *normalized = [[marker stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
 
     if ([normalized isEqualToString:@"[!NOTE]"]) {
         if (outLabel) *outLabel = @"Note";
@@ -439,7 +483,10 @@ static NSString *zs_docs_strip_blockquote_marker(NSString *trimmedLine) {
     return [trimmedLine substringFromIndex:1];
 }
 
-static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat contentWidth) {
+static NSAttributedString *zs_render_markdown(NSString *markdownInput, CGFloat contentWidth) {
+    NSString *markdown = [[markdownInput stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+        stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+
     NSMutableAttributedString *doc = [[NSMutableAttributedString alloc] init];
 
     UIColor *bodyColor = [UIColor colorWithWhite:1 alpha:0.82];
@@ -474,16 +521,22 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
     NSMutableParagraphStyle *calloutTitleParagraph = [NSMutableParagraphStyle new];
     calloutTitleParagraph.paragraphSpacingBefore = 8;
     calloutTitleParagraph.paragraphSpacing = 2;
+    calloutTitleParagraph.headIndent = kZSDocsQuoteBarIndent;
+    calloutTitleParagraph.firstLineHeadIndent = kZSDocsQuoteBarIndent;
 
     NSMutableParagraphStyle *calloutBodyParagraph = [NSMutableParagraphStyle new];
     calloutBodyParagraph.lineSpacing = 2;
     calloutBodyParagraph.paragraphSpacingBefore = 0;
     calloutBodyParagraph.paragraphSpacing = 8;
+    calloutBodyParagraph.headIndent = kZSDocsQuoteBarIndent;
+    calloutBodyParagraph.firstLineHeadIndent = kZSDocsQuoteBarIndent;
 
     NSMutableParagraphStyle *quoteParagraph = [NSMutableParagraphStyle new];
     quoteParagraph.lineSpacing = 2;
     quoteParagraph.paragraphSpacingBefore = 0;
     quoteParagraph.paragraphSpacing = 4;
+    quoteParagraph.headIndent = kZSDocsQuoteBarIndent;
+    quoteParagraph.firstLineHeadIndent = kZSDocsQuoteBarIndent;
 
     NSArray<NSString *> *lines = [markdown componentsSeparatedByString:@"\n"];
     NSUInteger lineCount = lines.count;
@@ -500,11 +553,6 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
     NSAttributedString *(^ruleString)(NSParagraphStyle *) = ^(NSParagraphStyle *style) {
         return [[NSAttributedString alloc] initWithString:@"\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014"
             attributes:@{NSFontAttributeName: bodyFont, NSForegroundColorAttributeName: dimColor}];
-    };
-
-    NSAttributedString *(^barPrefix)(UIColor *) = ^(UIColor *color) {
-        return [[NSAttributedString alloc] initWithString:@"\u258e  "
-            attributes:@{NSFontAttributeName: bodyFont, NSForegroundColorAttributeName: color}];
     };
 
     for (NSUInteger lineIndex = 0; lineIndex < lineCount; lineIndex++) {
@@ -541,15 +589,24 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
             NSUInteger scan = lineIndex + 1;
             for (; scan < lineCount; scan++) {
                 NSString *nextTrimmed = [lines[scan] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-                if (![nextTrimmed hasPrefix:@">"]) break;
-                [quoteBodyLines addObject:zs_docs_strip_blockquote_marker(nextTrimmed)];
+                if ([nextTrimmed hasPrefix:@">"]) {
+                    [quoteBodyLines addObject:zs_docs_strip_blockquote_marker(nextTrimmed)];
+                    continue;
+                }
+                if (nextTrimmed.length == 0) break;
+                if ([nextTrimmed hasPrefix:@"#"] || [nextTrimmed hasPrefix:@"```"] ||
+                    [nextTrimmed hasPrefix:@"- "] || [nextTrimmed hasPrefix:@"* "] ||
+                    [nextTrimmed hasPrefix:@"!["] || [nextTrimmed isEqualToString:@"---"]) break;
+                [quoteBodyLines addObject:nextTrimmed];
             }
             lineIndex = scan - 1;
+
+            UIColor *barColor = isAdmonition ? calloutColor : dimColor;
+            NSUInteger blockStartLocation = doc.length;
 
             if (isAdmonition) {
                 UIImage *symbolImage = [UIImage systemImageNamed:calloutSymbolName];
                 NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
-                [title appendAttributedString:barPrefix(calloutColor)];
                 if (symbolImage) {
                     UIImage *tintedSymbol = [symbolImage imageWithTintColor:calloutColor renderingMode:UIImageRenderingModeAlwaysOriginal];
                     NSTextAttachment *iconAttachment = [[NSTextAttachment alloc] init];
@@ -563,30 +620,29 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
                     attributes:@{NSFontAttributeName: calloutTitleFont, NSForegroundColorAttributeName: calloutColor}]];
                 appendLine(title, calloutTitleParagraph);
 
-                if (quoteBodyLines.count == 0) continue;
                 for (NSUInteger i = 0; i < quoteBodyLines.count; i++) {
                     NSString *bodyLine = quoteBodyLines[i];
-                    NSMutableAttributedString *calloutBody = [[NSMutableAttributedString alloc] init];
-                    [calloutBody appendAttributedString:barPrefix(calloutColor)];
-                    if (bodyLine.length > 0) {
-                        [calloutBody appendAttributedString:zs_render_markdown_inline(bodyLine, bodyFont, bodyColor)];
-                    }
+                    NSAttributedString *calloutBody = bodyLine.length > 0
+                        ? zs_render_markdown_inline(bodyLine, bodyFont, bodyColor)
+                        : [[NSAttributedString alloc] initWithString:@" "];
                     BOOL isLast = (i == quoteBodyLines.count - 1);
                     appendLine(calloutBody, isLast ? calloutBodyParagraph : quoteParagraph);
                 }
-                continue;
+            } else {
+                [quoteBodyLines insertObject:firstContent atIndex:0];
+                for (NSUInteger i = 0; i < quoteBodyLines.count; i++) {
+                    NSString *bodyLine = quoteBodyLines[i];
+                    NSAttributedString *quoteLine = bodyLine.length > 0
+                        ? zs_render_markdown_inline(bodyLine, bodyFont, dimColor)
+                        : [[NSAttributedString alloc] initWithString:@" "];
+                    BOOL isLast = (i == quoteBodyLines.count - 1);
+                    appendLine(quoteLine, isLast ? calloutBodyParagraph : quoteParagraph);
+                }
             }
 
-            [quoteBodyLines insertObject:firstContent atIndex:0];
-            for (NSUInteger i = 0; i < quoteBodyLines.count; i++) {
-                NSString *bodyLine = quoteBodyLines[i];
-                NSMutableAttributedString *quoteLine = [[NSMutableAttributedString alloc] init];
-                [quoteLine appendAttributedString:barPrefix(dimColor)];
-                if (bodyLine.length > 0) {
-                    [quoteLine appendAttributedString:zs_render_markdown_inline(bodyLine, bodyFont, dimColor)];
-                }
-                BOOL isLast = (i == quoteBodyLines.count - 1);
-                appendLine(quoteLine, isLast ? calloutBodyParagraph : quoteParagraph);
+            NSRange blockRange = NSMakeRange(blockStartLocation, doc.length - blockStartLocation);
+            if (blockRange.length > 0) {
+                [doc addAttribute:kZSDocsQuoteBarColorAttributeName value:barColor range:blockRange];
             }
             continue;
         }
