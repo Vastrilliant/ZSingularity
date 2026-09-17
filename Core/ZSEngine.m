@@ -784,14 +784,6 @@ static void *g_cachedGameManagerInstance;
 static int g_ticksSinceInstanceRefresh;
 static const int kInstanceRefreshTicks = 8;
 
-static int g_ticksSinceLoadCheck;
-static const int kLoadCheckThrottleTicks = 2;
-
-static int g_loadCheckWindowTicksRemaining;
-static const int kLoadCheckWindowTicks = 20;
-
-static int32_t g_lastGlobalSceneStateForReapply = INT32_MIN;
-
 static void *gZSBootMainMenuUserInfoCardClass;
 static BOOL gZSBootIntoMainMenuReapplyDone;
 
@@ -842,90 +834,10 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     return YES;
 }
 
-static BOOL zs_try_read_is_loading_screen_present(BOOL *outIsLoading) {
-    void *objectKlass  = zs_class("UnityEngine", "Object", "CoreModule");
-    void *loadingKlass = zs_class("", "LoadingSceneManager", "Assembly-CSharp");
-    if (!objectKlass || !loadingKlass) return NO;
-
-    const void *findMethod = zs_method(objectKlass, "FindObjectOfType", 2);
-    if (!findMethod) return NO;
-
-    void *typeObj = zs_type_object(loadingKlass);
-    if (!typeObj) return NO;
-
-    BOOL includeInactive = YES;
-    void *exc = NULL;
-    void *args[2] = { typeObj, &includeInactive };
-    void *result = [IL2CppBridge invokeMethod:findMethod onInstance:NULL args:args outException:&exc];
-    if (exc) {
-        static BOOL loggedOnce = NO;
-        if (!loggedOnce) {
-            ZLog(@"[ZSScripts] FindObjectOfType(LoadingSceneManager, true) threw - loading-screen presence detection is not working, falling back to battle-exit heuristic only");
-            loggedOnce = YES;
-        }
-        return NO;
-    }
-
-    *outIsLoading = (result != NULL);
-    return YES;
-}
-
-#pragma mark - Scene-loaded event hook (replaces the LoadingSceneManager poll)
-
-static BOOL g_sceneLoadedHookInstalled = NO;
-
-static void zs_on_scene_loaded_trampoline(void) __attribute__((unused));
-static void zs_on_scene_loaded_trampoline(void) {
-    ZLog(@"[ZSScripts] SceneManager.sceneLoaded fired - reapplying settings");
-    zs_reapply_all_settings();
-}
-
-static void zs_install_scene_loaded_hook(void) {
-    ZLog(@"[ZSScripts] scene-loaded event hook disabled (native delegate pointer isn't safely callable by IL2CPP on this ABI) - using polling fallback");
-#if 0
-    void *sceneManagerClass = zs_class("UnityEngine.SceneManagement", "SceneManager", "CoreModule");
-    if (!sceneManagerClass) return;
-
-    const void *addSceneLoaded = zs_method(sceneManagerClass, "add_sceneLoaded", 1);
-    if (!addSceneLoaded) return;
-
-    const void *paramType = [IL2CppBridge paramTypeForMethod:addSceneLoaded index:0];
-    void *delegateClass = paramType ? [IL2CppBridge classFromType:paramType] : NULL;
-    if (!delegateClass) return;
-
-    const void *ctor = [IL2CppBridge methodOnClass:delegateClass name:".ctor" argCount:2];
-    if (!ctor) return;
-
-    void *delegateInstance = [IL2CppBridge newObjectForClass:delegateClass];
-    if (!delegateInstance) return;
-
-    void *methodPtr = (void *)&zs_on_scene_loaded_trampoline;
-    void *ctorExc = NULL;
-    void *ctorArgs[2] = { NULL, &methodPtr };
-    [IL2CppBridge invokeMethod:ctor onInstance:delegateInstance args:ctorArgs outException:&ctorExc];
-    if (ctorExc) {
-        ZLog(@"[ZSScripts] scene-loaded delegate construction threw - falling back to polling");
-        return;
-    }
-
-    void *addExc = NULL;
-    void *addArgs[1] = { delegateInstance };
-    [IL2CppBridge invokeMethod:addSceneLoaded onInstance:NULL args:addArgs outException:&addExc];
-    if (addExc) {
-        ZLog(@"[ZSScripts] SceneManager.add_sceneLoaded threw - falling back to polling");
-        return;
-    }
-
-    g_sceneLoadedHookInstalled = YES;
-    ZLog(@"[ZSScripts] scene-loaded event hook installed - loading-screen poll disabled");
-#endif
-}
-
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
-
-@property (nonatomic, assign) BOOL wasLoading;
+@property (nonatomic, assign) BOOL displayLinkKVOInstalled;
 @end
 
 @implementation FPS120Controller
@@ -945,16 +857,48 @@ static void zs_install_scene_loaded_hook(void) {
 
 - (BOOL)start {
     if (!self.battleStatePollTimer) {
-        zs_install_scene_loaded_hook();
-
         self.battleStatePollTimer = [NSTimer timerWithTimeInterval:0.5
                                                               target:self
                                                             selector:@selector(battleStatePoll)
                                                             userInfo:nil
                                                              repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self installDisplayLinkKVO];
+        });
     }
     return zs_set_application_target_fps((int32_t)self.targetFPS);
+}
+
+- (void)installDisplayLinkKVO {
+    if (self.displayLinkKVOInstalled) return;
+    if (!zs_set_application_target_fps((int32_t)self.targetFPS)) return;
+    if (!g_unityDisplayLink) return;
+
+    [g_unityDisplayLink addObserver:self forKeyPath:@"preferredFramesPerSecond" options:NSKeyValueObservingOptionNew context:NULL];
+    self.displayLinkKVOInstalled = YES;
+    ZLog(@"[ZSScripts] preferredFramesPerSecond KVO observer installed");
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey, id> *)change context:(void *)context {
+    if (![keyPath isEqualToString:@"preferredFramesPerSecond"] || object != g_unityDisplayLink) {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+        return;
+    }
+
+    if (self.panelOpen) return;
+
+    BOOL isBattle = self.isInBattle;
+    if (isBattle && self.manualOverrideActiveCombat) return;
+    if (!isBattle && self.manualOverrideActiveMenu) return;
+
+    NSInteger expected = isBattle ? self.combatFPS : self.menuFPS;
+    NSInteger newValue = [change[NSKeyValueChangeNewKey] integerValue];
+    if (newValue == expected) return;
+
+    ZLog(@"[ZSScripts] preferredFramesPerSecond drifted to %ld (expected %ld, isBattle=%d) - reapplying settings", (long)newValue, (long)expected, isBattle);
+    zs_reapply_all_settings();
 }
 
 - (void)battleStatePoll {
@@ -966,42 +910,8 @@ static void zs_install_scene_loaded_hook(void) {
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
 
-    int32_t currentGlobalSceneState = 0;
-    BOOL haveGlobalSceneState = ZSGlobalScene_Current(&currentGlobalSceneState);
-    BOOL isFirstGlobalSceneObservation = (haveGlobalSceneState && g_lastGlobalSceneStateForReapply == INT32_MIN);
-    BOOL globalSceneStateChanged = (haveGlobalSceneState
-                                     && (isFirstGlobalSceneObservation
-                                         || currentGlobalSceneState != g_lastGlobalSceneStateForReapply));
-    if (haveGlobalSceneState) g_lastGlobalSceneStateForReapply = currentGlobalSceneState;
-
-    if (globalSceneStateChanged || (haveBattleState && wasInBattle && !isBattle)) {
-        g_loadCheckWindowTicksRemaining = kLoadCheckWindowTicks;
-        self.wasLoading = NO;
-    }
-
-    if (!g_sceneLoadedHookInstalled && g_loadCheckWindowTicksRemaining > 0) {
-        g_loadCheckWindowTicksRemaining--;
-        BOOL shouldCheckLoad = (g_ticksSinceLoadCheck == 0);
-        g_ticksSinceLoadCheck = (g_ticksSinceLoadCheck + 1) % kLoadCheckThrottleTicks;
-
-        if (shouldCheckLoad) {
-            BOOL isLoading = NO;
-            BOOL haveLoadState = zs_try_read_is_loading_screen_present(&isLoading);
-            if (haveLoadState) {
-                if (self.wasLoading && !isLoading) {
-                    ZLog(@"[ZSScripts] loading screen torn down (LoadingSceneManager gone, isBattle=%d) - reapplying settings", isBattle);
-                    zs_reapply_all_settings();
-                    if (wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
-                    g_loadCheckWindowTicksRemaining = 0;
-                }
-                self.wasLoading = isLoading;
-            } else if (haveBattleState && wasInBattle && !isBattle) {
-                ZLog(@"[ZSScripts] loading screen detected (battle-exit fallback, LoadingSceneManager lookup unavailable) - reapplying settings");
-                zs_reapply_all_settings();
-                if (g_autoClearPortraitCacheOnBattleExit) zs_clear_guide_portrait_cache();
-                g_loadCheckWindowTicksRemaining = 0;
-            }
-        }
+    if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
+        zs_clear_guide_portrait_cache();
     }
 
     if (!haveBattleState) return;
@@ -1080,6 +990,9 @@ static void zs_install_scene_loaded_hook(void) {
 
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
+    if (self.displayLinkKVOInstalled) {
+        [g_unityDisplayLink removeObserver:self forKeyPath:@"preferredFramesPerSecond"];
+    }
 }
 
 @end
@@ -2838,15 +2751,21 @@ static void ZSUID_HotFieldTick(void) {
     }
     if (!gUIDRedactorEnabledCache) return;
 
-    int32_t sceneState = ZSGlobalSceneStateMain;
+    int32_t sceneState = -1;
     BOOL sceneStateKnown = ZSGlobalScene_Current(&sceneState);
 
-    if (sceneStateKnown && sceneState != gUIDHotLastSceneState) {
+    if (!sceneStateKnown || sceneState != ZSGlobalSceneStateMain) {
+        if (sceneStateKnown && sceneState != gUIDHotLastSceneState) {
+            gUIDHotLastSceneState = sceneState;
+            ZSUID_HotFieldInvalidate();
+        }
+        return;
+    }
+
+    if (sceneState != gUIDHotLastSceneState) {
         gUIDHotLastSceneState = sceneState;
         ZSUID_HotFieldInvalidate();
     }
-
-    if (sceneStateKnown && sceneState != ZSGlobalSceneStateMain) return;
 
     if (gUIDHotTMPInstance && !ZSUID_UnityObjectIsAlive(gUIDHotTMPInstance)) {
         ZSUID_HotFieldInvalidate();
