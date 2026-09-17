@@ -17,6 +17,7 @@ static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
+static BOOL mt_get_static_int(const char *ns, const char *klassName, const char *assembly, const char *getter, int32_t *outValue);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -837,7 +838,8 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
-@property (nonatomic, assign) BOOL displayLinkKVOInstalled;
+@property (nonatomic, strong) CADisplayLink *fpsWatchdogLink;
+@property (nonatomic, assign) NSInteger lastObservedTargetFrameRate;
 @end
 
 @implementation FPS120Controller
@@ -865,27 +867,29 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self installDisplayLinkKVO];
+            [self installFPSWatchdog];
         });
     }
     return zs_set_application_target_fps((int32_t)self.targetFPS);
 }
 
-- (void)installDisplayLinkKVO {
-    if (self.displayLinkKVOInstalled) return;
+- (void)installFPSWatchdog {
+    if (self.fpsWatchdogLink) return;
     if (!zs_set_application_target_fps((int32_t)self.targetFPS)) return;
-    if (!g_unityDisplayLink) return;
 
-    [g_unityDisplayLink addObserver:self forKeyPath:@"preferredFramesPerSecond" options:NSKeyValueObservingOptionNew context:NULL];
-    self.displayLinkKVOInstalled = YES;
-    ZLog(@"[ZSScripts] preferredFramesPerSecond KVO observer installed");
+    int32_t initial = 0;
+    self.lastObservedTargetFrameRate = mt_get_static_int("UnityEngine", "Application", "CoreModule", "get_targetFrameRate", &initial) ? initial : self.targetFPS;
+
+    self.fpsWatchdogLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(fpsWatchdogTick)];
+    [self.fpsWatchdogLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    ZLog(@"[ZSScripts] Application.targetFrameRate watchdog installed");
 }
 
-- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey, id> *)change context:(void *)context {
-    if (![keyPath isEqualToString:@"preferredFramesPerSecond"] || object != g_unityDisplayLink) {
-        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
-        return;
-    }
+- (void)fpsWatchdogTick {
+    int32_t current = 0;
+    if (!mt_get_static_int("UnityEngine", "Application", "CoreModule", "get_targetFrameRate", &current)) return;
+    if (current == self.lastObservedTargetFrameRate) return;
+    self.lastObservedTargetFrameRate = current;
 
     if (self.panelOpen) return;
 
@@ -894,10 +898,9 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (!isBattle && self.manualOverrideActiveMenu) return;
 
     NSInteger expected = isBattle ? self.combatFPS : self.menuFPS;
-    NSInteger newValue = [change[NSKeyValueChangeNewKey] integerValue];
-    if (newValue == expected) return;
+    if (current == expected) return;
 
-    ZLog(@"[ZSScripts] preferredFramesPerSecond drifted to %ld (expected %ld, isBattle=%d) - reapplying settings", (long)newValue, (long)expected, isBattle);
+    ZLog(@"[ZSScripts] Application.targetFrameRate drifted to %d (expected %ld, isBattle=%d) - reapplying settings", current, (long)expected, isBattle);
     zs_reapply_all_settings();
 }
 
@@ -990,9 +993,7 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
-    if (self.displayLinkKVOInstalled) {
-        [g_unityDisplayLink removeObserver:self forKeyPath:@"preferredFramesPerSecond"];
-    }
+    [self.fpsWatchdogLink invalidate];
 }
 
 @end
