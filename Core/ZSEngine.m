@@ -17,6 +17,8 @@ static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
+static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing);
+static void zs_reapply_all_settings_except_experimental(void);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -842,7 +844,10 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
 @property (nonatomic, strong) NSTimer *fpsWatchdogTimer;
-@property (nonatomic, assign) NSInteger lastObservedPreferredFPS;
+@property (nonatomic, assign) int32_t lastObservedSceneState;
+@property (nonatomic, assign) BOOL lastObservedSceneStateKnown;
+@property (nonatomic, assign) BOOL lastObservedHttpProcessing;
+@property (nonatomic, assign) BOOL lastObservedHttpProcessingKnown;
 @end
 
 @implementation FPS120Controller
@@ -881,27 +886,48 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (!zs_set_application_target_fps((int32_t)self.targetFPS)) return;
     if (!g_unityDisplayLink) return;
 
-    self.lastObservedPreferredFPS = zs_refresh_unity_display_link().preferredFramesPerSecond;
+    int32_t sceneState = 0;
+    self.lastObservedSceneStateKnown = ZSGlobalScene_Current(&sceneState);
+    self.lastObservedSceneState = sceneState;
 
-    self.fpsWatchdogTimer = [NSTimer timerWithTimeInterval:1.0
+    BOOL processing = NO;
+    self.lastObservedHttpProcessingKnown = ZSHttpRequest_IsProcessing(&processing);
+    self.lastObservedHttpProcessing = processing;
+
+    self.fpsWatchdogTimer = [NSTimer timerWithTimeInterval:0.1
                                                       target:self
                                                     selector:@selector(fpsWatchdogTick)
                                                     userInfo:nil
                                                      repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.fpsWatchdogTimer forMode:NSRunLoopCommonModes];
-    ZLog(@"[ZSScripts] preferredFramesPerSecond watchdog installed");
+    ZLog(@"[ZSScripts] settings reapply watchdog installed");
 }
 
 - (void)fpsWatchdogTick {
-    CADisplayLink *previousLink = g_unityDisplayLink;
+    BOOL sceneChanged = NO;
+    int32_t sceneState = 0;
+    if (ZSGlobalScene_Current(&sceneState)) {
+        if (self.lastObservedSceneStateKnown && sceneState != self.lastObservedSceneState) sceneChanged = YES;
+        self.lastObservedSceneState = sceneState;
+        self.lastObservedSceneStateKnown = YES;
+    }
+
+    BOOL httpChanged = NO;
+    BOOL processing = NO;
+    if (ZSHttpRequest_IsProcessing(&processing)) {
+        if (self.lastObservedHttpProcessingKnown && processing != self.lastObservedHttpProcessing) httpChanged = YES;
+        self.lastObservedHttpProcessing = processing;
+        self.lastObservedHttpProcessingKnown = YES;
+    }
+
+    if (!sceneChanged && !httpChanged) return;
+
     CADisplayLink *link = zs_refresh_unity_display_link();
-    if (!link) return;
-
-    BOOL linkWasReplaced = (link != previousLink);
-
-    NSInteger current = link.preferredFramesPerSecond;
-    if (!linkWasReplaced && current == self.lastObservedPreferredFPS) return;
-    self.lastObservedPreferredFPS = current;
+    if (!link) {
+        ZLog(@"[ZSScripts] CADisplayLink ivar not found (sceneChanged=%d httpChanged=%d) - reapplying settings", sceneChanged, httpChanged);
+        zs_reapply_all_settings_except_experimental();
+        return;
+    }
 
     if (self.panelOpen) return;
 
@@ -910,10 +936,11 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (!isBattle && self.manualOverrideActiveMenu) return;
 
     NSInteger expected = isBattle ? self.combatFPS : self.menuFPS;
-    if (!linkWasReplaced && current == expected) return;
+    NSInteger current = link.preferredFramesPerSecond;
+    if (current == expected) return;
 
-    ZLog(@"[ZSScripts] preferredFramesPerSecond drifted to %ld (expected %ld, isBattle=%d, linkReplaced=%d) - reapplying settings", (long)current, (long)expected, isBattle, linkWasReplaced);
-    zs_reapply_all_settings();
+    ZLog(@"[ZSScripts] preferredFramesPerSecond is %ld, expected %ld (sceneChanged=%d httpChanged=%d) - reapplying settings", (long)current, (long)expected, sceneChanged, httpChanged);
+    zs_reapply_all_settings_except_experimental();
 }
 
 - (void)battleStatePoll {
@@ -1012,7 +1039,7 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 
 #pragma mark - Apply-everything entry points
 
-void zs_reapply_all_settings(void) {
+static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     ZSCustomGreeting_HotFieldInvalidate();
     ZSUID_HotFieldInvalidate();
 
@@ -1034,7 +1061,9 @@ void zs_reapply_all_settings(void) {
     zs_camera_data_set_int("set_antialiasingQuality", zs_step_value(kAAQualitySteps, 3, g_aaQualityIndex));
     zs_camera_data_set_bool("set_dithering", g_ditheringOn);
 
-    zs_exp_apply_key(@"RenderTextureMemorylessMode");
+    if (includeExperimental) {
+        zs_exp_apply_key(@"RenderTextureMemorylessMode");
+    }
 
     zs_apply_particle_key(@"ParticleAlignment");
     zs_apply_particle_key(@"ParticleRenderMode");
@@ -1043,6 +1072,14 @@ void zs_reapply_all_settings(void) {
     zs_apply_particle_key(@"ParticleMaxSize");
     zs_apply_particle_key(@"ParticleFreeformStretching");
     zs_apply_particle_max_particles_cap();
+}
+
+void zs_reapply_all_settings(void) {
+    zs_reapply_all_settings_internal(YES);
+}
+
+static void zs_reapply_all_settings_except_experimental(void) {
+    zs_reapply_all_settings_internal(NO);
 }
 
 void zs_reapply_post_fx(void) {
@@ -2219,6 +2256,32 @@ static BOOL ZSGlobalScene_Current(int32_t *outState) {
     if (![IL2CppBridge copyInstanceFieldValue:gZSGlobalSceneStateField onInstance:instance toBuffer:&state]) return NO;
 
     *outState = state;
+    return YES;
+}
+
+#pragma mark - HTTP Request Activity
+
+static void *gZSHttpApiRequesterClass;
+static void *gZSHttpProcessingField;
+
+static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing) {
+    if (!gZSHttpApiRequesterClass) {
+        gZSHttpApiRequesterClass = [IL2CppBridge classNamed:"HttpApiRequester" inNamespace:"Server" assemblyContains:"Assembly-CSharp"];
+        if (!gZSHttpApiRequesterClass) return NO;
+    }
+
+    void *instance = NULL;
+    if (![IL2CppBridge copyStaticFieldOnClass:gZSHttpApiRequesterClass name:"_instance" toBuffer:&instance] || !instance) return NO;
+
+    if (!gZSHttpProcessingField) {
+        gZSHttpProcessingField = [IL2CppBridge fieldNamed:"_isProcessing" onClass:gZSHttpApiRequesterClass];
+        if (!gZSHttpProcessingField) return NO;
+    }
+
+    BOOL processing = NO;
+    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpProcessingField onInstance:instance toBuffer:&processing]) return NO;
+
+    *outProcessing = processing;
     return YES;
 }
 
