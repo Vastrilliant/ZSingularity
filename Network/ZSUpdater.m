@@ -314,10 +314,16 @@ static void zs_update_find_release_by_tag(NSString *tag, NSUInteger page, NSStri
         for (NSDictionary *release in releases) {
             if (![release isKindOfClass:[NSDictionary class]]) continue;
             NSString *tagName = release[@"tag_name"];
-            if ([tagName isKindOfClass:[NSString class]] && [tagName isEqualToString:tag]) {
-                completion(release, nil);
-                return;
+            if (![tagName isKindOfClass:[NSString class]] || ![tagName isEqualToString:tag]) continue;
+
+            NSString *releaseTitle = [release[@"name"] isKindOfClass:[NSString class]] ? release[@"name"] : @"";
+            if ([releaseTitle rangeOfString:@"Nightly"].location == NSNotFound) {
+                ZLog(@"[ZSUpdateChecker] release tagged \"%@\" skipped - title \"%@\" doesn't contain \"Nightly\"", tag, releaseTitle);
+                continue;
             }
+
+            completion(release, nil);
+            return;
         }
 
         if (!hasNextPage || releases.count == 0) {
@@ -341,8 +347,14 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
         NSArray *releases = [root isKindOfClass:[NSArray class]] ? root : nil;
         for (NSDictionary *release in releases) {
             if (![release isKindOfClass:[NSDictionary class]]) continue;
+
             NSString *tagName = release[@"tag_name"];
-            if ([tagName isKindOfClass:[NSString class]] && [tagName isEqualToString:kZSNightlyReleaseTag]) continue;
+            BOOL isNightlyTag = [tagName isKindOfClass:[NSString class]] && [tagName isEqualToString:kZSNightlyReleaseTag];
+
+            BOOL isDraft = [release[@"draft"] isKindOfClass:[NSNumber class]] && [release[@"draft"] boolValue];
+            BOOL isPrerelease = [release[@"prerelease"] isKindOfClass:[NSNumber class]] && [release[@"prerelease"] boolValue];
+
+            if (isNightlyTag || isDraft || isPrerelease) continue;
             [accumulated addObject:release];
         }
 

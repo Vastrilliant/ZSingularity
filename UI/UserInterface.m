@@ -5603,6 +5603,9 @@ static const CGFloat kContentFadeHeight = 22;
     [reapplyButton addTarget:self action:@selector(reapplySettingsTapped) forControlEvents:UIControlEventTouchUpInside];
     UIView *resetReapplyRow = zs_make_grouped_action_pair_row(resetButton, reapplyButton);
 
+    UIButton *deleteSpecificAssetButton = zs_make_grouped_action_button(@"Delete Specific Asset", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
+    [deleteSpecificAssetButton addTarget:self action:@selector(deleteSpecificAssetTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIButton *hardResetButton = zs_make_grouped_action_button(@"Hard Assets Reset", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
     zs_attach_tap_to_confirm(hardResetButton, self,
         @"Hard Assets Reset?", @"This deletes every cached bundle, bank, backup, and Mod Asset Library entry, along with every game file ZSingularity has ever logged by path. This can't be undone.", @"Reset", YES, ^{
@@ -5618,6 +5621,7 @@ static const CGFloat kContentFadeHeight = 22;
     UIView *configActionsCard = zs_make_grouped_action_card(@[
         manualIndexButton,
         resetReapplyRow,
+        deleteSpecificAssetButton,
         hardResetButton,
         deleteProxyReleasesButton,
     ]);
@@ -7164,6 +7168,107 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             }
         });
     });
+}
+
+#pragma mark Config (Delete Specific Asset)
+
+- (void)deleteSpecificAssetTapped {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (!presenter) return;
+
+    UIAlertController *prompt = [UIAlertController alertControllerWithTitle:@"Delete Specific Asset"
+                                                                      message:@"Enter a filename, filename hash, or CAB identifier to search for in the index."
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+    [prompt addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = @"Filename, hash, or CAB identifier";
+        field.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.spellCheckingType = UITextSpellCheckingTypeNo;
+    }];
+    [prompt addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [prompt addAction:[UIAlertAction actionWithTitle:@"Search" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *trimmed = [(prompt.textFields.firstObject.text ?: @"")
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (trimmed.length == 0) return;
+        [weakSelf zs_searchAndConfirmDeleteAssetForQuery:trimmed];
+    }]];
+    [presenter presentViewController:prompt animated:YES completion:nil];
+}
+
+- (void)zs_searchAndConfirmDeleteAssetForQuery:(NSString *)query {
+    NSError *cabErr = nil;
+    NSString *matchedPath = [UnityCacheLocator locateBundlePathForCAB:query error:&cabErr];
+    if (matchedPath.length > 0) {
+        NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:matchedPath]];
+        [self zs_confirmDeleteAssetAtPath:matchedPath
+                                fileName:matchedPath.lastPathComponent
+                                    kind:@"Asset Bundle"
+                             displayPath:displayPath];
+        return;
+    }
+
+    NSString *fmodDir = [BankTransplant mobileFMODBuildsDirectory];
+    NSString *matchedFMODName = nil;
+    for (NSString *candidate in [ZSFileIndex cachedFMODBankFileNames]) {
+        if ([candidate caseInsensitiveCompare:query] == NSOrderedSame) {
+            matchedFMODName = candidate;
+            break;
+        }
+    }
+    if (matchedFMODName.length > 0 && fmodDir.length > 0) {
+        NSString *fmodPath = [fmodDir stringByAppendingPathComponent:matchedFMODName];
+        if ([NSFileManager.defaultManager fileExistsAtPath:fmodPath]) {
+            NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:fmodPath]];
+            [self zs_confirmDeleteAssetAtPath:fmodPath
+                                    fileName:matchedFMODName
+                                        kind:@"FMOD Audio Bank"
+                                 displayPath:displayPath];
+            return;
+        }
+    }
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+    [self zs_presentModsAlertWithTitle:@"Not Found"
+                                message:[NSString stringWithFormat:@"No file, hash, or CAB identifier matching \u201C%@\u201D was found in the index.", query]];
+}
+
+- (void)zs_confirmDeleteAssetAtPath:(NSString *)path
+                            fileName:(NSString *)fileName
+                                kind:(NSString *)kind
+                         displayPath:(NSString *)displayPath {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (!presenter) return;
+
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Delete Asset?"
+                                                                       message:[NSString stringWithFormat:@"Found a matching %@:\n\n\u201C%@\u201D\n%@\n\nThis will permanently delete it from the game's files. This can't be undone.",
+                                                                                kind, fileName, displayPath]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Abort" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [weakSelf zs_performDeleteAssetAtPath:path fileName:fileName];
+    }]];
+    [presenter presentViewController:confirm animated:YES completion:nil];
+}
+
+- (void)zs_performDeleteAssetAtPath:(NSString *)path fileName:(NSString *)fileName {
+    NSError *deleteErr = nil;
+    BOOL ok = [NSFileManager.defaultManager removeItemAtPath:path error:&deleteErr];
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:ok ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
+
+    if (ok) {
+        ZLog(@"[UserInterface] Delete Specific Asset: deleted %@", path);
+        [self zs_presentModsAlertWithTitle:@"Delete Specific Asset"
+                                    message:[NSString stringWithFormat:@"\u201C%@\u201D was deleted.", fileName]];
+    } else {
+        ZLog(@"[UserInterface] Delete Specific Asset: failed to delete %@: %@", path, deleteErr.localizedDescription);
+        [self zs_presentModsAlertWithTitle:@"Delete Specific Asset"
+                                    message:[NSString stringWithFormat:@"Couldn't delete \u201C%@\u201D: %@", fileName, deleteErr.localizedDescription ?: @"Unknown error."]];
+    }
 }
 
 #pragma mark Config (Hard Assets Reset)
