@@ -1616,5 +1616,39 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
     return s_fmodNames ?: [NSSet set];
 }
 
++ (nullable NSString *)firstCachedBundlePathMatchingQuery:(NSString *)query {
+    if (!s_hasIndex || query.length == 0) return nil;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *needle = query.lowercaseString;
+
+    NSArray<NSString *> *exactCAB = s_cabMap[query];
+    for (NSString *path in exactCAB) {
+        if ([fm fileExistsAtPath:path]) return path;
+    }
+
+    for (NSString *cab in s_cabMap) {
+        BOOL cabMatches = [cab.lowercaseString containsString:needle];
+        for (NSString *path in s_cabMap[cab]) {
+            if (!cabMatches && ![path.lowercaseString containsString:needle]) continue;
+            if ([fm fileExistsAtPath:path]) return path;
+        }
+    }
+
+    return nil;
+}
+
++ (nullable NSString *)firstCachedFMODFileNameMatchingQuery:(NSString *)query {
+    if (!s_hasIndex || query.length == 0) return nil;
+    NSString *needle = query.lowercaseString;
+
+    if ([s_fmodNames containsObject:query]) return query;
+
+    for (NSString *name in s_fmodNames) {
+        if ([name.lowercaseString containsString:needle]) return name;
+    }
+
+    return nil;
+}
+
 @end
 

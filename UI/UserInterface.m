@@ -7197,41 +7197,47 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_searchAndConfirmDeleteAssetForQuery:(NSString *)query {
-    NSError *cabErr = nil;
-    NSString *matchedPath = [UnityCacheLocator locateBundlePathForCAB:query error:&cabErr];
-    if (matchedPath.length > 0) {
-        NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:matchedPath]];
-        [self zs_confirmDeleteAssetAtPath:matchedPath
-                                fileName:matchedPath.lastPathComponent
-                                    kind:@"Asset Bundle"
-                             displayPath:displayPath];
-        return;
-    }
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [ZSFileIndex ensureIndexUpToDate];
 
-    NSString *fmodDir = [BankTransplant mobileFMODBuildsDirectory];
-    NSString *matchedFMODName = nil;
-    for (NSString *candidate in [ZSFileIndex cachedFMODBankFileNames]) {
-        if ([candidate caseInsensitiveCompare:query] == NSOrderedSame) {
-            matchedFMODName = candidate;
-            break;
-        }
-    }
-    if (matchedFMODName.length > 0 && fmodDir.length > 0) {
-        NSString *fmodPath = [fmodDir stringByAppendingPathComponent:matchedFMODName];
-        if ([NSFileManager.defaultManager fileExistsAtPath:fmodPath]) {
-            NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:fmodPath]];
-            [self zs_confirmDeleteAssetAtPath:fmodPath
-                                    fileName:matchedFMODName
-                                        kind:@"FMOD Audio Bank"
-                                 displayPath:displayPath];
+        NSString *matchedPath = [ZSFileIndex firstCachedBundlePathMatchingQuery:query];
+        if (matchedPath.length > 0) {
+            NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:matchedPath]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_confirmDeleteAssetAtPath:matchedPath
+                                        fileName:matchedPath.lastPathComponent
+                                            kind:@"Asset Bundle"
+                                     displayPath:displayPath];
+            });
             return;
         }
-    }
 
-    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
-    [self zs_presentModsAlertWithTitle:@"Not Found"
-                                message:[NSString stringWithFormat:@"No file, hash, or CAB identifier matching \u201C%@\u201D was found in the index.", query]];
+        NSString *fmodDir = [BankTransplant mobileFMODBuildsDirectory];
+        NSString *matchedFMODName = [ZSFileIndex firstCachedFMODFileNameMatchingQuery:query];
+        NSString *fmodPath = nil;
+        if (matchedFMODName.length > 0 && fmodDir.length > 0) {
+            NSString *candidate = [fmodDir stringByAppendingPathComponent:matchedFMODName];
+            if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) fmodPath = candidate;
+        }
+        if (fmodPath.length > 0) {
+            NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:fmodPath]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_confirmDeleteAssetAtPath:fmodPath
+                                        fileName:matchedFMODName
+                                            kind:@"FMOD Audio Bank"
+                                     displayPath:displayPath];
+            });
+            return;
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+            [weakSelf zs_presentModsAlertWithTitle:@"Not Found"
+                                        message:[NSString stringWithFormat:@"No file, hash, or CAB identifier matching \u201C%@\u201D was found in the index.", query]];
+        });
+    });
 }
 
 - (void)zs_confirmDeleteAssetAtPath:(NSString *)path
