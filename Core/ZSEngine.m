@@ -2590,6 +2590,17 @@ static int32_t ZSUID_UnboxInt32(void *boxed) {
     return value;
 }
 
+static BOOL ZSUID_UnityObjectIsAlive(void *obj) {
+    if (!obj) return NO;
+    void *klass = [IL2CppBridge classOfInstance:obj];
+    if (!klass) return NO;
+    void *field = [IL2CppBridge fieldNamed:"m_CachedPtr" onClass:klass];
+    if (!field) return YES;
+    void *cachedPtr = NULL;
+    if (![IL2CppBridge copyInstanceFieldValue:field onInstance:obj toBuffer:&cachedPtr]) return YES;
+    return cachedPtr != NULL;
+}
+
 static void ZSUID_RedactAllActiveInstances(void *klass, const char *fieldName) {
     if (!klass) return;
 
@@ -2694,6 +2705,10 @@ static BOOL ZSUID_ColdSingleResolve(size_t i) {
 }
 
 static void ZSUID_ColdSingleForceWrite(size_t i) {
+    if (gUIDColdTMPInstance[i] && !ZSUID_UnityObjectIsAlive(gUIDColdTMPInstance[i])) {
+        ZSUID_ColdSingleInvalidate(i);
+    }
+
     if (!gUIDColdTMPInstance[i]) {
         if (gUIDColdResolveAttempts[i] >= kUIDColdResolveMaxAttempts) return;
         gUIDColdResolveAttempts[i]++;
@@ -2832,6 +2847,10 @@ static void ZSUID_HotFieldTick(void) {
     }
 
     if (sceneStateKnown && sceneState != ZSGlobalSceneStateMain) return;
+
+    if (gUIDHotTMPInstance && !ZSUID_UnityObjectIsAlive(gUIDHotTMPInstance)) {
+        ZSUID_HotFieldInvalidate();
+    }
 
     if (!gUIDHotTMPInstance) {
         if (gUIDHotResolveAttempts >= kUIDHotResolveMaxAttempts) return;
