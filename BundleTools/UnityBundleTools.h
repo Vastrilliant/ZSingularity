@@ -137,7 +137,11 @@ typedef NS_ENUM(NSInteger, UnityCacheLocatorErrorCode) {
 
 + (NSSet<NSString *> *)cachedFMODBankFileNames;
 
++ (NSArray<NSString *> *)allCachedBundlePathsMatchingQuery:(NSString *)query;
+
 + (nullable NSString *)firstCachedBundlePathMatchingQuery:(NSString *)query;
+
++ (NSArray<NSString *> *)allCachedFMODFileNamesMatchingQuery:(NSString *)query;
 
 + (nullable NSString *)firstCachedFMODFileNameMatchingQuery:(NSString *)query;
 

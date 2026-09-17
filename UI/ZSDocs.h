@@ -397,6 +397,48 @@ static NSAttributedString *zs_render_markdown_inline(NSString *line, UIFont *bas
     return result;
 }
 
+static BOOL zs_docs_admonition_for_marker(NSString *marker, NSString **outLabel, UIColor **outColor, NSString **outSymbolName) {
+    NSString *normalized = [[marker stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] uppercaseString];
+
+    if ([normalized isEqualToString:@"[!NOTE]"]) {
+        if (outLabel) *outLabel = @"Note";
+        if (outColor) *outColor = [UIColor colorWithRed:0.345 green:0.647 blue:1.0 alpha:1.0];
+        if (outSymbolName) *outSymbolName = @"info.circle.fill";
+        return YES;
+    }
+    if ([normalized isEqualToString:@"[!TIP]"]) {
+        if (outLabel) *outLabel = @"Tip";
+        if (outColor) *outColor = [UIColor colorWithRed:0.247 green:0.725 blue:0.314 alpha:1.0];
+        if (outSymbolName) *outSymbolName = @"lightbulb.fill";
+        return YES;
+    }
+    if ([normalized isEqualToString:@"[!IMPORTANT]"]) {
+        if (outLabel) *outLabel = @"Important";
+        if (outColor) *outColor = [UIColor colorWithRed:0.639 green:0.443 blue:0.969 alpha:1.0];
+        if (outSymbolName) *outSymbolName = @"exclamationmark.bubble.fill";
+        return YES;
+    }
+    if ([normalized isEqualToString:@"[!WARNING]"]) {
+        if (outLabel) *outLabel = @"Warning";
+        if (outColor) *outColor = [UIColor colorWithRed:0.824 green:0.6 blue:0.133 alpha:1.0];
+        if (outSymbolName) *outSymbolName = @"exclamationmark.triangle.fill";
+        return YES;
+    }
+    if ([normalized isEqualToString:@"[!CAUTION]"]) {
+        if (outLabel) *outLabel = @"Caution";
+        if (outColor) *outColor = [UIColor colorWithRed:0.973 green:0.318 blue:0.286 alpha:1.0];
+        if (outSymbolName) *outSymbolName = @"xmark.octagon.fill";
+        return YES;
+    }
+    return NO;
+}
+
+static NSString *zs_docs_strip_blockquote_marker(NSString *trimmedLine) {
+    if ([trimmedLine hasPrefix:@"> "]) return [trimmedLine substringFromIndex:2];
+    if ([trimmedLine isEqualToString:@">"]) return @"";
+    return [trimmedLine substringFromIndex:1];
+}
+
 static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat contentWidth) {
     NSMutableAttributedString *doc = [[NSMutableAttributedString alloc] init];
 
@@ -427,7 +469,24 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
     imageParagraph.paragraphSpacing = 4;
     imageParagraph.alignment = NSTextAlignmentCenter;
 
+    UIFont *calloutTitleFont = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightBold];
+
+    NSMutableParagraphStyle *calloutTitleParagraph = [NSMutableParagraphStyle new];
+    calloutTitleParagraph.paragraphSpacingBefore = 8;
+    calloutTitleParagraph.paragraphSpacing = 2;
+
+    NSMutableParagraphStyle *calloutBodyParagraph = [NSMutableParagraphStyle new];
+    calloutBodyParagraph.lineSpacing = 2;
+    calloutBodyParagraph.paragraphSpacingBefore = 0;
+    calloutBodyParagraph.paragraphSpacing = 8;
+
+    NSMutableParagraphStyle *quoteParagraph = [NSMutableParagraphStyle new];
+    quoteParagraph.lineSpacing = 2;
+    quoteParagraph.paragraphSpacingBefore = 0;
+    quoteParagraph.paragraphSpacing = 4;
+
     NSArray<NSString *> *lines = [markdown componentsSeparatedByString:@"\n"];
+    NSUInteger lineCount = lines.count;
     BOOL inCodeBlock = NO;
     BOOL sawFirstHeading = NO;
 
@@ -443,7 +502,13 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
             attributes:@{NSFontAttributeName: bodyFont, NSForegroundColorAttributeName: dimColor}];
     };
 
-    for (NSString *rawLine in lines) {
+    NSAttributedString *(^barPrefix)(UIColor *) = ^(UIColor *color) {
+        return [[NSAttributedString alloc] initWithString:@"\u258e  "
+            attributes:@{NSFontAttributeName: bodyFont, NSForegroundColorAttributeName: color}];
+    };
+
+    for (NSUInteger lineIndex = 0; lineIndex < lineCount; lineIndex++) {
+        NSString *rawLine = lines[lineIndex];
         NSString *line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
         if ([line hasPrefix:@"```"]) {
@@ -461,6 +526,68 @@ static NSAttributedString *zs_render_markdown(NSString *markdown, CGFloat conten
 
         if (line.length == 0) {
             appendLine([[NSAttributedString alloc] initWithString:@" "], bodyParagraph);
+            continue;
+        }
+
+        if ([line hasPrefix:@">"]) {
+            NSString *firstContent = zs_docs_strip_blockquote_marker(line);
+
+            NSString *calloutLabel = nil;
+            UIColor *calloutColor = nil;
+            NSString *calloutSymbolName = nil;
+            BOOL isAdmonition = zs_docs_admonition_for_marker(firstContent, &calloutLabel, &calloutColor, &calloutSymbolName);
+
+            NSMutableArray<NSString *> *quoteBodyLines = [NSMutableArray array];
+            NSUInteger scan = lineIndex + 1;
+            for (; scan < lineCount; scan++) {
+                NSString *nextTrimmed = [lines[scan] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if (![nextTrimmed hasPrefix:@">"]) break;
+                [quoteBodyLines addObject:zs_docs_strip_blockquote_marker(nextTrimmed)];
+            }
+            lineIndex = scan - 1;
+
+            if (isAdmonition) {
+                UIImage *symbolImage = [UIImage systemImageNamed:calloutSymbolName];
+                NSMutableAttributedString *title = [[NSMutableAttributedString alloc] init];
+                [title appendAttributedString:barPrefix(calloutColor)];
+                if (symbolImage) {
+                    UIImage *tintedSymbol = [symbolImage imageWithTintColor:calloutColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+                    NSTextAttachment *iconAttachment = [[NSTextAttachment alloc] init];
+                    iconAttachment.image = tintedSymbol;
+                    CGFloat iconSize = calloutTitleFont.pointSize;
+                    iconAttachment.bounds = CGRectMake(0, -1, iconSize, iconSize);
+                    [title appendAttributedString:[NSAttributedString attributedStringWithAttachment:iconAttachment]];
+                    [title appendAttributedString:[[NSAttributedString alloc] initWithString:@"  "]];
+                }
+                [title appendAttributedString:[[NSAttributedString alloc] initWithString:calloutLabel
+                    attributes:@{NSFontAttributeName: calloutTitleFont, NSForegroundColorAttributeName: calloutColor}]];
+                appendLine(title, calloutTitleParagraph);
+
+                if (quoteBodyLines.count == 0) continue;
+                for (NSUInteger i = 0; i < quoteBodyLines.count; i++) {
+                    NSString *bodyLine = quoteBodyLines[i];
+                    NSMutableAttributedString *calloutBody = [[NSMutableAttributedString alloc] init];
+                    [calloutBody appendAttributedString:barPrefix(calloutColor)];
+                    if (bodyLine.length > 0) {
+                        [calloutBody appendAttributedString:zs_render_markdown_inline(bodyLine, bodyFont, bodyColor)];
+                    }
+                    BOOL isLast = (i == quoteBodyLines.count - 1);
+                    appendLine(calloutBody, isLast ? calloutBodyParagraph : quoteParagraph);
+                }
+                continue;
+            }
+
+            [quoteBodyLines insertObject:firstContent atIndex:0];
+            for (NSUInteger i = 0; i < quoteBodyLines.count; i++) {
+                NSString *bodyLine = quoteBodyLines[i];
+                NSMutableAttributedString *quoteLine = [[NSMutableAttributedString alloc] init];
+                [quoteLine appendAttributedString:barPrefix(dimColor)];
+                if (bodyLine.length > 0) {
+                    [quoteLine appendAttributedString:zs_render_markdown_inline(bodyLine, bodyFont, dimColor)];
+                }
+                BOOL isLast = (i == quoteBodyLines.count - 1);
+                appendLine(quoteLine, isLast ? calloutBodyParagraph : quoteParagraph);
+            }
             continue;
         }
 

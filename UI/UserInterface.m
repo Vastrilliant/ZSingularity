@@ -404,6 +404,14 @@ static void zs_configure_glass_button_fixed_corner_radius(UIButton *button, CGFl
 
 static const CGFloat kZSAuthFieldCornerRadius = 3;
 
+static void zs_clear_button_configuration(UIButton *button) {
+    if (!button) return;
+    SEL setConfig = NSSelectorFromString(@"setConfiguration:");
+    if ([button respondsToSelector:setConfig]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, nil);
+    }
+}
+
 static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
         Class configClass = NSClassFromString(@"UIButtonConfiguration");
@@ -445,6 +453,7 @@ static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString
         }
     }
 
+    zs_clear_button_configuration(button);
     [button setTitle:title forState:UIControlStateNormal];
     if (tintColor) [button setTitleColor:tintColor forState:UIControlStateNormal];
     if (font) button.titleLabel.font = font;
@@ -504,6 +513,7 @@ static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString 
         }
     }
 
+    zs_clear_button_configuration(button);
     [button setTitle:title forState:UIControlStateNormal];
     [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     if (font) button.titleLabel.font = font;
@@ -544,6 +554,7 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
         }
     }
 
+    zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
     button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
@@ -585,6 +596,7 @@ static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *imag
         }
     }
 
+    zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
     button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
@@ -5429,18 +5441,6 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *syslogButton = objc_getAssociatedObject(syslogRow, "zs_button");
     self.syslogButton = syslogButton;
 
-    zs_configure_glass_button_fixed_corner_radius(syslogButton, kZSAuthFieldCornerRadius);
-    if (!zs_has_liquid_glass()) {
-        syslogButton.layer.cornerRadius = kZSAuthFieldCornerRadius;
-        syslogButton.clipsToBounds = YES;
-    }
-    SEL syslogSetUpdateHandler = NSSelectorFromString(@"setConfigurationUpdateHandler:");
-    if ([syslogButton respondsToSelector:syslogSetUpdateHandler]) {
-        void (^syslogReassertCorners)(__kindof UIButton *) = ^(__kindof UIButton *btn) {
-            zs_configure_glass_button_fixed_corner_radius(btn, kZSAuthFieldCornerRadius);
-        };
-        ((void (*)(id, SEL, id))objc_msgSend)(syslogButton, syslogSetUpdateHandler, syslogReassertCorners);
-    }
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UILongPressGestureRecognizer *syslogHold =
@@ -7197,47 +7197,85 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_searchAndConfirmDeleteAssetForQuery:(NSString *)query {
+    UIAlertController *working = [self zs_presentDylibInstallWorkingAlertWithTitle:@"Searching\u2026"
+        message:@"Looking for a match in the index."];
+
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [ZSFileIndex ensureIndexUpToDate];
 
-        NSString *matchedPath = [ZSFileIndex firstCachedBundlePathMatchingQuery:query];
-        if (matchedPath.length > 0) {
+        NSArray<NSString *> *bundleMatches = [ZSFileIndex allCachedBundlePathsMatchingQuery:query];
+        if (bundleMatches.count > 1) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+                    [weakSelf zs_presentAmbiguousDeleteAssetMatches:bundleMatches forQuery:query];
+                }];
+            });
+            return;
+        }
+        if (bundleMatches.count == 1) {
+            NSString *matchedPath = bundleMatches.firstObject;
             NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:matchedPath]];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf zs_confirmDeleteAssetAtPath:matchedPath
-                                        fileName:matchedPath.lastPathComponent
-                                            kind:@"Asset Bundle"
-                                     displayPath:displayPath];
+                [weakSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+                    [weakSelf zs_confirmDeleteAssetAtPath:matchedPath
+                                            fileName:matchedPath.lastPathComponent
+                                                kind:@"Asset Bundle"
+                                         displayPath:displayPath];
+                }];
             });
             return;
         }
 
         NSString *fmodDir = [BankTransplant mobileFMODBuildsDirectory];
-        NSString *matchedFMODName = [ZSFileIndex firstCachedFMODFileNameMatchingQuery:query];
-        NSString *fmodPath = nil;
-        if (matchedFMODName.length > 0 && fmodDir.length > 0) {
-            NSString *candidate = [fmodDir stringByAppendingPathComponent:matchedFMODName];
-            if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) fmodPath = candidate;
+        NSArray<NSString *> *fmodMatches = @[];
+        if (fmodDir.length > 0) {
+            NSFileManager *fm = NSFileManager.defaultManager;
+            NSMutableArray<NSString *> *existingFMODMatches = [NSMutableArray array];
+            for (NSString *name in [ZSFileIndex allCachedFMODFileNamesMatchingQuery:query]) {
+                NSString *candidate = [fmodDir stringByAppendingPathComponent:name];
+                if ([fm fileExistsAtPath:candidate]) [existingFMODMatches addObject:candidate];
+            }
+            fmodMatches = existingFMODMatches;
         }
-        if (fmodPath.length > 0) {
+        if (fmodMatches.count > 1) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+                    [weakSelf zs_presentAmbiguousDeleteAssetMatches:fmodMatches forQuery:query];
+                }];
+            });
+            return;
+        }
+        if (fmodMatches.count == 1) {
+            NSString *fmodPath = fmodMatches.firstObject;
             NSString *displayPath = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:[NSURL fileURLWithPath:fmodPath]];
             dispatch_async(dispatch_get_main_queue(), ^{
-                [weakSelf zs_confirmDeleteAssetAtPath:fmodPath
-                                        fileName:matchedFMODName
-                                            kind:@"FMOD Audio Bank"
-                                     displayPath:displayPath];
+                [weakSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+                    [weakSelf zs_confirmDeleteAssetAtPath:fmodPath
+                                            fileName:fmodPath.lastPathComponent
+                                                kind:@"FMOD Audio Bank"
+                                         displayPath:displayPath];
+                }];
             });
             return;
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-            [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
-            [weakSelf zs_presentModsAlertWithTitle:@"Not Found"
-                                        message:[NSString stringWithFormat:@"No file, hash, or CAB identifier matching \u201C%@\u201D was found in the index.", query]];
+            [weakSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+                UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+                [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+                [weakSelf zs_presentModsAlertWithTitle:@"Not Found"
+                                            message:[NSString stringWithFormat:@"No file, hash, or CAB identifier matching \u201C%@\u201D was found in the index.", query]];
+            }];
         });
     });
+}
+
+- (void)zs_presentAmbiguousDeleteAssetMatches:(NSArray<NSString *> *)matchedPaths forQuery:(NSString *)query {
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeError];
+    [self zs_presentModsAlertWithTitle:@"Multiple Matches Found"
+                                message:[NSString stringWithFormat:@"\u201C%@\u201D matched %ld different files in the index. Narrow your search so it matches exactly one file, then try again.", query, (long)matchedPaths.count]];
 }
 
 - (void)zs_confirmDeleteAssetAtPath:(NSString *)path
@@ -10127,7 +10165,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                 fill.backgroundColor = [UIColor colorWithRed:1.0 green:0.08 blue:0.08 alpha:0.85].CGColor;
                 fill.anchorPoint = CGPointMake(0, 0);
 
-                fill.cornerRadius = kZSAuthFieldCornerRadius;
+                fill.cornerRadius = 200;
                 fill.cornerCurve = kCACornerCurveContinuous;
 
                 [self.syslogButton.layer insertSublayer:fill atIndex:0];
@@ -10150,7 +10188,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                 [CATransaction begin];
                 [CATransaction setAnimationDuration:0.18];
                 self.syslogButtonFillLayer.frame = CGRectMake(0, 0, 0, self.syslogButton.bounds.size.height);
-                self.syslogButtonFillLayer.cornerRadius = kZSAuthFieldCornerRadius;
+                self.syslogButtonFillLayer.cornerRadius = 200;
                 [CATransaction commit];
             }
             break;
@@ -10170,7 +10208,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.syslogButtonFillLayer.frame = CGRectMake(0, 0, bounds.size.width * pct, bounds.size.height);
-    self.syslogButtonFillLayer.cornerRadius = kZSAuthFieldCornerRadius;
+    self.syslogButtonFillLayer.cornerRadius = 200;
     [CATransaction commit];
 
     if (pct >= 1.0 && !self.syslogHoldTriggered) {
@@ -10185,7 +10223,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     self.syslogDebugModeEnabled = YES;
 
     zs_style_button_as_native_glass_with_font(self.syslogButton, @"Debug", [UIColor colorWithWhite:1 alpha:0.95], zs_mono_font(11, UIFontWeightSemibold));
-    zs_configure_glass_button_fixed_corner_radius(self.syslogButton, kZSAuthFieldCornerRadius);
 
     self.syslogTabEnabled = YES;
 
@@ -10209,12 +10246,11 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_resetSyslogDebugMode {
     self.syslogDebugModeEnabled = NO;
     zs_style_button_as_native_glass_with_font(self.syslogButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.88], zs_mono_font(11, UIFontWeightSemibold));
-    zs_configure_glass_button_fixed_corner_radius(self.syslogButton, kZSAuthFieldCornerRadius);
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     self.syslogButtonFillLayer.frame = CGRectMake(0, 0, 0, self.syslogButton.bounds.size.height);
-    self.syslogButtonFillLayer.cornerRadius = kZSAuthFieldCornerRadius;
+    self.syslogButtonFillLayer.cornerRadius = 200;
     [CATransaction commit];
 
     UIView *unityView = zs_ui_host_view();
