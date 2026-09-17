@@ -471,6 +471,44 @@ static void zs_style_button_as_native_glass(UIButton *button, NSString *title, U
     zs_style_button_as_native_glass_with_font(button, title, tintColor, nil);
 }
 
+static void zs_style_button_as_liquid_glass_fallback_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
+    [button setTitle:title forState:UIControlStateNormal];
+    if (tintColor) [button setTitleColor:tintColor forState:UIControlStateNormal];
+    if (font) button.titleLabel.font = font;
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+    button.layer.borderWidth = 1;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
+    button.layer.cornerRadius = 200;
+    button.clipsToBounds = YES;
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+}
+
+static void zs_style_button_mirroring_glass_state(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
+    if (zs_has_liquid_glass()) {
+        zs_style_button_as_native_glass_with_font(button, title, tintColor, font);
+    } else {
+        zs_style_button_as_liquid_glass_fallback_with_font(button, title, tintColor, font);
+    }
+}
+
+static UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSString *title, UIColor *tintColor, UIFont *font) {
+    UIButton *fallback = [UIButton buttonWithType:UIButtonTypeSystem];
+    fallback.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_liquid_glass_fallback_with_font(fallback, title, tintColor, font);
+    [primaryButton.superview addSubview:fallback];
+    [NSLayoutConstraint activateConstraints:@[
+        [fallback.leadingAnchor constraintEqualToAnchor:primaryButton.leadingAnchor],
+        [fallback.trailingAnchor constraintEqualToAnchor:primaryButton.trailingAnchor],
+        [fallback.topAnchor constraintEqualToAnchor:primaryButton.topAnchor],
+        [fallback.bottomAnchor constraintEqualToAnchor:primaryButton.bottomAnchor],
+    ]];
+    BOOL hasGlass = zs_has_liquid_glass();
+    primaryButton.hidden = !hasGlass;
+    fallback.hidden = hasGlass;
+    return fallback;
+}
+
 static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
         Class configClass = NSClassFromString(@"UIButtonConfiguration");
@@ -2075,15 +2113,22 @@ static ZSRow *zs_make_custom_greeting_row(NSString *currentText, id target, SEL 
     row.titleLabel.minimumScaleFactor = 0.8;
     [row addSubview:row.titleLabel];
 
+    UIFont *greetingButtonFont = zs_mono_font(11, UIFontWeightRegular);
+
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(button, @"", UIColor.whiteColor, zs_mono_font(11, UIFontWeightRegular));
+    zs_style_button_as_native_glass_with_font(button, @"", UIColor.whiteColor, greetingButtonFont);
     [button addTarget:target action:tapAction forControlEvents:UIControlEventTouchUpInside];
     [row addSubview:button];
-    objc_setAssociatedObject(row, "zs_button", button, OBJC_ASSOCIATION_RETAIN);
 
-    ZSMarqueeLabel *greetingLabel = zs_custom_greeting_marquee_label(button);
-    greetingLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    UIButton *buttonFallback = zs_make_liquid_glass_fallback_twin(button, @"", UIColor.whiteColor, greetingButtonFont);
+    [buttonFallback addTarget:target action:tapAction forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *activeGreetingButton = zs_has_liquid_glass() ? button : buttonFallback;
+    objc_setAssociatedObject(row, "zs_button", activeGreetingButton, OBJC_ASSOCIATION_RETAIN);
+
+    ZSMarqueeLabel *greetingLabel = zs_custom_greeting_marquee_label(activeGreetingButton);
+    greetingLabel.font = greetingButtonFont;
     greetingLabel.textColor = UIColor.whiteColor;
     greetingLabel.marqueeKey = @"customGreetingButton";
     greetingLabel.text = zs_custom_greeting_button_title(currentText);
@@ -2315,17 +2360,21 @@ static ZSRow *zs_make_button_pair_row(NSString *leftTitle, UIColor *leftTint,
     ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
+    UIFont *pairButtonFont = zs_mono_font(11, UIFontWeightSemibold);
+
     UIButton *leftButton = [UIButton buttonWithType:UIButtonTypeSystem];
     leftButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(leftButton, leftTitle, leftTint, zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_as_native_glass_with_font(leftButton, leftTitle, leftTint, pairButtonFont);
     [row addSubview:leftButton];
-    objc_setAssociatedObject(row, "zs_button_left", leftButton, OBJC_ASSOCIATION_RETAIN);
+    UIButton *leftButtonFallback = zs_make_liquid_glass_fallback_twin(leftButton, leftTitle, leftTint, pairButtonFont);
+    objc_setAssociatedObject(row, "zs_button_left", zs_has_liquid_glass() ? leftButton : leftButtonFallback, OBJC_ASSOCIATION_RETAIN);
 
     UIButton *rightButton = [UIButton buttonWithType:UIButtonTypeSystem];
     rightButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(rightButton, rightTitle, rightTint, zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_as_native_glass_with_font(rightButton, rightTitle, rightTint, pairButtonFont);
     [row addSubview:rightButton];
-    objc_setAssociatedObject(row, "zs_button_right", rightButton, OBJC_ASSOCIATION_RETAIN);
+    UIButton *rightButtonFallback = zs_make_liquid_glass_fallback_twin(rightButton, rightTitle, rightTint, pairButtonFont);
+    objc_setAssociatedObject(row, "zs_button_right", zs_has_liquid_glass() ? rightButton : rightButtonFallback, OBJC_ASSOCIATION_RETAIN);
 
     static const CGFloat kButtonGap = 8;
     [NSLayoutConstraint activateConstraints:@[
@@ -2656,13 +2705,18 @@ static ZSRow *zs_make_button_and_glass_field_row(NSString *buttonTitle, UIColor 
     ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
+    UIFont *syslogButtonFont = zs_mono_font(11, UIFontWeightSemibold);
+
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(button, buttonTitle, buttonTint, zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_as_native_glass_with_font(button, buttonTitle, buttonTint, syslogButtonFont);
     button.titleLabel.adjustsFontSizeToFitWidth = YES;
     button.titleLabel.minimumScaleFactor = 0.75;
     [row addSubview:button];
-    objc_setAssociatedObject(row, "zs_button", button, OBJC_ASSOCIATION_RETAIN);
+    UIButton *buttonFallback = zs_make_liquid_glass_fallback_twin(button, buttonTitle, buttonTint, syslogButtonFont);
+    buttonFallback.titleLabel.adjustsFontSizeToFitWidth = YES;
+    buttonFallback.titleLabel.minimumScaleFactor = 0.75;
+    objc_setAssociatedObject(row, "zs_button", zs_has_liquid_glass() ? button : buttonFallback, OBJC_ASSOCIATION_RETAIN);
 
     UITextField *field = [[UITextField alloc] init];
     field.font = zs_mono_font(11, UIFontWeightRegular);
@@ -10229,7 +10283,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_enterSyslogDebugMode {
     self.syslogDebugModeEnabled = YES;
 
-    zs_style_button_as_native_glass_with_font(self.syslogButton, @"Debug", [UIColor colorWithWhite:1 alpha:0.95], zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_mirroring_glass_state(self.syslogButton, @"Debug", [UIColor colorWithWhite:1 alpha:0.95], zs_mono_font(11, UIFontWeightSemibold));
 
     self.syslogTabEnabled = YES;
 
@@ -10252,7 +10306,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 - (void)zs_resetSyslogDebugMode {
     self.syslogDebugModeEnabled = NO;
-    zs_style_button_as_native_glass_with_font(self.syslogButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.88], zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_mirroring_glass_state(self.syslogButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.88], zs_mono_font(11, UIFontWeightSemibold));
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
