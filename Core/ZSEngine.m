@@ -870,8 +870,9 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     if (self.panelOpen) {
         expected = 30;
     } else {
-        BOOL isBattle = NO;
-        if (!zs_try_read_is_in_battle(&isBattle)) return;
+        int32_t sceneState = 0;
+        if (!ZSGlobalScene_Current(&sceneState)) return;
+        BOOL isBattle = (sceneState == kSceneStateBattle);
         if (isBattle && self.manualOverrideActiveCombat) return;
         if (!isBattle && self.manualOverrideActiveMenu) return;
         expected = isBattle ? self.combatFPS : self.menuFPS;
