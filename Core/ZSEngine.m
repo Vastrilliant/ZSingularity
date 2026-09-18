@@ -823,6 +823,8 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
 @property (nonatomic, strong) NSTimer *fpsPollTimer;
+- (void)applyMenuFPS:(NSInteger)fps;
+- (void)applyCombatFPS:(NSInteger)fps;
 @end
 
 @implementation FPS120Controller
@@ -922,14 +924,17 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     }
 }
 
-- (void)setManualMenuFPS:(NSInteger)fps {
+- (void)applyMenuFPS:(NSInteger)fps {
     self.menuFPS = fps;
-    self.manualOverrideActiveMenu = YES;
-
     if (!self.panelOpen && !self.isInBattle) {
         self.targetFPS = fps;
         zs_set_application_target_fps((int32_t)fps);
     }
+}
+
+- (void)setManualMenuFPS:(NSInteger)fps {
+    self.manualOverrideActiveMenu = YES;
+    [self applyMenuFPS:fps];
 }
 
 - (void)clearManualMenuOverride {
@@ -939,13 +944,17 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     }
 }
 
-- (void)setManualCombatFPS:(NSInteger)fps {
+- (void)applyCombatFPS:(NSInteger)fps {
     self.combatFPS = fps;
-    self.manualOverrideActiveCombat = YES;
     if (!self.panelOpen && self.isInBattle) {
         self.targetFPS = fps;
         zs_set_application_target_fps((int32_t)fps);
     }
+}
+
+- (void)setManualCombatFPS:(NSInteger)fps {
+    self.manualOverrideActiveCombat = YES;
+    [self applyCombatFPS:fps];
 }
 
 - (void)clearManualCombatOverride {
@@ -983,8 +992,8 @@ static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     ZSCustomGreeting_HotFieldInvalidate();
     ZSUID_HotFieldInvalidate();
 
-    [[FPS120Controller shared] setManualMenuFPS:g_menuFPS];
-    [[FPS120Controller shared] setManualCombatFPS:g_combatFPS];
+    [[FPS120Controller shared] applyMenuFPS:g_menuFPS];
+    [[FPS120Controller shared] applyCombatFPS:g_combatFPS];
 
     zs_set_texture_mip_limit(g_textureMip);
     zs_apply_render_scale_for_battle_state([FPS120Controller shared].isInBattle, YES);
