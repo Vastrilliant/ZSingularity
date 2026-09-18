@@ -17,7 +17,6 @@ static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
-static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing);
 static void zs_reapply_all_settings_except_experimental(void);
 static BOOL ZSUID_UnityObjectIsAlive(void *obj);
 
@@ -791,27 +790,6 @@ static void *g_cachedGameManagerInstance;
 static int g_ticksSinceInstanceRefresh;
 static const int kInstanceRefreshTicks = 8;
 
-static void *gZSBootMainMenuUserInfoCardClass;
-static BOOL gZSBootIntoMainMenuReapplyDone;
-
-static void zs_check_boot_into_main_menu_reapply(void) {
-    if (gZSBootIntoMainMenuReapplyDone) return;
-
-    if (!gZSBootMainMenuUserInfoCardClass) {
-        gZSBootMainMenuUserInfoCardClass = [IL2CppBridge classNamed:"UserInfoCard"
-                                                         inNamespace:"MainUI"
-                                                    assemblyContains:"Assembly-CSharp"];
-        if (!gZSBootMainMenuUserInfoCardClass) return;
-    }
-
-    void *instance = ZSUID_FindActiveInstance(gZSBootMainMenuUserInfoCardClass);
-    if (!instance) return;
-
-    ZLog(@"[ZSScripts] landed on main menu (UserInfoCard found) - reapplying settings once for login->main menu transition");
-    zs_reapply_all_settings();
-    gZSBootIntoMainMenuReapplyDone = YES;
-}
-
 static void *zs_get_cached_game_manager_instance(void) {
     BOOL needsRefresh = (!g_cachedGameManagerInstance || g_ticksSinceInstanceRefresh >= kInstanceRefreshTicks);
     if (needsRefresh) {
@@ -844,11 +822,7 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
-@property (nonatomic, strong) NSTimer *fpsWatchdogTimer;
-@property (nonatomic, assign) int32_t lastObservedSceneState;
-@property (nonatomic, assign) BOOL lastObservedSceneStateKnown;
-@property (nonatomic, assign) BOOL lastObservedHttpProcessing;
-@property (nonatomic, assign) BOOL lastObservedHttpProcessingKnown;
+@property (nonatomic, strong) NSTimer *fpsPollTimer;
 @end
 
 @implementation FPS120Controller
@@ -874,79 +848,43 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
                                                             userInfo:nil
                                                              repeats:YES];
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
-
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self installFPSWatchdog];
-        });
     }
+
+    if (!self.fpsPollTimer) {
+        self.fpsPollTimer = [NSTimer timerWithTimeInterval:1.0
+                                                      target:self
+                                                    selector:@selector(fpsPollTick)
+                                                    userInfo:nil
+                                                     repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.fpsPollTimer forMode:NSRunLoopCommonModes];
+    }
+
     return zs_set_application_target_fps((int32_t)self.targetFPS);
 }
 
-- (void)installFPSWatchdog {
-    if (self.fpsWatchdogTimer) return;
-    if (!zs_set_application_target_fps((int32_t)self.targetFPS)) return;
-    if (!g_unityDisplayLink) return;
-
-    int32_t sceneState = 0;
-    self.lastObservedSceneStateKnown = ZSGlobalScene_Current(&sceneState);
-    self.lastObservedSceneState = sceneState;
-
-    BOOL processing = NO;
-    self.lastObservedHttpProcessingKnown = ZSHttpRequest_IsProcessing(&processing);
-    self.lastObservedHttpProcessing = processing;
-
-    self.fpsWatchdogTimer = [NSTimer timerWithTimeInterval:0.1
-                                                      target:self
-                                                    selector:@selector(fpsWatchdogTick)
-                                                    userInfo:nil
-                                                     repeats:YES];
-    [[NSRunLoop mainRunLoop] addTimer:self.fpsWatchdogTimer forMode:NSRunLoopCommonModes];
-    ZLog(@"[ZSScripts] settings reapply watchdog installed");
-}
-
-- (void)fpsWatchdogTick {
-    BOOL sceneChanged = NO;
-    int32_t sceneState = 0;
-    if (ZSGlobalScene_Current(&sceneState)) {
-        if (self.lastObservedSceneStateKnown && sceneState != self.lastObservedSceneState) sceneChanged = YES;
-        self.lastObservedSceneState = sceneState;
-        self.lastObservedSceneStateKnown = YES;
-    }
-
-    BOOL httpChanged = NO;
-    BOOL processing = NO;
-    if (ZSHttpRequest_IsProcessing(&processing)) {
-        if (self.lastObservedHttpProcessingKnown && processing != self.lastObservedHttpProcessing) httpChanged = YES;
-        self.lastObservedHttpProcessing = processing;
-        self.lastObservedHttpProcessingKnown = YES;
-    }
-
-    if (!sceneChanged && !httpChanged) return;
-
+- (void)fpsPollTick {
     CADisplayLink *link = zs_refresh_unity_display_link();
-    if (!link) {
-        ZLog(@"[ZSScripts] CADisplayLink ivar not found (sceneChanged=%d httpChanged=%d) - reapplying settings", sceneChanged, httpChanged);
-        zs_reapply_all_settings_except_experimental();
-        return;
+    if (!link) return;
+
+    NSInteger expected;
+    if (self.panelOpen) {
+        expected = 30;
+    } else {
+        BOOL isBattle = NO;
+        if (!zs_try_read_is_in_battle(&isBattle)) return;
+        if (isBattle && self.manualOverrideActiveCombat) return;
+        if (!isBattle && self.manualOverrideActiveMenu) return;
+        expected = isBattle ? self.combatFPS : self.menuFPS;
     }
 
-    if (self.panelOpen) return;
-
-    BOOL isBattle = self.isInBattle;
-    if (isBattle && self.manualOverrideActiveCombat) return;
-    if (!isBattle && self.manualOverrideActiveMenu) return;
-
-    NSInteger expected = isBattle ? self.combatFPS : self.menuFPS;
     NSInteger current = link.preferredFramesPerSecond;
     if (current == expected) return;
 
-    ZLog(@"[ZSScripts] preferredFramesPerSecond is %ld, expected %ld (sceneChanged=%d httpChanged=%d) - reapplying settings", (long)current, (long)expected, sceneChanged, httpChanged);
+    ZLog(@"[ZSScripts] preferredFramesPerSecond is %ld, expected %ld - reapplying settings", (long)current, (long)expected);
     zs_reapply_all_settings_except_experimental();
 }
 
 - (void)battleStatePoll {
-    if (!gZSBootIntoMainMenuReapplyDone) zs_check_boot_into_main_menu_reapply();
-
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
     BOOL wasInBattle = self.isInBattle;
@@ -1033,7 +971,7 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
-    [self.fpsWatchdogTimer invalidate];
+    [self.fpsPollTimer invalidate];
 }
 
 @end
@@ -2234,6 +2172,7 @@ typedef NS_ENUM(int32_t, ZSGlobalSceneState) {
     ZSGlobalSceneStateRailwayDungeon = 6,
     ZSGlobalSceneStateStoryMirrorDungeon = 7,
     ZSGlobalSceneStateProjectGS = 8,
+    ZSGlobalSceneStateRpg = 9,
 };
 
 static void *gZSGlobalGameManagerClass;
@@ -2257,77 +2196,6 @@ static BOOL ZSGlobalScene_Current(int32_t *outState) {
     if (![IL2CppBridge copyInstanceFieldValue:gZSGlobalSceneStateField onInstance:instance toBuffer:&state]) return NO;
 
     *outState = state;
-    return YES;
-}
-
-#pragma mark - HTTP Request Activity
-
-static void *gZSHttpApiRequesterClass;
-static void *gZSHttpNetworkingUIField;
-static void *gZSHttpConnectingRootField;
-static void *gZSHttpGameObjectClass;
-static const void *gZSHttpGetActiveSelfMethod;
-
-static BOOL zs_unbox_bool(void *boxed, BOOL fallback) {
-    if (!boxed) return fallback;
-    void *klass = [IL2CppBridge classOfInstance:boxed];
-    if (!klass) return fallback;
-    void *field = [IL2CppBridge fieldNamed:"m_value" onClass:klass];
-    if (!field) return fallback;
-    BOOL value = fallback;
-    if (![IL2CppBridge copyInstanceFieldValue:field onInstance:boxed toBuffer:&value]) return fallback;
-    return value;
-}
-
-static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing) {
-    if (!gZSHttpApiRequesterClass) {
-        gZSHttpApiRequesterClass = [IL2CppBridge classNamed:"HttpApiRequester" inNamespace:"Server" assemblyContains:"Assembly-CSharp"];
-        if (!gZSHttpApiRequesterClass) return NO;
-    }
-
-    void *requester = NULL;
-    if (![IL2CppBridge copyStaticFieldOnClass:gZSHttpApiRequesterClass name:"_instance" toBuffer:&requester] || !requester) return NO;
-
-    if (!gZSHttpNetworkingUIField) {
-        gZSHttpNetworkingUIField = [IL2CppBridge fieldNamed:"networkingUI" onClass:gZSHttpApiRequesterClass];
-        if (!gZSHttpNetworkingUIField) return NO;
-    }
-
-    void *networkingUI = NULL;
-    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpNetworkingUIField onInstance:requester toBuffer:&networkingUI] || !networkingUI) return NO;
-
-    if (!gZSHttpConnectingRootField) {
-        void *networkingUIClass = [IL2CppBridge classOfInstance:networkingUI];
-        if (!networkingUIClass) return NO;
-        gZSHttpConnectingRootField = [IL2CppBridge fieldNamed:"_connectingRoot" onClass:networkingUIClass];
-        if (!gZSHttpConnectingRootField) return NO;
-    }
-
-    void *connectingRoot = NULL;
-    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpConnectingRootField onInstance:networkingUI toBuffer:&connectingRoot] || !connectingRoot) {
-        *outProcessing = NO;
-        return YES;
-    }
-
-    if (!ZSUID_UnityObjectIsAlive(connectingRoot)) {
-        *outProcessing = NO;
-        return YES;
-    }
-
-    if (!gZSHttpGameObjectClass) {
-        gZSHttpGameObjectClass = [IL2CppBridge classNamed:"GameObject" inNamespace:"UnityEngine" assemblyContains:"CoreModule"];
-        if (!gZSHttpGameObjectClass) return NO;
-    }
-    if (!gZSHttpGetActiveSelfMethod) {
-        gZSHttpGetActiveSelfMethod = [IL2CppBridge methodOnClass:gZSHttpGameObjectClass name:"get_activeSelf" argCount:0];
-        if (!gZSHttpGetActiveSelfMethod) return NO;
-    }
-
-    void *exc = NULL;
-    void *boxed = [IL2CppBridge invokeMethod:gZSHttpGetActiveSelfMethod onInstance:connectingRoot args:NULL outException:&exc];
-    if (exc) return NO;
-
-    *outProcessing = zs_unbox_bool(boxed, NO);
     return YES;
 }
 
