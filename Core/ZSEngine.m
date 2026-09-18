@@ -19,6 +19,7 @@ static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
 static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing);
 static void zs_reapply_all_settings_except_experimental(void);
+static BOOL ZSUID_UnityObjectIsAlive(void *obj);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -2262,7 +2263,21 @@ static BOOL ZSGlobalScene_Current(int32_t *outState) {
 #pragma mark - HTTP Request Activity
 
 static void *gZSHttpApiRequesterClass;
-static void *gZSHttpProcessingField;
+static void *gZSHttpNetworkingUIField;
+static void *gZSHttpConnectingRootField;
+static void *gZSHttpGameObjectClass;
+static const void *gZSHttpGetActiveSelfMethod;
+
+static BOOL zs_unbox_bool(void *boxed, BOOL fallback) {
+    if (!boxed) return fallback;
+    void *klass = [IL2CppBridge classOfInstance:boxed];
+    if (!klass) return fallback;
+    void *field = [IL2CppBridge fieldNamed:"m_value" onClass:klass];
+    if (!field) return fallback;
+    BOOL value = fallback;
+    if (![IL2CppBridge copyInstanceFieldValue:field onInstance:boxed toBuffer:&value]) return fallback;
+    return value;
+}
 
 static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing) {
     if (!gZSHttpApiRequesterClass) {
@@ -2270,18 +2285,49 @@ static BOOL ZSHttpRequest_IsProcessing(BOOL *outProcessing) {
         if (!gZSHttpApiRequesterClass) return NO;
     }
 
-    void *instance = NULL;
-    if (![IL2CppBridge copyStaticFieldOnClass:gZSHttpApiRequesterClass name:"_instance" toBuffer:&instance] || !instance) return NO;
+    void *requester = NULL;
+    if (![IL2CppBridge copyStaticFieldOnClass:gZSHttpApiRequesterClass name:"_instance" toBuffer:&requester] || !requester) return NO;
 
-    if (!gZSHttpProcessingField) {
-        gZSHttpProcessingField = [IL2CppBridge fieldNamed:"_isProcessing" onClass:gZSHttpApiRequesterClass];
-        if (!gZSHttpProcessingField) return NO;
+    if (!gZSHttpNetworkingUIField) {
+        gZSHttpNetworkingUIField = [IL2CppBridge fieldNamed:"networkingUI" onClass:gZSHttpApiRequesterClass];
+        if (!gZSHttpNetworkingUIField) return NO;
     }
 
-    BOOL processing = NO;
-    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpProcessingField onInstance:instance toBuffer:&processing]) return NO;
+    void *networkingUI = NULL;
+    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpNetworkingUIField onInstance:requester toBuffer:&networkingUI] || !networkingUI) return NO;
 
-    *outProcessing = processing;
+    if (!gZSHttpConnectingRootField) {
+        void *networkingUIClass = [IL2CppBridge classOfInstance:networkingUI];
+        if (!networkingUIClass) return NO;
+        gZSHttpConnectingRootField = [IL2CppBridge fieldNamed:"_connectingRoot" onClass:networkingUIClass];
+        if (!gZSHttpConnectingRootField) return NO;
+    }
+
+    void *connectingRoot = NULL;
+    if (![IL2CppBridge copyInstanceFieldValue:gZSHttpConnectingRootField onInstance:networkingUI toBuffer:&connectingRoot] || !connectingRoot) {
+        *outProcessing = NO;
+        return YES;
+    }
+
+    if (!ZSUID_UnityObjectIsAlive(connectingRoot)) {
+        *outProcessing = NO;
+        return YES;
+    }
+
+    if (!gZSHttpGameObjectClass) {
+        gZSHttpGameObjectClass = [IL2CppBridge classNamed:"GameObject" inNamespace:"UnityEngine" assemblyContains:"CoreModule"];
+        if (!gZSHttpGameObjectClass) return NO;
+    }
+    if (!gZSHttpGetActiveSelfMethod) {
+        gZSHttpGetActiveSelfMethod = [IL2CppBridge methodOnClass:gZSHttpGameObjectClass name:"get_activeSelf" argCount:0];
+        if (!gZSHttpGetActiveSelfMethod) return NO;
+    }
+
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:gZSHttpGetActiveSelfMethod onInstance:connectingRoot args:NULL outException:&exc];
+    if (exc) return NO;
+
+    *outProcessing = zs_unbox_bool(boxed, NO);
     return YES;
 }
 
