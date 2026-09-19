@@ -140,6 +140,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
 + (BOOL)lt_ensurePackBackupForLanguage:(NSString *)languageCode error:(NSError **)error;
 + (BOOL)lt_placeFileAtPath:(NSString *)sourcePath atPath:(NSString *)destPath error:(NSError **)error;
 + (BOOL)lt_replaceDirectoryAtPath:(NSString *)destDir withCopyOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error;
++ (BOOL)lt_mergeDirectoryAtPath:(NSString *)destDir withContentsOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error;
 + (BOOL)lt_restoreFileBackupAtPath:(NSString *)backupPath toRelativeTarget:(NSString *)relativeTarget force:(BOOL)force;
 + (NSInteger)lt_restoreFileBackupsForLanguage:(NSString *)languageCode force:(BOOL)force;
 + (BOOL)lt_restorePackBackupForLanguage:(NSString *)languageCode force:(BOOL)force;
@@ -527,6 +528,47 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     return YES;
 }
 
++ (BOOL)lt_mergeDirectoryAtPath:(NSString *)destDir withContentsOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    BOOL destIsDirectory = NO;
+    if (![fm fileExistsAtPath:destDir isDirectory:&destIsDirectory] || !destIsDirectory) {
+        NSError *dirErr = nil;
+        if (![fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+            if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+                [NSString stringWithFormat:@"Couldn't create the \"%@\" folder: %@", destDir.lastPathComponent, dirErr.localizedDescription]);
+            return NO;
+        }
+    }
+
+    NSError *listErr = nil;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:sourceDir error:&listErr];
+    if (!entries) {
+        if (error) *error = LTError(LocalizationTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read %@: %@", sourceDir.lastPathComponent, listErr.localizedDescription]);
+        return NO;
+    }
+
+    for (NSString *entryName in entries) {
+        if ([entryName isEqualToString:@".DS_Store"] || [entryName hasPrefix:@"._"]) continue;
+
+        NSString *sourceItemPath = [sourceDir stringByAppendingPathComponent:entryName];
+        NSString *destItemPath = [destDir stringByAppendingPathComponent:entryName];
+
+        BOOL sourceItemIsDirectory = NO;
+        [fm fileExistsAtPath:sourceItemPath isDirectory:&sourceItemIsDirectory];
+
+        if (sourceItemIsDirectory) {
+            if (![self lt_mergeDirectoryAtPath:destItemPath withContentsOfDirectoryAtPath:sourceItemPath error:error]) return NO;
+            continue;
+        }
+
+        if (![self lt_placeFileAtPath:sourceItemPath atPath:destItemPath error:error]) return NO;
+    }
+
+    return YES;
+}
+
 + (BOOL)applyModFileAtPath:(NSString *)modPath toRelativeTarget:(NSString *)relativeTarget error:(NSError **)error {
     NSFileManager *fm = NSFileManager.defaultManager;
 
@@ -579,7 +621,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     }
 
     if (![self lt_ensurePackBackupForLanguage:languageCode error:error]) return NO;
-    if (![self lt_replaceDirectoryAtPath:languageDir withCopyOfDirectoryAtPath:packPath error:error]) return NO;
+    if (![self lt_mergeDirectoryAtPath:languageDir withContentsOfDirectoryAtPath:packPath error:error]) return NO;
 
     NSString *markerPath = LTPackMarkerPath(languageCode);
     if (markerPath) {
@@ -588,7 +630,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
 
     zs_track_asset_path(languageDir);
     [ZSFileIndex ensureLocalizationIndexUpToDate];
-    ZLog(@"[LocalizationTransplant] swapped the \"%@\" language folder with %@", languageCode, packPath.lastPathComponent);
+    ZLog(@"[LocalizationTransplant] merged %@ into the \"%@\" language folder", packPath.lastPathComponent, languageCode);
     return YES;
 }
 

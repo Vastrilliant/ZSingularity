@@ -28,4 +28,4 @@ Mods 部分是一个本地 "mod folders" 库。每个文件夹都包含你导入
 
 对 bundle 进行 transcoding 会将其发送到 [Auth](Auth.md) 中配置的 GitHub 仓库，GitHub Actions workflow 会根据 [Config → Transcode Format](Config.md) 中选择的格式重新编码其纹理。
 
-运行成功后，tweak 会下载处理后的 bundle 并替换原始 bundle 进行安装。原始 stock bundle 会先通过 `ZTranscoderInstaller` 备份，因此之后可以恢复。之前 dispatch 已经存在于配置 repo 中的处理后 bundle 也可以直接列出并重新安装，无需再次运行 Transcoder workflow。
+运行成功后，tweak 会下载处理后的 bundle 并替换原始 bundle 进行安装。原始 stock bundle 会先通过 `ZTranscoderInstaller` 备份，因此之后可以恢复。

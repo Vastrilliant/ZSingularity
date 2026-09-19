@@ -115,6 +115,8 @@ jobs:
             -arch arm64 \
             -miphoneos-version-min=15.0 \
             -DZS_BUILD_NUMBER=${{ github.run_number }} \
+            -DZS_BUILD_CHANNEL=release \
+            -DZS_BUILD_BRANCH='"${{ github.ref_name }}"' \
             -framework Foundation \
             -framework UIKit \
             -framework QuartzCore \

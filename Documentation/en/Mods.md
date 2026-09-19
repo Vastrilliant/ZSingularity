@@ -24,7 +24,7 @@ Every entry's info panel starts with a `Kind:` line telling you which of these i
 ### Localization mods
 
 - **Localize .json files** must start with `dataList`. You'll be asked which language folder (`en`, `jp`, `kr`) to place them in; the matching language prefix (`EN_`, `JP_` or `KR_`) is prepended to each file's name (replacing any other prefix it already has), and the file replaces the game's file of that name inside the folder. It is rejected if no such file exists there.
-- **Localization packs** replace an entire language folder. A folder is treated as a pack when it contains at least two of the game's localization subfolders (`BattleAnnouncerDlg`, `BgmLyrics`, `EGOVoiceDig`, `PersonalityVoiceDlg`, `RPGSystem`, `StoryData`). A .zip is accepted only if it holds nothing but the pack folder.
+- **Localization packs** are merged into the language folder you pick: files from the pack overwrite the game's files of the same name, and any files or folders the pack doesn't include are kept, so older packs still work after a game update. A folder is treated as a pack when it contains at least two of the game's localization subfolders (`BattleAnnouncerDlg`, `BgmLyrics`, `EGOVoiceDig`, `PersonalityVoiceDlg`, `RPGSystem`, `StoryData`). A .zip is accepted only if it holds nothing but the pack folder.
 
 The original files are backed up before anything is swapped, and **Restore Originals** puts them back.
 
@@ -36,4 +36,4 @@ The original files are backed up before anything is swapped, and **Restore Origi
 
 Transcoding a bundle sends it to the GitHub repository configured under [Auth](Auth.md), where a GitHub Actions workflow re-encodes its textures into the format chosen under [Config → Transcode Format](Config.md).
 
-Once a run finishes successfully, the tweak downloads the processed bundle and installs it in place of the original — the original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later. Processed bundles already sitting in the configured repo from an earlier dispatch can also be listed and reinstalled directly, without re-running the Transcoder workflow.
+Once a run finishes successfully, the tweak downloads the processed bundle and installs it in place of the original — the original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later.

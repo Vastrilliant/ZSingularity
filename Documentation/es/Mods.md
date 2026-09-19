@@ -28,4 +28,4 @@ Próximamente:
 
 Hacer transcoding de un bundle lo envía al repositorio de GitHub configurado en [Auth](Auth.md), donde un workflow de GitHub Actions vuelve a codificar sus texturas en el formato elegido en [Config → Transcode Format](Config.md).
 
-Cuando una ejecución termina correctamente, el tweak descarga el bundle procesado y lo instala en lugar del original. El stock bundle original se respalda primero mediante `ZTranscoderInstaller`, para poder restaurarlo posteriormente. Los bundles procesados que ya se encuentren en el repo configurado por un dispatch anterior también pueden aparecer en la lista y reinstalarse directamente, sin volver a ejecutar el workflow de Transcoder.
+Cuando una ejecución termina correctamente, el tweak descarga el bundle procesado y lo instala en lugar del original. El stock bundle original se respalda primero mediante `ZTranscoderInstaller`, para poder restaurarlo posteriormente.

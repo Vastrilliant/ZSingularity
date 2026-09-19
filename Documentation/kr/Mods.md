@@ -28,4 +28,4 @@ Mods 섹션은 "mod folders"의 로컬 라이브러리입니다. 각 폴더에�
 
 bundle을 transcoding하면 [Auth](Auth.md)에 설정된 GitHub 저장소로 전송되며, GitHub Actions workflow가 [Config → Transcode Format](Config.md)에서 선택한 형식으로 텍스처를 다시 인코딩합니다.
 
-실행이 성공적으로 끝나면 tweak가 처리된 bundle을 다운로드하여 원본 대신 설치합니다. 원본 stock bundle은 먼저 `ZTranscoderInstaller`를 통해 백업되므로 나중에 복원할 수 있습니다. 이전 dispatch에서 설정된 repo에 이미 존재하는 처리된 bundle도 Transcoder workflow를 다시 실행하지 않고 바로 목록에 표시하여 재설치할 수 있습니다.
+실행이 성공적으로 끝나면 tweak가 처리된 bundle을 다운로드하여 원본 대신 설치합니다. 원본 stock bundle은 먼저 `ZTranscoderInstaller`를 통해 백업되므로 나중에 복원할 수 있습니다.

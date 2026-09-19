@@ -53,18 +53,6 @@ typedef NS_ENUM(NSInteger, ZTranscoderRunStatus) {
 + (nullable instancetype)handleFromDictionaryRepresentation:(NSDictionary<NSString *, NSString *> *)dict;
 @end
 
-@interface ZTranscoderProcessedRelease : NSObject
-@property (nonatomic, copy, readonly) NSString *tagName;
-
-@property (nonatomic, copy, readonly, nullable) NSString *cabDisplayName;
-
-@property (nonatomic, copy, readonly) NSString *displayName;
-@property (nonatomic, assign, readonly) unsigned long long byteSize;
-@property (nonatomic, copy, readonly, nullable) NSString *uploadedAt;
-
-@property (nonatomic, copy, readonly, nullable) NSString *checksum;
-@end
-
 @interface ZTranscoderService : NSObject
 
 + (void)ztranscoderBundleAtURL:(NSURL *)moddedBundleURL
@@ -99,18 +87,6 @@ typedef NS_ENUM(NSInteger, ZTranscoderRunStatus) {
 
 + (BOOL)isUploadCompressionEnabled;
 + (void)setUploadCompressionEnabled:(BOOL)enabled;
-
-#pragma mark - Processed Bundles listing (6)
-
-+ (void)listProcessedReleasesForConfig:(ZTranscoderConfig *)config
-                              completion:(void (^)(NSArray<ZTranscoderProcessedRelease *> * _Nullable releases, NSError * _Nullable error))completion;
-
-#pragma mark - Processed Bundles install (9)
-
-+ (void)downloadProcessedRelease:(ZTranscoderProcessedRelease *)release
-                            config:(ZTranscoderConfig *)config
-                          progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))downloadProgress
-                        completion:(void (^)(NSURL * _Nullable bundleURL, NSError * _Nullable error))completion;
 
 #pragma mark - Delete every stored release (8)
 

@@ -54,16 +54,6 @@ static NSString *bds_uniqueTagForCAB(NSString *cabIdentifier) {
     return [NSString stringWithFormat:@"bundle-doctor/CAB-%@-%@", cabTrunc, uuid];
 }
 
-static NSString *bds_cabDisplayNameFromTag(NSString *tagName) {
-    NSRange cabRange = [tagName rangeOfString:@"CAB-"];
-    if (cabRange.location == NSNotFound) return nil;
-    NSString *fromCAB = [tagName substringFromIndex:cabRange.location];
-
-    NSArray<NSString *> *components = [fromCAB componentsSeparatedByString:@"-"];
-    if (components.count < 2) return fromCAB;
-    return [NSString stringWithFormat:@"%@-%@", components[0], components[1]];
-}
-
 static NSData *bds_prepareBundleDataForUpload(NSData *data, unsigned long long *outCompressedByteSize, NSError **error) {
     if (outCompressedByteSize) *outCompressedByteSize = 0;
     if (data.length == 0) return data;
@@ -283,41 +273,6 @@ didFinishDownloadingToURL:(NSURL *)location {
 + (nullable id)bds_performJSONRequest:(NSURLRequest *)request expectBody:(BOOL)expectBody error:(NSError **)error;
 + (NSDateFormatter *)bds_iso8601Formatter;
 + (NSError *)bds_errorWithCode:(ZTranscoderServiceErrorCode)code description:(NSString *)description;
-@end
-
-#pragma mark - ZTranscoderProcessedRelease
-
-@implementation ZTranscoderProcessedRelease {
-    NSString *_tagName;
-    NSString *_cabDisplayName;
-    NSString *_displayName;
-    unsigned long long _byteSize;
-    NSString *_uploadedAt;
-    NSString *_checksum;
-}
-
-- (instancetype)initWithTagName:(NSString *)tagName
-                        byteSize:(unsigned long long)byteSize
-                      uploadedAt:(nullable NSString *)uploadedAt
-                        checksum:(nullable NSString *)checksum {
-    if ((self = [super init])) {
-        _tagName = [tagName copy] ?: @"";
-        _cabDisplayName = bds_cabDisplayNameFromTag(_tagName);
-        _displayName = _cabDisplayName.length > 0 ? _cabDisplayName : _tagName;
-        _byteSize = byteSize;
-        _uploadedAt = [uploadedAt copy];
-        _checksum = [checksum copy];
-    }
-    return self;
-}
-
-- (NSString *)tagName { return _tagName; }
-- (NSString *)cabDisplayName { return _cabDisplayName; }
-- (NSString *)displayName { return _displayName; }
-- (unsigned long long)byteSize { return _byteSize; }
-- (NSString *)uploadedAt { return _uploadedAt; }
-- (NSString *)checksum { return _checksum; }
-
 @end
 
 #pragma mark - ZTranscoderService
@@ -852,126 +807,6 @@ didFinishDownloadingToURL:(NSURL *)location {
         id repo = [self bds_getJSON:path config:config error:&error];
         ZLog(@"[ZTranscoderService] credential verification against %@/%@: %@", config.repoOwner, config.repoName, repo != nil ? @"OK" : @"FAILED");
         finish(repo != nil, error);
-    });
-}
-
-#pragma mark - Processed Bundles listing (6)
-
-+ (void)listProcessedReleasesForConfig:(ZTranscoderConfig *)rawConfig
-                              completion:(void (^)(NSArray<ZTranscoderProcessedRelease *> * _Nullable, NSError * _Nullable))completion {
-    void (^finish)(NSArray<ZTranscoderProcessedRelease *> * _Nullable, NSError * _Nullable) =
-        ^(NSArray<ZTranscoderProcessedRelease *> *releases, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(releases, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        static const NSInteger kPerPage = 100;
-        NSMutableArray<ZTranscoderProcessedRelease *> *results = [NSMutableArray array];
-        NSInteger page = 1;
-        for (;;) {
-            NSString *path = [NSString stringWithFormat:@"/repos/%@/%@/releases?per_page=%ld&page=%ld",
-                               config.repoOwner, config.repoName, (long)kPerPage, (long)page];
-            NSError *error = nil;
-            id result = [self bds_getJSON:path config:config error:&error];
-            if (!result) {
-                finish(nil, error);
-                return;
-            }
-            NSArray *pageReleases = [result isKindOfClass:NSArray.class] ? result : @[];
-            for (NSDictionary *release in pageReleases) {
-                if (![release isKindOfClass:NSDictionary.class]) continue;
-                NSArray *assets = release[@"assets"];
-                if (![assets isKindOfClass:NSArray.class]) continue;
-
-                NSDictionary *outputAsset = nil;
-                for (NSDictionary *asset in assets) {
-                    if ([asset isKindOfClass:NSDictionary.class] && [asset[@"name"] isEqual:kBDSOutputAssetName]) {
-                        outputAsset = asset;
-                        break;
-                    }
-                }
-
-                if (!outputAsset) continue;
-
-                NSString *tagName = [release[@"tag_name"] isKindOfClass:NSString.class] ? release[@"tag_name"] : @"";
-                id sizeValue = outputAsset[@"size"];
-                unsigned long long size = [sizeValue respondsToSelector:@selector(unsignedLongLongValue)] ? [sizeValue unsignedLongLongValue] : 0;
-                NSString *uploadedAt = [outputAsset[@"created_at"] isKindOfClass:NSString.class] ? outputAsset[@"created_at"] : nil;
-                NSString *digest = [outputAsset[@"digest"] isKindOfClass:NSString.class] ? outputAsset[@"digest"] : nil;
-
-                [results addObject:[[ZTranscoderProcessedRelease alloc] initWithTagName:tagName
-                                                                                  byteSize:size
-                                                                                uploadedAt:uploadedAt
-                                                                                  checksum:digest]];
-            }
-            if (pageReleases.count < kPerPage) break;
-            page++;
-        }
-
-        [results sortUsingComparator:^NSComparisonResult(ZTranscoderProcessedRelease *a, ZTranscoderProcessedRelease *b) {
-
-            if (!a.uploadedAt && !b.uploadedAt) return NSOrderedSame;
-            if (!a.uploadedAt) return NSOrderedDescending;
-            if (!b.uploadedAt) return NSOrderedAscending;
-            return [b.uploadedAt compare:a.uploadedAt];
-        }];
-
-        ZLog(@"[ZTranscoderService] listed %lu processed release(s) for %@/%@", (unsigned long)results.count, config.repoOwner, config.repoName);
-        finish(results, nil);
-    });
-}
-
-#pragma mark - Processed Bundles install (9)
-
-+ (void)downloadProcessedRelease:(ZTranscoderProcessedRelease *)release
-                            config:(ZTranscoderConfig *)rawConfig
-                          progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))downloadProgress
-                        completion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
-    void (^reportProgress)(int64_t, int64_t) = ^(int64_t bytesWritten, int64_t totalBytesExpected) {
-        if (!downloadProgress) return;
-        int64_t total = totalBytesExpected > 0 ? totalBytesExpected : (int64_t)release.byteSize;
-        dispatch_async(dispatch_get_main_queue(), ^{ downloadProgress(bytesWritten, total); });
-    };
-    void (^finish)(NSURL * _Nullable, NSError * _Nullable) = ^(NSURL * _Nullable url, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(url, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                 description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-        NSData *bundleData = nil;
-        if (![self bds_downloadReleaseAssetNamed:kBDSOutputAssetName fromReleaseTag:release.tagName
-                                           config:config progress:reportProgress data:&bundleData error:&error]) {
-            finish(nil, error);
-            return;
-        }
-        reportProgress((int64_t)bundleData.length, (int64_t)bundleData.length);
-
-        NSString *tempName = [NSString stringWithFormat:@"processed-%@.bundle", [NSUUID UUID].UUIDString];
-        NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:tempName]];
-        NSError *writeError = nil;
-        if (![bundleData writeToURL:tempURL options:NSDataWritingAtomic error:&writeError]) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                     description:writeError.localizedDescription ?: @"Couldn't write the processed bundle to a temp file."]);
-            return;
-        }
-
-        ZLog(@"[ZTranscoderService] processed release %@ downloaded to %@ (%lu bytes)", release.tagName, tempURL.path, (unsigned long)bundleData.length);
-
-        finish(tempURL, nil);
     });
 }
 

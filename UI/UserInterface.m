@@ -1320,6 +1320,7 @@ static const CGFloat kFillAlpha = 1.0;
 @property (nonatomic, strong) UIVisualEffectView *trackGlass;
 @property (nonatomic, assign) BOOL glassEnabled;
 - (void)zs_forceLabelRedisplay;
+- (void)zs_applySegmentLabelColors;
 @end
 
 @implementation ZSModeSlider
@@ -1438,10 +1439,23 @@ static const CGFloat kFillAlpha = 1.0;
         l.userInteractionEnabled = NO;
         l.adjustsFontSizeToFitWidth = YES;
         l.minimumScaleFactor = 0.7;
+        l.layer.zPosition = 10;
         [self.track addSubview:l];
         [self.segmentLabels addObject:l];
     }
+    [self zs_applySegmentLabelColors];
     [self setNeedsLayout];
+}
+
+- (void)zs_applySegmentLabelColors {
+    NSInteger count = (NSInteger)self.segmentLabels.count;
+    if (count == 0) return;
+    NSInteger clampedIndex = MAX(0, MIN(count - 1, self.selectedIndex));
+    for (NSInteger i = 0; i < count; i++) {
+        UILabel *l = self.segmentLabels[i];
+        UIColor *color = (i == clampedIndex) ? UIColor.blackColor : [UIColor colorWithWhite:1 alpha:0.6];
+        l.textColor = color;
+    }
 }
 
 - (void)setDefaultIndex:(NSInteger)defaultIndex {
@@ -1473,9 +1487,9 @@ static const CGFloat kFillAlpha = 1.0;
     for (NSInteger i = 0; i < count; i++) {
         UILabel *l = self.segmentLabels[i];
         l.frame = CGRectMake(segmentWidth * i, 0, segmentWidth, self.track.bounds.size.height);
-        l.textColor = (i == clampedIndex) ? UIColor.blackColor : [UIColor colorWithWhite:1 alpha:0.6];
         [self.track bringSubviewToFront:l];
     }
+    [self zs_applySegmentLabelColors];
 
     self.thumb.frame = CGRectMake(segmentWidth * clampedIndex + 2, 2, MAX(0, segmentWidth - 4), MAX(0, self.track.bounds.size.height - 4));
     if (self.trackGlass) [self.track sendSubviewToBack:self.trackGlass];
@@ -1506,6 +1520,7 @@ static const CGFloat kFillAlpha = 1.0;
     if (count == 0) { _selectedIndex = 0; return; }
     selectedIndex = MAX(0, MIN(count - 1, selectedIndex));
     _selectedIndex = selectedIndex;
+    [self zs_applySegmentLabelColors];
     if (animated) {
         [UIView animateWithDuration:0.22
                               delay:0
@@ -2915,9 +2930,6 @@ static UIView *zs_make_blacklist_entry_row(NSString *term, id target, SEL remove
 static const CGFloat kZSModsOptionsButtonWidth = 30;
 static const CGFloat kZSModsOptionsButtonHeight = 18;
 
-static NSString * const kZSProcessedBundlesFolderName = @"Processed Bundles";
-static NSString * const kZSProcessedBundlesFolderSubtext = @"download bundles stored in the proxy\u2019s release tab";
-
 static NSString * const kZSStoredBundlesFolderName = @"Stored Bundles";
 static NSString * const kZSStoredBundlesFolderSubtext = @"Your stored bundles are here, you can restore them any time.";
 
@@ -3425,6 +3437,14 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
                                                     [entry.path stringByAppendingString:@"|path"],
                                                     subtextFont, subtextColor);
         [panel addArrangedSubview:pathRow];
+
+        if (entry.localizationKind != ModAssetLibraryLocalizationKindNone && entry.localizationLanguage.length > 0) {
+            UILabel *langFolderLabel = [[UILabel alloc] init];
+            langFolderLabel.text = [NSString stringWithFormat:@"Selected lang folder: %@", entry.localizationLanguage];
+            langFolderLabel.font = subtextFont;
+            langFolderLabel.textColor = subtextColor;
+            [panel addArrangedSubview:langFolderLabel];
+        }
     }
 
     if (entry.isAssetBundle) {
@@ -3503,126 +3523,6 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
         errorLabel.textColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.5 alpha:0.85];
         errorLabel.marqueeKey = [entry.path stringByAppendingString:@"|doctorError"];
         [panel addArrangedSubview:errorLabel];
-    }
-
-    [NSLayoutConstraint activateConstraints:@[
-        [panel.topAnchor constraintEqualToAnchor:container.topAnchor],
-        [panel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [panel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [panel.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
-    ]];
-
-    return container;
-}
-
-#pragma mark - Mods Library "Processed Bundles" rows (6)
-
-static UIView *zs_make_processed_bundle_row(ZTranscoderProcessedRelease *release, id target, SEL tapAction,
-                                             SEL installAction, BOOL installInFlight) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-    objc_setAssociatedObject(row, "zs_processedRelease", release, OBJC_ASSOCIATION_RETAIN);
-
-    UIImageSymbolConfiguration *iconConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:
-        [UIImage systemImageNamed:@"shippingbox.fill" withConfiguration:iconConfig]];
-    icon.translatesAutoresizingMaskIntoConstraints = NO;
-    icon.tintColor = [UIColor colorWithWhite:1 alpha:0.6];
-    icon.contentMode = UIViewContentModeCenter;
-    [row addSubview:icon];
-
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.text = release.displayName;
-    label.font = zs_mono_font(11, UIFontWeightRegular);
-    label.textColor = [UIColor colorWithWhite:1 alpha:0.75];
-    label.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    [row addSubview:label];
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:target action:tapAction];
-    [row addGestureRecognizer:tap];
-
-    UIView *installView = nil;
-    if (installInFlight) {
-        UILabel *progressLabel = [[UILabel alloc] init];
-        progressLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        progressLabel.text = @"installing…";
-        progressLabel.font = zs_mono_font(10, UIFontWeightMedium);
-        progressLabel.textColor = zs_accent_green_color();
-        progressLabel.textAlignment = NSTextAlignmentRight;
-        zs_apply_gif_text_tint(progressLabel);
-        installView = progressLabel;
-    } else {
-        UIButton *installButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        installButton.translatesAutoresizingMaskIntoConstraints = NO;
-        zs_style_pill_icon_button_as_native_glass(installButton,
-            zs_mods_doctor_button_icon(@"arrow.down.circle.fill", kZSModsDoctorCapsuleFontSize),
-            zs_accent_green_color());
-        objc_setAssociatedObject(installButton, "zs_processedRelease", release, OBJC_ASSOCIATION_RETAIN);
-        [installButton addTarget:target action:installAction forControlEvents:UIControlEventTouchUpInside];
-        objc_setAssociatedObject(row, "zs_button_install", installButton, OBJC_ASSOCIATION_RETAIN);
-        installView = installButton;
-    }
-    objc_setAssociatedObject(installView, "zs_processedRelease", release, OBJC_ASSOCIATION_RETAIN);
-    [row addSubview:installView];
-    objc_setAssociatedObject(row, "zs_view_install", installView, OBJC_ASSOCIATION_RETAIN);
-
-    [NSLayoutConstraint activateConstraints:@[
-        [icon.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:22],
-        [icon.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [icon.widthAnchor constraintEqualToConstant:16],
-
-        [label.leadingAnchor constraintEqualToAnchor:icon.trailingAnchor constant:5],
-        [label.trailingAnchor constraintLessThanOrEqualToAnchor:installView.leadingAnchor constant:-6],
-        [label.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [row.topAnchor constraintEqualToAnchor:label.topAnchor constant:-3],
-        [row.bottomAnchor constraintEqualToAnchor:label.bottomAnchor constant:3],
-
-        [installView.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [installView.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [installView.widthAnchor constraintGreaterThanOrEqualToConstant:kZSModsDoctorCapsuleMinWidth],
-    ]];
-    if (!installInFlight) {
-        [installView.heightAnchor constraintEqualToConstant:kZSModsDoctorCapsuleHeight].active = YES;
-    }
-
-    return row;
-}
-
-static UIView *zs_make_processed_bundle_info_panel(ZTranscoderProcessedRelease *release) {
-    UIView *container = [[UIView alloc] init];
-    container.translatesAutoresizingMaskIntoConstraints = NO;
-    objc_setAssociatedObject(container, "zs_processedRelease", release, OBJC_ASSOCIATION_RETAIN);
-
-    UIStackView *panel = [[UIStackView alloc] init];
-    panel.axis = UILayoutConstraintAxisVertical;
-    panel.spacing = 2;
-    panel.translatesAutoresizingMaskIntoConstraints = NO;
-    panel.layoutMarginsRelativeArrangement = YES;
-    panel.layoutMargins = UIEdgeInsetsMake(2, 38, 2, 4);
-    [container addSubview:panel];
-
-    UIFont *subtextFont = zs_mono_font(9.5, UIFontWeightRegular);
-    UIColor *subtextColor = [UIColor colorWithWhite:1 alpha:0.4];
-
-    UILabel *sizeLabel = [[UILabel alloc] init];
-    sizeLabel.text = [NSString stringWithFormat:@"Size: %@", [NSByteCountFormatter stringFromByteCount:(long long)release.byteSize countStyle:NSByteCountFormatterCountStyleFile]];
-    sizeLabel.font = subtextFont;
-    sizeLabel.textColor = subtextColor;
-    [panel addArrangedSubview:sizeLabel];
-
-    UILabel *dateLabel = [[UILabel alloc] init];
-    dateLabel.text = [NSString stringWithFormat:@"Upload date: %@", release.uploadedAt.length ? release.uploadedAt : @"unknown"];
-    dateLabel.font = subtextFont;
-    dateLabel.textColor = subtextColor;
-    [panel addArrangedSubview:dateLabel];
-
-    if (release.checksum.length > 0) {
-        UIView *checksumRow = zs_make_marquee_info_row(@"Checksum:", release.checksum,
-                                                         [release.tagName stringByAppendingString:@"|checksum"],
-                                                         subtextFont, subtextColor);
-        [panel addArrangedSubview:checksumRow];
     }
 
     [NSLayoutConstraint activateConstraints:@[
@@ -4023,14 +3923,6 @@ static UIView *zs_make_title_block(void) {
 
 @property (nonatomic, weak) UIDocumentPickerViewController *libraryImportPicker;
 @property (nonatomic, copy) NSString *libraryImportTargetFolder;
-
-@property (nonatomic, strong) NSArray<ZTranscoderProcessedRelease *> *processedBundlesReleases;
-@property (nonatomic, assign) BOOL processedBundlesLoading;
-@property (nonatomic, copy) NSString *processedBundlesErrorMessage;
-
-@property (nonatomic, strong) NSMutableSet<NSString *> *modsLibraryExpandedProcessedBundles;
-
-@property (nonatomic, strong) NSMutableSet<NSString *> *processedBundleInstallInFlight;
 
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTimer *> *doctorPollTimers;
 
@@ -5485,8 +5377,6 @@ static const CGFloat kContentFadeHeight = 22;
 
     self.modsLibraryExpandedFolders = [NSMutableSet set];
     self.modsLibraryExpandedInfoEntries = [NSMutableSet set];
-    self.modsLibraryExpandedProcessedBundles = [NSMutableSet set];
-    self.processedBundleInstallInFlight = [NSMutableSet set];
     self.modsLibraryStack = [[UIStackView alloc] init];
     self.modsLibraryStack.axis = UILayoutConstraintAxisVertical;
     self.modsLibraryStack.spacing = 2;
@@ -8728,55 +8618,6 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
             [self zs_closeModsOptionsDropdownAnimated:NO];
         }
     }
-
-    BOOL processedExpanded = [self.modsLibraryExpandedFolders containsObject:kZSProcessedBundlesFolderName];
-    UIView *processedFolderRow = zs_make_mods_folder_row(kZSProcessedBundlesFolderName, nil,
-        kZSProcessedBundlesFolderSubtext, processedExpanded, self,
-        @selector(zs_modsLibraryFolderRowTapped:), NULL, 0);
-    [self.modsLibraryStack addArrangedSubview:processedFolderRow];
-
-    if (!processedExpanded) return;
-
-    if (self.processedBundlesLoading) {
-        UILabel *loading = [[UILabel alloc] init];
-        loading.text = @"  Loading\u2026";
-        loading.font = zs_mono_font(11, UIFontWeightRegular);
-        loading.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-        [self.modsLibraryStack addArrangedSubview:loading];
-        return;
-    }
-
-    if (self.processedBundlesErrorMessage.length > 0) {
-        UILabel *errorLabel = [[UILabel alloc] init];
-        errorLabel.text = [NSString stringWithFormat:@"  %@", self.processedBundlesErrorMessage];
-        errorLabel.numberOfLines = 0;
-        errorLabel.font = zs_mono_font(11, UIFontWeightRegular);
-        errorLabel.textColor = [UIColor colorWithRed:1.0 green:0.5 blue:0.5 alpha:0.85];
-        [self.modsLibraryStack addArrangedSubview:errorLabel];
-        return;
-    }
-
-    if (self.processedBundlesReleases.count == 0) {
-        UILabel *emptyFolder = [[UILabel alloc] init];
-        emptyFolder.text = @"  No processed bundles yet.";
-        emptyFolder.font = zs_mono_font(11, UIFontWeightRegular);
-        emptyFolder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-        [self.modsLibraryStack addArrangedSubview:emptyFolder];
-        return;
-    }
-
-    for (ZTranscoderProcessedRelease *release in self.processedBundlesReleases) {
-        BOOL releaseExpanded = [self.modsLibraryExpandedProcessedBundles containsObject:release.tagName];
-        BOOL installInFlight = [self.processedBundleInstallInFlight containsObject:release.tagName];
-        UIView *releaseRow = zs_make_processed_bundle_row(release, self, @selector(zs_processedBundleRowTapped:),
-            @selector(zs_processedBundleInstallTapped:), installInFlight);
-        [self.modsLibraryStack addArrangedSubview:releaseRow];
-
-        if (releaseExpanded) {
-            UIView *releaseInfoPanel = zs_make_processed_bundle_info_panel(release);
-            [self.modsLibraryStack addArrangedSubview:releaseInfoPanel];
-        }
-    }
 }
 
 - (void)zs_modsLibraryFolderRowTapped:(UITapGestureRecognizer *)gesture {
@@ -8789,184 +8630,6 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         [self.modsLibraryExpandedFolders addObject:folderName];
     }
     [self zs_rebuildModsLibrary];
-
-    if (!wasExpanded && [folderName isEqualToString:kZSProcessedBundlesFolderName]) {
-        [self zs_fetchProcessedBundles];
-    }
-}
-
-- (void)zs_fetchProcessedBundles {
-    self.processedBundlesLoading = YES;
-    self.processedBundlesErrorMessage = nil;
-    [self zs_rebuildModsLibrary];
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        self.processedBundlesLoading = NO;
-        self.processedBundlesErrorMessage = @"Set a GitHub Repository Link and Personal Access Token under Mods \u2192 Auth first.";
-        [self zs_rebuildModsLibrary];
-        return;
-    }
-
-    __weak typeof(self) weakSelf = self;
-    [ZTranscoderService listProcessedReleasesForConfig:config
-        completion:^(NSArray<ZTranscoderProcessedRelease *> * _Nullable releases, NSError * _Nullable error) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        strongSelf.processedBundlesLoading = NO;
-        if (!releases) {
-            strongSelf.processedBundlesErrorMessage = error.localizedDescription ?: @"Couldn't load processed bundles.";
-            strongSelf.processedBundlesReleases = nil;
-        } else {
-            strongSelf.processedBundlesErrorMessage = nil;
-            strongSelf.processedBundlesReleases = releases;
-        }
-
-        [strongSelf zs_rebuildModsLibrary];
-    }];
-}
-
-- (void)zs_processedBundleRowTapped:(UITapGestureRecognizer *)gesture {
-    ZTranscoderProcessedRelease *release = objc_getAssociatedObject(gesture.view, "zs_processedRelease");
-    if (!release) return;
-    if ([self.modsLibraryExpandedProcessedBundles containsObject:release.tagName]) {
-        [self.modsLibraryExpandedProcessedBundles removeObject:release.tagName];
-    } else {
-        [self.modsLibraryExpandedProcessedBundles addObject:release.tagName];
-    }
-    [self zs_rebuildModsLibrary];
-}
-
-- (void)zs_processedBundleInstallTapped:(UIButton *)sender {
-    ZTranscoderProcessedRelease *release = objc_getAssociatedObject(sender, "zs_processedRelease");
-    if (!release) return;
-
-    if (!self.processedBundleInstallInFlight) self.processedBundleInstallInFlight = [NSMutableSet set];
-    if ([self.processedBundleInstallInFlight containsObject:release.tagName]) return;
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        [self zs_presentModsAlertWithTitle:@"Auth Not Configured"
-                                    message:@"Set a GitHub Repository Link and Personal Access Token under Mods \u2192 Auth first."];
-        return;
-    }
-
-    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [haptic impactOccurred];
-
-    __weak typeof(self) weakSelf = self;
-    [self zs_pickModsLibraryFolderForInstallWithCompletion:^(NSString *folderName) {
-        [weakSelf zs_installProcessedBundleRelease:release intoFolder:folderName config:config];
-    }];
-}
-
-- (void)zs_pickModsLibraryFolderForInstallWithCompletion:(void (^)(NSString *chosenFolder))completion {
-    NSMutableArray<NSString *> *pickable = [[ModAssetLibrary folderNames] mutableCopy];
-    [pickable removeObject:kZSStoredBundlesFolderName];
-
-    void (^createAndContinue)(void) = ^{
-        [self zs_promptForModFolderNameWithTitle:@"New Folder"
-                                      actionTitle:@"Create & Install"
-                                       completion:^(NSString *trimmedName) {
-            NSError *createErr = nil;
-            if (![ModAssetLibrary createFolderNamed:trimmedName error:&createErr]) {
-                [self zs_presentModsAlertWithTitle:@"Couldn't Create Folder" message:createErr.localizedDescription ?: @"Unknown error."];
-                return;
-            }
-            completion(trimmedName);
-        }];
-    };
-
-    if (pickable.count == 0) {
-        createAndContinue();
-        return;
-    }
-
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) return;
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Install Into Which Folder?"
-                                                                      message:nil
-                                                               preferredStyle:UIAlertControllerStyleActionSheet];
-    for (NSString *candidate in pickable) {
-        [sheet addAction:[UIAlertAction actionWithTitle:candidate style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            completion(candidate);
-        }]];
-    }
-    [sheet addAction:[UIAlertAction actionWithTitle:@"New Folder\u2026" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        createAndContinue();
-    }]];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    [presenter presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)zs_installProcessedBundleRelease:(ZTranscoderProcessedRelease *)release intoFolder:(NSString *)folderName config:(ZTranscoderConfig *)config {
-    if ([self.processedBundleInstallInFlight containsObject:release.tagName]) return;
-    [self.processedBundleInstallInFlight addObject:release.tagName];
-    [self zs_rebuildModsLibrary];
-
-    __weak typeof(self) weakSelf = self;
-    [ZTranscoderService downloadProcessedRelease:release config:config
-        progress:nil
-        completion:^(NSURL * _Nullable bundleURL, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (!bundleURL) {
-            [strongSelf.processedBundleInstallInFlight removeObject:release.tagName];
-            UINotificationFeedbackGenerator *errHaptic = [UINotificationFeedbackGenerator new];
-            [errHaptic notificationOccurred:UINotificationFeedbackTypeError];
-            [strongSelf zs_presentModsAlertWithTitle:@"Download Failed"
-                                              message:error.localizedDescription ?: @"Unknown error."];
-            [strongSelf zs_rebuildModsLibrary];
-            return;
-        }
-        [strongSelf zs_importAndInstallDownloadedProcessedBundleAtURL:bundleURL release:release intoFolder:folderName];
-    }];
-}
-
-- (void)zs_importAndInstallDownloadedProcessedBundleAtURL:(NSURL *)bundleURL release:(ZTranscoderProcessedRelease *)release intoFolder:(NSString *)folderName {
-    NSError *beforeErr = nil;
-    NSSet<NSString *> *pathsBefore = [NSSet setWithArray:
-        [[ModAssetLibrary entriesInFolder:folderName error:&beforeErr] valueForKey:@"path"] ?: @[]];
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *importError = nil;
-        NSArray<NSString *> *rejectedFileLines = nil;
-        BOOL imported = [ModAssetLibrary importFileURLs:@[bundleURL] intoFolder:folderName rejectedFileLines:&rejectedFileLines error:&importError];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            if (!imported) {
-                [strongSelf.processedBundleInstallInFlight removeObject:release.tagName];
-                UINotificationFeedbackGenerator *errHaptic = [UINotificationFeedbackGenerator new];
-                [errHaptic notificationOccurred:UINotificationFeedbackTypeError];
-
-                NSString *failureMessage = rejectedFileLines.firstObject ?: (importError.localizedDescription ?: @"Unknown error.");
-                [strongSelf zs_presentModsAlertWithTitle:@"Import Failed"
-                                                  message:failureMessage];
-                [strongSelf zs_rebuildModsLibrary];
-                return;
-            }
-
-            NSError *afterErr = nil;
-            NSArray<ModAssetLibraryEntry *> *afterEntries = [ModAssetLibrary entriesInFolder:folderName error:&afterErr] ?: @[];
-            ModAssetLibraryEntry *newEntry = nil;
-            for (ModAssetLibraryEntry *candidate in afterEntries) {
-                if (![pathsBefore containsObject:candidate.path]) { newEntry = candidate; break; }
-            }
-            if (!newEntry) {
-                ZLog(@"[Mods Library] imported processed release %@ into \"%@\" but couldn't find its new entry afterward.", release.tagName, folderName);
-                [strongSelf.processedBundleInstallInFlight removeObject:release.tagName];
-                [strongSelf zs_rebuildModsLibrary];
-                return;
-            }
-
-            [strongSelf.processedBundleInstallInFlight removeObject:release.tagName];
-            [strongSelf zs_rebuildModsLibrary];
-            [strongSelf zs_doctorInstallUsingKnownTargetForDoctoredURL:bundleURL entryPath:newEntry.path inFolder:folderName];
-        });
-    });
 }
 
 - (void)zs_modsLibraryEntryInfoTapped:(UITapGestureRecognizer *)gesture {
@@ -12191,7 +11854,13 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     else if ([key isEqualToString:@"AntialiasingMode"]) g_expAntialiasingMode = (int32_t)i;
     else if ([key isEqualToString:@"AntialiasingQuality"]) g_expAntialiasingQuality = (int32_t)i;
     else if ([key isEqualToString:@"UpscalingFilter"]) g_expUpscalingFilter = (int32_t)i;
-    else if ([key isEqualToString:@"RenderTextureMemorylessMode"]) g_expRenderTextureMemorylessMode = (i==0?0:(i==1?2:(i==2?4:6)));
+    else if ([key isEqualToString:@"RenderTextureMemorylessMode"]) {
+        g_expRenderTextureMemorylessMode = (i==0?0:(i==1?2:(i==2?4:6)));
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(zs_applyRenderTextureMemorylessDeferred) object:nil];
+        [self performSelector:@selector(zs_applyRenderTextureMemorylessDeferred) withObject:nil afterDelay:0.25];
+        [self zs_scheduleSave];
+        return;
+    }
     else if ([key isEqualToString:@"URPMSAA"]) g_expURPMSAA = (i==0?1:(i==1?2:(i==2?4:8)));
     else if ([key isEqualToString:@"StoreActionsOptimization"]) g_expStoreActionsOptimization = (int32_t)i;
     else if ([key isEqualToString:@"IntermediateTextureMode"]) g_expIntermediateTextureMode = (int32_t)i;
@@ -12231,6 +11900,10 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     else if ([key isEqualToString:@"AnimatorUpdateMode"]) g_expAnimatorUpdateMode = (int32_t)i;
     zs_exp_apply_key(key);
     [self zs_scheduleSave];
+}
+
+- (void)zs_applyRenderTextureMemorylessDeferred {
+    zs_exp_apply_key(@"RenderTextureMemorylessMode");
 }
 
 - (void)expWheelChanged:(ZSWheelPicker *)picker {
