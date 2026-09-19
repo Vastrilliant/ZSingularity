@@ -22,6 +22,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "ZSEmbeddedFont.h"
+#import "ZSEmbeddedSignature.h"
 #import "ZSDocs.h"
 #import "ZSGifTint.h"
 
@@ -64,6 +65,19 @@ static UIWindow *zs_key_window(void) {
 
 static UIView *zs_ui_host_view(void) {
     return zs_unity_view() ?: zs_key_window();
+}
+
+static void zs_close_application(void) {
+    zs_persist_current_settings();
+    exit(0);
+}
+
+static void zs_add_restart_action(UIAlertController *alert) {
+    [alert addAction:[UIAlertAction actionWithTitle:@"Restart App"
+                                              style:UIAlertActionStyleDestructive
+                                            handler:^(UIAlertAction *action) {
+        zs_close_application();
+    }]];
 }
 
 static void zs_force_dark(UIView *view) {
@@ -2457,6 +2471,9 @@ static UIView *zs_make_grouped_action_pair_row(UIButton *leftButton, UIButton *r
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
+    leftButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    rightButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+
     [row addSubview:leftButton];
     UIView *divider = zs_make_grouped_vertical_divider();
     [row addSubview:divider];
@@ -3155,7 +3172,7 @@ static UIView *zs_make_mods_entry_row(ModAssetLibraryEntry *entry, id target, SE
     if (isBank) {
         iconName = @"waveform";
     } else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
-        iconName = @"folder.fill";
+        iconName = @"shippingbox.fill";
     } else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) {
         iconName = @"text.bubble.fill";
     }
@@ -3631,6 +3648,34 @@ static void zs_apply_update_label_style(UILabel *label, NSString *text, BOOL int
         label.textColor = [UIColor colorWithWhite:1 alpha:0.45];
         label.text = text;
     }
+}
+
+static const CGFloat kZSSignatureWidth = 104;
+static const CGFloat kZSSignatureInset = 8;
+static const CGFloat kZSSignatureOpacity = 0.15;
+
+static UIImage *zs_signature_image(void) {
+    static UIImage *image;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSData *data = [NSData dataWithBytes:kZSSignaturePNG length:kZSSignaturePNGLength];
+        image = [UIImage imageWithData:data];
+    });
+    return image;
+}
+
+static UIImageView *zs_make_signature_overlay(void) {
+    UIImage *image = zs_signature_image();
+    if (!image || image.size.width <= 0) return nil;
+    UIImageView *view = [[UIImageView alloc] initWithImage:image];
+    view.translatesAutoresizingMaskIntoConstraints = NO;
+    view.contentMode = UIViewContentModeScaleAspectFit;
+    view.alpha = kZSSignatureOpacity;
+    view.userInteractionEnabled = NO;
+    view.isAccessibilityElement = NO;
+    [view.widthAnchor constraintEqualToConstant:kZSSignatureWidth].active = YES;
+    [view.heightAnchor constraintEqualToAnchor:view.widthAnchor multiplier:image.size.height / image.size.width].active = YES;
+    return view;
 }
 
 static UIView *zs_make_title_block(void) {
@@ -4330,6 +4375,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                                                      message:@"ZSingularity added new keys to the game's info.plist. This is necessary for certain features to work."
                                                               preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    zs_add_restart_action(alert);
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
@@ -5161,6 +5207,15 @@ static const CGFloat kContentFadeHeight = 22;
         [self.stack.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-kPanelPadding],
         [self.stack.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-(kPanelPadding * 2)],
     ]];
+
+    UIImageView *signatureOverlay = zs_make_signature_overlay();
+    if (signatureOverlay) {
+        [self.scrollView addSubview:signatureOverlay];
+        [NSLayoutConstraint activateConstraints:@[
+            [signatureOverlay.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:kZSSignatureInset],
+            [signatureOverlay.trailingAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.trailingAnchor constant:-kZSSignatureInset],
+        ]];
+    }
 
     zs_ensure_settings_loaded_from_disk();
 
@@ -7352,7 +7407,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         @"Deleted %ld tracked asset%@ from the game's own files, cleared every backup, and emptied the Mod Asset Library. Restart the game for it to take effect.",
         (long)assetsDeleted, assetsDeleted == 1 ? @"" : @"s"];
     ZLog(@"[UserInterface] Hard Assets Reset: deleted %ld tracked asset(s), cleared backups and the Mod Asset Library", (long)assetsDeleted);
-    [self zs_presentModsAlertWithTitle:@"Hard Assets Reset" message:message];
+    [self zs_presentModsAlertWithTitle:@"Hard Assets Reset" message:message offersRestart:YES];
 }
 
 - (void)deleteStoredBundlesInProxyTapped:(UIButton *)button {
@@ -7619,6 +7674,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSMutableArray<NSURL *> *localizationFolderURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *localizationZipURLs = [NSMutableArray array];
     NSMutableArray<NSString *> *summaryLines = [NSMutableArray array];
+    NSMutableSet<NSString *> *acceptedBankNames = [NSMutableSet set];
 
     for (NSURL *url in urls) {
         if ([url.pathExtension caseInsensitiveCompare:@"zip"] == NSOrderedSame) {
@@ -7630,8 +7686,18 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         } else if ([url.pathExtension caseInsensitiveCompare:@"carra2"] == NSOrderedSame) {
             [carra2URLs addObject:url];
         } else if ([url.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
-            [bankURLs addObject:url];
-            [validURLs addObject:url];
+            NSString *bankKey = url.lastPathComponent.lowercaseString;
+            ModAssetLibraryEntry *overlappingBank = [ModAssetLibrary activeEntryOverlappingBankNamed:url.lastPathComponent];
+            if (overlappingBank) {
+                [summaryLines addObject:[ModAssetLibrary overlapRejectionLineForName:url.lastPathComponent existingEntry:overlappingBank]];
+            } else if ([acceptedBankNames containsObject:bankKey]) {
+                [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - it points to the %@ as another bank in this batch",
+                                         url.lastPathComponent, ModAssetLibraryOverlapPhrase]];
+            } else {
+                [acceptedBankNames addObject:bankKey];
+                [bankURLs addObject:url];
+                [validURLs addObject:url];
+            }
         } else if ([self zs_urlIsDirectory:url]) {
             if ([self zs_isLocalizationPackFolderURL:url]) {
                 [localizationFolderURLs addObject:url];
@@ -7912,7 +7978,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         @"Restored %@ to their original state. Restart the game for it to take effect.",
         [parts componentsJoinedByString:@" and "]];
     ZLog(@"[BankTransplant] Restore Originals (force=%d): %ld bank(s), %ld bundle(s), %ld localization item(s) restored.", force, (long)banksRestored, (long)bundlesRestored, (long)localizationRestored);
-    [self zs_presentModsAlertWithTitle:@"Restore Originals" message:message];
+    [self zs_presentModsAlertWithTitle:@"Restore Originals" message:message offersRestart:YES];
 }
 
 - (void)zs_presentRestoreNothingToRestoreAlertWithForceOption {
@@ -8381,31 +8447,72 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         return;
     }
 
-    BOOL anySucceeded = NO;
+    NSMutableArray<NSString *> *overlapLines = [NSMutableArray array];
+    NSMutableArray<NSString *> *summaryLines = [NSMutableArray array];
     for (NSString *line in lines) {
+        if ([line containsString:ModAssetLibraryOverlapPhrase]) {
+            [overlapLines addObject:line];
+        } else {
+            [summaryLines addObject:line];
+        }
+    }
+
+    BOOL anySucceeded = NO;
+    for (NSString *line in summaryLines) {
         if ([line rangeOfString:@": swapped"].location != NSNotFound || [line rangeOfString:@": installed"].location != NSNotFound) {
             anySucceeded = YES;
             break;
         }
     }
-    [haptic notificationOccurred:anySucceeded ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
-    NSString *message = [lines componentsJoinedByString:@"\n"];
-    if (anySucceeded) {
-        message = [message stringByAppendingString:@"\n\nRestart the game for swapped/installed files to take effect."];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t presentSummary = ^{
+        if (summaryLines.count == 0) return;
+        NSString *message = [summaryLines componentsJoinedByString:@"\n"];
+        if (anySucceeded) {
+            message = [message stringByAppendingString:@"\n\nRestart the game for swapped/installed files to take effect."];
+        }
+        [weakSelf zs_presentModsAlertWithTitle:@"Load Mods" message:message offersRestart:anySucceeded];
+    };
+
+    if (overlapLines.count > 0) {
+        [haptic notificationOccurred:UINotificationFeedbackTypeError];
+        [self zs_presentModsAlertWithTitle:@"Mod Overlap"
+                                    message:[overlapLines componentsJoinedByString:@"\n"]
+                              offersRestart:NO
+                             dismissHandler:presentSummary];
+        return;
     }
-    [self zs_presentModsAlertWithTitle:@"Load Mods" message:message];
+
+    [haptic notificationOccurred:anySucceeded ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
+    presentSummary();
 }
 
 - (void)zs_presentModsAlertWithTitle:(NSString *)title message:(NSString *)message {
+    [self zs_presentModsAlertWithTitle:title message:message offersRestart:NO dismissHandler:nil];
+}
+
+- (void)zs_presentModsAlertWithTitle:(NSString *)title message:(NSString *)message offersRestart:(BOOL)offersRestart {
+    [self zs_presentModsAlertWithTitle:title message:message offersRestart:offersRestart dismissHandler:nil];
+}
+
+- (void)zs_presentModsAlertWithTitle:(NSString *)title
+                              message:(NSString *)message
+                        offersRestart:(BOOL)offersRestart
+                       dismissHandler:(nullable dispatch_block_t)dismissHandler {
     UIViewController *presenter = zs_key_window().rootViewController;
     if (!presenter) {
         ZLog(@"[BankTransplant] %@: %@", title, message);
+        if (dismissHandler) dismissHandler();
         return;
     }
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
                                                                      message:message
                                                               preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        if (dismissHandler) dismissHandler();
+    }]];
+    if (offersRestart) zs_add_restart_action(alert);
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
@@ -9050,6 +9157,16 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 }
 
 - (void)zs_restoreStoredBundleEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName {
+    ModAssetLibraryEntry *overlapping = [ModAssetLibrary activeEntryOverlappingEntry:entry];
+    if (overlapping) {
+        UINotificationFeedbackGenerator *overlapHaptic = [UINotificationFeedbackGenerator new];
+        [overlapHaptic notificationOccurred:UINotificationFeedbackTypeError];
+        [self zs_presentModsAlertWithTitle:@"Mod Overlap"
+                                    message:[ModAssetLibrary overlapRejectionLineForName:[ModAssetLibrary displayNameForEntry:entry]
+                                                                            existingEntry:overlapping]];
+        return;
+    }
+
     NSURL *stockURL = entry.isAssetBundle ? zs_mods_live_stock_url_for_entry(entry) : nil;
 
     NSArray<NSString *> *realFolders = [[ModAssetLibrary folderNames] mutableCopy];
@@ -9186,7 +9303,16 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                                    entries:(NSArray<ModAssetLibraryEntry *> *)entries
                                 intoFolder:(NSString *)destFolder {
     NSInteger failureCount = 0;
+    NSMutableArray<NSString *> *overlapLines = [NSMutableArray array];
     for (ModAssetLibraryEntry *entry in entries) {
+        ModAssetLibraryEntry *overlapping = [ModAssetLibrary activeEntryOverlappingEntry:entry];
+        if (overlapping) {
+            failureCount++;
+            [overlapLines addObject:[ModAssetLibrary overlapRejectionLineForName:[ModAssetLibrary displayNameForEntry:entry]
+                                                                    existingEntry:overlapping]];
+            continue;
+        }
+
         if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
             NSError *applyErr = nil;
             if (![self zs_applyLocalizationEntry:entry error:&applyErr]) {
@@ -9216,7 +9342,15 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
     [haptic notificationOccurred:failureCount == 0 ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
-    if (failureCount > 0) {
+    if (overlapLines.count > 0) {
+        NSInteger otherFailures = failureCount - (NSInteger)overlapLines.count;
+        NSString *overlapMessage = [overlapLines componentsJoinedByString:@"\n"];
+        if (otherFailures > 0) {
+            overlapMessage = [overlapMessage stringByAppendingFormat:@"\n\n%ld other mod%@ couldn't be restored. See syslog.",
+                              (long)otherFailures, otherFailures == 1 ? @"" : @"s"];
+        }
+        [self zs_presentModsAlertWithTitle:@"Mod Overlap" message:overlapMessage];
+    } else if (failureCount > 0) {
         [self zs_presentModsAlertWithTitle:@"Restore Partly Failed"
                                     message:[NSString stringWithFormat:@"%ld of %ld mod%@ couldn't be restored. See syslog.",
                                              (long)failureCount, (long)entries.count, entries.count == 1 ? @"" : @"s"]];
@@ -11156,6 +11290,7 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
                                                                          message:@"You must restart the app for the Liquid Glass changes to take effect."
                                                                   preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        zs_add_restart_action(alert);
         [presenter presentViewController:alert animated:YES completion:nil];
     }
 }
@@ -11308,9 +11443,9 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 
         NSString *subtext;
         if (mode == ZSUpdateCheckModeNightlyReleases) {
-            subtext = updateAvailable ? @"A new nightly build is available." : @"Nightly build is up to date.";
+            subtext = updateAvailable ? @"A new nightly build is available" : @"Nightly build is up to date";
         } else {
-            subtext = updateAvailable ? @"A new update is available." : @"Version is up to date.";
+            subtext = updateAvailable ? @"A new update is available" : @"Version is up to date";
         }
 
         zs_apply_update_label_style(strongSelf.updateStatusLabel, subtext, updateAvailable);
@@ -11718,7 +11853,7 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
                 UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
                 [haptic notificationOccurred:success ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
                 NSString *displayMessage = success ? @"Successfully Installed. Restart your game to load the new build." : message;
-                [strongSelf zs_presentModsAlertWithTitle:success ? @"Dylib Replaced" : @"Replace Failed" message:displayMessage];
+                [strongSelf zs_presentModsAlertWithTitle:success ? @"Dylib Replaced" : @"Replace Failed" message:displayMessage offersRestart:success];
             }];
         }];
     }];

@@ -58,6 +58,7 @@ typedef NS_ENUM(NSInteger, LunartiqueModArchiveErrorCode) {
 @end
 
 extern NSString * const ModAssetLibraryErrorDomain;
+extern NSString * const ModAssetLibraryOverlapPhrase;
 
 typedef NS_ENUM(NSInteger, ModAssetLibraryErrorCode) {
     ModAssetLibraryErrorInvalidFolderName = 1,
@@ -69,6 +70,7 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryErrorCode) {
     ModAssetLibraryErrorDeleteFailed,
     ModAssetLibraryErrorEntryNotFound,
     ModAssetLibraryErrorCABNotIndexed,
+    ModAssetLibraryErrorTargetOverlap,
 };
 
 typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
@@ -149,6 +151,16 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
                                               error:(NSError **)error;
 
 + (NSArray<NSString *> *)subFolderNamesInFolder:(NSString *)parentFolder;
+
++ (nullable ModAssetLibraryEntry *)activeEntryOverlappingEntry:(ModAssetLibraryEntry *)candidate;
+
++ (nullable ModAssetLibraryEntry *)activeEntryOverlappingBankNamed:(NSString *)bankFileName;
+
++ (NSString *)displayNameForEntry:(ModAssetLibraryEntry *)entry;
+
++ (NSString *)overlapRejectionLineForName:(NSString *)name existingEntry:(ModAssetLibraryEntry *)existing;
+
++ (NSString *)overlapReasonForExistingEntry:(ModAssetLibraryEntry *)existing;
 
 + (nullable NSArray<ModAssetLibraryEntry *> *)entriesInFolder:(NSString *)folderName error:(NSError **)error;
 

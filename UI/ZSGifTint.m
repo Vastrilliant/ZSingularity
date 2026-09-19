@@ -71,6 +71,8 @@ typedef NS_ENUM(NSInteger, ZSGifWindowKind) {
 
 static void zs_teardown_window(ZSGifWindow *w);
 static void zs_reapply_window(ZSGifWindow *w);
+static void zs_restore_switch_native_tint(ZSGifWindow *w);
+static void zs_set_switch_texture_driven(UISwitch *sw, BOOL textureDriven);
 
 #pragma mark - Engine: decode + per-tick contents swap only
 
@@ -227,6 +229,9 @@ static const size_t kZSGifDecodeMaxPixelSize = 240;
     _disabled = disabled;
     if (disabled) {
         [self teardownAllWindows];
+        for (ZSGifWindow *w in _windows) {
+            zs_restore_switch_native_tint(w);
+        }
     } else if (!_paused) {
         [self reconstructAllWindows];
     }
@@ -340,6 +345,18 @@ static ZSGifWindow *zs_register(UIView *owner, ZSGifWindowKind kind, CALayer *ma
         w.panUnit = zs_pan_unit_for_owner(owner);
         objc_setAssociatedObject(owner, kZSGifWindowKey, w, OBJC_ASSOCIATION_RETAIN);
     }
+    w.ownerView = owner;
+    w.kind = kind;
+    w.texLayerFrame = texLayerFrame;
+    w.atBack = atBack;
+
+    if ([[ZSGifTintEngine sharedEngine] isDisabled]) {
+        w.texLayer = nil;
+        w.maskLayer = nil;
+        w.active = NO;
+        [[ZSGifTintEngine sharedEngine] addWindow:w];
+        return w;
+    }
     w.active = YES;
 
     CALayer *tex = [CALayer new];
@@ -356,12 +373,8 @@ static ZSGifWindow *zs_register(UIView *owner, ZSGifWindowKind kind, CALayer *ma
         [owner.layer addSublayer:tex];
     }
 
-    w.ownerView = owner;
-    w.kind = kind;
     w.texLayer = tex;
     w.maskLayer = maskLayer;
-    w.texLayerFrame = texLayerFrame;
-    w.atBack = atBack;
     [[ZSGifTintEngine sharedEngine] addWindow:w];
     return w;
 }
@@ -595,14 +608,29 @@ static void zs_refresh_switch_mask_if_registered(UISwitch *sw) {
 void zs_apply_gif_switch_tint(UISwitch *sw) {
     if (!sw) return;
     zs_gif_tint_preload();
-    sw.onTintColor = UIColor.clearColor;
 
     CAShapeLayer *mask = [CAShapeLayer new];
     ZSGifWindow *w = zs_register(sw, ZSGifWindowKindSwitch, mask, kZSSwitchTexLayerFrame, YES);
+    zs_set_switch_texture_driven(sw, w.texLayer != nil);
     w.texLayer.opacity = sw.isOn ? 1.0f : 0.0f;
     zs_refresh_switch_mask_if_registered(sw);
 
     [sw addTarget:sw action:@selector(zs_gifTint_switchValueChanged) forControlEvents:UIControlEventValueChanged];
+}
+
+static UIColor *zs_switch_native_on_tint(void) {
+    return [UIColor colorWithRed:0x30 / 255.0 green:0xD1 / 255.0 blue:0x58 / 255.0 alpha:1.0];
+}
+
+static void zs_set_switch_texture_driven(UISwitch *sw, BOOL textureDriven) {
+    sw.onTintColor = textureDriven ? UIColor.clearColor : zs_switch_native_on_tint();
+}
+
+static void zs_restore_switch_native_tint(ZSGifWindow *w) {
+    if (!w || w.kind != ZSGifWindowKindSwitch) return;
+    UISwitch *sw = (UISwitch *)w.ownerView;
+    if (!sw) return;
+    zs_set_switch_texture_driven(sw, NO);
 }
 
 void zs_remove_gif_switch_tint(UISwitch *sw) {
@@ -645,6 +673,7 @@ static void zs_reapply_window(ZSGifWindow *w) {
             break;
         case ZSGifWindowKindSwitch: {
             UISwitch *sw = (UISwitch *)w.ownerView;
+            zs_set_switch_texture_driven(sw, w.texLayer != nil);
             w.texLayer.opacity = sw.isOn ? 1.0f : 0.0f;
             zs_refresh_switch_mask_if_registered(sw);
             break;

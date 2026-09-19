@@ -533,6 +533,8 @@ static BOOL lma_isHex32(NSString *s) {
 #pragma mark - ModAssetLibrary
 
 NSString * const ModAssetLibraryErrorDomain = @"ModAssetLibraryErrorDomain";
+NSString * const ModAssetLibraryOverlapPhrase = @"same game file as";
+static NSString * const kMALStoredBundlesFolderName = @"Stored Bundles";
 static NSString * const kMALManifestFileName = @"manifest.json";
 static NSString * const kMALFolderRemarkFileName = @"remark.txt";
 static NSString * const kMALOriginalBundleBackupsDirectoryName = @".OriginalBundleBackups";
@@ -629,6 +631,13 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
 + (nullable NSString *)mal_livePathDescriptionForFileName:(NSString *)fileName;
 + (void)mal_reconcileEntryPaths:(NSArray<ModAssetLibraryEntry *> *)entries folderName:(NSString *)folderName;
 + (NSString *)mal_gameBundleRelativePath:(NSString *)path;
++ (BOOL)mal_folderIsStored:(nullable NSString *)folderName;
++ (nullable NSString *)mal_normalizedTargetPath:(nullable NSString *)path;
++ (nullable NSString *)mal_targetKeyForEntry:(ModAssetLibraryEntry *)entry;
++ (nullable ModAssetLibraryEntry *)mal_activeEntryForTargetPath:(nullable NSString *)targetPath
+                                                   pendingFolder:(nullable NSString *)pendingFolder
+                                                  pendingEntries:(nullable NSArray<ModAssetLibraryEntry *> *)pendingEntries
+                                                   excludingPath:(nullable NSString *)excludedEntryPath;
 @end
 
 @implementation ModAssetLibrary
@@ -932,6 +941,84 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     return [self mal_libraryRelativePath:path];
 }
 
++ (BOOL)mal_folderIsStored:(nullable NSString *)folderName {
+    if (folderName.length == 0) return NO;
+    if ([folderName isEqualToString:kMALStoredBundlesFolderName]) return YES;
+    return [folderName hasPrefix:[kMALStoredBundlesFolderName stringByAppendingString:@"/"]];
+}
+
++ (nullable NSString *)mal_normalizedTargetPath:(nullable NSString *)path {
+    if (path.length == 0) return nil;
+    NSString *normalized = [self mal_sandboxRelativePath:path];
+    while ([normalized hasPrefix:@"/"]) normalized = [normalized substringFromIndex:1];
+    while (normalized.length > 1 && [normalized hasSuffix:@"/"]) normalized = [normalized substringToIndex:normalized.length - 1];
+    return normalized.length > 0 ? normalized : nil;
+}
+
++ (nullable NSString *)mal_targetKeyForEntry:(ModAssetLibraryEntry *)entry {
+    NSString *raw = entry.resolvedInstallTargetPath.length > 0 ? entry.resolvedInstallTargetPath : entry.livePathDescription;
+    return [self mal_normalizedTargetPath:raw];
+}
+
++ (nullable ModAssetLibraryEntry *)mal_activeEntryForTargetPath:(nullable NSString *)targetPath
+                                                   pendingFolder:(nullable NSString *)pendingFolder
+                                                  pendingEntries:(nullable NSArray<ModAssetLibraryEntry *> *)pendingEntries
+                                                   excludingPath:(nullable NSString *)excludedEntryPath {
+    NSString *key = [self mal_normalizedTargetPath:targetPath];
+    if (key.length == 0) return nil;
+
+    for (ModAssetLibraryEntry *existing in pendingEntries) {
+        if (excludedEntryPath.length > 0 && [existing.path isEqualToString:excludedEntryPath]) continue;
+        NSString *existingKey = [self mal_targetKeyForEntry:existing];
+        if (existingKey.length > 0 && [existingKey caseInsensitiveCompare:key] == NSOrderedSame) {
+            if (existing.currentFolder.length == 0) existing.currentFolder = pendingFolder;
+            return existing;
+        }
+    }
+
+    for (NSString *folder in [self folderNames]) {
+        if ([self mal_folderIsStored:folder]) continue;
+        if (pendingFolder.length > 0 && [folder isEqualToString:pendingFolder]) continue;
+        NSArray<ModAssetLibraryEntry *> *folderEntries = [self entriesInFolder:folder error:nil];
+        for (ModAssetLibraryEntry *existing in folderEntries) {
+            if (excludedEntryPath.length > 0 && [existing.path isEqualToString:excludedEntryPath]) continue;
+            NSString *existingKey = [self mal_targetKeyForEntry:existing];
+            if (existingKey.length > 0 && [existingKey caseInsensitiveCompare:key] == NSOrderedSame) {
+                return existing;
+            }
+        }
+    }
+    return nil;
+}
+
++ (nullable ModAssetLibraryEntry *)activeEntryOverlappingEntry:(ModAssetLibraryEntry *)candidate {
+    NSString *target = candidate.resolvedInstallTargetPath.length > 0 ? candidate.resolvedInstallTargetPath : candidate.livePathDescription;
+    return [self mal_activeEntryForTargetPath:target pendingFolder:nil pendingEntries:nil excludingPath:candidate.path];
+}
+
++ (nullable ModAssetLibraryEntry *)activeEntryOverlappingBankNamed:(NSString *)bankFileName {
+    NSString *target = [self mal_livePathDescriptionForFileName:bankFileName];
+    return [self mal_activeEntryForTargetPath:target pendingFolder:nil pendingEntries:nil excludingPath:nil];
+}
+
++ (NSString *)displayNameForEntry:(ModAssetLibraryEntry *)entry {
+    if ([entry.fileName isEqualToString:@"__data"]) {
+        NSString *parentName = entry.path.stringByDeletingLastPathComponent.lastPathComponent;
+        if (parentName.length > 0) return parentName;
+    }
+    return entry.fileName.length > 0 ? entry.fileName : @"unnamed mod";
+}
+
++ (NSString *)overlapReasonForExistingEntry:(ModAssetLibraryEntry *)existing {
+    NSString *folder = existing.currentFolder.length > 0 ? existing.currentFolder : @"the library";
+    return [NSString stringWithFormat:@"it points to the %@ \"%@\" in \"%@\"",
+            ModAssetLibraryOverlapPhrase, [self displayNameForEntry:existing], folder];
+}
+
++ (NSString *)overlapRejectionLineForName:(NSString *)name existingEntry:(ModAssetLibraryEntry *)existing {
+    return [NSString stringWithFormat:@"%@: rejected - %@", name, [self overlapReasonForExistingEntry:existing]];
+}
+
 static NSString *MALCABRejectionLine(NSString *displayName) {
     return [NSString stringWithFormat:@"%@: rejected - its CAB identifier could not be found, meaning it's either malformed or outdated", displayName];
 }
@@ -960,6 +1047,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     iso.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
     NSString *now = [iso stringFromDate:[NSDate date]];
 
+    BOOL enforceOverlap = ![self mal_folderIsStored:folderName];
     NSMutableArray<NSString *> *rejectedLines = [NSMutableArray array];
     NSInteger importedCount = 0;
     for (NSURL *url in moddedURLs) {
@@ -999,6 +1087,21 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
                      url.lastPathComponent, cabID, locateErr.localizedDescription);
                 if (accessing) [url stopAccessingSecurityScopedResource];
                 [rejectedLines addObject:MALCABRejectionLine(url.lastPathComponent)];
+                continue;
+            }
+        }
+
+        if (enforceOverlap) {
+            NSString *overlapTarget = isBundle ? resolvedTargetPath : [self mal_livePathDescriptionForFileName:url.lastPathComponent];
+            ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:overlapTarget
+                                                                     pendingFolder:folderName
+                                                                    pendingEntries:entries
+                                                                     excludingPath:nil];
+            if (overlapping) {
+                if (accessing) [url stopAccessingSecurityScopedResource];
+                ZLog(@"[ModAssetLibrary] %@ overlaps an existing entry (%@) - rejecting.",
+                     url.lastPathComponent, overlapTarget);
+                [rejectedLines addObject:[self overlapRejectionLineForName:url.lastPathComponent existingEntry:overlapping]];
                 continue;
             }
         }
@@ -1098,6 +1201,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     iso.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
     NSString *now = [iso stringFromDate:[NSDate date]];
 
+    BOOL enforceOverlap = ![self mal_folderIsStored:folderName];
     NSMutableArray<NSString *> *rejectedLines = [NSMutableArray array];
     NSInteger importedCount = 0;
     for (LunartiqueModEntry *lmaEntry in matches) {
@@ -1139,6 +1243,19 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
             continue;
         }
         NSString *resolvedTargetPath = [self mal_sandboxRelativePath:matchPath];
+
+        if (enforceOverlap) {
+            ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:resolvedTargetPath
+                                                                     pendingFolder:folderName
+                                                                    pendingEntries:entries
+                                                                     excludingPath:nil];
+            if (overlapping) {
+                ZLog(@"[ModAssetLibrary] Lunartique entry %@ overlaps an existing entry (%@) - rejecting.",
+                     lmaEntry.dataEntryName, resolvedTargetPath);
+                [rejectedLines addObject:[self overlapRejectionLineForName:lmaEntry.dataEntryName existingEntry:overlapping]];
+                continue;
+            }
+        }
 
         NSString *destPath = nil;
         NSString *destName = nil;
@@ -1184,6 +1301,17 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     NSError *bankScanErr = nil;
     NSArray<NSString *> *bankEntryNames = [LunartiqueModArchive matchedBankEntryNamesInZipAtURL:zipURL error:&bankScanErr] ?: @[];
     for (NSString *bankEntryName in bankEntryNames) {
+        if (enforceOverlap) {
+            ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:[self mal_livePathDescriptionForFileName:bankEntryName.lastPathComponent]
+                                                                     pendingFolder:folderName
+                                                                    pendingEntries:entries
+                                                                     excludingPath:nil];
+            if (overlapping) {
+                ZLog(@"[ModAssetLibrary] bank %@ from Lunartique zip overlaps an existing entry - rejecting.", bankEntryName);
+                [rejectedLines addObject:[self overlapRejectionLineForName:bankEntryName.lastPathComponent existingEntry:overlapping]];
+                continue;
+            }
+        }
         NSURL *bankURL = nil;
         NSError *bankExtractErr = nil;
         if (![LunartiqueModArchive extractBankEntryNamed:bankEntryName fromZipAtURL:zipURL bankURL:&bankURL error:&bankExtractErr]) {
@@ -1286,6 +1414,18 @@ static NSString *MALTimestampNow(void) {
         }
         NSString *relativeTarget = targets.firstObject;
 
+        if (![self mal_folderIsStored:folderName]) {
+            NSString *overlapTarget = [self mal_sandboxRelativePath:[[LocalizationTransplant localizeDirectory] stringByAppendingPathComponent:relativeTarget]];
+            ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:overlapTarget
+                                                                     pendingFolder:nil
+                                                                    pendingEntries:nil
+                                                                     excludingPath:nil];
+            if (overlapping) {
+                [summaryLines addObject:[self overlapRejectionLineForName:displayName existingEntry:overlapping]];
+                continue;
+            }
+        }
+
         NSString *destName = [self mal_uniqueFileNameFor:displayName inFolder:folderPath];
         NSString *destPath = [folderPath stringByAppendingPathComponent:destName];
 
@@ -1339,6 +1479,18 @@ static NSString *MALTimestampNow(void) {
     if (![LocalizationTransplant isTranslationPackDirectoryAtPath:sourcePath]) {
         [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - unknown folder, it doesn't look like a localization pack", displayName]];
         return;
+    }
+
+    if (![self mal_folderIsStored:folderName]) {
+        NSString *overlapTarget = [self mal_sandboxRelativePath:[LocalizationTransplant languageDirectoryForCode:languageCode]];
+        ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:overlapTarget
+                                                                 pendingFolder:nil
+                                                                pendingEntries:nil
+                                                                 excludingPath:nil];
+        if (overlapping) {
+            [summaryLines addObject:[self overlapRejectionLineForName:displayName existingEntry:overlapping]];
+            return;
+        }
     }
 
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -1469,6 +1621,20 @@ static NSString *MALTimestampNow(void) {
     }
     NSString *resolvedTargetPath = [self mal_libraryRelativePath:matchPath];
 
+    if (![self mal_folderIsStored:folderName]) {
+        ModAssetLibraryEntry *overlapping = [self mal_activeEntryForTargetPath:resolvedTargetPath
+                                                                 pendingFolder:nil
+                                                                pendingEntries:nil
+                                                                 excludingPath:nil];
+        if (overlapping) {
+            if (accessing) [carra2URL stopAccessingSecurityScopedResource];
+            ZLog(@"[ModAssetLibrary] Carra2 %@ overlaps an existing entry (%@) - rejecting.",
+                 carra2URL.lastPathComponent, resolvedTargetPath);
+            if (error) *error = MALError(ModAssetLibraryErrorTargetOverlap, [self overlapReasonForExistingEntry:overlapping]);
+            return NO;
+        }
+    }
+
     NSError *entriesErr = nil;
     NSMutableArray<ModAssetLibraryEntry *> *entries =
         [([self entriesInFolder:folderName error:&entriesErr] ?: @[]) mutableCopy];
@@ -1558,6 +1724,16 @@ static NSString *MALTimestampNow(void) {
         if (error) *error = MALError(ModAssetLibraryErrorFolderNotFound,
             [NSString stringWithFormat:@"No folder named \"%@\" - create it first.", toFolder]);
         return nil;
+    }
+
+    if ([self mal_folderIsStored:fromFolder] && ![self mal_folderIsStored:toFolder]) {
+        ModAssetLibraryEntry *overlapping = [self activeEntryOverlappingEntry:entry];
+        if (overlapping) {
+            if (error) *error = MALError(ModAssetLibraryErrorTargetOverlap,
+                [NSString stringWithFormat:@"\"%@\" can't be restored: %@.",
+                    [self displayNameForEntry:entry], [self overlapReasonForExistingEntry:overlapping]]);
+            return nil;
+        }
     }
 
     NSError *fromEntriesErr = nil;
