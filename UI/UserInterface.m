@@ -9,6 +9,7 @@
 #import "ZSDiagnostics.h"
 #import "ZTweakLog.h"
 #import "BankTransplant.h"
+#import "LocalizationMods.h"
 #import "Transcoder.h"
 #import "PatchManifestNetwork.h"
 #import "ZSInfoPlistPatch.h"
@@ -3138,8 +3139,16 @@ static UIView *zs_make_mods_entry_row(ModAssetLibraryEntry *entry, id target, SE
 
     BOOL isDoctorEligible = (entry.isAssetBundle || entry.zipCacheHash1.length > 0) && !isStoredBundlesFolder;
     UIImageSymbolConfiguration *iconConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
+    NSString *iconName = @"doc.fill";
+    if (isBank) {
+        iconName = @"waveform";
+    } else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+        iconName = @"folder.fill";
+    } else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) {
+        iconName = @"text.bubble.fill";
+    }
     UIImageView *icon = [[UIImageView alloc] initWithImage:
-        [UIImage systemImageNamed:(isBank ? @"waveform" : @"doc.fill") withConfiguration:iconConfig]];
+        [UIImage systemImageNamed:iconName withConfiguration:iconConfig]];
     icon.translatesAutoresizingMaskIntoConstraints = NO;
     icon.tintColor = [UIColor colorWithWhite:1 alpha:0.6];
     icon.contentMode = UIViewContentModeCenter;
@@ -3368,6 +3377,16 @@ static NSString *zs_doctor_status_text_for_entry(ModAssetLibraryEntry *entry, BO
     return @"Not installed";
 }
 
+static NSString *zs_kind_descriptor_for_entry(ModAssetLibraryEntry *entry) {
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) return @"Localization pack";
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) return @"Localization .json file";
+    if (entry.isAssetBundle) return @"Unity Asset Bundle";
+    NSString *extension = entry.fileName.pathExtension;
+    if ([extension caseInsensitiveCompare:@"bank"] == NSOrderedSame) return @"FMOD Audio Bank";
+    if ([extension caseInsensitiveCompare:@"carra2"] == NSOrderedSame || entry.zipCacheHash1.length > 0) return @".carra2 mod archive";
+    return @"Unknown";
+}
+
 static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL downloadInFlight, BOOL isStoredBundlesFolder) {
     UIView *container = [[UIView alloc] init];
     container.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3383,6 +3402,12 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
 
     UIFont *subtextFont = zs_mono_font(9.5, UIFontWeightRegular);
     UIColor *subtextColor = [UIColor colorWithWhite:1 alpha:0.4];
+
+    UILabel *kindLabel = [[UILabel alloc] init];
+    kindLabel.text = [NSString stringWithFormat:@"Kind: %@", zs_kind_descriptor_for_entry(entry)];
+    kindLabel.font = subtextFont;
+    kindLabel.textColor = subtextColor;
+    [panel addArrangedSubview:kindLabel];
 
     if (entry.remark.length > 0) {
         ZSMarqueeLabel *remarkLabel = [[ZSMarqueeLabel alloc] init];
@@ -7408,6 +7433,8 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     if (bankBackupDir) [fm removeItemAtPath:bankBackupDir error:nil];
     NSString *bundleBackupDir = [ZTranscoderInstaller bundleBackupDirectory];
     if (bundleBackupDir) [fm removeItemAtPath:bundleBackupDir error:nil];
+    NSString *localizationBackupDir = [LocalizationTransplant backupDirectory];
+    if (localizationBackupDir) [fm removeItemAtPath:localizationBackupDir error:nil];
 
     NSError *libraryError = nil;
     BOOL libraryCleared = [ModAssetLibrary deleteAllFoldersWithError:&libraryError];
@@ -7507,9 +7534,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 - (void)zs_presentLoadModsPickerIntoFolder:(NSString *)folderName {
     UIDocumentPickerViewController *picker;
     if (@available(iOS 14.0, *)) {
-        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData, UTTypeItem]];
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData, UTTypeItem, UTTypeFolder]];
     } else {
-        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data", @"public.item"]
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data", @"public.item", @"public.folder"]
                                                                           inMode:UIDocumentPickerModeImport];
     }
     picker.delegate = self;
@@ -7579,7 +7606,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         BOOL isLunartique = [LunartiqueModArchive isLunartiqueFormatZipAtURL:zipURL error:&formatErr];
         if (!isLunartique) {
             if (accessing) [zipURL stopAccessingSecurityScopedResource];
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - doesn't match the Lunartique mod format's file tree", zipURL.lastPathComponent]];
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - unknown file, it's neither a Lunartique mod nor a localization pack", zipURL.lastPathComponent]];
             continue;
         }
 
@@ -7613,6 +7640,86 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 }
 
+- (BOOL)zs_urlIsDirectory:(NSURL *)url {
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    BOOL isDirectory = NO;
+    BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:url.path isDirectory:&isDirectory];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+    return exists && isDirectory;
+}
+
+- (BOOL)zs_isLocalizationPackFolderURL:(NSURL *)url {
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    BOOL isPack = [LocalizationTransplant isTranslationPackDirectoryAtPath:url.path];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+    return isPack;
+}
+
+- (BOOL)zs_isLocalizationPackZipURL:(NSURL *)url {
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    NSArray<NSString *> *names = [LunartiqueModArchive allEntryNamesInZipAtURL:url error:nil];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+    if (names.count == 0) return NO;
+    return [LocalizationTransplant packRootFolderNameForArchiveEntryNames:names] != nil;
+}
+
+- (nullable NSString *)zs_detectedLocalizationLanguageForFolderURL:(NSURL *)url {
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    NSString *language = [LocalizationTransplant detectedLanguageForPackDirectoryAtPath:url.path];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+    return language;
+}
+
+- (nullable NSString *)zs_detectedLocalizationLanguageForZipURL:(NSURL *)url {
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    NSArray<NSString *> *names = [LunartiqueModArchive allEntryNamesInZipAtURL:url error:nil];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+    return names ? [LocalizationTransplant detectedLanguageForArchiveEntryNames:names] : nil;
+}
+
+- (void)zs_promptLocalizationLanguageQueue:(NSMutableArray<NSDictionary *> *)queue
+                                      jobs:(NSMutableArray<NSDictionary *> *)jobs
+                              summaryLines:(NSMutableArray<NSString *> *)summaryLines
+                                completion:(void (^)(NSArray<NSDictionary *> *jobs))completion {
+    if (queue.count == 0) {
+        completion(jobs);
+        return;
+    }
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (!presenter) {
+        completion(jobs);
+        return;
+    }
+
+    NSDictionary *item = queue.firstObject;
+    [queue removeObjectAtIndex:0];
+
+    NSString *detected = item[@"detected"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Select Language Folder"
+                                                                    message:item[@"message"]
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    for (NSString *code in [LocalizationTransplant languageCodes]) {
+        NSString *title = [detected isEqualToString:code] ? [code stringByAppendingString:@" (detected)"] : code;
+        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            NSMutableDictionary *job = [item mutableCopy];
+            job[@"language"] = code;
+            [jobs addObject:job];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_promptLocalizationLanguageQueue:queue jobs:jobs summaryLines:summaryLines completion:completion];
+            });
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: cancelled", item[@"name"]]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf zs_promptLocalizationLanguageQueue:queue jobs:jobs summaryLines:summaryLines completion:completion];
+        });
+    }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)zs_handleLoadModsPickedURLs:(NSArray<NSURL *> *)urls intoFolder:(NSString *)folderName {
     if (urls.count == 0) return;
 
@@ -7620,16 +7727,35 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSMutableArray<NSURL *> *bankURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *zipURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *carra2URLs = [NSMutableArray array];
+    NSMutableArray<NSURL *> *localizationJSONURLs = [NSMutableArray array];
+    NSMutableArray<NSURL *> *localizationFolderURLs = [NSMutableArray array];
+    NSMutableArray<NSURL *> *localizationZipURLs = [NSMutableArray array];
     NSMutableArray<NSString *> *summaryLines = [NSMutableArray array];
 
     for (NSURL *url in urls) {
         if ([url.pathExtension caseInsensitiveCompare:@"zip"] == NSOrderedSame) {
-            [zipURLs addObject:url];
+            if ([self zs_isLocalizationPackZipURL:url]) {
+                [localizationZipURLs addObject:url];
+            } else {
+                [zipURLs addObject:url];
+            }
         } else if ([url.pathExtension caseInsensitiveCompare:@"carra2"] == NSOrderedSame) {
             [carra2URLs addObject:url];
         } else if ([url.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
             [bankURLs addObject:url];
             [validURLs addObject:url];
+        } else if ([self zs_urlIsDirectory:url]) {
+            if ([self zs_isLocalizationPackFolderURL:url]) {
+                [localizationFolderURLs addObject:url];
+            } else {
+                [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - unknown folder, it doesn't look like a localization pack", url.lastPathComponent]];
+            }
+        } else if ([url.pathExtension caseInsensitiveCompare:@"json"] == NSOrderedSame) {
+            if ([LocalizationTransplant isLocalizationJSONAtURL:url]) {
+                [localizationJSONURLs addObject:url];
+            } else {
+                [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - not a localization .json file (it must start with dataList)", url.lastPathComponent]];
+            }
         } else if ([self zs_isRecognizedBundleURL:url]) {
 
             [validURLs addObject:url];
@@ -7642,7 +7768,67 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
     self.loadModsSummaryLines = summaryLines;
 
-    if (validURLs.count == 0 && zipURLs.count == 0 && carra2URLs.count == 0) {
+    NSMutableArray<NSDictionary *> *promptQueue = [NSMutableArray array];
+    if (localizationJSONURLs.count > 0) {
+        NSUInteger count = localizationJSONURLs.count;
+        [promptQueue addObject:@{
+            @"type": @"json",
+            @"urls": [localizationJSONURLs copy],
+            @"name": count == 1 ? localizationJSONURLs.firstObject.lastPathComponent
+                                : [NSString stringWithFormat:@"%lu localization .json files", (unsigned long)count],
+            @"message": count == 1
+                ? [NSString stringWithFormat:@"Which language folder should \u201C%@\u201D go into?", localizationJSONURLs.firstObject.lastPathComponent]
+                : [NSString stringWithFormat:@"Which language folder should these %lu .json files go into?", (unsigned long)count],
+        }];
+    }
+    for (NSURL *folderURL in localizationFolderURLs) {
+        NSString *detected = [self zs_detectedLocalizationLanguageForFolderURL:folderURL];
+        NSMutableDictionary *item = [@{
+            @"type": @"folder",
+            @"url": folderURL,
+            @"name": folderURL.lastPathComponent,
+            @"message": [NSString stringWithFormat:@"Which language folder should \u201C%@\u201D replace?", folderURL.lastPathComponent],
+        } mutableCopy];
+        if (detected) item[@"detected"] = detected;
+        [promptQueue addObject:item];
+    }
+    for (NSURL *zipURL in localizationZipURLs) {
+        NSString *detected = [self zs_detectedLocalizationLanguageForZipURL:zipURL];
+        NSMutableDictionary *item = [@{
+            @"type": @"zip",
+            @"url": zipURL,
+            @"name": zipURL.lastPathComponent,
+            @"message": [NSString stringWithFormat:@"Which language folder should \u201C%@\u201D replace?", zipURL.lastPathComponent],
+        } mutableCopy];
+        if (detected) item[@"detected"] = detected;
+        [promptQueue addObject:item];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [self zs_promptLocalizationLanguageQueue:promptQueue
+                                        jobs:[NSMutableArray array]
+                                summaryLines:summaryLines
+                                  completion:^(NSArray<NSDictionary *> *localizationJobs) {
+        [weakSelf zs_runLoadModsImportWithValidURLs:validURLs
+                                           bankURLs:bankURLs
+                                            zipURLs:zipURLs
+                                         carra2URLs:carra2URLs
+                                   localizationJobs:localizationJobs
+                                         intoFolder:folderName
+                                       summaryLines:summaryLines];
+    }];
+}
+
+- (void)zs_runLoadModsImportWithValidURLs:(NSArray<NSURL *> *)validURLs
+                                 bankURLs:(NSArray<NSURL *> *)bankURLs
+                                  zipURLs:(NSArray<NSURL *> *)zipURLs
+                               carra2URLs:(NSArray<NSURL *> *)carra2URLs
+                         localizationJobs:(NSArray<NSDictionary *> *)localizationJobs
+                               intoFolder:(NSString *)folderName
+                             summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    self.loadModsSummaryLines = summaryLines;
+
+    if (validURLs.count == 0 && zipURLs.count == 0 && carra2URLs.count == 0 && localizationJobs.count == 0) {
         [self zs_processLoadModsBankURLs:bankURLs];
         return;
     }
@@ -7688,6 +7874,17 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         }
         if (carra2URLs.count > 0) {
             [self zs_handleLoadModsPickedCarra2URLs:carra2URLs intoFolder:folderName summaryLines:summaryLines];
+        }
+        for (NSDictionary *job in localizationJobs) {
+            NSString *type = job[@"type"];
+            NSString *language = job[@"language"];
+            if ([type isEqualToString:@"json"]) {
+                [ModAssetLibrary importLocalizationJSONURLs:job[@"urls"] language:language intoFolder:folderName summaryLines:summaryLines];
+            } else if ([type isEqualToString:@"folder"]) {
+                [ModAssetLibrary importLocalizationPackFolderURL:job[@"url"] language:language intoFolder:folderName summaryLines:summaryLines];
+            } else if ([type isEqualToString:@"zip"]) {
+                [ModAssetLibrary importLocalizationPackZipURL:job[@"url"] language:language intoFolder:folderName summaryLines:summaryLines];
+            }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -7779,9 +7976,12 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSError *bundleError = nil;
     NSInteger bundlesRestored = [ZTranscoderInstaller restoreAllBackedUpBundlesForce:force error:&bundleError];
 
+    NSError *localizationError = nil;
+    NSInteger localizationRestored = [LocalizationTransplant restoreAllBackupsForce:force error:&localizationError];
+
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
 
-    if (banksRestored < 0 || bundlesRestored < 0) {
+    if (banksRestored < 0 || bundlesRestored < 0 || localizationRestored < 0) {
         [haptic notificationOccurred:UINotificationFeedbackTypeError];
         NSString *reason = bankError.localizedDescription ?: bundleError.localizedDescription ?: @"Unknown error.";
         ZLog(@"[BankTransplant] Restore Originals (force=%d) failed: %@", force, reason);
@@ -7789,11 +7989,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         return;
     }
 
-    if (banksRestored == 0 && bundlesRestored == 0) {
+    if (banksRestored == 0 && bundlesRestored == 0 && localizationRestored == 0) {
         [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
         if (force) {
 
-            [self zs_presentModsAlertWithTitle:@"Nothing to Restore" message:@"No backed-up banks or bundles found."];
+            [self zs_presentModsAlertWithTitle:@"Nothing to Restore" message:@"No backed-up banks, bundles or localization files found."];
         } else {
             [self zs_presentRestoreNothingToRestoreAlertWithForceOption];
         }
@@ -7808,10 +8008,13 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     if (bundlesRestored > 0) {
         [parts addObject:[NSString stringWithFormat:@"%ld bundle%@", (long)bundlesRestored, bundlesRestored == 1 ? @"" : @"s"]];
     }
+    if (localizationRestored > 0) {
+        [parts addObject:[NSString stringWithFormat:@"%ld localization item%@", (long)localizationRestored, localizationRestored == 1 ? @"" : @"s"]];
+    }
     NSString *message = [NSString stringWithFormat:
         @"Restored %@ to their original state. Restart the game for it to take effect.",
         [parts componentsJoinedByString:@" and "]];
-    ZLog(@"[BankTransplant] Restore Originals (force=%d): %ld bank(s), %ld bundle(s) restored.", force, (long)banksRestored, (long)bundlesRestored);
+    ZLog(@"[BankTransplant] Restore Originals (force=%d): %ld bank(s), %ld bundle(s), %ld localization item(s) restored.", force, (long)banksRestored, (long)bundlesRestored, (long)localizationRestored);
     [self zs_presentModsAlertWithTitle:@"Restore Originals" message:message];
 }
 
@@ -9054,6 +9257,10 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         replacementBytesURL = [NSURL fileURLWithPath:tempPath];
     }
 
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        [self zs_restoreLocalizationEntryBestEffort:entry];
+    }
+
     entry.cachedFromFolder = folderName;
     NSError *moveErr = nil;
     ModAssetLibraryEntry *moved = [ModAssetLibrary moveEntry:entry
@@ -9217,6 +9424,15 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_finishRestoringStoredBundleEntry:(ModAssetLibraryEntry *)entry stockURL:(nullable NSURL *)stockURL intoFolder:(NSString *)destFolder {
     NSString *sourceFolder = zs_mods_folder_name_for_entry(entry) ?: kZSStoredBundlesFolderName;
 
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        NSError *applyErr = nil;
+        if (![self zs_applyLocalizationEntry:entry error:&applyErr]) {
+            [self zs_presentModsAlertWithTitle:@"Restore Failed"
+                                        message:applyErr.localizedDescription ?: @"Unknown error."];
+            return;
+        }
+    }
+
     if (stockURL) {
         NSError *installErr = nil;
         if (![ZTranscoderInstaller installDoctoredBundleAtURL:[NSURL fileURLWithPath:entry.path]
@@ -9301,6 +9517,15 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                                 intoFolder:(NSString *)destFolder {
     NSInteger failureCount = 0;
     for (ModAssetLibraryEntry *entry in entries) {
+        if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+            NSError *applyErr = nil;
+            if (![self zs_applyLocalizationEntry:entry error:&applyErr]) {
+                failureCount++;
+                ZLog(@"[Mods Library] restore folder \"%@\": couldn't re-place %@: %@", folderName, entry.fileName, applyErr.localizedDescription);
+                continue;
+            }
+        }
+
         NSURL *stockURL = entry.isAssetBundle ? zs_mods_live_stock_url_for_entry(entry) : nil;
         if (stockURL) {
             NSError *installErr = nil;
@@ -9468,6 +9693,10 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 }
 
 - (BOOL)zs_rePlaceModEntryCore:(ModAssetLibraryEntry *)entry error:(NSError **)outError {
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        return [self zs_applyLocalizationEntry:entry error:outError];
+    }
+
     BOOL isBank = ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame);
     if (isBank) {
         return [BankTransplant transplantAndSwapModdedBankAtURL:[NSURL fileURLWithPath:entry.path] error:outError];
@@ -9938,7 +10167,32 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [self zs_rebuildModsLibrary];
 }
 
+- (void)zs_restoreLocalizationEntryBestEffort:(ModAssetLibraryEntry *)entry {
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+        [LocalizationTransplant restorePackForLanguage:entry.localizationLanguage ifAppliedFromPackAtPath:entry.path];
+    } else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON && entry.localizationRelativePath.length > 0) {
+        [LocalizationTransplant restoreRelativeTarget:entry.localizationRelativePath ifAppliedFromModFileAtPath:entry.path];
+    }
+}
+
+- (BOOL)zs_applyLocalizationEntry:(ModAssetLibraryEntry *)entry error:(NSError **)outError {
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+        return [LocalizationTransplant applyPackAtPath:entry.path toLanguage:entry.localizationLanguage error:outError];
+    }
+    if (entry.localizationRelativePath.length == 0) {
+        if (outError) *outError = [NSError errorWithDomain:@"ZSModsRePlace" code:4
+                                                    userInfo:@{NSLocalizedDescriptionKey: @"Couldn't resolve this mod's target file."}];
+        return NO;
+    }
+    return [LocalizationTransplant applyModFileAtPath:entry.path toRelativeTarget:entry.localizationRelativePath error:outError];
+}
+
 - (void)zs_restoreModEntryBestEffort:(ModAssetLibraryEntry *)entry {
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        [self zs_restoreLocalizationEntryBestEffort:entry];
+        return;
+    }
+
     NSError *bankError = nil;
     [BankTransplant restoreBackedUpBankNamed:entry.fileName error:&bankError];
     if (bankError) {
@@ -10163,9 +10417,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_presentModImportPickerForFolder:(NSString *)folderName {
     UIDocumentPickerViewController *picker;
     if (@available(iOS 14.0, *)) {
-        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData, UTTypeItem]];
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeData, UTTypeItem, UTTypeFolder]];
     } else {
-        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data", @"public.item"]
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.data", @"public.item", @"public.folder"]
                                                                           inMode:UIDocumentPickerModeImport];
     }
     picker.delegate = self;

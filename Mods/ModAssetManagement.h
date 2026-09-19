@@ -33,6 +33,12 @@ typedef NS_ENUM(NSInteger, LunartiqueModArchiveErrorCode) {
 
 + (nullable NSArray<NSString *> *)matchedBankEntryNamesInZipAtURL:(NSURL *)zipURL error:(NSError **)error;
 
++ (nullable NSArray<NSString *> *)allEntryNamesInZipAtURL:(NSURL *)zipURL error:(NSError **)error;
+
++ (BOOL)extractAllEntriesOfZipAtURL:(NSURL *)zipURL
+                     toDirectoryURL:(NSURL *)directoryURL
+                              error:(NSError **)error;
+
 + (BOOL)extractBankEntryNamed:(NSString *)entryName
                    fromZipAtURL:(NSURL *)zipURL
                         bankURL:(NSURL * _Nullable * _Nonnull)outBankURL
@@ -74,6 +80,12 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
     ModAssetLibraryDoctorStatusInstalled,
 };
 
+typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
+    ModAssetLibraryLocalizationKindNone = 0,
+    ModAssetLibraryLocalizationKindJSON,
+    ModAssetLibraryLocalizationKindPack,
+};
+
 @interface ModAssetLibraryEntry : NSObject
 @property (nonatomic, copy) NSString *fileName;
 @property (nonatomic, copy) NSString *path;
@@ -94,6 +106,12 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
 @property (nonatomic, copy, nullable) NSString *zipCacheHash2;
 
 @property (nonatomic, copy, nullable) NSString *remark;
+
+@property (nonatomic, assign) ModAssetLibraryLocalizationKind localizationKind;
+
+@property (nonatomic, copy, nullable) NSString *localizationLanguage;
+
+@property (nonatomic, copy, nullable) NSString *localizationRelativePath;
 
 @property (nonatomic, copy, nullable) NSString *cachedFromFolder;
 
@@ -143,6 +161,21 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryDoctorStatus) {
                     intoFolder:(NSString *)folderName
              rejectedEntryLines:(NSArray<NSString *> * _Nullable * _Nullable)rejectedEntryLines
                          error:(NSError **)error;
+
++ (void)importLocalizationJSONURLs:(NSArray<NSURL *> *)jsonURLs
+                          language:(NSString *)languageCode
+                        intoFolder:(NSString *)folderName
+                      summaryLines:(NSMutableArray<NSString *> *)summaryLines;
+
++ (void)importLocalizationPackFolderURL:(NSURL *)folderURL
+                               language:(NSString *)languageCode
+                             intoFolder:(NSString *)folderName
+                           summaryLines:(NSMutableArray<NSString *> *)summaryLines;
+
++ (void)importLocalizationPackZipURL:(NSURL *)zipURL
+                            language:(NSString *)languageCode
+                          intoFolder:(NSString *)folderName
+                        summaryLines:(NSMutableArray<NSString *> *)summaryLines;
 
 + (BOOL)importCarra2URL:(NSURL *)carra2URL
               intoFolder:(NSString *)folderName

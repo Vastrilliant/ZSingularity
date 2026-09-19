@@ -8,7 +8,14 @@
 
 static NSString * const kTargetHostSuffix = @"limbuscompanycdn.org";
 
-static NSString * const kTargetPathSuffix = @"FmodPatchInfo.json";
+static NSArray<NSString *> *PMTargetPathSuffixes(void) {
+    static NSArray<NSString *> *suffixes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        suffixes = @[@"FmodPatchInfo.json", @"LocalizePatchInfo.json"];
+    });
+    return suffixes;
+}
 
 static const NSUInteger kMaxManifestBytes = 32ULL * 1024ULL * 1024ULL;
 
@@ -16,6 +23,7 @@ static IMP gOrigDidReceiveData;
 static IMP gOrigDidComplete;
 static Class gDelegateClass;
 static BOOL gInstalled;
+static NSMutableSet<NSString *> *gPatchedSuffixes;
 
 static NSMutableDictionary<NSNumber *, NSMutableData *> *gBuffers;
 static dispatch_queue_t gStateQueue;
@@ -23,19 +31,27 @@ static dispatch_queue_t gStateQueue;
 static NSString * const kSettingsSection = @"network";
 static NSString * const kZeroingEnabledKey = @"fmodManifestZeroingEnabled";
 
-static BOOL PMIsTargetTask(NSURLSessionDataTask *task) {
+static NSString *PMMatchedSuffixForTask(NSURLSessionTask *task) {
     NSURL *url = task.currentRequest.URL ?: task.originalRequest.URL;
-    if (!url) return NO;
+    if (!url) return nil;
 
     NSString *host = url.host.lowercaseString ?: @"";
     NSString *path = url.path ?: @"";
+    if (![host hasSuffix:kTargetHostSuffix]) return nil;
 
-    BOOL match = [host hasSuffix:kTargetHostSuffix] && [path hasSuffix:kTargetPathSuffix];
+    for (NSString *suffix in PMTargetPathSuffixes()) {
+        if ([path hasSuffix:suffix]) return suffix;
+    }
+    return nil;
+}
 
-    ZLog(@"[PatchManifestNetwork] observed request host=%@ path=%@ match=%@",
-          host, path, match ? @"YES" : @"NO");
+static BOOL PMIsTargetTask(NSURLSessionDataTask *task) {
+    NSString *matchedSuffix = PMMatchedSuffixForTask(task);
 
-    return match;
+    ZLog(@"[PatchManifestNetwork] observed request url=%@ match=%@",
+          task.currentRequest.URL ?: task.originalRequest.URL, matchedSuffix ? @"YES" : @"NO");
+
+    return matchedSuffix != nil;
 }
 
 static NSData *PMPatchManifestData(NSData *input) {
@@ -168,8 +184,18 @@ static void PMDidComplete(id self,
         self, _cmd, session, task, error);
 
     if (patched) {
-        ZLog(@"[PatchManifestNetwork] manifest patched - deactivating for the rest of this session");
-        [PatchManifestNetwork uninstall];
+        NSString *matchedSuffix = PMMatchedSuffixForTask(task);
+        BOOL allPatched = NO;
+        @synchronized ([PatchManifestNetwork class]) {
+            if (matchedSuffix) [gPatchedSuffixes addObject:matchedSuffix];
+            allPatched = gPatchedSuffixes.count >= PMTargetPathSuffixes().count;
+        }
+        if (allPatched) {
+            ZLog(@"[PatchManifestNetwork] every manifest patched - deactivating for the rest of this session");
+            [PatchManifestNetwork uninstall];
+        } else {
+            ZLog(@"[PatchManifestNetwork] patched %@ - staying active for the remaining manifests", matchedSuffix);
+        }
     }
 }
 
@@ -246,6 +272,7 @@ static NSArray<NSString *> *PMFindCandidateDelegateClassNames(void) {
         gOrigDidComplete = method_getImplementation(didCompleteMethod);
 
         gBuffers = [NSMutableDictionary dictionary];
+        gPatchedSuffixes = [NSMutableSet set];
         gStateQueue = dispatch_queue_create("com.120F.PatchManifestNetwork", DISPATCH_QUEUE_SERIAL);
 
         method_setImplementation(didReceiveMethod, (IMP)PMDidReceiveData);
@@ -274,6 +301,7 @@ static NSArray<NSString *> *PMFindCandidateDelegateClassNames(void) {
         }
 
         gBuffers = nil;
+        gPatchedSuffixes = nil;
         gStateQueue = nil;
         gDelegateClass = Nil;
         gOrigDidReceiveData = NULL;

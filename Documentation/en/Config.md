@@ -19,7 +19,7 @@ ASTC is Apple's natively supported compressed texture format on iOS; smaller blo
 
 ## FModManifest zeroing
 
-**ZSingularity** zeroes out the network call FMOD normally uses to validate its manifest, so that swapped-in sound banks load without tripping a checksum mismatch. Disabling this toggle disarms that patch and restores FMOD's original manifest validation.
+**ZSingularity** zeroes out the network call FMOD normally uses to validate its manifest, so that swapped-in sound banks load without tripping a checksum mismatch. The same patch also covers the localization manifest (`LocalizePatchInfo.json`), so swapped-in localization files aren't rejected either. Disabling this toggle disarms it and restores the original manifest validation.
 
 **You must disable this setting when downloading new updates**
 

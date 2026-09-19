@@ -1,6 +1,7 @@
 #import "ModAssetManagement.h"
 #import "ZTweakLog.h"
 #import "BankTransplant.h"
+#import "LocalizationMods.h"
 #import "UnityBundleTools.h"
 #import <compression.h>
 
@@ -362,6 +363,80 @@ static BOOL lma_isHex32(NSString *s) {
     return YES;
 }
 
++ (nullable NSArray<NSString *> *)allEntryNamesInZipAtURL:(NSURL *)zipURL error:(NSError **)error {
+    NSData *data = [self lma_mappedDataForZipAtURL:zipURL error:error];
+    if (!data) return nil;
+
+    NSArray<LMACDRecord *> *records = [self lma_centralDirectoryRecordsForData:data error:error];
+    if (!records) return nil;
+
+    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:records.count];
+    for (LMACDRecord *rec in records) [names addObject:rec.name];
+    return names;
+}
+
++ (BOOL)extractAllEntriesOfZipAtURL:(NSURL *)zipURL
+                     toDirectoryURL:(NSURL *)directoryURL
+                              error:(NSError **)error {
+    NSData *data = [self lma_mappedDataForZipAtURL:zipURL error:error];
+    if (!data) return NO;
+
+    NSArray<LMACDRecord *> *records = [self lma_centralDirectoryRecordsForData:data error:error];
+    if (!records) return NO;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *rootPath = directoryURL.path;
+    NSError *dirErr = nil;
+    if (![fm createDirectoryAtPath:rootPath withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        if (error) *error = dirErr ?: LMAError(LunartiqueModArchiveErrorExtractionFailed, @"Couldn't create a temp folder to extract into.");
+        return NO;
+    }
+
+    for (LMACDRecord *rec in records) {
+        NSString *normalized = [rec.name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+        BOOL isDirectoryEntry = [normalized hasSuffix:@"/"];
+
+        NSMutableArray<NSString *> *components = [NSMutableArray array];
+        for (NSString *component in [normalized componentsSeparatedByString:@"/"]) {
+            if (component.length == 0 || [component isEqualToString:@"."]) continue;
+            if ([component isEqualToString:@".."]) {
+                if (error) *error = LMAError(LunartiqueModArchiveErrorCorruptEntry,
+                    [NSString stringWithFormat:@"\"%@\" tries to escape the extraction folder.", rec.name]);
+                return NO;
+            }
+            [components addObject:component];
+        }
+        if (components.count == 0 || [LocalizationTransplant isJunkArchivePathComponents:components]) continue;
+
+        NSString *destPath = [rootPath stringByAppendingPathComponent:[components componentsJoinedByString:@"/"]];
+        if (isDirectoryEntry) {
+            [fm createDirectoryAtPath:destPath withIntermediateDirectories:YES attributes:nil error:nil];
+            continue;
+        }
+
+        NSError *parentErr = nil;
+        if (![fm createDirectoryAtPath:destPath.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:&parentErr]) {
+            if (error) *error = parentErr ?: LMAError(LunartiqueModArchiveErrorExtractionFailed, @"Couldn't create a folder while extracting.");
+            return NO;
+        }
+
+        NSError *inflateErr = nil;
+        NSData *bytes = [self lma_inflatedDataForRecord:rec inData:data error:&inflateErr];
+        if (!bytes) {
+            if (error) *error = inflateErr;
+            return NO;
+        }
+
+        NSError *writeErr = nil;
+        if (![bytes writeToFile:destPath options:0 error:&writeErr]) {
+            if (error) *error = writeErr ?: LMAError(LunartiqueModArchiveErrorExtractionFailed,
+                [NSString stringWithFormat:@"Couldn't write \"%@\" while extracting.", rec.name]);
+            return NO;
+        }
+    }
+    return YES;
+}
+
 @end
 
 #pragma mark - Carra2ModArchive
@@ -481,6 +556,9 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     if (self.zipCacheHash1) d[@"zipCacheHash1"] = self.zipCacheHash1;
     if (self.zipCacheHash2) d[@"zipCacheHash2"] = self.zipCacheHash2;
     if (self.remark.length > 0) d[@"remark"] = self.remark;
+    if (self.localizationKind != ModAssetLibraryLocalizationKindNone) d[@"localizationKind"] = @(self.localizationKind);
+    if (self.localizationLanguage.length > 0) d[@"localizationLanguage"] = self.localizationLanguage;
+    if (self.localizationRelativePath.length > 0) d[@"localizationRelativePath"] = self.localizationRelativePath;
     if (self.cachedFromFolder.length > 0) d[@"cachedFromFolder"] = self.cachedFromFolder;
     if (self.isAssetBundle) d[@"isAssetBundle"] = @YES;
     if (self.cabIdentifier) d[@"cabIdentifier"] = self.cabIdentifier;
@@ -513,6 +591,11 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     e.zipCacheHash2 = [d[@"zipCacheHash2"] isKindOfClass:NSString.class] ? d[@"zipCacheHash2"] : nil;
     e.remark = [d[@"remark"] isKindOfClass:NSString.class] ? d[@"remark"] : nil;
     e.cachedFromFolder = [d[@"cachedFromFolder"] isKindOfClass:NSString.class] ? d[@"cachedFromFolder"] : nil;
+    NSInteger rawLocalizationKind = [d[@"localizationKind"] isKindOfClass:NSNumber.class] ? [d[@"localizationKind"] integerValue] : 0;
+    e.localizationKind = (rawLocalizationKind == ModAssetLibraryLocalizationKindJSON || rawLocalizationKind == ModAssetLibraryLocalizationKindPack)
+        ? (ModAssetLibraryLocalizationKind)rawLocalizationKind : ModAssetLibraryLocalizationKindNone;
+    e.localizationLanguage = [d[@"localizationLanguage"] isKindOfClass:NSString.class] ? d[@"localizationLanguage"] : nil;
+    e.localizationRelativePath = [d[@"localizationRelativePath"] isKindOfClass:NSString.class] ? d[@"localizationRelativePath"] : nil;
 
     e.isAssetBundle = [d[@"isAssetBundle"] isKindOfClass:NSNumber.class] && [d[@"isAssetBundle"] boolValue];
     e.cabIdentifier = [d[@"cabIdentifier"] isKindOfClass:NSString.class] ? d[@"cabIdentifier"] : nil;
@@ -1147,6 +1230,202 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     return wrote;
 }
 
++ (BOOL)mal_appendEntry:(ModAssetLibraryEntry *)entry toFolder:(NSString *)folderName error:(NSError **)error {
+    NSMutableArray<ModAssetLibraryEntry *> *entries =
+        [([self entriesInFolder:folderName error:nil] ?: @[]) mutableCopy];
+    [entries addObject:entry];
+    return [self mal_writeEntries:entries toFolder:folderName error:error];
+}
+
++ (nullable NSString *)mal_localizationFolderPathForFolder:(NSString *)folderName {
+    NSString *root = [self modLibraryRootDirectory];
+    NSString *folderPath = root ? [root stringByAppendingPathComponent:folderName] : nil;
+    BOOL isDir = NO;
+    if (!folderPath || ![NSFileManager.defaultManager fileExistsAtPath:folderPath isDirectory:&isDir] || !isDir) return nil;
+    return folderPath;
+}
+
+static NSString *MALTimestampNow(void) {
+    NSDateFormatter *iso = [NSDateFormatter new];
+    iso.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    iso.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+    iso.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    return [iso stringFromDate:[NSDate date]];
+}
+
++ (void)importLocalizationJSONURLs:(NSArray<NSURL *> *)jsonURLs
+                          language:(NSString *)languageCode
+                        intoFolder:(NSString *)folderName
+                      summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    NSString *folderPath = [self mal_localizationFolderPathForFolder:folderName];
+    if (!folderPath) {
+        for (NSURL *url in jsonURLs) {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - no folder named \"%@\"", url.lastPathComponent, folderName]];
+        }
+        return;
+    }
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *now = MALTimestampNow();
+
+    for (NSURL *url in jsonURLs) {
+        NSString *displayName = url.lastPathComponent;
+
+        if (![LocalizationTransplant isLocalizationJSONAtURL:url]) {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - not a localization .json file (it must start with dataList)", displayName]];
+            continue;
+        }
+
+        NSArray<NSString *> *targets = [LocalizationTransplant relativeTargetsForJSONNamed:displayName inLanguage:languageCode];
+        if (targets.count != 1) {
+            NSString *reason = targets.count == 0
+                ? [NSString stringWithFormat:@"no file matching this name was found in the \"%@\" folder", languageCode]
+                : [NSString stringWithFormat:@"it matches %lu files in the \"%@\" folder", (unsigned long)targets.count, languageCode];
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", displayName, reason]];
+            continue;
+        }
+        NSString *relativeTarget = targets.firstObject;
+
+        NSString *destName = [self mal_uniqueFileNameFor:displayName inFolder:folderPath];
+        NSString *destPath = [folderPath stringByAppendingPathComponent:destName];
+
+        BOOL accessing = [url startAccessingSecurityScopedResource];
+        NSError *copyErr = nil;
+        BOOL copied = [fm copyItemAtPath:url.path toPath:destPath error:&copyErr];
+        if (accessing) [url stopAccessingSecurityScopedResource];
+        if (!copied) {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - couldn't copy it into the library: %@", displayName, copyErr.localizedDescription ?: @"unknown error"]];
+            continue;
+        }
+
+        NSError *applyErr = nil;
+        if (![LocalizationTransplant applyModFileAtPath:destPath toRelativeTarget:relativeTarget error:&applyErr]) {
+            [fm removeItemAtPath:destPath error:nil];
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", displayName, applyErr.localizedDescription ?: @"swap failed"]];
+            continue;
+        }
+
+        NSDictionary<NSFileAttributeKey, id> *attrs = [fm attributesOfItemAtPath:destPath error:nil];
+        ModAssetLibraryEntry *entry = [ModAssetLibraryEntry new];
+        entry.fileName = destName;
+        entry.path = destPath;
+        entry.byteSize = attrs.fileSize;
+        entry.dateAdded = now;
+        entry.localizationKind = ModAssetLibraryLocalizationKindJSON;
+        entry.localizationLanguage = languageCode;
+        entry.localizationRelativePath = relativeTarget;
+        NSString *localizeDir = [LocalizationTransplant localizeDirectory];
+        entry.livePathDescription = [self mal_sandboxRelativePath:[localizeDir stringByAppendingPathComponent:relativeTarget]];
+
+        NSError *writeErr = nil;
+        if ([self mal_appendEntry:entry toFolder:folderName error:&writeErr]) {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: swapped", displayName]];
+        } else {
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: swapped, but couldn't be added to the library - %@", displayName, writeErr.localizedDescription ?: @"unknown error"]];
+        }
+    }
+}
+
++ (void)mal_importLocalizationPackFromDirectoryAtPath:(NSString *)sourcePath
+                                          displayName:(NSString *)displayName
+                                             language:(NSString *)languageCode
+                                           intoFolder:(NSString *)folderName
+                                         summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    NSString *folderPath = [self mal_localizationFolderPathForFolder:folderName];
+    if (!folderPath) {
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - no folder named \"%@\"", displayName, folderName]];
+        return;
+    }
+    if (![LocalizationTransplant isTranslationPackDirectoryAtPath:sourcePath]) {
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - unknown folder, it doesn't look like a localization pack", displayName]];
+        return;
+    }
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *destName = [self mal_uniqueFolderNameFor:sourcePath.lastPathComponent inParentFolder:folderPath];
+    NSString *destPath = [folderPath stringByAppendingPathComponent:destName];
+
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:sourcePath toPath:destPath error:&copyErr]) {
+        [fm removeItemAtPath:destPath error:nil];
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - couldn't copy it into the library: %@", displayName, copyErr.localizedDescription ?: @"unknown error"]];
+        return;
+    }
+
+    NSError *applyErr = nil;
+    if (![LocalizationTransplant applyPackAtPath:destPath toLanguage:languageCode error:&applyErr]) {
+        [fm removeItemAtPath:destPath error:nil];
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", displayName, applyErr.localizedDescription ?: @"swap failed"]];
+        return;
+    }
+
+    ModAssetLibraryEntry *entry = [ModAssetLibraryEntry new];
+    entry.fileName = destName;
+    entry.path = destPath;
+    entry.byteSize = [LocalizationTransplant totalByteSizeAtPath:destPath];
+    entry.dateAdded = MALTimestampNow();
+    entry.localizationKind = ModAssetLibraryLocalizationKindPack;
+    entry.localizationLanguage = languageCode;
+    entry.livePathDescription = [self mal_sandboxRelativePath:[LocalizationTransplant languageDirectoryForCode:languageCode]];
+
+    NSError *writeErr = nil;
+    if ([self mal_appendEntry:entry toFolder:folderName error:&writeErr]) {
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: swapped", displayName]];
+    } else {
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: swapped, but couldn't be added to the library - %@", displayName, writeErr.localizedDescription ?: @"unknown error"]];
+    }
+}
+
++ (void)importLocalizationPackFolderURL:(NSURL *)folderURL
+                               language:(NSString *)languageCode
+                             intoFolder:(NSString *)folderName
+                           summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    BOOL accessing = [folderURL startAccessingSecurityScopedResource];
+    [self mal_importLocalizationPackFromDirectoryAtPath:folderURL.path
+                                             displayName:folderURL.lastPathComponent
+                                                language:languageCode
+                                              intoFolder:folderName
+                                            summaryLines:summaryLines];
+    if (accessing) [folderURL stopAccessingSecurityScopedResource];
+}
+
++ (void)importLocalizationPackZipURL:(NSURL *)zipURL
+                            language:(NSString *)languageCode
+                          intoFolder:(NSString *)folderName
+                        summaryLines:(NSMutableArray<NSString *> *)summaryLines {
+    NSString *displayName = zipURL.lastPathComponent;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *tempRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"zs-loc-zip-%@", [NSUUID UUID].UUIDString]];
+
+    BOOL accessing = [zipURL startAccessingSecurityScopedResource];
+    NSError *extractErr = nil;
+    BOOL extracted = [LunartiqueModArchive extractAllEntriesOfZipAtURL:zipURL
+                                                        toDirectoryURL:[NSURL fileURLWithPath:tempRoot isDirectory:YES]
+                                                                 error:&extractErr];
+    if (accessing) [zipURL stopAccessingSecurityScopedResource];
+
+    if (!extracted) {
+        [fm removeItemAtPath:tempRoot error:nil];
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - couldn't unzip it: %@", displayName, extractErr.localizedDescription ?: @"unknown error"]];
+        return;
+    }
+
+    NSString *packDir = [LocalizationTransplant packDirectoryInExtractedDirectoryAtPath:tempRoot];
+    if (!packDir) {
+        [fm removeItemAtPath:tempRoot error:nil];
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - unknown file, it isn't a localization pack", displayName]];
+        return;
+    }
+
+    [self mal_importLocalizationPackFromDirectoryAtPath:packDir
+                                             displayName:displayName
+                                                language:languageCode
+                                              intoFolder:folderName
+                                            summaryLines:summaryLines];
+    [fm removeItemAtPath:tempRoot error:nil];
+}
+
 + (BOOL)importCarra2URL:(NSURL *)carra2URL
               intoFolder:(NSString *)folderName
                    error:(NSError **)error {
@@ -1330,6 +1609,9 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     movedEntry.cabIdentifier = entry.cabIdentifier;
     movedEntry.targetPlatform = entry.targetPlatform;
     movedEntry.cachedFromFolder = entry.cachedFromFolder;
+    movedEntry.localizationKind = entry.localizationKind;
+    movedEntry.localizationLanguage = entry.localizationLanguage;
+    movedEntry.localizationRelativePath = entry.localizationRelativePath;
     movedEntry.currentFolder = toFolder;
     movedEntry.doctorStatus = entry.doctorStatus;
     movedEntry.doctorUploadProgress = entry.doctorUploadProgress;

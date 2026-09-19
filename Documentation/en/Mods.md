@@ -16,9 +16,17 @@ Supported Formats:
 `.assets.bank` FMOD Sound Bank 
 `Lunartique` .zip archives 
 `Carra2` archives 
+`Localize` .json files (custom announcers) 
+Localization packs (full translations, as a folder or a .zip)
 
-Coming soon: 
-`Localize` .json files (translation mods, custom announcers, etc.)
+Every entry's info panel starts with a `Kind:` line telling you which of these it is.
+
+### Localization mods
+
+- **Localize .json files** must start with `dataList`. You'll be asked which language folder (`en`, `jp`, `kr`) to place them in; the matching language prefix (`EN_`, `JP_` or `KR_`) is prepended to each file's name (replacing any other prefix it already has), and the file replaces the game's file of that name inside the folder. It is rejected if no such file exists there.
+- **Localization packs** replace an entire language folder. A folder is treated as a pack when it contains at least two of the game's localization subfolders (`BattleAnnouncerDlg`, `BgmLyrics`, `EGOVoiceDig`, `PersonalityVoiceDlg`, `RPGSystem`, `StoryData`). A .zip is accepted only if it holds nothing but the pack folder.
+
+The original files are backed up before anything is swapped, and **Restore Originals** puts them back.
 
 ## Processing
 
