@@ -64,9 +64,12 @@ static NSString *LTNameWithoutLanguagePrefix(NSString *fileName) {
 
 static NSString *LTDetectLanguage(NSArray<NSString *> *paths) {
     NSCountedSet<NSString *> *tally = [NSCountedSet set];
+    NSUInteger jsonCount = 0;
     for (NSString *path in paths) {
         NSString *leaf = path.lastPathComponent;
         if ([leaf.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+        if ([leaf hasPrefix:@"._"]) continue;
+        jsonCount++;
         NSString *code = LTLanguageCodeForFileName(leaf);
         if (code) [tally addObject:code];
     }
@@ -79,6 +82,7 @@ static NSString *LTDetectLanguage(NSArray<NSString *> *paths) {
             bestCount = count;
         }
     }
+    if (bestCount * 2 <= jsonCount) return nil;
     return best;
 }
 
