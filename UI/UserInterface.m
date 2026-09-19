@@ -7695,14 +7695,12 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSDictionary *item = queue.firstObject;
     [queue removeObjectAtIndex:0];
 
-    NSString *detected = item[@"detected"];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Select Language Folder"
                                                                     message:item[@"message"]
                                                              preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) weakSelf = self;
     for (NSString *code in [LocalizationTransplant languageCodes]) {
-        NSString *title = [detected isEqualToString:code] ? [code stringByAppendingString:@" (detected)"] : code;
-        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [alert addAction:[UIAlertAction actionWithTitle:code style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             NSMutableDictionary *job = [item mutableCopy];
             job[@"language"] = code;
             [jobs addObject:job];
@@ -7781,16 +7779,21 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
                 : [NSString stringWithFormat:@"Which language folder should these %lu .json files go into?", (unsigned long)count],
         }];
     }
+    NSMutableArray<NSDictionary *> *autoJobs = [NSMutableArray array];
     for (NSURL *folderURL in localizationFolderURLs) {
         NSString *detected = [self zs_detectedLocalizationLanguageForFolderURL:folderURL];
         NSMutableDictionary *item = [@{
             @"type": @"folder",
             @"url": folderURL,
             @"name": folderURL.lastPathComponent,
-            @"message": [NSString stringWithFormat:@"Which language folder should \u201C%@\u201D replace?", folderURL.lastPathComponent],
+            @"message": [NSString stringWithFormat:@"\u201C%@\u201D has no language prefix in its .json files. Which language folder should it replace? The prefix will be added to every .json file.", folderURL.lastPathComponent],
         } mutableCopy];
-        if (detected) item[@"detected"] = detected;
-        [promptQueue addObject:item];
+        if (detected) {
+            item[@"language"] = detected;
+            [autoJobs addObject:item];
+        } else {
+            [promptQueue addObject:item];
+        }
     }
     for (NSURL *zipURL in localizationZipURLs) {
         NSString *detected = [self zs_detectedLocalizationLanguageForZipURL:zipURL];
@@ -7798,15 +7801,19 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             @"type": @"zip",
             @"url": zipURL,
             @"name": zipURL.lastPathComponent,
-            @"message": [NSString stringWithFormat:@"Which language folder should \u201C%@\u201D replace?", zipURL.lastPathComponent],
+            @"message": [NSString stringWithFormat:@"\u201C%@\u201D has no language prefix in its .json files. Which language folder should it replace? The prefix will be added to every .json file.", zipURL.lastPathComponent],
         } mutableCopy];
-        if (detected) item[@"detected"] = detected;
-        [promptQueue addObject:item];
+        if (detected) {
+            item[@"language"] = detected;
+            [autoJobs addObject:item];
+        } else {
+            [promptQueue addObject:item];
+        }
     }
 
     __weak typeof(self) weakSelf = self;
     [self zs_promptLocalizationLanguageQueue:promptQueue
-                                        jobs:[NSMutableArray array]
+                                        jobs:autoJobs
                                 summaryLines:summaryLines
                                   completion:^(NSArray<NSDictionary *> *localizationJobs) {
         [weakSelf zs_runLoadModsImportWithValidURLs:validURLs

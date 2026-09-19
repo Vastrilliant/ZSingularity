@@ -276,6 +276,44 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     return LTDetectLanguage(entryNames);
 }
 
++ (BOOL)prefixPackJSONFilesAtPath:(NSString *)packPath
+                     withLanguage:(NSString *)languageCode
+                            error:(NSError **)error {
+    if (!LTIsValidLanguageCode(languageCode)) {
+        if (error) *error = LTError(LocalizationTransplantErrorInvalidTarget, @"Unknown language folder.");
+        return NO;
+    }
+    if ([self detectedLanguageForPackDirectoryAtPath:packPath]) return YES;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *prefix = [languageCode.uppercaseString stringByAppendingString:@"_"];
+
+    NSMutableArray<NSString *> *jsonRelativePaths = [NSMutableArray array];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:packPath];
+    for (NSString *relative in enumerator) {
+        if ([relative.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+        if ([self isJunkArchivePathComponents:relative.pathComponents]) continue;
+        if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+        [jsonRelativePaths addObject:relative];
+    }
+
+    for (NSString *relative in jsonRelativePaths) {
+        NSString *sourcePath = [packPath stringByAppendingPathComponent:relative];
+        NSString *renamedLeaf = [prefix stringByAppendingString:relative.lastPathComponent];
+        NSString *destPath = [sourcePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:renamedLeaf];
+
+        NSError *moveErr = nil;
+        if (![fm moveItemAtPath:sourcePath toPath:destPath error:&moveErr]) {
+            if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+                [NSString stringWithFormat:@"Couldn't add the \"%@\" prefix to %@: %@",
+                    prefix, relative.lastPathComponent, moveErr.localizedDescription]);
+            return NO;
+        }
+    }
+    ZLog(@"[LocalizationTransplant] prefixed %lu .json files with \"%@\"", (unsigned long)jsonRelativePaths.count, prefix);
+    return YES;
+}
+
 + (NSArray<NSString *> *)relativeTargetsForJSONNamed:(NSString *)fileName inLanguage:(NSString *)languageCode {
     NSString *localizeDir = [self localizeDirectory];
     if (!localizeDir || !LTIsValidLanguageCode(languageCode)) return @[];

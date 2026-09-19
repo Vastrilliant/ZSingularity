@@ -1352,6 +1352,13 @@ static NSString *MALTimestampNow(void) {
         return;
     }
 
+    NSError *prefixErr = nil;
+    if (![LocalizationTransplant prefixPackJSONFilesAtPath:destPath withLanguage:languageCode error:&prefixErr]) {
+        [fm removeItemAtPath:destPath error:nil];
+        [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", displayName, prefixErr.localizedDescription ?: @"couldn't add the language prefix"]];
+        return;
+    }
+
     NSError *applyErr = nil;
     if (![LocalizationTransplant applyPackAtPath:destPath toLanguage:languageCode error:&applyErr]) {
         [fm removeItemAtPath:destPath error:nil];

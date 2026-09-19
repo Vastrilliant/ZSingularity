@@ -38,6 +38,10 @@ typedef NS_ENUM(NSInteger, LocalizationTransplantErrorCode) {
 
 + (nullable NSString *)detectedLanguageForArchiveEntryNames:(NSArray<NSString *> *)entryNames;
 
++ (BOOL)prefixPackJSONFilesAtPath:(NSString *)packPath
+                     withLanguage:(NSString *)languageCode
+                            error:(NSError **)error;
+
 + (NSArray<NSString *> *)relativeTargetsForJSONNamed:(NSString *)fileName inLanguage:(NSString *)languageCode;
 
 + (unsigned long long)totalByteSizeAtPath:(NSString *)path;
