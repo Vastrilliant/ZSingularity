@@ -145,6 +145,10 @@ typedef NS_ENUM(NSInteger, UnityCacheLocatorErrorCode) {
 
 + (nullable NSString *)firstCachedFMODFileNameMatchingQuery:(NSString *)query;
 
++ (void)ensureLocalizationIndexUpToDate;
+
++ (nullable NSArray<NSString *> *)cachedLocalizationPathsInLanguage:(NSString *)languageCode;
+
 @end
 
 NS_ASSUME_NONNULL_END

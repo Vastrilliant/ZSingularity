@@ -2,6 +2,7 @@
 #import "LocalizationMods.h"
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
+#import "UnityBundleTools.h"
 
 NSString * const LocalizationTransplantErrorDomain = @"LocalizationTransplantErrorDomain";
 
@@ -276,21 +277,28 @@ static NSString *LTPackFingerprint(NSString *packPath) {
 }
 
 + (NSArray<NSString *> *)relativeTargetsForJSONNamed:(NSString *)fileName inLanguage:(NSString *)languageCode {
-    NSString *languageDir = [self languageDirectoryForCode:languageCode];
-    NSFileManager *fm = NSFileManager.defaultManager;
-    BOOL isDirectory = NO;
-    if (!languageDir || ![fm fileExistsAtPath:languageDir isDirectory:&isDirectory] || !isDirectory) return @[];
+    NSString *localizeDir = [self localizeDirectory];
+    if (!localizeDir || !LTIsValidLanguageCode(languageCode)) return @[];
 
     NSString *wanted = [[languageCode stringByAppendingString:@"_"] stringByAppendingString:LTNameWithoutLanguagePrefix(fileName)];
-    NSMutableArray<NSString *> *matches = [NSMutableArray array];
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:languageDir];
-    for (NSString *relative in enumerator) {
-        NSString *leaf = relative.lastPathComponent;
-        if ([leaf hasPrefix:@"."]) continue;
-        if ([leaf.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
-        if ([leaf.lowercaseString isEqualToString:wanted]) {
-            [matches addObject:[languageCode stringByAppendingPathComponent:relative]];
+
+    NSArray<NSString *> *(^lookup)(void) = ^NSArray<NSString *> *{
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSMutableArray<NSString *> *matches = [NSMutableArray array];
+        for (NSString *relativeTarget in [ZSFileIndex cachedLocalizationPathsInLanguage:languageCode] ?: @[]) {
+            NSString *leaf = relativeTarget.lastPathComponent;
+            if ([leaf.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+            if (![leaf.lowercaseString isEqualToString:wanted]) continue;
+            if ([fm fileExistsAtPath:[localizeDir stringByAppendingPathComponent:relativeTarget]]) [matches addObject:relativeTarget];
         }
+        return matches;
+    };
+
+    if (![ZSFileIndex cachedLocalizationPathsInLanguage:languageCode]) [ZSFileIndex ensureLocalizationIndexUpToDate];
+    NSArray<NSString *> *matches = lookup();
+    if (matches.count == 0) {
+        [ZSFileIndex ensureLocalizationIndexUpToDate];
+        matches = lookup();
     }
     return matches;
 }
@@ -507,6 +515,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     if (![self lt_placeFileAtPath:modPath atPath:targetPath error:error]) return NO;
 
     zs_track_asset_path(targetPath);
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
     ZLog(@"[LocalizationTransplant] swapped %@ in place with the modded file's bytes as-is", relativeTarget);
     return YES;
 }
@@ -536,6 +545,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     }
 
     zs_track_asset_path(languageDir);
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
     ZLog(@"[LocalizationTransplant] swapped the \"%@\" language folder with %@", languageCode, packPath.lastPathComponent);
     return YES;
 }
@@ -603,6 +613,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
         return NO;
     }
     if (markerPath) [fm removeItemAtPath:markerPath error:nil];
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
     return YES;
 }
 

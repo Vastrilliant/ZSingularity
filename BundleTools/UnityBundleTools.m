@@ -3,6 +3,7 @@
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
 #import "BankTransplant.h"
+#import "LocalizationMods.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1416,6 +1417,7 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
 
 static NSDictionary<NSString *, NSArray<NSString *> *> *s_cabMap = nil;
 static NSSet<NSString *> *s_fmodNames = nil;
+static NSDictionary<NSString *, NSArray<NSString *> *> *s_localizeMap = nil;
 static BOOL s_hasIndex = NO;
 static const NSUInteger kZSFIMaxPathLength = 1024;
 
@@ -1514,6 +1516,84 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
     return map;
 }
 
+#pragma mark - Localization index
+
++ (NSArray<NSString *> *)zsfi_localizationRoots {
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    for (NSString *code in [LocalizationTransplant languageCodes]) {
+        NSString *languageDir = [LocalizationTransplant languageDirectoryForCode:code];
+        if (languageDir) [roots addObject:languageDir];
+    }
+    return roots;
+}
+
++ (NSDictionary<NSString *, NSArray<NSString *> *> *)zsfi_buildLocalizationMap {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableDictionary<NSString *, NSArray<NSString *> *> *map = [NSMutableDictionary dictionary];
+    NSUInteger totalFiles = 0;
+
+    for (NSString *code in [LocalizationTransplant languageCodes]) {
+        NSString *languageDir = [LocalizationTransplant languageDirectoryForCode:code];
+        BOOL isDirectory = NO;
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        if (languageDir && [fm fileExistsAtPath:languageDir isDirectory:&isDirectory] && isDirectory) {
+            @try {
+                NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:languageDir];
+                NSString *relPath;
+                while ((relPath = [walker nextObject])) {
+                    if (![walker.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+                    if ([relPath.lastPathComponent hasPrefix:@"."]) continue;
+                    [paths addObject:[code stringByAppendingPathComponent:relPath]];
+                }
+            } @catch (NSException *exception) {
+                ZLog(@"[ZSFileIndex] skipping localization folder %@ after Foundation threw during enumeration: %@", code, exception);
+            }
+        }
+        [paths sortUsingSelector:@selector(compare:)];
+        map[code] = paths;
+        totalFiles += paths.count;
+    }
+
+    ZLog(@"[ZSFileIndex] rebuilt localization index: %lu file(s) across %lu language folder(s)",
+         (unsigned long)totalFiles, (unsigned long)map.count);
+    return map;
+}
+
++ (BOOL)zsfi_localizationMapIsValid:(id)candidate {
+    if (![candidate isKindOfClass:[NSDictionary class]]) return NO;
+    for (id value in [(NSDictionary *)candidate allValues]) {
+        if (![value isKindOfClass:[NSArray class]]) return NO;
+    }
+    return YES;
+}
+
++ (void)ensureLocalizationIndexUpToDate {
+    @synchronized (self) {
+        zs_ensure_file_index_snapshot_loaded();
+        NSDictionary *saved = g_fileIndexSnapshot ?: @{};
+        NSDictionary *savedFP = [saved[@"localizeFingerprint"] isKindOfClass:[NSDictionary class]] ? saved[@"localizeFingerprint"] : nil;
+        NSDictionary *currentFP = [self zsfi_fingerprintForRoots:[self zsfi_localizationRoots]];
+
+        BOOL changed = savedFP == nil || ![currentFP isEqual:savedFP] || ![self zsfi_localizationMapIsValid:saved[@"localizeFilePaths"]];
+        if (!changed && s_localizeMap) return;
+
+        NSDictionary<NSString *, NSArray<NSString *> *> *map = changed ? [self zsfi_buildLocalizationMap] : saved[@"localizeFilePaths"];
+        s_localizeMap = map;
+
+        if (changed) {
+            NSMutableDictionary *snapshot = [saved mutableCopy];
+            snapshot[@"localizeFingerprint"] = currentFP;
+            snapshot[@"localizeFilePaths"] = map;
+            zs_set_file_index_snapshot(snapshot);
+        }
+    }
+}
+
++ (nullable NSArray<NSString *> *)cachedLocalizationPathsInLanguage:(NSString *)languageCode {
+    NSArray<NSString *> *paths = s_localizeMap[languageCode];
+    return paths;
+}
+
 #pragma mark - Public API
 
 + (void)ensureIndexUpToDate {
@@ -1532,6 +1612,11 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
         BOOL unityChanged = savedUnityFP == nil || ![currentUnityFP isEqual:savedUnityFP];
         BOOL fmodChanged  = savedFMODFP  == nil || ![currentFMODFP  isEqual:savedFMODFP];
 
+        NSDictionary *savedLocalizeFP = [saved[@"localizeFingerprint"] isKindOfClass:[NSDictionary class]] ? saved[@"localizeFingerprint"] : nil;
+        NSDictionary *currentLocalizeFP = [self zsfi_fingerprintForRoots:[self zsfi_localizationRoots]];
+        BOOL localizeChanged = savedLocalizeFP == nil || ![currentLocalizeFP isEqual:savedLocalizeFP]
+            || ![self zsfi_localizationMapIsValid:saved[@"localizeFilePaths"]];
+
         NSDictionary<NSString *, NSArray<NSString *> *> *cabMap;
         if (!unityChanged && [saved[@"unityCacheCABMap"] isKindOfClass:[NSDictionary class]]) {
             cabMap = saved[@"unityCacheCABMap"];
@@ -1549,16 +1634,22 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
             ZLog(@"[ZSFileIndex] FMOD mobile builds folder changed or never indexed - listed %lu file(s)", (unsigned long)fmodNamesArr.count);
         }
 
+        NSDictionary<NSString *, NSArray<NSString *> *> *localizeMap = localizeChanged
+            ? [self zsfi_buildLocalizationMap] : saved[@"localizeFilePaths"];
+
         s_cabMap = cabMap;
         s_fmodNames = [NSSet setWithArray:fmodNamesArr];
+        s_localizeMap = localizeMap;
         s_hasIndex = YES;
 
-        if (unityChanged || fmodChanged) {
+        if (unityChanged || fmodChanged || localizeChanged) {
             NSDictionary *snapshot = @{
                 @"unityCacheFingerprint": currentUnityFP,
                 @"fmodFingerprint": currentFMODFP,
                 @"unityCacheCABMap": cabMap,
                 @"fmodFileNames": fmodNamesArr,
+                @"localizeFingerprint": currentLocalizeFP,
+                @"localizeFilePaths": localizeMap,
             };
             zs_set_file_index_snapshot(snapshot);
         }
@@ -1576,8 +1667,12 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
         NSDictionary<NSString *, NSArray<NSString *> *> *cabMap = [self zsfi_buildCABMapForRoots:unityRoots];
         NSArray<NSString *> *fmodNamesArr = fmodDir ? ([NSFileManager.defaultManager contentsOfDirectoryAtPath:fmodDir error:nil] ?: @[]) : @[];
 
+        NSDictionary *currentLocalizeFP = [self zsfi_fingerprintForRoots:[self zsfi_localizationRoots]];
+        NSDictionary<NSString *, NSArray<NSString *> *> *localizeMap = [self zsfi_buildLocalizationMap];
+
         s_cabMap = cabMap;
         s_fmodNames = [NSSet setWithArray:fmodNamesArr];
+        s_localizeMap = localizeMap;
         s_hasIndex = YES;
 
         NSDictionary *snapshot = @{
@@ -1585,6 +1680,8 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
             @"fmodFingerprint": currentFMODFP,
             @"unityCacheCABMap": cabMap,
             @"fmodFileNames": fmodNamesArr,
+            @"localizeFingerprint": currentLocalizeFP,
+            @"localizeFilePaths": localizeMap,
         };
         zs_set_file_index_snapshot(snapshot);
 
