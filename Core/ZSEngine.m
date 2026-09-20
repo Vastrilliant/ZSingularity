@@ -822,6 +822,17 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     return YES;
 }
 
+static const double kParticleApplyDelaySeconds = 2.0;
+
+static void zs_schedule_particle_apply(void) {
+    static uint64_t generation;
+    uint64_t token = ++generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kParticleApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != generation) return;
+        zs_apply_particle_settings();
+    });
+}
+
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
@@ -892,10 +903,11 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 
 - (void)battleStatePoll {
     static int32_t lastParticleSceneState = -1;
+    BOOL scheduleParticles = NO;
     int32_t currentSceneState = -1;
     if (ZSGlobalScene_Current(&currentSceneState) && currentSceneState != lastParticleSceneState) {
         lastParticleSceneState = currentSceneState;
-        zs_apply_particle_settings();
+        scheduleParticles = YES;
     }
 
     BOOL isBattle = NO;
@@ -903,6 +915,9 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     BOOL wasInBattle = self.isInBattle;
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
+
+    if (haveBattleState && isBattle && !wasInBattle) scheduleParticles = YES;
+    if (scheduleParticles) zs_schedule_particle_apply();
 
     if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
         zs_clear_guide_portrait_cache();
@@ -2688,6 +2703,7 @@ static BOOL gUIDRedactorEnabledCache;
 static BOOL gUIDRedactorEnabledCacheLoaded;
 
 static void ZSUID_HotFieldInvalidate(void) {
+    for (size_t i = 0; i < kUIDTargetCount; i++) ZSUID_ColdSingleInvalidate(i);
     gUIDHotPanelInstance = NULL;
     gUIDHotTMPInstance = NULL;
     gUIDHotGetText = NULL;
