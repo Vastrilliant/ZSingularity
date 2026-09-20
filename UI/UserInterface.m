@@ -206,6 +206,22 @@ static void zs_set_tutorial_override_completion_enabled(BOOL enabled) {
     zs_write_settings_section(kZSTutorialSettingsSection, section);
 }
 
+static NSString * const kZSDeveloperSettingsSection = @"developer";
+static NSString * const kZSDeveloperEnabledKey = @"enabled";
+static const NSInteger kZSDeveloperUnlockTapCount = 10;
+static const CFTimeInterval kZSDeveloperUnlockTapInterval = 0.6;
+
+static BOOL zs_developer_settings_enabled(void) {
+    NSDictionary *section = zs_settings_section(kZSDeveloperSettingsSection);
+    return [section[kZSDeveloperEnabledKey] boolValue];
+}
+
+static void zs_set_developer_settings_enabled(BOOL enabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSDeveloperSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSDeveloperEnabledKey] = @(enabled);
+    zs_write_settings_section(kZSDeveloperSettingsSection, section);
+}
+
 #pragma mark - Update pipeline settings
 
 static NSString * const kZSUpdatePipelineSettingsSection = @"updatePipeline";
@@ -3747,6 +3763,8 @@ static UIView *zs_make_title_block(void) {
     buildInfoLabel.font = zs_mono_font(kZSSubtitleFontSize, UIFontWeightMedium);
     [container addSubview:buildInfoLabel];
 
+    headerLabel.userInteractionEnabled = YES;
+    objc_setAssociatedObject(container, @"zs_header_label", headerLabel, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(container, @"zs_update_dot", updateDot, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(container, @"zs_update_label", updateLabel, OBJC_ASSOCIATION_RETAIN);
 
@@ -3886,6 +3904,9 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSMutableArray<dispatch_block_t> *pendingSectionBuilders;
 @property (nonatomic, strong) NSMutableArray<dispatch_block_t> *pendingExperimentalSectionBuilders;
 @property (nonatomic, strong) NSDictionary *pendingCollapsedStates;
+@property (nonatomic, copy) NSArray<UIView *> *developerSectionViews;
+@property (nonatomic, assign) NSInteger developerUnlockTapCount;
+@property (nonatomic, assign) CFTimeInterval developerUnlockLastTapTime;
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, assign) BOOL installed;
 @property (nonatomic, assign) CGFloat panelWidth;
@@ -4581,6 +4602,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.pendingSectionBuilders = nil;
     self.pendingExperimentalSectionBuilders = nil;
     self.pendingCollapsedStates = nil;
+    self.developerSectionViews = nil;
 
     self.docsPanelGlass = nil;
     self.docsPanel = nil;
@@ -5251,6 +5273,9 @@ static const CGFloat kContentFadeHeight = 22;
     self.updateStatusLabel = objc_getAssociatedObject(titleBlock, @"zs_update_label");
     UITapGestureRecognizer *updateStatusTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(updateStatusLabelTapped:)];
     [self.updateStatusLabel addGestureRecognizer:updateStatusTap];
+    UILabel *titleHeaderLabel = objc_getAssociatedObject(titleBlock, @"zs_header_label");
+    UITapGestureRecognizer *developerUnlockTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_titleHeaderTapped:)];
+    [titleHeaderLabel addGestureRecognizer:developerUnlockTap];
     UILongPressGestureRecognizer *updateStatusLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(updateStatusLabelLongPressed:)];
     updateStatusLongPress.minimumPressDuration = 1.0;
     [self.updateStatusLabel addGestureRecognizer:updateStatusLongPress];
@@ -5620,6 +5645,7 @@ static const CGFloat kContentFadeHeight = 22;
     }];
 
     [self.pendingSectionBuilders addObject:^{
+    NSUInteger developerViewsStart = self.stack.arrangedSubviews.count;
     zs_add_section_header(self.stack, @"Developer", self);
 
     ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
@@ -5632,6 +5658,10 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack setCustomSpacing:8 afterView:manifestZeroingRow];
     [self.stack addArrangedSubview:overrideTutorialRow];
     [self.stack setCustomSpacing:kSectionSpacing afterView:overrideTutorialRow];
+
+    NSArray<UIView *> *arrangedViews = self.stack.arrangedSubviews;
+    self.developerSectionViews = [arrangedViews subarrayWithRange:NSMakeRange(developerViewsStart, arrangedViews.count - developerViewsStart)];
+    [self zs_applyDeveloperSectionVisibilityRelayout:NO];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -6889,6 +6919,68 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     }
 }
 
+- (void)zs_titleHeaderTapped:(UITapGestureRecognizer *)recognizer {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - self.developerUnlockLastTapTime > kZSDeveloperUnlockTapInterval) {
+        self.developerUnlockTapCount = 0;
+    }
+    self.developerUnlockLastTapTime = now;
+    self.developerUnlockTapCount++;
+
+    if (self.developerUnlockTapCount < kZSDeveloperUnlockTapCount) return;
+    self.developerUnlockTapCount = 0;
+
+    BOOL enabled = !zs_developer_settings_enabled();
+    zs_set_developer_settings_enabled(enabled);
+    ZLog(@"[UserInterface] developer settings %@", enabled ? @"enabled" : @"disabled");
+    [self zs_applyDeveloperSectionVisibilityRelayout:YES];
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:enabled ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
+}
+
+- (void)zs_applyDeveloperSectionVisibilityRelayout:(BOOL)relayout {
+    NSArray<UIView *> *sectionViews = self.developerSectionViews;
+    if (sectionViews.count == 0) return;
+
+    BOOL visible = zs_developer_settings_enabled();
+
+    UIView *headerRow = nil;
+    for (UIView *view in sectionViews) {
+        if ([objc_getAssociatedObject(view, "zs_isSectionHeader") boolValue]) {
+            headerRow = view;
+            break;
+        }
+    }
+    BOOL collapsed = [objc_getAssociatedObject(headerRow, "zs_sectionCollapsed") boolValue];
+
+    NSMutableArray<UIView *> *revealedViews = [NSMutableArray array];
+    for (UIView *view in sectionViews) {
+        view.hidden = (view == headerRow) ? !visible : (!visible || collapsed);
+        if (!view.hidden) [revealedViews addObject:view];
+    }
+
+    if (!relayout) return;
+
+    [self.stack setNeedsLayout];
+    [self.stack layoutIfNeeded];
+    [self.glassContainer setNeedsLayout];
+    [self.glassContainer layoutIfNeeded];
+    [self.panel setNeedsLayout];
+    [self.panel layoutIfNeeded];
+    [self.scrollViewport setNeedsLayout];
+    [self.scrollViewport layoutIfNeeded];
+    [self zs_updateSliderGlassVisibility];
+
+    if (revealedViews.count > 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (UIView *view in revealedViews) {
+                zs_refresh_mode_and_wheel_sliders(view);
+            }
+        });
+    }
+}
+
 - (void)zs_sectionCollapseToggleTapped:(UIButton *)sender {
     UIView *headerRow = objc_getAssociatedObject(sender, "zs_sectionHeaderRow");
     if (!headerRow) return;
@@ -6911,6 +7003,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     for (NSUInteger i = headerIndex + 1; i < arranged.count; i++) {
         UIView *view = arranged[i];
         if ([objc_getAssociatedObject(view, "zs_isSectionHeader") boolValue]) break;
+        if (!zs_developer_settings_enabled() && [self.developerSectionViews containsObject:view]) continue;
 
         if (view == self.experimentalSectionContainer) {
             view.hidden = collapsed ? YES : !g_experimentalSettingsEnabled;
