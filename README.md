@@ -17,6 +17,9 @@ Need some help, have a bug to report or want to suggest new features? [Join the 
 <p align="center">
   <img src="assets/demo/settings_demo.jpg" width="40.18%" />
   <img src="assets/demo/mods_demo.jpg" width="50%" />
+  <img src="assets/demo/mods_demo.PNG" width="91.2%" />
+  <img src="assets/demo/profile_demo.jpg" width="91.2%" />
+  <img src="assets/demo/announcer_demo.jpg" width="91.2%" />
 </p>
 
 ## Features
@@ -34,17 +37,16 @@ Adjust various graphical settings such as:
 
 And many Quality-Of-Life settings that aim to give you a better experience 
 
-ZSingularity also features a fledged Mod Loader & Asset manager optimized for mobile, load and bookkeep your mods with ease
+ZSingularity also features a **full fledged Mod Loader & Asset manager** optimized for mobile, load and bookkeep your mods with ease
 
 Supported Mods:
 - __data Unity asset bundles
 - assets.bank FMOD audio banks
 - Lunartique.zip mod format
 - .carra2 mod format
+- Announcer mods
+- Translation mods
 
-Planned:
-- Custom translation support
-- Custom announcers
 ## Installation
 
 **Pre-built ipa is available in the [Discord Server](https://discord.gg/nRmztE2unw)**
