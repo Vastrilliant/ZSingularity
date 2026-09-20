@@ -891,7 +891,12 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 }
 
 - (void)battleStatePoll {
-    zs_apply_particle_settings();
+    static int32_t lastParticleSceneState = -1;
+    int32_t currentSceneState = -1;
+    if (ZSGlobalScene_Current(&currentSceneState) && currentSceneState != lastParticleSceneState) {
+        lastParticleSceneState = currentSceneState;
+        zs_apply_particle_settings();
+    }
 
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
