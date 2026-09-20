@@ -29,6 +29,8 @@ typedef NS_ENUM(NSInteger, BankTransplantErrorCode) {
 
 + (nullable NSDictionary<NSString *, id> *)fmodHeaderInfoForBankAtPath:(NSString *)path;
 
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedBanks;
+
 @end
 
 NS_ASSUME_NONNULL_END

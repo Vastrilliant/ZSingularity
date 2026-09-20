@@ -62,6 +62,8 @@ typedef NS_ENUM(NSInteger, LocalizationTransplantErrorCode) {
 
 + (NSInteger)restoreAllBackupsForce:(BOOL)force error:(NSError **)error;
 
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedFiles;
+
 @end
 
 NS_ASSUME_NONNULL_END

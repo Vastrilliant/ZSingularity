@@ -13,12 +13,6 @@ El formato de textura de salida al que [Transcoder pipeline](Mods.md#the-transco
 
 ASTC es el formato de textura comprimida compatible de forma nativa con Apple en iOS. Los bloques pequeños (4x4) conservan más detalle a cambio de un archivo mayor, mientras que los bloques grandes (8x8) reducen más el archivo pero suavizan los detalles finos.
 
-## FModManifest zeroing
-
-**ZSingularity** anula la llamada de red que FMOD normalmente utiliza para validar su manifest, de modo que los sound banks sustituidos se carguen sin provocar un error de checksum. Desactivar esta configuración desactiva ese parche y restaura la validación original del manifest de FMOD.
-
-**Debes desactivar esta configuración al descargar nuevas actualizaciones.**
-
 ## LZ4HC compression on dispatch
 
 Comprime los bundles con LZ4HC antes de subirlos al Transcoder pipeline para ahorrar ancho de banda. Esta configuración consume una cantidad considerable de RAM por cada subida de bundle; desactívala si tienes crashes debido a problemas de memoria.

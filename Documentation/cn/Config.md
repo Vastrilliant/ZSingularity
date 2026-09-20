@@ -13,12 +13,6 @@
 
 ASTC 是 Apple 在 iOS 上原生支持的压缩纹理格式。较小的块大小（4x4）能保留更多细节，但文件更大；较大的块大小（8x8）能进一步缩小文件，但会使细节变得柔和。
 
-## FModManifest zeroing
-
-**ZSingularity** 会将 FMOD 通常用于验证 manifest 的网络请求归零，使替换后的 sound bank 不会因校验和不匹配而无法加载。禁用此设置会解除该补丁，并恢复 FMOD 原本的 manifest 验证。
-
-**下载新更新时必须禁用此设置。**
-
 ## LZ4HC compression on dispatch
 
 在上传到 Transcoder pipeline 之前使用 LZ4HC 压缩 bundle，以节省带宽。此设置会在每次上传 bundle 时消耗大量 RAM；如果因内存问题发生崩溃，请将其禁用。

@@ -7,8 +7,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)install;
 + (void)uninstall;
 
-+ (BOOL)isZeroingEnabled;
-+ (void)setZeroingEnabled:(BOOL)enabled;
++ (BOOL)isZeroAllEnabled;
++ (void)setZeroAllEnabled:(BOOL)enabled;
 @end
 
 NS_ASSUME_NONNULL_END

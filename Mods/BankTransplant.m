@@ -13,6 +13,7 @@ static NSError *BTError(BankTransplantErrorCode code, NSString *message) {
 }
 
 static NSString * const kBTBackupSuffix = @".orig-bak";
+static NSString * const kBTMobileBuildsRelativePath = @"Assets/Sound/FMODBuilds/Mobile";
 
 @interface BankTransplant ()
 + (BOOL)bt_restoreOneBackupEntry:(NSString *)backupEntryName inBackupDir:(NSString *)backupDir mobileDir:(NSString *)mobileDir force:(BOOL)force;
@@ -25,7 +26,7 @@ static NSString * const kBTBackupSuffix = @".orig-bak";
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDir = paths.firstObject;
     if (!documentsDir) return nil;
-    return [documentsDir stringByAppendingPathComponent:@"Assets/Sound/FMODBuilds/Mobile"];
+    return [documentsDir stringByAppendingPathComponent:kBTMobileBuildsRelativePath];
 }
 
 + (NSString *)bankBackupDirectory {
@@ -212,6 +213,27 @@ static NSString * const kBTBackupSuffix = @".orig-bak";
     }
 
     return [self bt_restoreOneBackupEntry:backupEntryName inBackupDir:backupDir mobileDir:mobileDir force:NO] ? 1 : 0;
+}
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedBanks {
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *backupDir = [self bankBackupDirectory];
+    if (!mobileDir || !backupDir) return @[];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    for (NSString *entry in [fm contentsOfDirectoryAtPath:backupDir error:nil] ?: @[]) {
+        if (![entry hasSuffix:kBTBackupSuffix]) continue;
+
+        NSString *fileName = [entry substringToIndex:entry.length - kBTBackupSuffix.length];
+        NSString *livePath = [mobileDir stringByAppendingPathComponent:fileName];
+        NSString *backupPath = [backupDir stringByAppendingPathComponent:entry];
+        if (![fm fileExistsAtPath:livePath]) continue;
+        if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+        [result addObject:[kBTMobileBuildsRelativePath stringByAppendingPathComponent:fileName]];
+    }
+    return result;
 }
 
 static NSString *BTFSB5CodecName(uint32_t mode) {

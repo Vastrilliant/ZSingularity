@@ -17,12 +17,6 @@ The output texture format the [Transcoder pipeline](Mods.md#the-transcode-pipeli
 
 ASTC is Apple's natively supported compressed texture format on iOS; smaller block sizes (4x4) keep more detail at the cost of a larger file, while larger block sizes (8x8) shrink the file further but soften fine detail.
 
-## FModManifest zeroing
-
-**ZSingularity** zeroes out the network call FMOD normally uses to validate its manifest, so that swapped-in sound banks load without tripping a checksum mismatch. The same patch also covers the localization manifest (`LocalizePatchInfo.json`), so swapped-in localization files aren't rejected either. Disabling this toggle disarms it and restores the original manifest validation.
-
-**You must disable this setting when downloading new updates**
-
 ## LZ4HC compression on dispatch
 
 Compresses bundles into LZ4HC before being uploaded to the Transcoder pipeline to save on bandwidth. Using this setting will consume a significant amount of RAM per bundle upload - disable this if you’re crashing due to memory issues

@@ -182,6 +182,7 @@ static void zs_style_social_text_button(UIButton *button, NSString *text) {
 
 static NSString * const kZSTutorialSettingsSection = @"tutorial";
 static NSString * const kZSTutorialCompletedKey = @"completed";
+static NSString * const kZSTutorialOverrideCompletionKey = @"overrideCompletion";
 
 static BOOL zs_tutorial_completed(void) {
     NSDictionary *section = zs_settings_section(kZSTutorialSettingsSection);
@@ -191,6 +192,17 @@ static BOOL zs_tutorial_completed(void) {
 static void zs_set_tutorial_completed(BOOL completed) {
     NSMutableDictionary *section = [zs_settings_section(kZSTutorialSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
     section[kZSTutorialCompletedKey] = @(completed);
+    zs_write_settings_section(kZSTutorialSettingsSection, section);
+}
+
+static BOOL zs_tutorial_override_completion_enabled(void) {
+    NSDictionary *section = zs_settings_section(kZSTutorialSettingsSection);
+    return [section[kZSTutorialOverrideCompletionKey] boolValue];
+}
+
+static void zs_set_tutorial_override_completion_enabled(BOOL enabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSTutorialSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSTutorialOverrideCompletionKey] = @(enabled);
     zs_write_settings_section(kZSTutorialSettingsSection, section);
 }
 
@@ -4083,7 +4095,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
 
     [self zs_presentTutorialIfNeeded];
-    if (zs_tutorial_completed()) {
+    if (zs_tutorial_completed() && !self.tutorialPresented) {
         [self zs_presentRestartPromptIfNeeded];
     }
 
@@ -4133,7 +4145,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 }
 
 - (void)zs_presentTutorialIfNeeded {
-    if (zs_tutorial_completed() || self.tutorialPresented) return;
+    if ((zs_tutorial_completed() && !zs_tutorial_override_completion_enabled()) || self.tutorialPresented) return;
 
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
@@ -5608,6 +5620,21 @@ static const CGFloat kContentFadeHeight = 22;
     }];
 
     [self.pendingSectionBuilders addObject:^{
+    zs_add_section_header(self.stack, @"Developer", self);
+
+    ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
+    [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
+    [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
+
+    [self.stack addArrangedSubview:manifestZeroingRow];
+    [self.stack setCustomSpacing:8 afterView:manifestZeroingRow];
+    [self.stack addArrangedSubview:overrideTutorialRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:overrideTutorialRow];
+    }];
+
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
     NSString *currentReencodeFormat = [ZTranscoderSettings loadConfig].outputFormat;
@@ -5615,9 +5642,6 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *reencodeFormatRow = zs_make_reencode_format_row(currentReencodeFormat, self,
                                                             @selector(zs_reencodeFormatButtonTapped:));
     self.reencodeFormatButton = objc_getAssociatedObject(reencodeFormatRow, "zs_button");
-
-    ZSRow *fmodZeroingRow = zs_make_switch_row(@"FModManifest zeroing", PatchManifestNetwork.isZeroingEnabled);
-    [fmodZeroingRow.toggle addTarget:self action:@selector(fmodZeroingChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *lz4hcRow = zs_make_switch_row(@"LZ4HC compression on dispatch", ZTranscoderService.isUploadCompressionEnabled);
     [lz4hcRow.toggle addTarget:self action:@selector(lz4hcCompressionChanged:) forControlEvents:UIControlEventValueChanged];
@@ -5664,8 +5688,6 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self.stack addArrangedSubview:reencodeFormatRow];
     [self.stack setCustomSpacing:8 afterView:reencodeFormatRow];
-    [self.stack addArrangedSubview:fmodZeroingRow];
-    [self.stack setCustomSpacing:8 afterView:fmodZeroingRow];
     [self.stack addArrangedSubview:lz4hcRow];
     [self.stack setCustomSpacing:8 afterView:lz4hcRow];
     [self.stack addArrangedSubview:checkCIBuildsRow];
@@ -11270,8 +11292,12 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
     [self zs_scheduleSave];
 }
 
-- (void)fmodZeroingChanged:(UISwitch *)toggle {
-    [PatchManifestNetwork setZeroingEnabled:toggle.on];
+- (void)manifestZeroingChanged:(UISwitch *)toggle {
+    [PatchManifestNetwork setZeroAllEnabled:toggle.on];
+}
+
+- (void)overrideTutorialCompletionChanged:(UISwitch *)toggle {
+    zs_set_tutorial_override_completion_enabled(toggle.on);
 }
 
 - (void)lz4hcCompressionChanged:(UISwitch *)toggle {

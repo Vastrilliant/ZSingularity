@@ -16,6 +16,7 @@ static NSString * const kLTBackupSuffix = @".orig-bak";
 static NSString * const kLTMarkerSuffix = @".applied";
 static NSString * const kLTFileBackupsDirectoryName = @"files";
 static NSString * const kLTPackBackupsDirectoryName = @"packs";
+static NSString * const kLTLocalizeRelativePath = @"Assets/Resources_moved/Localize";
 
 static NSArray<NSString *> *LTLanguageCodes(void) {
     static NSArray<NSString *> *codes;
@@ -156,7 +157,7 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsDir = paths.firstObject;
     if (!documentsDir) return nil;
-    return [documentsDir stringByAppendingPathComponent:@"Assets/Resources_moved/Localize"];
+    return [documentsDir stringByAppendingPathComponent:kLTLocalizeRelativePath];
 }
 
 + (nullable NSString *)languageDirectoryForCode:(NSString *)languageCode {
@@ -748,6 +749,51 @@ static NSString *LTPackFingerprint(NSString *packPath) {
         if ([self lt_restorePackBackupForLanguage:languageCode force:force]) restored++;
     }
     return restored;
+}
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedFiles {
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *base = [self backupDirectory];
+    if (!localizeDir || !base) return @[];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableOrderedSet<NSString *> *result = [NSMutableOrderedSet orderedSet];
+
+    NSString *filesRoot = [base stringByAppendingPathComponent:kLTFileBackupsDirectoryName];
+    NSDirectoryEnumerator *fileBackups = [fm enumeratorAtPath:filesRoot];
+    for (NSString *relative in fileBackups) {
+        if (![relative hasSuffix:kLTBackupSuffix]) continue;
+        if (![fileBackups.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+
+        NSString *relativeTarget = [relative substringToIndex:relative.length - kLTBackupSuffix.length];
+        NSString *livePath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+        NSString *backupPath = [filesRoot stringByAppendingPathComponent:relative];
+        if (![fm fileExistsAtPath:livePath]) continue;
+        if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+        [result addObject:[kLTLocalizeRelativePath stringByAppendingPathComponent:relativeTarget]];
+    }
+
+    for (NSString *languageCode in LTLanguageCodes()) {
+        NSString *packBackup = LTPackBackupPath(languageCode);
+        NSString *languageDir = [self languageDirectoryForCode:languageCode];
+        if (!packBackup || !languageDir || ![fm fileExistsAtPath:packBackup]) continue;
+
+        NSDirectoryEnumerator *packFiles = [fm enumeratorAtPath:packBackup];
+        for (NSString *relative in packFiles) {
+            if (![packFiles.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+
+            NSString *livePath = [languageDir stringByAppendingPathComponent:relative];
+            NSString *backupPath = [packBackup stringByAppendingPathComponent:relative];
+            if (![fm fileExistsAtPath:livePath]) continue;
+            if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+            NSString *relativeTarget = [languageCode stringByAppendingPathComponent:relative];
+            [result addObject:[kLTLocalizeRelativePath stringByAppendingPathComponent:relativeTarget]];
+        }
+    }
+
+    return result.array;
 }
 
 @end
