@@ -4246,7 +4246,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     body.font = zs_mono_font(12, UIFontWeightRegular);
     body.userInteractionEnabled = NO;
 
-    NSMutableAttributedString *bodyText = [[NSMutableAttributedString alloc] initWithString:@"To get started, click and hold the screen with two of your fingers, then swipe left to open the menu.\n\nMake sure to read the documentation by clicking the " attributes:@{
+    NSMutableAttributedString *bodyText = [[NSMutableAttributedString alloc] initWithString:@"To get started, click and hold the screen with two of your fingers, then swipe left to open the menu.\n\nAlso make sure to read the documentation of each setting by clicking the " attributes:@{
         NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
         NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
     }];
@@ -4258,7 +4258,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         attachment.image = [infoImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.6]];
         attachment.bounds = CGRectMake(0, -2, 12, 12);
         [bodyText appendAttributedString:[NSAttributedString attributedStringWithAttachment:attachment]];
-        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithString:@" icon next to each section." attributes:@{
+        [bodyText appendAttributedString:[[NSAttributedString alloc] initWithString:@" icon next to each section.\n\nJoin the Discord Server if you want to report a bug, suggest new features or need some help." attributes:@{
             NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
             NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
         }]];

@@ -16,9 +16,8 @@ Formatos compatibles:
 `.assets.bank` FMOD Sound Bank
 `Lunartique` .zip archives
 `Carra2` archives
-
-Próximamente:
-`Localize` .json files (translation mods, custom announcers, etc.)
+`*.json` localization files 
+`translation` packages
 
 ## Processing
 

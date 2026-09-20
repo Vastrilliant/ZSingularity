@@ -16,9 +16,8 @@ Mods 部分是一个本地 "mod folders" 库。每个文件夹都包含你导入
 `.assets.bank` FMOD Sound Bank
 `Lunartique` .zip archives
 `Carra2` archives
-
-即将支持:
-`Localize` .json files (translation mods、custom announcers 等)
+`*.json` localization files 
+`translation` packages
 
 ## Processing
 

@@ -16,9 +16,8 @@ Mods 섹션은 "mod folders"의 로컬 라이브러리입니다. 각 폴더에�
 `.assets.bank` FMOD Sound Bank
 `Lunartique` .zip archives
 `Carra2` archives
-
-곧 지원 예정:
-`Localize` .json files (translation mods, custom announcers 등)
+`*.json` localization files 
+`translation` packages
 
 ## Processing
 

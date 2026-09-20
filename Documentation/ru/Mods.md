@@ -16,9 +16,8 @@
 `.assets.bank` FMOD Sound Bank
 `Lunartique` .zip archives
 `Carra2` archives
-
-Скоро:
-`Localize` .json files (translation mods, custom announcers и т. д.)
+`*.json` localization files 
+`translation` packages
 
 ## Processing
 
