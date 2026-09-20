@@ -1,8 +1,6 @@
 #import "PatchManifestNetwork.h"
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
-#import "BankTransplant.h"
-#import "LocalizationMods.h"
 
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
@@ -33,39 +31,6 @@ static dispatch_queue_t gStateQueue;
 static NSString * const kSettingsSection = @"network";
 static NSString * const kZeroingEnabledKey = @"fmodManifestZeroingEnabled";
 
-static NSString *PMNormalizedPath(NSString *path) {
-    return [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"].lowercaseString;
-}
-
-static NSDictionary<NSString *, NSArray<NSString *> *> *PMReplacedPathsByLeaf(void) {
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
-    [paths addObjectsFromArray:[BankTransplant documentsRelativePathsOfSwappedBanks]];
-    [paths addObjectsFromArray:[LocalizationTransplant documentsRelativePathsOfSwappedFiles]];
-
-    NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *byLeaf = [NSMutableDictionary dictionary];
-    for (NSString *path in paths) {
-        NSString *normalized = PMNormalizedPath(path);
-        NSString *leaf = normalized.lastPathComponent;
-        NSMutableArray<NSString *> *bucket = byLeaf[leaf];
-        if (!bucket) {
-            bucket = [NSMutableArray array];
-            byLeaf[leaf] = bucket;
-        }
-        [bucket addObject:normalized];
-    }
-    return byLeaf;
-}
-
-static BOOL PMManifestKeyIsReplaced(NSString *key, NSDictionary<NSString *, NSArray<NSString *> *> *replacedByLeaf) {
-    NSString *normalized = PMNormalizedPath(key);
-    for (NSString *path in replacedByLeaf[normalized.lastPathComponent]) {
-        if ([path isEqualToString:normalized]) return YES;
-        if ([path hasSuffix:[@"/" stringByAppendingString:normalized]]) return YES;
-        if ([normalized hasSuffix:[@"/" stringByAppendingString:path]]) return YES;
-    }
-    return NO;
-}
-
 static NSString *PMMatchedSuffixForTask(NSURLSessionTask *task) {
     NSURL *url = task.currentRequest.URL ?: task.originalRequest.URL;
     if (!url) return nil;
@@ -94,14 +59,8 @@ static NSData *PMPatchManifestData(NSData *input) {
         return input;
     }
 
-    BOOL zeroAll = [PatchManifestNetwork isZeroAllEnabled];
-    NSDictionary<NSString *, NSArray<NSString *> *> *replacedByLeaf = nil;
-    if (!zeroAll) {
-        replacedByLeaf = PMReplacedPathsByLeaf();
-        if (replacedByLeaf.count == 0) {
-            ZLog(@"[PatchManifestNetwork] no replaced files on disk - forwarding manifest unmodified");
-            return input;
-        }
+    if (![PatchManifestNetwork isZeroAllEnabled]) {
+        return input;
     }
 
     NSError *jsonError = nil;
@@ -124,7 +83,6 @@ static NSData *PMPatchManifestData(NSData *input) {
     for (NSString *key in files) {
         NSMutableDictionary *entry = files[key];
         if (![entry isKindOfClass:[NSMutableDictionary class]]) continue;
-        if (!zeroAll && !PMManifestKeyIsReplaced(key, replacedByLeaf)) continue;
 
         BOOL hashAlreadyZero = [entry[@"Hash"] isEqual:@"0"] || [entry[@"Hash"] isEqual:@0];
         BOOL sizeAlreadyZero = [entry[@"Size"] respondsToSelector:@selector(unsignedLongLongValue)]
@@ -150,8 +108,7 @@ static NSData *PMPatchManifestData(NSData *input) {
         return input;
     }
 
-    ZLog(@"[PatchManifestNetwork] zeroed Hash/Size on %lu Files entries (%@)",
-          (unsigned long)patchedCount, zeroAll ? @"every entry" : @"replaced files only");
+    ZLog(@"[PatchManifestNetwork] zeroed Hash/Size on %lu Files entries", (unsigned long)patchedCount);
 
     return output;
 }

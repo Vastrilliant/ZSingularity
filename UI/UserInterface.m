@@ -5648,14 +5648,9 @@ static const CGFloat kContentFadeHeight = 22;
     NSUInteger developerViewsStart = self.stack.arrangedSubviews.count;
     zs_add_section_header(self.stack, @"Developer", self);
 
-    ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
-    [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
-
     ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
     [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
 
-    [self.stack addArrangedSubview:manifestZeroingRow];
-    [self.stack setCustomSpacing:8 afterView:manifestZeroingRow];
     [self.stack addArrangedSubview:overrideTutorialRow];
     [self.stack setCustomSpacing:kSectionSpacing afterView:overrideTutorialRow];
 
@@ -5672,6 +5667,9 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *reencodeFormatRow = zs_make_reencode_format_row(currentReencodeFormat, self,
                                                             @selector(zs_reencodeFormatButtonTapped:));
     self.reencodeFormatButton = objc_getAssociatedObject(reencodeFormatRow, "zs_button");
+
+    ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
+    [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *lz4hcRow = zs_make_switch_row(@"LZ4HC compression on dispatch", ZTranscoderService.isUploadCompressionEnabled);
     [lz4hcRow.toggle addTarget:self action:@selector(lz4hcCompressionChanged:) forControlEvents:UIControlEventValueChanged];
@@ -5718,6 +5716,8 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self.stack addArrangedSubview:reencodeFormatRow];
     [self.stack setCustomSpacing:8 afterView:reencodeFormatRow];
+    [self.stack addArrangedSubview:manifestZeroingRow];
+    [self.stack setCustomSpacing:8 afterView:manifestZeroingRow];
     [self.stack addArrangedSubview:lz4hcRow];
     [self.stack setCustomSpacing:8 afterView:lz4hcRow];
     [self.stack addArrangedSubview:checkCIBuildsRow];
