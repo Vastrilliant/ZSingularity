@@ -19,6 +19,9 @@ static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static BOOL ZSUID_UnityObjectIsAlive(void *obj);
+static void zs_apply_particle_settings(void);
+static void zs_apply_animator_settings(void);
+static void zs_apply_camera_surface(void);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -888,6 +891,8 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 }
 
 - (void)battleStatePoll {
+    zs_apply_particle_settings();
+
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
     BOOL wasInBattle = self.isInBattle;
@@ -1009,18 +1014,15 @@ static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     zs_camera_data_set_int("set_antialiasing", zs_step_value(kAAModeSteps, 4, g_aaModeIndex));
     zs_camera_data_set_int("set_antialiasingQuality", zs_step_value(kAAQualitySteps, 3, g_aaQualityIndex));
     zs_camera_data_set_bool("set_dithering", g_ditheringOn);
+    zs_apply_camera_surface();
 
     if (includeExperimental) {
         zs_exp_apply_key(@"RenderTextureMemorylessMode");
     }
 
-    zs_apply_particle_key(@"ParticleAlignment");
-    zs_apply_particle_key(@"ParticleRenderMode");
-    zs_apply_particle_key(@"ParticleSortMode");
-    zs_apply_particle_key(@"ParticleMinSize");
-    zs_apply_particle_key(@"ParticleMaxSize");
-    zs_apply_particle_key(@"ParticleFreeformStretching");
+    zs_apply_particle_settings();
     zs_apply_particle_max_particles_cap();
+    zs_apply_animator_settings();
 }
 
 void zs_reapply_all_settings(void) {
@@ -1088,14 +1090,6 @@ static void configure_metal_layer(UIView *unityView) {
 
 #pragma mark - Startup
 
-static void *file_index_worker(void *arg) {
-    (void)arg;
-    @autoreleasepool {
-        [ZSFileIndex ensureIndexUpToDate];
-    }
-    return NULL;
-}
-
 static void *background_worker(void *arg) {
     (void)arg;
 
@@ -1131,10 +1125,6 @@ static void fps120_init(void) {
     ZLog(@"dylib loaded - starting background worker");
 
     zs_ensure_settings_loaded_from_disk();
-
-    pthread_t indexThread;
-    pthread_create(&indexThread, NULL, file_index_worker, NULL);
-    pthread_detach(indexThread);
 
     pthread_t t;
     pthread_create(&t, NULL, background_worker, NULL);
