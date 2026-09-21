@@ -19,9 +19,11 @@ static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static BOOL ZSUID_UnityObjectIsAlive(void *obj);
-static void zs_apply_particle_settings(void);
-static void zs_apply_animator_settings(void);
-static void zs_apply_camera_surface(void);
+void zs_particles_load_from_dictionary(NSDictionary *particles);
+NSDictionary *zs_particles_settings_dictionary(void);
+BOOL zs_particle_get_bool(NSString *key);
+float zs_particle_get_number(NSString *key);
+float zs_particle_get_default_number(NSString *key);
 
 #pragma mark - Generic IL2CPP class/field/type/method caches
 
@@ -665,6 +667,7 @@ void zs_ensure_settings_loaded_from_disk(void) {
         g_experimentalSettingsEnabled = num(savedConfig, @"experimentalSettingsEnabled") ? num(savedConfig, @"experimentalSettingsEnabled").boolValue : NO;
 
         zs_exp_load_from_dictionary(saved[@"experimental"]);
+        zs_particles_load_from_dictionary(saved[@"particles"] ?: saved[@"experimental"]);
 
         if (!g_urpActive) g_urpActive = [NSMutableDictionary new];
         if (!g_urpValue) g_urpValue = [NSMutableDictionary new];
@@ -726,6 +729,7 @@ NSDictionary *zs_current_settings_dictionary(void) {
             @"urpEffects": urp,
         },
         @"experimental": zs_exp_settings_dictionary(),
+        @"particles": zs_particles_settings_dictionary(),
         @"config": @{
             @"experimentalSettingsEnabled": @(g_experimentalSettingsEnabled),
         },
@@ -822,17 +826,6 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     return YES;
 }
 
-static const double kParticleApplyDelaySeconds = 2.0;
-
-static void zs_schedule_particle_apply(void) {
-    static uint64_t generation;
-    uint64_t token = ++generation;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kParticleApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (token != generation) return;
-        zs_apply_particle_settings();
-    });
-}
-
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
@@ -902,22 +895,11 @@ static void zs_schedule_particle_apply(void) {
 }
 
 - (void)battleStatePoll {
-    static int32_t lastParticleSceneState = -1;
-    BOOL scheduleParticles = NO;
-    int32_t currentSceneState = -1;
-    if (ZSGlobalScene_Current(&currentSceneState) && currentSceneState != lastParticleSceneState) {
-        lastParticleSceneState = currentSceneState;
-        scheduleParticles = YES;
-    }
-
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
     BOOL wasInBattle = self.isInBattle;
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
-
-    if (haveBattleState && isBattle && !wasInBattle) scheduleParticles = YES;
-    if (scheduleParticles) zs_schedule_particle_apply();
 
     if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
         zs_clear_guide_portrait_cache();
@@ -1034,15 +1016,18 @@ static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     zs_camera_data_set_int("set_antialiasing", zs_step_value(kAAModeSteps, 4, g_aaModeIndex));
     zs_camera_data_set_int("set_antialiasingQuality", zs_step_value(kAAQualitySteps, 3, g_aaQualityIndex));
     zs_camera_data_set_bool("set_dithering", g_ditheringOn);
-    zs_apply_camera_surface();
 
     if (includeExperimental) {
         zs_exp_apply_key(@"RenderTextureMemorylessMode");
     }
 
-    zs_apply_particle_settings();
+    zs_apply_particle_key(@"ParticleAlignment");
+    zs_apply_particle_key(@"ParticleRenderMode");
+    zs_apply_particle_key(@"ParticleSortMode");
+    zs_apply_particle_key(@"ParticleMinSize");
+    zs_apply_particle_key(@"ParticleMaxSize");
+    zs_apply_particle_key(@"ParticleFreeformStretching");
     zs_apply_particle_max_particles_cap();
-    zs_apply_animator_settings();
 }
 
 void zs_reapply_all_settings(void) {
@@ -1368,25 +1353,6 @@ X(int32_t, APAntiAliasingQualityBias, 0, NO) \
 X(BOOL, APSkipDynamicBatching, NO, NO) \
 X(BOOL, APSkipFrontToBackSorting, NO, NO) \
 X(BOOL, APSkipTransparentObjects, NO, NO) \
-X(BOOL, ParticleGPUInstancing, YES, NO) \
-X(int32_t, ParticleAlignment, kZSParticleAlignmentPreserveOriginal, YES) \
-X(int32_t, ParticleRenderMode, kZSParticleRenderModePreserveOriginal, YES) \
-X(int32_t, ParticleMeshDistribution, 0, NO) \
-X(int32_t, ParticleSortMode, 0, YES) \
-X(float, ParticleLengthScale, 5.0f, NO) \
-X(float, ParticleVelocityScale, 1.0f, NO) \
-X(float, ParticleCameraVelocityScale, 1.0f, NO) \
-X(float, ParticleNormalDirection, 1.0f, NO) \
-X(float, ParticleShadowBias, 0.5f, NO) \
-X(float, ParticleSortingFudge, 0.0f, NO) \
-X(float, ParticleMinSize, 0.0f, YES) \
-X(float, ParticleMaxSize, 0.5f, YES) \
-X(BOOL, ParticleAllowRoll, YES, NO) \
-X(BOOL, ParticleFreeformStretching, NO, YES) \
-X(BOOL, ParticleRotateWithStretchDirection, NO, NO) \
-X(BOOL, ParticleApplyActiveColorSpace, YES, NO) \
-X(BOOL, ParticleMaxParticlesCapEnabled, NO, YES) \
-X(int32_t, ParticleMaxParticlesCap, 300, YES) \
 X(int32_t, AnimatorCullingMode, 0, NO) \
 X(int32_t, AnimatorUpdateMode, 0, NO) \
 X(BOOL, AnimatorApplyRootMotion, NO, NO) \
@@ -1429,6 +1395,81 @@ static BOOL exp_bool(NSDictionary *d, NSString *key, BOOL def) { NSNumber *n = d
 static int32_t exp_int(NSDictionary *d, NSString *key, int32_t def) { NSNumber *n = d[key]; return [n isKindOfClass:NSNumber.class] ? n.intValue : def; }
 static float exp_float(NSDictionary *d, NSString *key, float def) { NSNumber *n = d[key]; return [n isKindOfClass:NSNumber.class] ? n.floatValue : def; }
 
+#define PARTICLE_DEFAULTS(X) \
+X(BOOL, ParticleGPUInstancing, YES, NO) \
+X(int32_t, ParticleAlignment, kZSParticleAlignmentPreserveOriginal, YES) \
+X(int32_t, ParticleRenderMode, kZSParticleRenderModePreserveOriginal, YES) \
+X(int32_t, ParticleMeshDistribution, 0, NO) \
+X(int32_t, ParticleSortMode, 0, YES) \
+X(float, ParticleLengthScale, 5.0f, NO) \
+X(float, ParticleVelocityScale, 1.0f, NO) \
+X(float, ParticleCameraVelocityScale, 1.0f, NO) \
+X(float, ParticleNormalDirection, 1.0f, NO) \
+X(float, ParticleShadowBias, 0.5f, NO) \
+X(float, ParticleSortingFudge, 0.0f, NO) \
+X(float, ParticleMinSize, 0.0f, YES) \
+X(float, ParticleMaxSize, 0.5f, YES) \
+X(BOOL, ParticleAllowRoll, YES, NO) \
+X(BOOL, ParticleFreeformStretching, NO, YES) \
+X(BOOL, ParticleRotateWithStretchDirection, NO, NO) \
+X(BOOL, ParticleApplyActiveColorSpace, YES, NO) \
+X(BOOL, ParticleMaxParticlesCapEnabled, NO, YES) \
+X(int32_t, ParticleMaxParticlesCap, 300, YES)
+
+#define PARTICLE_DECL(type, name, def, persist) type g_exp##name = def;
+PARTICLE_DEFAULTS(PARTICLE_DECL)
+#undef PARTICLE_DECL
+
+void zs_particles_reset_defaults(void) {
+#define PARTICLE_RESET(type, name, def, persist) g_exp##name = def;
+    PARTICLE_DEFAULTS(PARTICLE_RESET)
+#undef PARTICLE_RESET
+}
+
+void zs_particles_load_from_dictionary(NSDictionary *particles) {
+    NSDictionary *d = [particles isKindOfClass:NSDictionary.class] ? particles : nil;
+#define PARTICLE_LOAD(type, name, def, persist) do { \
+    if (!(persist) || !d) { g_exp##name = def; } \
+    else if (strcmp(#type, "BOOL") == 0) g_exp##name = exp_bool(d, @#name, def); \
+    else if (strcmp(#type, "int32_t") == 0) g_exp##name = exp_int(d, @#name, def); \
+    else g_exp##name = exp_float(d, @#name, def); \
+} while(0);
+    PARTICLE_DEFAULTS(PARTICLE_LOAD)
+#undef PARTICLE_LOAD
+}
+
+NSDictionary *zs_particles_settings_dictionary(void) {
+    NSMutableDictionary *d = [NSMutableDictionary dictionary];
+#define PARTICLE_SAVE(type, name, def, persist) if (persist) d[@#name] = @(g_exp##name);
+    PARTICLE_DEFAULTS(PARTICLE_SAVE)
+#undef PARTICLE_SAVE
+    return d;
+}
+
+BOOL zs_particle_get_bool(NSString *key) {
+    if (!key) return NO;
+#define PARTICLE_GETB(type, name, def, persist) if (strcmp(#type, "BOOL") == 0 && [key isEqualToString:@#name]) return g_exp##name;
+    PARTICLE_DEFAULTS(PARTICLE_GETB)
+#undef PARTICLE_GETB
+    return NO;
+}
+
+float zs_particle_get_number(NSString *key) {
+    if (!key) return 0.0f;
+#define PARTICLE_GETN(type, name, def, persist) if (strcmp(#type, "BOOL") != 0 && [key isEqualToString:@#name]) return (float)g_exp##name;
+    PARTICLE_DEFAULTS(PARTICLE_GETN)
+#undef PARTICLE_GETN
+    return 0.0f;
+}
+
+float zs_particle_get_default_number(NSString *key) {
+    if (!key) return 0.0f;
+#define PARTICLE_GETDN(type, name, def, persist) if (strcmp(#type, "BOOL") != 0 && [key isEqualToString:@#name]) return (float)(def);
+    PARTICLE_DEFAULTS(PARTICLE_GETDN)
+#undef PARTICLE_GETDN
+    return 0.0f;
+}
+
 void zs_exp_reset_defaults(void) {
 #define RESET(type, name, def, persist) g_exp##name = def;
     EXP_DEFAULTS(RESET)
@@ -1460,6 +1501,7 @@ BOOL zs_exp_get_bool(NSString *key) {
 #define GETB(type, name, def, persist) if (strcmp(#type, "BOOL") == 0 && [key isEqualToString:@#name]) return g_exp##name;
     EXP_DEFAULTS(GETB)
 #undef GETB
+    if ([key hasPrefix:@"Particle"]) return zs_particle_get_bool(key);
     return NO;
 }
 
@@ -1468,6 +1510,7 @@ float zs_exp_get_number(NSString *key) {
 #define GETN(type, name, def, persist) if (strcmp(#type, "BOOL") != 0 && [key isEqualToString:@#name]) return (float)g_exp##name;
     EXP_DEFAULTS(GETN)
 #undef GETN
+    if ([key hasPrefix:@"Particle"]) return zs_particle_get_number(key);
     return 0.0f;
 }
 
@@ -1476,6 +1519,7 @@ float zs_exp_get_default_number(NSString *key) {
 #define GETDN(type, name, def, persist) if (strcmp(#type, "BOOL") != 0 && [key isEqualToString:@#name]) return (float)(def);
     EXP_DEFAULTS(GETDN)
 #undef GETDN
+    if ([key hasPrefix:@"Particle"]) return zs_particle_get_default_number(key);
     return 0.0f;
 }
 
@@ -1777,6 +1821,33 @@ BOOL zs_apply_particle_max_particles_cap(void) {
     return YES;
 }
 
+static BOOL zs_particle_apply_key_internal(NSString *key) {
+    if ([key isEqualToString:@"ParticleMaxParticlesCapEnabled"] || [key isEqualToString:@"ParticleMaxParticlesCap"]) {
+        return zs_apply_particle_max_particles_cap();
+    }
+    return zs_apply_particle_key(key);
+}
+
+void zs_particle_apply_key(NSString *key) {
+    @autoreleasepool {
+        @try {
+            BOOL applied = zs_particle_apply_key_internal(key);
+            if (!applied && key.length) {
+                ZLog(@"[ZSParticles] Key %@ has no safe runtime operation; state saved only", key);
+            }
+        } @catch (NSException *exception) {
+            ZLog(@"[ZSParticles] Key %@ failed safely: %@", key, exception.reason);
+        }
+    }
+}
+
+BOOL zs_particle_key_class_available(NSString *key) {
+    if ([key isEqualToString:@"ParticleMaxParticlesCapEnabled"] || [key isEqualToString:@"ParticleMaxParticlesCap"]) {
+        return mt_class("UnityEngine", "ParticleSystem", "ParticleSystemModule") != NULL;
+    }
+    return mt_class("UnityEngine", "ParticleSystemRenderer", "ParticleSystemModule") != NULL;
+}
+
 static BOOL zs_apply_animator_key(NSString *key) {
     void *klass = mt_class("UnityEngine", "Animator", "AnimationModule");
     NSUInteger count = 0;
@@ -2042,8 +2113,7 @@ static BOOL zs_exp_apply_key_internal(NSString *key) {
         if ([key isEqualToString:@"APSkipTransparentObjects"]) return mt_call_static_bool("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_SkipTransparentObjects", g_expAPSkipTransparentObjects);
     }
 
-    if ([key isEqualToString:@"ParticleMaxParticlesCapEnabled"] || [key isEqualToString:@"ParticleMaxParticlesCap"]) return zs_apply_particle_max_particles_cap();
-    if ([key hasPrefix:@"Particle"]) return zs_apply_particle_key(key);
+    if ([key hasPrefix:@"Particle"]) return zs_particle_apply_key_internal(key);
     if ([key hasPrefix:@"Animator"]) return zs_apply_animator_key(key);
     if ([key hasPrefix:@"Rigidbody"]) return zs_apply_rigidbody_key(key);
     if ([key isEqualToString:@"BurstCompilation"] || [key isEqualToString:@"BurstSafetyChecks"]) { zs_apply_burst_settings(); return YES; }
@@ -2083,12 +2153,7 @@ BOOL zs_exp_key_class_available(NSString *key) {
         return mt_class("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule") != NULL;
     }
 
-    if ([key isEqualToString:@"ParticleMaxParticlesCapEnabled"] || [key isEqualToString:@"ParticleMaxParticlesCap"]) {
-        return mt_class("UnityEngine", "ParticleSystem", "ParticleSystemModule") != NULL;
-    }
-    if ([key hasPrefix:@"Particle"]) {
-        return mt_class("UnityEngine", "ParticleSystemRenderer", "ParticleSystemModule") != NULL;
-    }
+    if ([key hasPrefix:@"Particle"]) return zs_particle_key_class_available(key);
 
     if ([key hasPrefix:@"Animator"]) {
         return mt_class("UnityEngine", "Animator", "AnimationModule") != NULL;
