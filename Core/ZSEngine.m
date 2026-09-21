@@ -18,6 +18,7 @@ static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
+static void zs_apply_persisted_particle_settings(void);
 static BOOL ZSUID_UnityObjectIsAlive(void *obj);
 void zs_particles_load_from_dictionary(NSDictionary *particles);
 NSDictionary *zs_particles_settings_dictionary(void);
@@ -826,6 +827,17 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
     return YES;
 }
 
+static const double kParticleApplyDelaySeconds = 2.0;
+
+static void zs_schedule_particle_apply(void) {
+    static uint64_t generation;
+    uint64_t token = ++generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kParticleApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != generation) return;
+        zs_apply_persisted_particle_settings();
+    });
+}
+
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
@@ -895,11 +907,22 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 }
 
 - (void)battleStatePoll {
+    static int32_t lastParticleSceneState = -1;
+    BOOL scheduleParticles = NO;
+    int32_t currentSceneState = -1;
+    if (ZSGlobalScene_Current(&currentSceneState) && currentSceneState != lastParticleSceneState) {
+        lastParticleSceneState = currentSceneState;
+        scheduleParticles = YES;
+    }
+
     BOOL isBattle = NO;
     BOOL haveBattleState = zs_try_read_is_in_battle(&isBattle);
     BOOL wasInBattle = self.isInBattle;
     if (haveBattleState) self.isInBattle = isBattle;
     if (haveBattleState) zs_apply_render_scale_for_battle_state(isBattle, NO);
+
+    if (haveBattleState && isBattle && !wasInBattle) scheduleParticles = YES;
+    if (scheduleParticles) zs_schedule_particle_apply();
 
     if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
         zs_clear_guide_portrait_cache();
@@ -995,6 +1018,16 @@ static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
 
 #pragma mark - Apply-everything entry points
 
+static void zs_apply_persisted_particle_settings(void) {
+    zs_apply_particle_key(@"ParticleAlignment");
+    zs_apply_particle_key(@"ParticleRenderMode");
+    zs_apply_particle_key(@"ParticleSortMode");
+    zs_apply_particle_key(@"ParticleMinSize");
+    zs_apply_particle_key(@"ParticleMaxSize");
+    zs_apply_particle_key(@"ParticleFreeformStretching");
+    zs_apply_particle_max_particles_cap();
+}
+
 static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     ZSCustomGreeting_HotFieldInvalidate();
     ZSUID_HotFieldInvalidate();
@@ -1021,13 +1054,7 @@ static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
         zs_exp_apply_key(@"RenderTextureMemorylessMode");
     }
 
-    zs_apply_particle_key(@"ParticleAlignment");
-    zs_apply_particle_key(@"ParticleRenderMode");
-    zs_apply_particle_key(@"ParticleSortMode");
-    zs_apply_particle_key(@"ParticleMinSize");
-    zs_apply_particle_key(@"ParticleMaxSize");
-    zs_apply_particle_key(@"ParticleFreeformStretching");
-    zs_apply_particle_max_particles_cap();
+    zs_apply_persisted_particle_settings();
 }
 
 void zs_reapply_all_settings(void) {
@@ -1761,7 +1788,23 @@ static void zs_apply_render_texture_memoryless(void) {
     }
 }
 
+static BOOL zs_particle_value_is_default(NSString *key) {
+#define PARTICLE_ISDEF(type, name, def, persist) if ([key isEqualToString:@#name]) return fabs((double)g_exp##name - (double)(def)) < 1e-4;
+    PARTICLE_DEFAULTS(PARTICLE_ISDEF)
+#undef PARTICLE_ISDEF
+    return NO;
+}
+
+static BOOL zs_particle_key_needs_restore(NSString *key) {
+    if ([key isEqualToString:@"ParticleAlignment"]) return zs_particle_alignment_cache().count > 0;
+    if ([key isEqualToString:@"ParticleRenderMode"]) return zs_particle_render_mode_cache().count > 0;
+    return NO;
+}
+
 BOOL zs_apply_particle_key(NSString *key) {
+    BOOL isDefault = zs_particle_value_is_default(key);
+    if (isDefault && !zs_particle_key_needs_restore(key)) return YES;
+
     void *klass = mt_class("UnityEngine", "ParticleSystemRenderer", "ParticleSystemModule");
     NSUInteger count = 0;
     void *array = zs_resources_find_all_for_class(klass, &count);
@@ -1788,6 +1831,10 @@ BOOL zs_apply_particle_key(NSString *key) {
         else if ([key isEqualToString:@"ParticleRotateWithStretchDirection"]) mt_call_instance_bool(obj, "set_rotateWithStretchDirection", g_expParticleRotateWithStretchDirection);
         else if ([key isEqualToString:@"ParticleApplyActiveColorSpace"]) mt_call_instance_bool(obj, "set_applyActiveColorSpace", g_expParticleApplyActiveColorSpace);
         else { handled = NO; break; }
+    }
+    if (isDefault) {
+        if ([key isEqualToString:@"ParticleAlignment"]) [zs_particle_alignment_cache() removeAllObjects];
+        else if ([key isEqualToString:@"ParticleRenderMode"]) [zs_particle_render_mode_cache() removeAllObjects];
     }
     return handled;
 }
