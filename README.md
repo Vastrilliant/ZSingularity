@@ -17,9 +17,7 @@ Need some help, have a bug to report or want to suggest new features? [Join the 
 <p align="center">
   <img src="assets/demo/settings_demo.jpg" width="40.18%" />
   <img src="assets/demo/mods_demo.jpg" width="50%" />
-  <img src="assets/demo/mods_demo.PNG" width="91.2%" />
   <img src="assets/demo/profile_demo.jpg" width="91.2%" />
-  <img src="assets/demo/announcer_demo.jpg" width="91.2%" />
 </p>
 
 ## Features
