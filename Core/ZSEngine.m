@@ -1348,28 +1348,30 @@ static void zs_apply_custom_font_if_present(void) {
     if (titleOffsetBoxed < 0 || subOffsetBoxed < 0 || fontAssetOffsetBoxed < 0) return;
 
     int32_t valueTypeHeaderSize = (int32_t)(sizeof(void *) * 2);
-    int32_t titleOffset = titleOffsetBoxed - valueTypeHeaderSize;
-    int32_t subOffset = subOffsetBoxed - valueTypeHeaderSize;
-    int32_t fontAssetOffset = fontAssetOffsetBoxed - valueTypeHeaderSize;
+    int32_t titleOffsetUnboxed = titleOffsetBoxed - valueTypeHeaderSize;
+    int32_t subOffsetUnboxed = subOffsetBoxed - valueTypeHeaderSize;
+    int32_t fontAssetOffsetUnboxed = fontAssetOffsetBoxed - valueTypeHeaderSize;
 
-    const char *setFieldNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
-    for (size_t i = 0; i < sizeof(setFieldNames) / sizeof(setFieldNames[0]); i++) {
-        int32_t setOffset = zs_offset(fontManagerClass, setFieldNames[i]);
-        if (setOffset < 0) continue;
-        uint8_t *setBase = (uint8_t *)fontManagerData + setOffset;
-        *(void **)(setBase + titleOffset + fontAssetOffset) = fontAsset;
-        *(void **)(setBase + subOffset + fontAssetOffset) = fontAsset;
+    ZLog(@"[ZSFont] fontManagerData=%p titleOffsetBoxed=0x%x subOffsetBoxed=0x%x fontAssetOffsetBoxed=0x%x", fontManagerData, titleOffsetBoxed, subOffsetBoxed, fontAssetOffsetBoxed);
+
+    const void *getFontAssetMethod = mt_method(fontManagerClass, "GetFontAsset", 2);
+    int32_t krSetOffset = zs_offset(fontManagerClass, "krSet");
+    if (getFontAssetMethod && krSetOffset >= 0) {
+        int32_t fontType = 0;
+        int32_t language = 0;
+        void *getArgs[2] = { &fontType, &language };
+        void *getExc = NULL;
+        void *boxedResult = [IL2CppBridge invokeMethod:getFontAssetMethod onInstance:fontManagerData args:getArgs outException:&getExc];
+        uint8_t *krSetBase = (uint8_t *)fontManagerData + krSetOffset;
+        void *liveViaBoxedConvention = *(void **)(krSetBase + titleOffsetBoxed + fontAssetOffsetBoxed);
+        void *liveViaUnboxedConvention = *(void **)(krSetBase + titleOffsetUnboxed + fontAssetOffsetUnboxed);
+        void *liveViaAccessor = (!getExc && boxedResult) ? *(void **)((uint8_t *)boxedResult + fontAssetOffsetBoxed) : NULL;
+        ZLog(@"[ZSFont] GetFontAsset(Title,KR) boxedResult=%p accessorFontAsset=%p | krSet+boxedOffsets=%p | krSet+unboxedOffsets=%p", boxedResult, liveViaAccessor, liveViaBoxedConvention, liveViaUnboxedConvention);
+    } else {
+        ZLog(@"[ZSFont] could not resolve GetFontAsset method or krSet offset for diagnostic read");
     }
 
-    const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
-    if (setFallbackMethod) {
-        int32_t languages[] = { 0, 1, 2 };
-        for (size_t i = 0; i < sizeof(languages) / sizeof(languages[0]); i++) {
-            void *langArgs[1] = { &languages[i] };
-            void *fallbackExc = NULL;
-            [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
-        }
-    }
+    ZLog(@"[ZSFont] custom font asset created (%p) but NOT installed - write disabled pending offset verification, see log lines above", fontAsset);
 }
 
 #pragma mark - Experimental state
