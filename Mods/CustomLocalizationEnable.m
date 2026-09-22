@@ -2,6 +2,7 @@
 #import "IL2CppIntrospection.h"
 #import "ZTweakLog.h"
 #import "ZSUpdater.h"
+#import "ZSEngine.h"
 #import <pthread.h>
 
 static NSString *ZSCustomLangStagingDirectory(void) {
@@ -38,6 +39,16 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         ZLog(@"[CustomLocalizeEnable] skipping: standalone install, app bundle isn't writable at runtime");
         return NULL;
     }
+
+    __block BOOL unityReady = NO;
+    while (!unityReady) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            if (zs_unity_view()) unityReady = YES;
+        });
+        if (!unityReady) usleep(200 * 1000);
+    }
+
+    usleep(1000 * 1000);
 
     __block void *localizeManager = NULL;
     int attempts = 0;
