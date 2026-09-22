@@ -1342,10 +1342,15 @@ static void zs_apply_custom_font_if_present(void) {
     void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
     if (exc || !fontManagerData) return;
 
-    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
-    int32_t subOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
-    int32_t fontAssetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
-    if (titleOffset < 0 || subOffset < 0 || fontAssetOffset < 0) return;
+    int32_t titleOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
+    int32_t subOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
+    int32_t fontAssetOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
+    if (titleOffsetBoxed < 0 || subOffsetBoxed < 0 || fontAssetOffsetBoxed < 0) return;
+
+    int32_t valueTypeHeaderSize = (int32_t)(sizeof(void *) * 2);
+    int32_t titleOffset = titleOffsetBoxed - valueTypeHeaderSize;
+    int32_t subOffset = subOffsetBoxed - valueTypeHeaderSize;
+    int32_t fontAssetOffset = fontAssetOffsetBoxed - valueTypeHeaderSize;
 
     const char *setFieldNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
     for (size_t i = 0; i < sizeof(setFieldNames) / sizeof(setFieldNames[0]); i++) {
