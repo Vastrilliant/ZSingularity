@@ -4,10 +4,7 @@
 #import "ZSUpdater.h"
 #import "ZSEngine.h"
 #import <pthread.h>
-#import <sys/mman.h>
-#import <libkern/OSCacheControl.h>
 #import <unistd.h>
-#import <errno.h>
 
 static void *gZSForcedLangPathString;
 
@@ -38,36 +35,17 @@ static NSString *ZSInvokeStaticString(void *klass, const char *methodName) {
     return [IL2CppBridge nsStringFromIl2CppString:result];
 }
 
-static void ZSWriteInstructions(void *funcAddr, uint32_t *instrs, size_t len) {
-    long pageSize = sysconf(_SC_PAGESIZE);
-    uintptr_t pageStart = (uintptr_t)funcAddr & ~(uintptr_t)(pageSize - 1);
-    size_t span = ((uintptr_t)funcAddr + len) - pageStart;
-    size_t protectLen = (span + pageSize - 1) & ~(size_t)(pageSize - 1);
-    if (mprotect((void *)pageStart, protectLen, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        ZLog(@"[CustomLocalizeEnable] mprotect rw failed at %p: %s", funcAddr, strerror(errno));
-        return;
-    }
-    memcpy(funcAddr, instrs, len);
-    sys_icache_invalidate(funcAddr, len);
-    mprotect((void *)pageStart, protectLen, PROT_READ | PROT_EXEC);
+static void *ZSForcedLangDataPathNative(void) {
+    return gZSForcedLangPathString;
 }
 
-static void ZSPatchFunctionToReturnPointer(void *funcAddr, void *ptrVal) {
-    uint64_t v = (uint64_t)(uintptr_t)ptrVal;
-    uint32_t instrs[5];
-    instrs[0] = (1u << 31) | (2u << 29) | (0x25u << 23) | (0u << 21) | (((uint32_t)(v & 0xFFFF)) << 5);
-    instrs[1] = (1u << 31) | (3u << 29) | (0x25u << 23) | (1u << 21) | (((uint32_t)((v >> 16) & 0xFFFF)) << 5);
-    instrs[2] = (1u << 31) | (3u << 29) | (0x25u << 23) | (2u << 21) | (((uint32_t)((v >> 32) & 0xFFFF)) << 5);
-    instrs[3] = (1u << 31) | (3u << 29) | (0x25u << 23) | (3u << 21) | (((uint32_t)((v >> 48) & 0xFFFF)) << 5);
-    instrs[4] = 0xD65F03C0;
-    ZSWriteInstructions(funcAddr, instrs, sizeof(instrs));
+static BOOL ZSForcedIsRunningNative(void) {
+    return YES;
 }
 
-static void ZSPatchFunctionToReturnBool(void *funcAddr, BOOL value) {
-    uint32_t instrs[2];
-    instrs[0] = (0u << 31) | (2u << 29) | (0x25u << 23) | (0u << 21) | (((uint32_t)(value ? 1 : 0)) << 5);
-    instrs[1] = 0xD65F03C0;
-    ZSWriteInstructions(funcAddr, instrs, sizeof(instrs));
+static void ZSHookMethodPointer(const void *method, void *replacement) {
+    if (!method || !replacement) return;
+    *(void **)(uintptr_t)method = replacement;
 }
 
 static void *zs_custom_localize_enable_thread(void *arg) {
@@ -130,30 +108,20 @@ static void *zs_custom_localize_enable_thread(void *arg) {
             void *forcedString = [IL2CppBridge il2CppStringFromNSString:targetDir];
             if (forcedString) {
                 gZSForcedLangPathString = forcedString;
-                void *funcAddr = [IL2CppBridge nativeFunctionPointerForMethod:langMethod];
-                if (funcAddr) {
-                    ZSPatchFunctionToReturnPointer(funcAddr, forcedString);
-                    ZLog(@"[CustomLocalizeEnable] patched GetLangDataPath to return %@", targetDir);
-                } else {
-                    ZLog(@"[CustomLocalizeEnable] no native function pointer for GetLangDataPath");
-                }
+                ZSHookMethodPointer(langMethod, (void *)ZSForcedLangDataPathNative);
+                ZLog(@"[CustomLocalizeEnable] hooked GetLangDataPath to return %@", targetDir);
             } else {
                 ZLog(@"[CustomLocalizeEnable] failed to create managed string for %@", targetDir);
             }
         } else {
-            ZLog(@"[CustomLocalizeEnable] GetLangDataPath method not found for patching");
+            ZLog(@"[CustomLocalizeEnable] GetLangDataPath method not found for hooking");
         }
 
         if (runningMethod) {
-            void *funcAddr = [IL2CppBridge nativeFunctionPointerForMethod:runningMethod];
-            if (funcAddr) {
-                ZSPatchFunctionToReturnBool(funcAddr, YES);
-                ZLog(@"[CustomLocalizeEnable] patched IsRunning to return true");
-            } else {
-                ZLog(@"[CustomLocalizeEnable] no native function pointer for IsRunning");
-            }
+            ZSHookMethodPointer(runningMethod, (void *)ZSForcedIsRunningNative);
+            ZLog(@"[CustomLocalizeEnable] hooked IsRunning to return true");
         } else {
-            ZLog(@"[CustomLocalizeEnable] IsRunning method not found for patching");
+            ZLog(@"[CustomLocalizeEnable] IsRunning method not found for hooking");
         }
     });
 
