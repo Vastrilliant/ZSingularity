@@ -1,4 +1,3 @@
-
 #import "CustomLocalizationEnable.h"
 #import "IL2CppIntrospection.h"
 #import "ZTweakLog.h"
@@ -40,10 +39,12 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         return NULL;
     }
 
-    void *localizeManager = NULL;
+    __block void *localizeManager = NULL;
     int attempts = 0;
-    while (!localizeManager && attempts < 150) { // ~30s at 200ms
-        localizeManager = ZSFindClass("CustomLocalizeManager", "ProjectMoon.CustomLocalization");
+    while (!localizeManager && attempts < 150) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            localizeManager = ZSFindClass("CustomLocalizeManager", "ProjectMoon.CustomLocalization");
+        });
         if (!localizeManager) {
             usleep(200 * 1000);
             attempts++;
@@ -54,7 +55,11 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         return NULL;
     }
 
-    NSString *langPath = ZSInvokeStaticString(localizeManager, "GetLangDataPath");
+    __block NSString *langPath = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        langPath = ZSInvokeStaticString(localizeManager, "GetLangDataPath");
+    });
+
     ZLog(@"[CustomLocalizeEnable] game reports its Lang folder at: %@", langPath ?: @"(nil)");
     if (langPath.length == 0) return NULL;
 
@@ -70,7 +75,6 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         ZLog(@"[CustomLocalizeEnable] Lang path is already under Documents - nothing to redirect");
         return NULL;
     }
-
 
     NSString *existingLinkDestination = [fm destinationOfSymbolicLinkAtPath:langPath error:nil];
     if (existingLinkDestination) {
