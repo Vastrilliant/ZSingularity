@@ -1322,7 +1322,7 @@ static void zs_apply_custom_font_if_present(void) {
     int32_t renderMode = 4165;
     int32_t atlasWidth = 2048;
     int32_t atlasHeight = 2048;
-    void *args[7] = { &pathStr, &faceIndex, &samplingPointSize, &atlasPadding, &renderMode, &atlasWidth, &atlasHeight };
+    void *args[7] = { pathStr, &faceIndex, &samplingPointSize, &atlasPadding, &renderMode, &atlasWidth, &atlasHeight };
     void *exc = NULL;
     void *fontAsset = [IL2CppBridge invokeMethod:createMethod onInstance:NULL args:args outException:&exc];
     if (exc || !fontAsset) return;
@@ -1338,7 +1338,7 @@ static void zs_apply_custom_font_if_present(void) {
     if (!loadMethod || !typeObj) return;
 
     void *resourcePathStr = [IL2CppBridge il2CppStringFromNSString:@"Font/FontSet/FontManagerScriptableObject"];
-    void *loadArgs[2] = { &resourcePathStr, &typeObj };
+    void *loadArgs[2] = { resourcePathStr, typeObj };
     void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
     if (exc || !fontManagerData) return;
 
