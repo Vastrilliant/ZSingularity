@@ -903,6 +903,8 @@ static void zs_schedule_particle_apply(void) {
     if (current == expected) return;
 
     ZLog(@"[ZSScripts] preferredFramesPerSecond is %ld, expected %ld - reapplying settings", (long)current, (long)expected);
+    self.targetFPS = expected;
+    zs_set_application_target_fps((int32_t)expected);
     zs_reapply_all_settings_except_experimental();
 }
 
