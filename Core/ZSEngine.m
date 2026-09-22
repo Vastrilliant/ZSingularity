@@ -1124,6 +1124,8 @@ static void configure_metal_layer(UIView *unityView) {
 
 #pragma mark - Startup
 
+static void zs_apply_custom_font_if_present(void);
+
 static void *background_worker(void *arg) {
     (void)arg;
 
@@ -1150,6 +1152,10 @@ static void *background_worker(void *arg) {
         if (!fpsReady) usleep(200 * 1000);
     }
     ZLog(@"FPS120Controller started - scene-state poll and target frame rate write are live");
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        zs_apply_custom_font_if_present();
+    });
 
     return NULL;
 }
@@ -1281,6 +1287,84 @@ static BOOL mt_get_static_int(const char *ns, const char *klassName, const char 
     if (exc || !boxed) return NO;
     *outValue = *(int32_t *)((uint8_t *)boxed + 0x10);
     return YES;
+}
+
+static NSString *zs_first_custom_font_path(void) {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = paths.firstObject;
+    if (!documentsDir) return nil;
+    NSString *fontsDir = [documentsDir stringByAppendingPathComponent:@"Fonts"];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:fontsDir isDirectory:&isDirectory] || !isDirectory) return nil;
+
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:fontsDir];
+    for (NSString *relative in enumerator) {
+        if ([relative.pathExtension caseInsensitiveCompare:@"ttf"] != NSOrderedSame) continue;
+        return [fontsDir stringByAppendingPathComponent:relative];
+    }
+    return nil;
+}
+
+static void zs_apply_custom_font_if_present(void) {
+    NSString *fontPath = zs_first_custom_font_path();
+    if (!fontPath) return;
+
+    void *tmpFontAssetClass = mt_class("TMPro", "TMP_FontAsset", "Unity.TextMeshPro");
+    const void *createMethod = mt_method(tmpFontAssetClass, "CreateFontAsset", 7);
+    if (!createMethod) return;
+
+    void *pathStr = [IL2CppBridge il2CppStringFromNSString:fontPath];
+    int32_t faceIndex = 0;
+    int32_t samplingPointSize = 90;
+    int32_t atlasPadding = 5;
+    int32_t renderMode = 4165;
+    int32_t atlasWidth = 2048;
+    int32_t atlasHeight = 2048;
+    void *args[7] = { &pathStr, &faceIndex, &samplingPointSize, &atlasPadding, &renderMode, &atlasWidth, &atlasHeight };
+    void *exc = NULL;
+    void *fontAsset = [IL2CppBridge invokeMethod:createMethod onInstance:NULL args:args outException:&exc];
+    if (exc || !fontAsset) return;
+
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    void *fontSetClass = mt_class("UtilityUI", "FontSet", "Assembly-CSharp");
+    void *fontAssetStructClass = mt_class("UtilityUI", "FontAsset", "Assembly-CSharp");
+    if (!fontManagerClass || !fontSetClass || !fontAssetStructClass) return;
+
+    void *resourcesClass = mt_class("UnityEngine", "Resources", "UnityEngine.CoreModule");
+    const void *loadMethod = mt_method(resourcesClass, "Load", 2);
+    void *typeObj = zs_type_object(fontManagerClass);
+    if (!loadMethod || !typeObj) return;
+
+    void *resourcePathStr = [IL2CppBridge il2CppStringFromNSString:@"Font/FontSet/FontManagerScriptableObject"];
+    void *loadArgs[2] = { &resourcePathStr, &typeObj };
+    void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
+    if (exc || !fontManagerData) return;
+
+    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
+    int32_t subOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
+    int32_t fontAssetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
+    if (titleOffset < 0 || subOffset < 0 || fontAssetOffset < 0) return;
+
+    const char *setFieldNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
+    for (size_t i = 0; i < sizeof(setFieldNames) / sizeof(setFieldNames[0]); i++) {
+        int32_t setOffset = zs_offset(fontManagerClass, setFieldNames[i]);
+        if (setOffset < 0) continue;
+        uint8_t *setBase = (uint8_t *)fontManagerData + setOffset;
+        *(void **)(setBase + titleOffset + fontAssetOffset) = fontAsset;
+        *(void **)(setBase + subOffset + fontAssetOffset) = fontAsset;
+    }
+
+    const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
+    if (setFallbackMethod) {
+        int32_t languages[] = { 0, 1, 2 };
+        for (size_t i = 0; i < sizeof(languages) / sizeof(languages[0]); i++) {
+            void *langArgs[1] = { &languages[i] };
+            void *fallbackExc = NULL;
+            [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
+        }
+    }
 }
 
 #pragma mark - Experimental state
