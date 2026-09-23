@@ -1306,230 +1306,192 @@ static BOOL mt_get_static_int(const char *ns, const char *klassName, const char 
     return YES;
 }
 
-static NSString *zs_first_custom_font_path(void) {
-    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *documentsDir = paths.firstObject;
+static const int32_t kZSCustomFontSamplingPointSize = 90;
+static const int32_t kZSCustomFontPadding = 5;
+static const int32_t kZSCustomFontAtlasSize = 2048;
+static const int32_t kZSFontTypeCount = 2;
+static const int32_t kZSFontLanguageCount = 3;
+static const size_t kZSIl2CppObjectHeaderSize = sizeof(void *) * 2;
+static NSString *const kZSCustomLocalizeKey = @"ZSingularity";
+
+static void *g_zsCustomFontTitle;
+static void *g_zsCustomFontContext;
+static NSString *g_zsCustomFontSignature;
+
+static void *zs_custom_localize_manager_class(void) {
+    return mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
+}
+
+static void *zs_custom_localize_result_class(void) {
+    return mt_class("ProjectMoon.CustomLocalization", "SearchResult", "Assembly-CSharp");
+}
+
+static NSString *zs_custom_font_directory(void) {
+    NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     if (!documentsDir) return nil;
     NSString *fontsDir = [documentsDir stringByAppendingPathComponent:@"Fonts"];
 
-    NSFileManager *fm = NSFileManager.defaultManager;
     BOOL isDirectory = NO;
-    if (![fm fileExistsAtPath:fontsDir isDirectory:&isDirectory] || !isDirectory) return nil;
-
-    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:fontsDir];
-    for (NSString *relative in enumerator) {
-        if ([relative.pathExtension caseInsensitiveCompare:@"ttf"] != NSOrderedSame) continue;
-        return [fontsDir stringByAppendingPathComponent:relative];
-    }
-    return nil;
+    if (![NSFileManager.defaultManager fileExistsAtPath:fontsDir isDirectory:&isDirectory] || !isDirectory) return nil;
+    return fontsDir;
 }
 
-static void zs_apply_font_to_all_live_tmp_text(void *fontAsset, void *fontMaterial) {
-    void *tmpTextClass = mt_class("TMPro", "TMP_Text", "Unity.TextMeshPro");
-    if (!tmpTextClass) return;
-
-    const void *setFontMethod = mt_method(tmpTextClass, "set_font", 1);
-    if (!setFontMethod) return;
-    const void *setMaterialMethod = mt_method(tmpTextClass, "set_fontSharedMaterial", 1);
-    const void *forceMeshUpdateMethod = mt_method(tmpTextClass, "ForceMeshUpdate", 2);
-
-    NSUInteger count = 0;
-    void *array = zs_resources_find_all_for_class(tmpTextClass, &count);
-    if (!array) return;
-
-    NSUInteger updated = 0;
-    for (NSUInteger i = 0; i < count; i++) {
-        void *instance = zs_array_object_at(array, i);
-        if (!instance) continue;
-
-        void *fontArgs[1] = { fontAsset };
-        void *fontExc = NULL;
-        [IL2CppBridge invokeMethod:setFontMethod onInstance:instance args:fontArgs outException:&fontExc];
-        if (fontExc) continue;
-
-        if (fontMaterial && setMaterialMethod) {
-            void *matArgs[1] = { fontMaterial };
-            void *matExc = NULL;
-            [IL2CppBridge invokeMethod:setMaterialMethod onInstance:instance args:matArgs outException:&matExc];
-        }
-
-        if (forceMeshUpdateMethod) {
-            BOOL ignoreActiveState = YES;
-            BOOL forceTextReparsing = YES;
-            void *meshArgs[2] = { &ignoreActiveState, &forceTextReparsing };
-            void *meshExc = NULL;
-            [IL2CppBridge invokeMethod:forceMeshUpdateMethod onInstance:instance args:meshArgs outException:&meshExc];
-        }
-
-        updated++;
+static NSArray<NSString *> *zs_custom_font_files(NSString *fontsDir) {
+    NSMutableArray<NSString *> *files = [NSMutableArray array];
+    for (NSString *relative in [NSFileManager.defaultManager enumeratorAtPath:fontsDir]) {
+        NSString *extension = relative.pathExtension.lowercaseString;
+        if (![extension isEqualToString:@"ttf"] && ![extension isEqualToString:@"otf"]) continue;
+        [files addObject:[fontsDir stringByAppendingPathComponent:relative]];
     }
-
-    ZLog(@"[ZSFont] directly applied custom font to %lu/%lu live TMP_Text instance(s)", (unsigned long)updated, (unsigned long)count);
+    return [files sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
 }
 
-static void zs_apply_custom_font_if_present(void) {
-    NSString *fontPath = zs_first_custom_font_path();
-    if (!fontPath) return;
+static NSString *zs_pick_custom_font(NSArray<NSString *> *files, NSString *token) {
+    for (NSString *path in files) {
+        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
+    }
+    return files.firstObject;
+}
 
+static NSString *zs_custom_font_signature(NSArray<NSString *> *paths) {
+    NSMutableString *signature = [NSMutableString string];
+    for (NSString *path in paths) {
+        NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+        [signature appendFormat:@"%@|%llu|%.0f;", path, attributes.fileSize, attributes.fileModificationDate.timeIntervalSince1970];
+    }
+    return signature;
+}
 
-    void *tmpFontAssetClass = mt_class("TMPro", "TMP_FontAsset", "Unity.TextMeshPro");
-    const void *createMethod = mt_method(tmpFontAssetClass, "CreateFontAsset", 7);
-    if (!createMethod) return;
-
-    void *pathStr = [IL2CppBridge il2CppStringFromNSString:fontPath];
-    int32_t faceIndex = 0;
-    int32_t samplingPointSize = 90;
-    int32_t atlasPadding = 5;
-    int32_t renderMode = 4165;
-    int32_t atlasWidth = 2048;
-    int32_t atlasHeight = 2048;
-    void *args[7] = { pathStr, &faceIndex, &samplingPointSize, &atlasPadding, &renderMode, &atlasWidth, &atlasHeight };
+static BOOL zs_custom_localize_static_bool(const char *methodName, BOOL *outValue) {
+    void *managerClass = zs_custom_localize_manager_class();
+    const void *method = mt_method(managerClass, methodName, 0);
+    if (!method || !outValue) return NO;
     void *exc = NULL;
-    void *fontAsset = [IL2CppBridge invokeMethod:createMethod onInstance:NULL args:args outException:&exc];
-    if (exc || !fontAsset) return;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *outValue = *(uint8_t *)((uint8_t *)boxed + kZSIl2CppObjectHeaderSize) != 0;
+    return YES;
+}
 
-    const void *earlyGetMaterialMethod = mt_method(tmpFontAssetClass, "get_material", 0);
-    void *earlyMaterialExc = NULL;
-    void *earlyFontMaterial = earlyGetMaterialMethod ? [IL2CppBridge invokeMethod:earlyGetMaterialMethod onInstance:fontAsset args:NULL outException:&earlyMaterialExc] : NULL;
-    if (earlyMaterialExc) earlyFontMaterial = NULL;
-    zs_apply_font_to_all_live_tmp_text(fontAsset, earlyFontMaterial);
+static void *zs_load_custom_font(NSString *path) {
+    void *managerClass = zs_custom_localize_manager_class();
+    const void *tryLoadMethod = mt_method(managerClass, "TryLoadFont", 5);
+    if (!tryLoadMethod) {
+        ZLog(@"[ZSFont] CustomLocalizeManager.TryLoadFont not found");
+        return NULL;
+    }
 
+    void *pathStr = [IL2CppBridge il2CppStringFromNSString:path];
+    int32_t samplingPointSize = kZSCustomFontSamplingPointSize;
+    int32_t padding = kZSCustomFontPadding;
+    int32_t atlasSize = kZSCustomFontAtlasSize;
+    void *output = NULL;
+    void *args[5] = { pathStr, &samplingPointSize, &padding, &atlasSize, &output };
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:tryLoadMethod onInstance:NULL args:args outException:&exc];
+    if (exc || !result) {
+        ZLog(@"[ZSFont] TryLoadFont raised an exception for %@", path.lastPathComponent);
+        return NULL;
+    }
+
+    BOOL loaded = *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
+    if (!loaded || !output) {
+        ZLog(@"[ZSFont] TryLoadFont rejected %@", path.lastPathComponent);
+        return NULL;
+    }
+    return output;
+}
+
+static BOOL zs_read_custom_localize_fonts(void **titleFont, void **contextFont) {
+    void *managerClass = zs_custom_localize_manager_class();
+    void *resultClass = zs_custom_localize_result_class();
+    if (!managerClass || !resultClass) return NO;
+
+    void *dataField = [IL2CppBridge fieldNamed:"_data" onClass:managerClass];
+    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<TitleFont>k__BackingField"];
+    int32_t contextOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<ContextFont>k__BackingField"];
+    if (!dataField || titleOffset < 0 || contextOffset < 0) return NO;
+
+    uint8_t buffer[256] = {0};
+    if (![IL2CppBridge copyStaticFieldValue:dataField toBuffer:buffer]) return NO;
+
+    if (titleFont) *titleFont = *(void **)(buffer + titleOffset - kZSIl2CppObjectHeaderSize);
+    if (contextFont) *contextFont = *(void **)(buffer + contextOffset - kZSIl2CppObjectHeaderSize);
+    return YES;
+}
+
+static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont, NSString *directory) {
+    void *managerClass = zs_custom_localize_manager_class();
+    void *resultClass = zs_custom_localize_result_class();
+    if (!managerClass || !resultClass) return NO;
+
+    const void *ctorMethod = mt_method(resultClass, ".ctor", 4);
+    const void *isDataExistMethod = mt_method(resultClass, "IsDataExist", 0);
+    void *dataField = [IL2CppBridge fieldNamed:"_data" onClass:managerClass];
+    int32_t dataExistOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"_isDataExist"];
+    if (!ctorMethod || !dataField || dataExistOffset < 0) return NO;
+
+    void *boxedResult = [IL2CppBridge newObjectForClass:resultClass];
+    if (!boxedResult) return NO;
+
+    void *ctorArgs[4] = {
+        titleFont,
+        contextFont,
+        [IL2CppBridge il2CppStringFromNSString:directory],
+        [IL2CppBridge il2CppStringFromNSString:kZSCustomLocalizeKey]
+    };
+    void *ctorExc = NULL;
+    [IL2CppBridge invokeMethod:ctorMethod onInstance:boxedResult args:ctorArgs outException:&ctorExc];
+    if (ctorExc) return NO;
+
+    if (isDataExistMethod) {
+        void *existExc = NULL;
+        void *existBoxed = [IL2CppBridge invokeMethod:isDataExistMethod onInstance:boxedResult args:NULL outException:&existExc];
+        BOOL exists = !existExc && existBoxed && *(uint8_t *)((uint8_t *)existBoxed + kZSIl2CppObjectHeaderSize) != 0;
+        if (!exists) {
+            *((uint8_t *)boxedResult + dataExistOffset) = 1;
+            ZLog(@"[ZSFont] SearchResult reported no data after construction, forced _isDataExist");
+        }
+    }
+
+    [IL2CppBridge setStaticFieldValue:dataField fromBuffer:(uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize];
+
+    void *installedTitle = NULL;
+    void *installedContext = NULL;
+    if (!zs_read_custom_localize_fonts(&installedTitle, &installedContext)) return NO;
+    return installedTitle == titleFont && installedContext == contextFont;
+}
+
+static void *zs_load_font_manager_data(void) {
     void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
-    void *fontSetClass = mt_class("UtilityUI", "FontSet", "Assembly-CSharp");
-    void *fontAssetStructClass = mt_class("UtilityUI", "FontAsset", "Assembly-CSharp");
-    if (!fontManagerClass || !fontSetClass || !fontAssetStructClass) return;
-
     void *resourcesClass = mt_class("UnityEngine", "Resources", "UnityEngine.CoreModule");
     const void *loadMethod = mt_method(resourcesClass, "Load", 2);
     void *typeObj = zs_type_object(fontManagerClass);
-    if (!loadMethod || !typeObj) return;
+    if (!loadMethod || !typeObj) return NULL;
 
     void *resourcePathStr = [IL2CppBridge il2CppStringFromNSString:@"Font/FontSet/FontManagerScriptableObject"];
     void *loadArgs[2] = { resourcePathStr, typeObj };
+    void *exc = NULL;
     void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
-    if (exc || !fontManagerData) return;
+    return exc ? NULL : fontManagerData;
+}
 
-    int32_t titleOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
-    int32_t subOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
-    int32_t fontAssetOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
-    if (titleOffsetBoxed < 0 || subOffsetBoxed < 0 || fontAssetOffsetBoxed < 0) return;
-
-    const char *materialFieldNames[] = {
-        "fontMaterial", "underlineFontMaterial", "burningVersion2FontMaterial", "brownGlowMaterial",
-        "storyOverlayCanvasFontMaterial", "glowFontMaterial", "bronzeGlowFontMaterial",
-        "storyUiTvEffectMaterial", "lyricsMaterial"
-    };
-    size_t materialFieldCount = sizeof(materialFieldNames) / sizeof(materialFieldNames[0]);
-    int32_t materialOffsets[sizeof(materialFieldNames) / sizeof(materialFieldNames[0])];
-    for (size_t i = 0; i < materialFieldCount; i++) {
-        int32_t boxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:materialFieldNames[i]];
-        if (boxed < 0) return;
-        materialOffsets[i] = boxed;
-    }
-
-    int32_t valueTypeHeaderSize = (int32_t)(sizeof(void *) * 2);
-    int32_t titleOffset = titleOffsetBoxed - valueTypeHeaderSize;
-    int32_t subOffset = subOffsetBoxed - valueTypeHeaderSize;
-    int32_t fontAssetOffset = fontAssetOffsetBoxed - valueTypeHeaderSize;
-    for (size_t i = 0; i < materialFieldCount; i++) {
-        materialOffsets[i] -= valueTypeHeaderSize;
-    }
-
-    const void *getMaterialMethod = mt_method(tmpFontAssetClass, "get_material", 0);
-    void *materialExc = NULL;
-    void *fontMaterial = getMaterialMethod ? [IL2CppBridge invokeMethod:getMaterialMethod onInstance:fontAsset args:NULL outException:&materialExc] : NULL;
-    if (materialExc) fontMaterial = NULL;
-
-    int32_t *materialOffsetsPtr = materialOffsets;
-    void (^applyFontAssetStruct)(uint8_t *) = ^(uint8_t *base) {
-        *(void **)(base + fontAssetOffset) = fontAsset;
-        if (!fontMaterial) return;
-        for (size_t i = 0; i < materialFieldCount; i++) {
-            *(void **)(base + materialOffsetsPtr[i]) = fontMaterial;
-        }
-    };
-
-    const char *setFieldNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
-    for (size_t i = 0; i < sizeof(setFieldNames) / sizeof(setFieldNames[0]); i++) {
-        int32_t setOffset = zs_offset(fontManagerClass, setFieldNames[i]);
-        if (setOffset < 0) continue;
-        uint8_t *setBase = (uint8_t *)fontManagerData + setOffset;
-        applyFontAssetStruct(setBase + titleOffset);
-        applyFontAssetStruct(setBase + subOffset);
-    }
-
-    int32_t bebasKaiOffset = zs_offset(fontManagerClass, "_bebasKaiAsset");
-    if (bebasKaiOffset >= 0) {
-        applyFontAssetStruct((uint8_t *)fontManagerData + bebasKaiOffset);
-    }
-
-    int32_t excelsiorAssetOffset = zs_offset(fontManagerClass, "excelsiorSansAsset");
-    if (excelsiorAssetOffset >= 0) {
-        *(void **)((uint8_t *)fontManagerData + excelsiorAssetOffset) = fontAsset;
-    }
-
-    if (fontMaterial) {
-        const char *excelsiorMaterialFieldNames[] = {
-            "excelsiorSansDefaultMat", "excelsiorSansUnderlineMat", "excelsiorSansBurningMat",
-            "excelsiorSansGlowMat", "excelsiorSansOutlineMat", "excelsiorSansBlackGlowMat"
-        };
-        for (size_t i = 0; i < sizeof(excelsiorMaterialFieldNames) / sizeof(excelsiorMaterialFieldNames[0]); i++) {
-            int32_t off = zs_offset(fontManagerClass, excelsiorMaterialFieldNames[i]);
-            if (off < 0) continue;
-            *(void **)((uint8_t *)fontManagerData + off) = fontMaterial;
-        }
-    }
-
+static void zs_refresh_font_consumers(void *fontManagerData) {
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
     const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
-    if (setFallbackMethod) {
-        int32_t languages[] = { 0, 1, 2 };
-        for (size_t i = 0; i < sizeof(languages) / sizeof(languages[0]); i++) {
-            void *langArgs[1] = { &languages[i] };
+    if (fontManagerData && setFallbackMethod) {
+        for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+            int32_t languageValue = language;
+            void *langArgs[1] = { &languageValue };
             void *fallbackExc = NULL;
             [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
         }
     }
 
-    void *fontCollectionClass = mt_class("", "FontAssetCollectionScriptableObject", "Assembly-CSharp");
-    if (fontCollectionClass) {
-        const char *collectionFontFieldNames[] = {
-            "_kotraBold", "_SCDream", "_mikodacs", "_pretendardRegular",
-            "_corporateLogoBold", "_higashiOmeGothic", "_bebasKai", "_excelsiorSans"
-        };
-        const char *collectionMaterialFieldNames[] = {
-            "_kotraBold_mat", "_kotraBold_Burning_Ver2", "_kotraBold_Grayscale",
-            "_SCDream_normal", "_mikodacs_normal", "_pretendardRegular_normal",
-            "_corporateLogoBold_normal", "_corporateLogoBold_Burning_Ver2", "_corporateLogoBold_Grayscale",
-            "_higashiOmeGothic_normal",
-            "_bebasKai_Normal", "_bebasKai_Burning", "_bebasKai_BronzeGlow", "_bebasKai_GrayGlow",
-            "_excelsiorSans_mat", "_excelsiorSans_Burning_Ver2",
-            "_excelsiorSans_FormationBaton", "_excelsiorSans_FormationBatonUnabled"
-        };
-
-        NSUInteger collectionCount = 0;
-        void *collectionArray = zs_resources_find_all_for_class(fontCollectionClass, &collectionCount);
-        for (NSUInteger i = 0; i < collectionCount; i++) {
-            void *collectionInstance = zs_array_object_at(collectionArray, i);
-            if (!collectionInstance) continue;
-            for (size_t f = 0; f < sizeof(collectionFontFieldNames) / sizeof(collectionFontFieldNames[0]); f++) {
-                int32_t off = zs_offset(fontCollectionClass, collectionFontFieldNames[f]);
-                if (off < 0) continue;
-                *(void **)((uint8_t *)collectionInstance + off) = fontAsset;
-            }
-            if (fontMaterial) {
-                for (size_t m = 0; m < sizeof(collectionMaterialFieldNames) / sizeof(collectionMaterialFieldNames[0]); m++) {
-                    int32_t off = zs_offset(fontCollectionClass, collectionMaterialFieldNames[m]);
-                    if (off < 0) continue;
-                    *(void **)((uint8_t *)collectionInstance + off) = fontMaterial;
-                }
-            }
-        }
-        if (collectionCount > 0) {
-            ZLog(@"[ZSFont] patched %lu live FontAssetCollectionScriptableObject instance(s)", (unsigned long)collectionCount);
-        }
-    }
-
-    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "PretendardFontSetter", "TextMeshProLanguageSetter" };
+    const char *setterClassNames[] = {
+        "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "ExcelsiorSansFontSetter",
+        "FixedFontSetter", "PretendardFontSetter", "TextMeshProLanguageSetter"
+    };
     for (size_t i = 0; i < sizeof(setterClassNames) / sizeof(setterClassNames[0]); i++) {
         void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
         if (!setterClass) continue;
@@ -1549,7 +1511,6 @@ static void zs_apply_custom_font_if_present(void) {
 
     const char *langRefreshClassNames[] = { "TextMeshProLanguageSetterManager", "TextMeshProChildrenSetter" };
     const char *langRefreshMethodNames[] = { "UpdateUIs", "RefreshLanguage" };
-    int32_t langRefreshValues[] = { 0, 1, 2 };
     for (size_t i = 0; i < sizeof(langRefreshClassNames) / sizeof(langRefreshClassNames[0]); i++) {
         void *langRefreshClass = mt_class("UtilityUI", langRefreshClassNames[i], "Assembly-CSharp");
         if (!langRefreshClass) continue;
@@ -1561,8 +1522,9 @@ static void zs_apply_custom_font_if_present(void) {
         for (NSUInteger j = 0; j < langRefreshCount; j++) {
             void *langRefreshInstance = zs_array_object_at(langRefreshArray, j);
             if (!langRefreshInstance) continue;
-            for (size_t k = 0; k < sizeof(langRefreshValues) / sizeof(langRefreshValues[0]); k++) {
-                void *langRefreshArgs[1] = { &langRefreshValues[k] };
+            for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+                int32_t languageValue = language;
+                void *langRefreshArgs[1] = { &languageValue };
                 void *langRefreshExc = NULL;
                 [IL2CppBridge invokeMethod:langRefreshMethod onInstance:langRefreshInstance args:langRefreshArgs outException:&langRefreshExc];
             }
@@ -1571,26 +1533,93 @@ static void zs_apply_custom_font_if_present(void) {
     }
 
     void *duiStyleManagerClass = mt_class("DUI.StyleLibs", "DUIStyleManager", "Assembly-CSharp");
-    if (duiStyleManagerClass) {
-        const void *onSceneChangedMethod = mt_method(duiStyleManagerClass, "OnSceneChanged", 0);
-        if (onSceneChangedMethod) {
-            NSUInteger duiCount = 0;
-            void *duiArray = zs_resources_find_all_for_class(duiStyleManagerClass, &duiCount);
-            if (duiArray) {
-                for (NSUInteger j = 0; j < duiCount; j++) {
-                    void *duiInstance = zs_array_object_at(duiArray, j);
-                    if (!duiInstance) continue;
-                    void *duiExc = NULL;
-                    [IL2CppBridge invokeMethod:onSceneChangedMethod onInstance:duiInstance args:NULL outException:&duiExc];
-                }
-                ZLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s)", (unsigned long)duiCount);
-            }
+    const void *onSceneChangedMethod = mt_method(duiStyleManagerClass, "OnSceneChanged", 0);
+    if (onSceneChangedMethod) {
+        NSUInteger duiCount = 0;
+        void *duiArray = zs_resources_find_all_for_class(duiStyleManagerClass, &duiCount);
+        for (NSUInteger j = 0; duiArray && j < duiCount; j++) {
+            void *duiInstance = zs_array_object_at(duiArray, j);
+            if (!duiInstance) continue;
+            void *duiExc = NULL;
+            [IL2CppBridge invokeMethod:onSceneChangedMethod onInstance:duiInstance args:NULL outException:&duiExc];
+        }
+        ZLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s)", (unsigned long)duiCount);
+    }
+}
+
+static void zs_log_custom_localize_state(void *fontManagerData, void *titleFont, void *contextFont) {
+    BOOL isRunning = NO;
+    BOOL isUsing = NO;
+    BOOL haveRunning = zs_custom_localize_static_bool("IsRunning", &isRunning);
+    BOOL haveUsing = zs_custom_localize_static_bool("IsUsing", &isUsing);
+    ZLog(@"[ZSFont] CustomLocalizeManager IsRunning=%d IsUsing=%d", haveRunning ? isRunning : -1, haveUsing ? isUsing : -1);
+
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    void *fontAssetStructClass = mt_class("UtilityUI", "FontAsset", "Assembly-CSharp");
+    const void *getFontAssetMethod = mt_method(fontManagerClass, "GetFontAsset", 2);
+    int32_t fontAssetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
+    if (!fontManagerData || !getFontAssetMethod || fontAssetOffset < 0) return;
+
+    int32_t matched = 0;
+    int32_t total = 0;
+    for (int32_t type = 0; type < kZSFontTypeCount; type++) {
+        for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+            int32_t typeValue = type;
+            int32_t languageValue = language;
+            void *args[2] = { &typeValue, &languageValue };
+            void *exc = NULL;
+            void *boxed = [IL2CppBridge invokeMethod:getFontAssetMethod onInstance:fontManagerData args:args outException:&exc];
+            total++;
+            if (exc || !boxed) continue;
+            void *resolved = *(void **)((uint8_t *)boxed + fontAssetOffset);
+            if (resolved == titleFont || resolved == contextFont) matched++;
         }
     }
+    ZLog(@"[ZSFont] FontManager primary slots resolving to the custom font: %d/%d", matched, total);
+}
 
-    ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
+static void zs_apply_custom_font_if_present(void) {
+    NSString *fontsDir = zs_custom_font_directory();
+    if (!fontsDir) return;
 
-    zs_apply_font_to_all_live_tmp_text(fontAsset, fontMaterial);
+    NSArray<NSString *> *files = zs_custom_font_files(fontsDir);
+    if (files.count == 0) return;
+
+    NSString *titlePath = zs_pick_custom_font(files, @"title");
+    NSString *contextPath = zs_pick_custom_font(files, @"context");
+    NSString *signature = zs_custom_font_signature(@[titlePath, contextPath]);
+
+    BOOL cachedFontsUsable = g_zsCustomFontTitle && g_zsCustomFontContext &&
+        [signature isEqualToString:g_zsCustomFontSignature] &&
+        ZSUID_UnityObjectIsAlive(g_zsCustomFontTitle) && ZSUID_UnityObjectIsAlive(g_zsCustomFontContext);
+
+    void *currentTitle = NULL;
+    void *currentContext = NULL;
+    BOOL haveCurrent = zs_read_custom_localize_fonts(&currentTitle, &currentContext);
+    if (cachedFontsUsable && haveCurrent && currentTitle == g_zsCustomFontTitle && currentContext == g_zsCustomFontContext) return;
+
+    void *titleFont = g_zsCustomFontTitle;
+    void *contextFont = g_zsCustomFontContext;
+    if (!cachedFontsUsable) {
+        titleFont = zs_load_custom_font(titlePath);
+        if (!titleFont) return;
+        contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
+        if (!contextFont) return;
+    }
+
+    if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
+        ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
+        return;
+    }
+
+    g_zsCustomFontTitle = titleFont;
+    g_zsCustomFontContext = contextFont;
+    g_zsCustomFontSignature = signature;
+    ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
+
+    void *fontManagerData = zs_load_font_manager_data();
+    zs_refresh_font_consumers(fontManagerData);
+    zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
 }
 
 static const double kFontApplyDelaySeconds = 2.0;
