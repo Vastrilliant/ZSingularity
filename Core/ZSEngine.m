@@ -1316,6 +1316,7 @@ static NSString *const kZSCustomLocalizeKey = @"ZSingularity";
 
 static void *g_zsCustomFontTitle;
 static void *g_zsCustomFontContext;
+static void *g_zsCustomFontCJK;
 static NSString *g_zsCustomFontSignature;
 
 static void *zs_custom_localize_manager_class(void) {
@@ -1377,6 +1378,13 @@ static NSString *zs_pick_custom_font(NSArray<NSString *> *files, NSString *token
         if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
     }
     return files.firstObject;
+}
+
+static NSString *zs_pick_custom_font_optional(NSArray<NSString *> *files, NSString *token) {
+    for (NSString *path in files) {
+        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
+    }
+    return nil;
 }
 
 static NSString *zs_custom_font_signature(NSArray<NSString *> *paths) {
@@ -1591,7 +1599,23 @@ static void zs_font_asset_fallback_add(void *listObj, void *font) {
     [IL2CppBridge invokeMethod:addMethod onInstance:listObj args:args outException:&exc];
 }
 
-static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont) {
+static void zs_font_asset_fallback_insert_front(void *listObj, void *font) {
+    if (!listObj || !font) return;
+    if (zs_font_asset_fallback_contains(listObj, font)) return;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *insertMethod = [IL2CppBridge methodOnClass:listClass name:"Insert" argCount:2];
+    if (!insertMethod) {
+        zs_font_asset_fallback_add(listObj, font);
+        return;
+    }
+    int32_t index = 0;
+    void *args[2] = { &index, font };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:insertMethod onInstance:listObj args:args outException:&exc];
+    if (exc) zs_font_asset_fallback_add(listObj, font);
+}
+
+static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont, void *cjkFont) {
     void *fontAssetClass = zs_tmp_font_asset_class();
     const void *getFallbackMethod = mt_method(fontAssetClass, "get_fallbackFontAssetTable", 0);
     if (!fontAssetClass || !getFallbackMethod) {
@@ -1606,16 +1630,40 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
         return;
     }
 
+    void *titleListObj = NULL;
+    void *contextListObj = NULL;
+    if (titleFont) {
+        void *titleExc = NULL;
+        titleListObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:titleFont args:NULL outException:&titleExc];
+        if (titleExc) titleListObj = NULL;
+    }
+    if (contextFont) {
+        if (contextFont == titleFont) {
+            contextListObj = titleListObj;
+        } else {
+            void *contextExc = NULL;
+            contextListObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:contextFont args:NULL outException:&contextExc];
+            if (contextExc) contextListObj = NULL;
+        }
+    }
+
+    if (cjkFont && titleListObj) zs_font_asset_fallback_insert_front(titleListObj, cjkFont);
+    if (cjkFont && contextListObj && contextListObj != titleListObj) zs_font_asset_fallback_insert_front(contextListObj, cjkFont);
+
     NSUInteger patched = 0;
     for (NSUInteger i = 0; i < count; i++) {
         void *fontAsset = zs_array_object_at(fontAssets, i);
-        if (!fontAsset || fontAsset == titleFont || fontAsset == contextFont) continue;
+        if (!fontAsset || fontAsset == titleFont || fontAsset == contextFont || fontAsset == cjkFont) continue;
 
         void *exc = NULL;
         void *listObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:fontAsset args:NULL outException:&exc];
         if (exc || !listObj) continue;
 
         BOOL changed = NO;
+        if (cjkFont && !zs_font_asset_fallback_contains(listObj, cjkFont)) {
+            zs_font_asset_fallback_insert_front(listObj, cjkFont);
+            changed = YES;
+        }
         if (titleFont && !zs_font_asset_fallback_contains(listObj, titleFont)) {
             zs_font_asset_fallback_add(listObj, titleFont);
             changed = YES;
@@ -1625,8 +1673,15 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
             changed = YES;
         }
         if (changed) patched++;
+
+        if (titleListObj && !zs_font_asset_fallback_contains(titleListObj, fontAsset)) {
+            zs_font_asset_fallback_add(titleListObj, fontAsset);
+        }
+        if (contextListObj && contextListObj != titleListObj && !zs_font_asset_fallback_contains(contextListObj, fontAsset)) {
+            zs_font_asset_fallback_add(contextListObj, fontAsset);
+        }
     }
-    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s)", (unsigned long)patched, (unsigned long)count);
+    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p", (unsigned long)patched, (unsigned long)count, cjkFont);
 }
 
 static void zs_refresh_font_consumers(void *fontManagerData) {
@@ -1775,12 +1830,17 @@ static void zs_apply_custom_font_if_present(void) {
 
     NSString *titlePath = zs_pick_custom_font(files, @"title");
     NSString *contextPath = zs_pick_custom_font(files, @"context");
-    NSString *signature = zs_custom_font_signature(@[titlePath, contextPath]);
-    ZLog(@"[ZSFont] apply: title=%@ context=%@", titlePath.lastPathComponent, contextPath.lastPathComponent);
+    NSString *cjkPath = zs_pick_custom_font_optional(files, @"cjk");
+    NSMutableArray<NSString *> *signatureInputs = [NSMutableArray arrayWithObjects:titlePath, contextPath, nil];
+    if (cjkPath) [signatureInputs addObject:cjkPath];
+    NSString *signature = zs_custom_font_signature(signatureInputs);
+    ZLog(@"[ZSFont] apply: title=%@ context=%@ cjk=%@", titlePath.lastPathComponent, contextPath.lastPathComponent, cjkPath.lastPathComponent ?: @"(none)");
 
+    BOOL cjkCachedUsable = !cjkPath || (g_zsCustomFontCJK && ZSUID_UnityObjectIsAlive(g_zsCustomFontCJK));
     BOOL cachedFontsUsable = g_zsCustomFontTitle && g_zsCustomFontContext &&
         [signature isEqualToString:g_zsCustomFontSignature] &&
-        ZSUID_UnityObjectIsAlive(g_zsCustomFontTitle) && ZSUID_UnityObjectIsAlive(g_zsCustomFontContext);
+        ZSUID_UnityObjectIsAlive(g_zsCustomFontTitle) && ZSUID_UnityObjectIsAlive(g_zsCustomFontContext) &&
+        cjkCachedUsable;
 
     void *currentTitle = NULL;
     void *currentContext = NULL;
@@ -1791,6 +1851,7 @@ static void zs_apply_custom_font_if_present(void) {
 
     void *titleFont = g_zsCustomFontTitle;
     void *contextFont = g_zsCustomFontContext;
+    void *cjkFont = g_zsCustomFontCJK;
 
     if (!alreadyInstalled) {
         if (!cachedFontsUsable) {
@@ -1804,15 +1865,26 @@ static void zs_apply_custom_font_if_present(void) {
                 ZLog(@"[ZSFont] apply: aborting, context font failed to load");
                 return;
             }
+            cjkFont = NULL;
+            if (cjkPath) {
+                if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
+                else if ([cjkPath isEqualToString:contextPath]) cjkFont = contextFont;
+                else {
+                    cjkFont = zs_load_custom_font(cjkPath);
+                    if (!cjkFont) ZLog(@"[ZSFont] apply: CJK font failed to load, continuing without it");
+                }
+            }
         }
 
         g_zsCustomFontTitle = titleFont;
         g_zsCustomFontContext = contextFont;
+        g_zsCustomFontCJK = cjkFont;
         g_zsCustomFontSignature = signature;
 
         if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
             g_zsCustomFontTitle = NULL;
             g_zsCustomFontContext = NULL;
+            g_zsCustomFontCJK = NULL;
             g_zsCustomFontSignature = nil;
             ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
             return;
@@ -1825,7 +1897,7 @@ static void zs_apply_custom_font_if_present(void) {
 
     void *fontManagerData = zs_load_font_manager_data();
     zs_refresh_font_consumers(fontManagerData);
-    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont);
+    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont);
     zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
 }
 
