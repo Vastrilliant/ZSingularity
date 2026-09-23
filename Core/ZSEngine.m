@@ -16,6 +16,7 @@
 static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
+static const int32_t kZSFontSceneStateMain = 2;
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static void zs_apply_persisted_particle_settings(void);
@@ -1152,6 +1153,17 @@ static void *background_worker(void *arg) {
         if (!fpsReady) usleep(200 * 1000);
     }
     ZLog(@"FPS120Controller started - scene-state poll and target frame rate write are live");
+
+    __block BOOL mainSceneReady = NO;
+    while (!mainSceneReady) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            int32_t sceneState = -1;
+            if (ZSGlobalScene_Current(&sceneState) && sceneState == kZSFontSceneStateMain) {
+                mainSceneReady = YES;
+            }
+        });
+        if (!mainSceneReady) usleep(200 * 1000);
+    }
 
     dispatch_sync(dispatch_get_main_queue(), ^{
         zs_apply_custom_font_if_present();
