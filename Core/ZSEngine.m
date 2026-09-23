@@ -1341,7 +1341,13 @@ static NSString *zs_customlocalize_parent_path(void) {
     void *exc = NULL;
     void *result = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
     if (exc || !result) return nil;
-    return zs_nsstring_from_il2cpp_string(result);
+    NSString *raw = zs_nsstring_from_il2cpp_string(result);
+    if (!raw.length) return nil;
+    if ([raw hasPrefix:@"/"]) return raw;
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = paths.firstObject;
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:raw];
 }
 
 static BOOL zs_ensure_customlocalize_font_layout(NSString *ttfPath, NSString *parentPath) {
@@ -1352,20 +1358,25 @@ static BOOL zs_ensure_customlocalize_font_layout(NSString *ttfPath, NSString *pa
     NSString *contextDir = [[keyDir stringByAppendingPathComponent:@"Font"] stringByAppendingPathComponent:@"Context"];
 
     NSError *dirErr = nil;
-    [fm createDirectoryAtPath:titleDir withIntermediateDirectories:YES attributes:nil error:&dirErr];
-    [fm createDirectoryAtPath:contextDir withIntermediateDirectories:YES attributes:nil error:&dirErr];
+    if (![fm createDirectoryAtPath:titleDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        ZLog(@"[ZSFont] createDirectoryAtPath failed for %@: %@", titleDir, dirErr);
+    }
+    dirErr = nil;
+    if (![fm createDirectoryAtPath:contextDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        ZLog(@"[ZSFont] createDirectoryAtPath failed for %@: %@", contextDir, dirErr);
+    }
 
     NSString *fileName = ttfPath.lastPathComponent;
     NSString *titleDest = [titleDir stringByAppendingPathComponent:fileName];
     NSString *contextDest = [contextDir stringByAppendingPathComponent:fileName];
 
     NSError *copyErr = nil;
-    if (![fm fileExistsAtPath:titleDest]) {
-        [fm copyItemAtPath:ttfPath toPath:titleDest error:&copyErr];
+    if (![fm fileExistsAtPath:titleDest] && ![fm copyItemAtPath:ttfPath toPath:titleDest error:&copyErr]) {
+        ZLog(@"[ZSFont] copyItemAtPath failed for %@: %@", titleDest, copyErr);
     }
     copyErr = nil;
-    if (![fm fileExistsAtPath:contextDest]) {
-        [fm copyItemAtPath:ttfPath toPath:contextDest error:&copyErr];
+    if (![fm fileExistsAtPath:contextDest] && ![fm copyItemAtPath:ttfPath toPath:contextDest error:&copyErr]) {
+        ZLog(@"[ZSFont] copyItemAtPath failed for %@: %@", contextDest, copyErr);
     }
 
     return [fm fileExistsAtPath:titleDest] && [fm fileExistsAtPath:contextDest];
