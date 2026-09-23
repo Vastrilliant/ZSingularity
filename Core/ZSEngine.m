@@ -1723,39 +1723,41 @@ static void zs_apply_custom_font_if_present(void) {
     BOOL haveCurrent = zs_read_custom_localize_fonts(&currentTitle, &currentContext);
     ZLog(@"[ZSFont] apply: cachedUsable=%d cached=%p/%p current(haveCurrent=%d)=%p/%p",
          cachedFontsUsable, g_zsCustomFontTitle, g_zsCustomFontContext, haveCurrent, currentTitle, currentContext);
-    if (cachedFontsUsable && haveCurrent && currentTitle == g_zsCustomFontTitle && currentContext == g_zsCustomFontContext) {
-        ZLog(@"[ZSFont] apply: already installed, nothing to do");
-        return;
-    }
+    BOOL alreadyInstalled = cachedFontsUsable && haveCurrent && currentTitle == g_zsCustomFontTitle && currentContext == g_zsCustomFontContext;
 
     void *titleFont = g_zsCustomFontTitle;
     void *contextFont = g_zsCustomFontContext;
-    if (!cachedFontsUsable) {
-        titleFont = zs_load_custom_font(titlePath);
-        if (!titleFont) {
-            ZLog(@"[ZSFont] apply: aborting, title font failed to load");
+
+    if (!alreadyInstalled) {
+        if (!cachedFontsUsable) {
+            titleFont = zs_load_custom_font(titlePath);
+            if (!titleFont) {
+                ZLog(@"[ZSFont] apply: aborting, title font failed to load");
+                return;
+            }
+            contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
+            if (!contextFont) {
+                ZLog(@"[ZSFont] apply: aborting, context font failed to load");
+                return;
+            }
+        }
+
+        g_zsCustomFontTitle = titleFont;
+        g_zsCustomFontContext = contextFont;
+        g_zsCustomFontSignature = signature;
+
+        if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
+            g_zsCustomFontTitle = NULL;
+            g_zsCustomFontContext = NULL;
+            g_zsCustomFontSignature = nil;
+            ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
             return;
         }
-        contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
-        if (!contextFont) {
-            ZLog(@"[ZSFont] apply: aborting, context font failed to load");
-            return;
-        }
+
+        ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
+    } else {
+        ZLog(@"[ZSFont] apply: already installed, refreshing consumers for the current scene");
     }
-
-    g_zsCustomFontTitle = titleFont;
-    g_zsCustomFontContext = contextFont;
-    g_zsCustomFontSignature = signature;
-
-    if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
-        g_zsCustomFontTitle = NULL;
-        g_zsCustomFontContext = NULL;
-        g_zsCustomFontSignature = nil;
-        ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
-        return;
-    }
-
-    ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
 
     void *fontManagerData = zs_load_font_manager_data();
     zs_refresh_font_consumers(fontManagerData);
