@@ -114,7 +114,7 @@ static void *ZSFindChildTransform(void *transform, NSString *name) {
     if (!findMethod) return NULL;
     void *nameString = [IL2CppBridge il2CppStringFromNSString:name];
     if (!nameString) return NULL;
-    void *args[1] = { &nameString };
+    void *args[1] = { nameString };
     void *exc = NULL;
     void *result = [IL2CppBridge invokeMethod:findMethod onInstance:transform args:args outException:&exc];
     if (exc) return NULL;
@@ -129,7 +129,7 @@ static void ZSSetDropdownTemplate(void *dropdown, void *templateRectTransform) {
         ZLog(@"[CustomLocalizeEnable] set_template not found on dropdown class");
         return;
     }
-    void *args[1] = { &templateRectTransform };
+    void *args[1] = { templateRectTransform };
     void *exc = NULL;
     [IL2CppBridge invokeMethod:setTemplate onInstance:dropdown args:args outException:&exc];
     if (exc) {
