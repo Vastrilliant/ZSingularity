@@ -1324,117 +1324,50 @@ static NSString *zs_first_custom_font_path(void) {
     return nil;
 }
 
-static NSString *zs_nsstring_from_il2cpp_string(void *ilStr) {
-    if (!ilStr) return nil;
-    int32_t length = *(int32_t *)((uint8_t *)ilStr + 0x10);
-    if (length <= 0) return length == 0 ? @"" : nil;
-    const uint16_t *chars = (const uint16_t *)((uint8_t *)ilStr + 0x14);
-    return [[NSString alloc] initWithBytes:chars length:(NSUInteger)length * 2 encoding:NSUTF16LittleEndianStringEncoding];
-}
+static void zs_apply_font_to_all_live_tmp_text(void *fontAsset, void *fontMaterial) {
+    void *tmpTextClass = mt_class("TMPro", "TMP_Text", "Unity.TextMeshPro");
+    if (!tmpTextClass) return;
 
-static const char *kZSCustomLocalizeKey = "ZSCustomFont";
+    const void *setFontMethod = mt_method(tmpTextClass, "set_font", 1);
+    if (!setFontMethod) return;
+    const void *setMaterialMethod = mt_method(tmpTextClass, "set_fontSharedMaterial", 1);
+    const void *forceMeshUpdateMethod = mt_method(tmpTextClass, "ForceMeshUpdate", 2);
 
-static NSString *zs_customlocalize_parent_path(void) {
-    void *klass = mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
-    const void *method = mt_method(klass, "GetParentPath", 0);
-    if (!method) return nil;
-    void *exc = NULL;
-    void *result = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
-    if (exc || !result) return nil;
-    NSString *raw = zs_nsstring_from_il2cpp_string(result);
-    if (!raw.length) return nil;
-    if ([raw hasPrefix:@"/"]) return raw;
-    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *documentsDir = paths.firstObject;
-    if (!documentsDir) return nil;
-    return [documentsDir stringByAppendingPathComponent:raw];
-}
+    NSUInteger count = 0;
+    void *array = zs_resources_find_all_for_class(tmpTextClass, &count);
+    if (!array) return;
 
-static BOOL zs_ensure_customlocalize_font_layout(NSString *ttfPath, NSString *parentPath) {
-    if (!ttfPath || !parentPath) return NO;
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *keyDir = [parentPath stringByAppendingPathComponent:@(kZSCustomLocalizeKey)];
-    NSString *titleDir = [[keyDir stringByAppendingPathComponent:@"Font"] stringByAppendingPathComponent:@"Title"];
-    NSString *contextDir = [[keyDir stringByAppendingPathComponent:@"Font"] stringByAppendingPathComponent:@"Context"];
+    NSUInteger updated = 0;
+    for (NSUInteger i = 0; i < count; i++) {
+        void *instance = zs_array_object_at(array, i);
+        if (!instance) continue;
 
-    NSError *dirErr = nil;
-    if (![fm createDirectoryAtPath:titleDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
-        ZLog(@"[ZSFont] createDirectoryAtPath failed for %@: %@", titleDir, dirErr);
-    }
-    dirErr = nil;
-    if (![fm createDirectoryAtPath:contextDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
-        ZLog(@"[ZSFont] createDirectoryAtPath failed for %@: %@", contextDir, dirErr);
-    }
+        void *fontArgs[1] = { fontAsset };
+        void *fontExc = NULL;
+        [IL2CppBridge invokeMethod:setFontMethod onInstance:instance args:fontArgs outException:&fontExc];
+        if (fontExc) continue;
 
-    NSString *fileName = ttfPath.lastPathComponent;
-    NSString *titleDest = [titleDir stringByAppendingPathComponent:fileName];
-    NSString *contextDest = [contextDir stringByAppendingPathComponent:fileName];
-
-    NSError *copyErr = nil;
-    if (![fm fileExistsAtPath:titleDest] && ![fm copyItemAtPath:ttfPath toPath:titleDest error:&copyErr]) {
-        ZLog(@"[ZSFont] copyItemAtPath failed for %@: %@", titleDest, copyErr);
-    }
-    copyErr = nil;
-    if (![fm fileExistsAtPath:contextDest] && ![fm copyItemAtPath:ttfPath toPath:contextDest error:&copyErr]) {
-        ZLog(@"[ZSFont] copyItemAtPath failed for %@: %@", contextDest, copyErr);
-    }
-
-    return [fm fileExistsAtPath:titleDest] && [fm fileExistsAtPath:contextDest];
-}
-
-static void zs_apply_custom_localize_font_if_present(void) {
-    NSString *ttfPath = zs_first_custom_font_path();
-    if (!ttfPath) return;
-
-    NSString *parentPath = zs_customlocalize_parent_path();
-    if (!parentPath) {
-        ZLog(@"[ZSFont] CustomLocalizeManager.GetParentPath unavailable");
-        return;
-    }
-
-    if (!zs_ensure_customlocalize_font_layout(ttfPath, parentPath)) {
-        ZLog(@"[ZSFont] failed to lay out CustomLocalize font folder under %@", parentPath);
-        return;
-    }
-
-    void *customLocalizeClass = mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
-
-    const void *refreshMethod = mt_method(customLocalizeClass, "GetCandidates", 0);
-    if (refreshMethod) {
-        void *refreshExc = NULL;
-        [IL2CppBridge invokeMethod:refreshMethod onInstance:NULL args:NULL outException:&refreshExc];
-        if (refreshExc) {
-            ZLog(@"[ZSFont] CustomLocalizeManager.GetCandidates() refresh failed");
+        if (fontMaterial && setMaterialMethod) {
+            void *matArgs[1] = { fontMaterial };
+            void *matExc = NULL;
+            [IL2CppBridge invokeMethod:setMaterialMethod onInstance:instance args:matArgs outException:&matExc];
         }
-    }
 
-    const void *setMethod = mt_method(customLocalizeClass, "SetLastSelectedAndReturn", 1);
-    if (!setMethod) return;
-
-    void *keyStr = [IL2CppBridge il2CppStringFromNSString:@(kZSCustomLocalizeKey)];
-    void *args[1] = { keyStr };
-    void *exc = NULL;
-    void *boxedResult = [IL2CppBridge invokeMethod:setMethod onInstance:NULL args:args outException:&exc];
-    if (exc || !boxedResult) {
-        ZLog(@"[ZSFont] CustomLocalizeManager.SetLastSelectedAndReturn(%s) failed", kZSCustomLocalizeKey);
-        return;
-    }
-
-    void *searchResultClass = mt_class("ProjectMoon.CustomLocalization", "SearchResult", "Assembly-CSharp");
-    BOOL dataExists = NO;
-    if (searchResultClass) {
-        int32_t dataExistOffset = [IL2CppBridge fieldOffsetOnClass:searchResultClass name:"_isDataExist"];
-        if (dataExistOffset >= 0) {
-            dataExists = *(BOOL *)((uint8_t *)boxedResult + dataExistOffset);
+        if (forceMeshUpdateMethod) {
+            BOOL ignoreActiveState = YES;
+            BOOL forceTextReparsing = YES;
+            void *meshArgs[2] = { &ignoreActiveState, &forceTextReparsing };
+            void *meshExc = NULL;
+            [IL2CppBridge invokeMethod:forceMeshUpdateMethod onInstance:instance args:meshArgs outException:&meshExc];
         }
+
+        updated++;
     }
 
-    ZLog(@"[ZSFont] CustomLocalizeManager candidate '%s' selected under %@, dataExists=%d", kZSCustomLocalizeKey, parentPath, dataExists);
+    ZLog(@"[ZSFont] directly applied custom font to %lu/%lu live TMP_Text instance(s)", (unsigned long)updated, (unsigned long)count);
 }
 
 static void zs_apply_custom_font_if_present(void) {
-    zs_apply_custom_localize_font_if_present();
-
     NSString *fontPath = zs_first_custom_font_path();
     if (!fontPath) return;
 
@@ -1454,6 +1387,12 @@ static void zs_apply_custom_font_if_present(void) {
     void *exc = NULL;
     void *fontAsset = [IL2CppBridge invokeMethod:createMethod onInstance:NULL args:args outException:&exc];
     if (exc || !fontAsset) return;
+
+    const void *earlyGetMaterialMethod = mt_method(tmpFontAssetClass, "get_material", 0);
+    void *earlyMaterialExc = NULL;
+    void *earlyFontMaterial = earlyGetMaterialMethod ? [IL2CppBridge invokeMethod:earlyGetMaterialMethod onInstance:fontAsset args:NULL outException:&earlyMaterialExc] : NULL;
+    if (earlyMaterialExc) earlyFontMaterial = NULL;
+    zs_apply_font_to_all_live_tmp_text(fontAsset, earlyFontMaterial);
 
     void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
     void *fontSetClass = mt_class("UtilityUI", "FontSet", "Assembly-CSharp");
