@@ -7,6 +7,7 @@
 #import <unistd.h>
 
 static void *gZSForcedLangPathString;
+static void *gZSCustomLocalizeDropdown;
 
 static NSString *ZSCustomLangStagingDirectory(void) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -79,6 +80,33 @@ static void ZSSetComponentGameObjectActive(void *component, BOOL active) {
     [IL2CppBridge invokeMethod:setActive onInstance:gameObject args:args outException:&exc];
 }
 
+static void ZSSetSelectableInteractable(void *component, BOOL interactable) {
+    if (!component) return;
+    void *klass = [IL2CppBridge classOfInstance:component];
+    const void *setInteractable = [IL2CppBridge methodOnClass:klass name:"set_interactable" argCount:1];
+    if (!setInteractable) {
+        ZLog(@"[CustomLocalizeEnable] set_interactable not found on dropdown class");
+        return;
+    }
+    void *args[1] = { &interactable };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:setInteractable onInstance:component args:args outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] set_interactable raised a managed exception");
+    }
+}
+
+static void *ZSResolveCustomLocalizeDropdown(void *loginInstance, void *loginKlass) {
+    int32_t popupOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"_customLocalizePopup"];
+    if (popupOff < 0) return NULL;
+    void *popup = *(void **)((uint8_t *)loginInstance + popupOff);
+    if (!popup) return NULL;
+    void *popupKlass = [IL2CppBridge classOfInstance:popup];
+    int32_t dropdownOff = [IL2CppBridge fieldOffsetOnClass:popupKlass name:"tmp_dropdown"];
+    if (dropdownOff < 0) return NULL;
+    return *(void **)((uint8_t *)popup + dropdownOff);
+}
+
 static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
     void *loginKlass = ZSFindClass("LoginSceneManager", "");
     if (!loginKlass) return NO;
@@ -96,6 +124,15 @@ static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
     ZSSetComponentGameObjectActive(customBtn, YES);
     ZSSetComponentGameObjectActive(clearBtn, NO);
     ZLog(@"[CustomLocalizeEnable] forced btn_customLocalize visible on LoginSceneManager");
+
+    void *dropdown = ZSResolveCustomLocalizeDropdown(loginInstance, loginKlass);
+    if (dropdown) {
+        gZSCustomLocalizeDropdown = dropdown;
+        ZSSetSelectableInteractable(dropdown, YES);
+        ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup");
+    } else {
+        ZLog(@"[CustomLocalizeEnable] couldn't resolve tmp_dropdown on CustomLocalizeSettingsUIPopup");
+    }
     return YES;
 }
 
@@ -191,6 +228,14 @@ static void *zs_custom_localize_enable_thread(void *arg) {
     }
     if (!fixedButton) {
         ZLog(@"[CustomLocalizeEnable] never found a live LoginSceneManager to fix up the button");
+        return NULL;
+    }
+
+    while (gZSCustomLocalizeDropdown) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            ZSSetSelectableInteractable(gZSCustomLocalizeDropdown, YES);
+        });
+        usleep(300 * 1000);
     }
 
     return NULL;
