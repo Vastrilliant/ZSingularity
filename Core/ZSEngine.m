@@ -1385,11 +1385,12 @@ static void zs_apply_custom_font_if_present(void) {
     void *fontMaterial = getMaterialMethod ? [IL2CppBridge invokeMethod:getMaterialMethod onInstance:fontAsset args:NULL outException:&materialExc] : NULL;
     if (materialExc) fontMaterial = NULL;
 
+    int32_t *materialOffsetsPtr = materialOffsets;
     void (^applyFontAssetStruct)(uint8_t *) = ^(uint8_t *base) {
         *(void **)(base + fontAssetOffset) = fontAsset;
         if (!fontMaterial) return;
         for (size_t i = 0; i < materialFieldCount; i++) {
-            *(void **)(base + materialOffsets[i]) = fontMaterial;
+            *(void **)(base + materialOffsetsPtr[i]) = fontMaterial;
         }
     };
 
