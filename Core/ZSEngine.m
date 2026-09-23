@@ -1398,6 +1398,16 @@ static void zs_apply_custom_localize_font_if_present(void) {
     }
 
     void *customLocalizeClass = mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
+
+    const void *refreshMethod = mt_method(customLocalizeClass, "GetCandidates", 0);
+    if (refreshMethod) {
+        void *refreshExc = NULL;
+        [IL2CppBridge invokeMethod:refreshMethod onInstance:NULL args:NULL outException:&refreshExc];
+        if (refreshExc) {
+            ZLog(@"[ZSFont] CustomLocalizeManager.GetCandidates() refresh failed");
+        }
+    }
+
     const void *setMethod = mt_method(customLocalizeClass, "SetLastSelectedAndReturn", 1);
     if (!setMethod) return;
 
