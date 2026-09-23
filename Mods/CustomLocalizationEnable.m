@@ -10,6 +10,7 @@ static void *gZSForcedLangPathString;
 static void *gZSCustomLocalizeDropdown;
 static void *gZSCustomLocalizePopup;
 static void *gZSGameStartTouchTrigger;
+static BOOL gZSCustomLocalizeTemplateFixed;
 
 static NSString *ZSCustomLangStagingDirectory(void) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -139,15 +140,15 @@ static void ZSSetDropdownTemplate(void *dropdown, void *templateRectTransform) {
     }
 }
 
-static void ZSFixCustomLocalizeDropdownTemplate(void *dropdown) {
+static BOOL ZSFixCustomLocalizeDropdownTemplate(void *dropdown) {
     void *dropdownTransform = ZSTransformOfComponent(dropdown);
     void *templateTransform = ZSFindChildTransform(dropdownTransform, @"Template");
     if (!templateTransform) {
-        ZLog(@"[CustomLocalizeEnable] couldn't find a Template child under tmp_dropdown");
-        return;
+        return NO;
     }
     ZSSetDropdownTemplate(dropdown, templateTransform);
     ZLog(@"[CustomLocalizeEnable] rewired tmp_dropdown.template to the Template child transform");
+    return YES;
 }
 
 static BOOL ZSUnboxBoolean(void *boxed) {
@@ -211,8 +212,8 @@ static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
     if (dropdown) {
         gZSCustomLocalizeDropdown = dropdown;
         ZSSetSelectableInteractable(dropdown, YES);
-        ZSFixCustomLocalizeDropdownTemplate(dropdown);
-        ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup");
+        gZSCustomLocalizeTemplateFixed = ZSFixCustomLocalizeDropdownTemplate(dropdown);
+        ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup (template fixed: %d)", gZSCustomLocalizeTemplateFixed);
     } else {
         ZLog(@"[CustomLocalizeEnable] couldn't resolve tmp_dropdown on CustomLocalizeSettingsUIPopup");
     }
@@ -317,6 +318,9 @@ static void *zs_custom_localize_enable_thread(void *arg) {
     while (gZSCustomLocalizeDropdown) {
         dispatch_sync(dispatch_get_main_queue(), ^{
             ZSSetSelectableInteractable(gZSCustomLocalizeDropdown, YES);
+            if (!gZSCustomLocalizeTemplateFixed) {
+                gZSCustomLocalizeTemplateFixed = ZSFixCustomLocalizeDropdownTemplate(gZSCustomLocalizeDropdown);
+            }
             if (gZSGameStartTouchTrigger && gZSCustomLocalizePopup) {
                 BOOL popupOpen = ZSComponentGameObjectActiveInHierarchy(gZSCustomLocalizePopup);
                 ZSSetComponentGameObjectActive(gZSGameStartTouchTrigger, !popupOpen);
