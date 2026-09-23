@@ -48,6 +48,42 @@ static void ZSHookMethodPointer(const void *method, void *replacement) {
     *(void **)(uintptr_t)method = replacement;
 }
 
+static void ZSSetComponentGameObjectActive(void *component, BOOL active) {
+    if (!component) return;
+    void *klass = [IL2CppBridge classOfInstance:component];
+    const void *getGameObject = [IL2CppBridge methodOnClass:klass name:"get_gameObject" argCount:0];
+    if (!getGameObject) return;
+    void *exc = NULL;
+    void *gameObject = [IL2CppBridge invokeMethod:getGameObject onInstance:component args:NULL outException:&exc];
+    if (exc || !gameObject) return;
+    void *goClass = [IL2CppBridge classOfInstance:gameObject];
+    const void *setActive = [IL2CppBridge methodOnClass:goClass name:"SetActive" argCount:1];
+    if (!setActive) return;
+    void *args[1] = { &active };
+    exc = NULL;
+    [IL2CppBridge invokeMethod:setActive onInstance:gameObject args:args outException:&exc];
+}
+
+static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
+    void *loginKlass = ZSFindClass("LoginSceneManager", "");
+    if (!loginKlass) return NO;
+    void *loginInstance = [IL2CppBridge findFirstLiveInstanceOfClass:loginKlass];
+    if (!loginInstance) return NO;
+
+    int32_t customOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"btn_customLocalize"];
+    int32_t clearOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"btn_allCacheClear"];
+    if (customOff < 0 || clearOff < 0) return NO;
+
+    void *customBtn = *(void **)((uint8_t *)loginInstance + customOff);
+    void *clearBtn = *(void **)((uint8_t *)loginInstance + clearOff);
+    if (!customBtn) return NO;
+
+    ZSSetComponentGameObjectActive(customBtn, YES);
+    ZSSetComponentGameObjectActive(clearBtn, NO);
+    ZLog(@"[CustomLocalizeEnable] forced btn_customLocalize visible on LoginSceneManager");
+    return YES;
+}
+
 static void *zs_custom_localize_enable_thread(void *arg) {
     (void)arg;
 
@@ -124,6 +160,21 @@ static void *zs_custom_localize_enable_thread(void *arg) {
             ZLog(@"[CustomLocalizeEnable] IsRunning method not found for hooking");
         }
     });
+
+    int loginAttempts = 0;
+    __block BOOL fixedButton = NO;
+    while (!fixedButton && loginAttempts < 150) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            fixedButton = ZSFixLoginSceneCustomLocalizeButton();
+        });
+        if (!fixedButton) {
+            usleep(200 * 1000);
+            loginAttempts++;
+        }
+    }
+    if (!fixedButton) {
+        ZLog(@"[CustomLocalizeEnable] never found a live LoginSceneManager to fix up the button");
+    }
 
     return NULL;
 }
