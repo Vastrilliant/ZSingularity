@@ -8,6 +8,8 @@
 
 static void *gZSForcedLangPathString;
 static void *gZSCustomLocalizeDropdown;
+static void *gZSCustomLocalizePopup;
+static void *gZSGameStartTouchTrigger;
 
 static NSString *ZSCustomLangStagingDirectory(void) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -148,11 +150,34 @@ static void ZSFixCustomLocalizeDropdownTemplate(void *dropdown) {
     ZLog(@"[CustomLocalizeEnable] rewired tmp_dropdown.template to the Template child transform");
 }
 
+static BOOL ZSUnboxBoolean(void *boxed) {
+    if (!boxed) return NO;
+    return *(uint8_t *)((uint8_t *)boxed + 0x10) != 0;
+}
+
+static BOOL ZSComponentGameObjectActiveInHierarchy(void *component) {
+    if (!component) return NO;
+    void *klass = [IL2CppBridge classOfInstance:component];
+    const void *getGameObject = [IL2CppBridge methodOnClass:klass name:"get_gameObject" argCount:0];
+    if (!getGameObject) return NO;
+    void *exc = NULL;
+    void *gameObject = [IL2CppBridge invokeMethod:getGameObject onInstance:component args:NULL outException:&exc];
+    if (exc || !gameObject) return NO;
+    void *goClass = [IL2CppBridge classOfInstance:gameObject];
+    const void *getActive = [IL2CppBridge methodOnClass:goClass name:"get_activeInHierarchy" argCount:0];
+    if (!getActive) return NO;
+    exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:getActive onInstance:gameObject args:NULL outException:&exc];
+    if (exc) return NO;
+    return ZSUnboxBoolean(boxed);
+}
+
 static void *ZSResolveCustomLocalizeDropdown(void *loginInstance, void *loginKlass) {
     int32_t popupOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"_customLocalizePopup"];
     if (popupOff < 0) return NULL;
     void *popup = *(void **)((uint8_t *)loginInstance + popupOff);
     if (!popup) return NULL;
+    gZSCustomLocalizePopup = popup;
     void *popupKlass = [IL2CppBridge classOfInstance:popup];
     int32_t dropdownOff = [IL2CppBridge fieldOffsetOnClass:popupKlass name:"tmp_dropdown"];
     if (dropdownOff < 0) return NULL;
@@ -167,11 +192,16 @@ static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
 
     int32_t customOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"btn_customLocalize"];
     int32_t clearOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"btn_allCacheClear"];
+    int32_t triggerOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"trigger_gameStart"];
     if (customOff < 0 || clearOff < 0) return NO;
 
     void *customBtn = *(void **)((uint8_t *)loginInstance + customOff);
     void *clearBtn = *(void **)((uint8_t *)loginInstance + clearOff);
     if (!customBtn) return NO;
+
+    if (triggerOff >= 0) {
+        gZSGameStartTouchTrigger = *(void **)((uint8_t *)loginInstance + triggerOff);
+    }
 
     ZSSetComponentGameObjectActive(customBtn, YES);
     ZSSetComponentGameObjectActive(clearBtn, NO);
@@ -287,8 +317,12 @@ static void *zs_custom_localize_enable_thread(void *arg) {
     while (gZSCustomLocalizeDropdown) {
         dispatch_sync(dispatch_get_main_queue(), ^{
             ZSSetSelectableInteractable(gZSCustomLocalizeDropdown, YES);
+            if (gZSGameStartTouchTrigger && gZSCustomLocalizePopup) {
+                BOOL popupOpen = ZSComponentGameObjectActiveInHierarchy(gZSCustomLocalizePopup);
+                ZSSetComponentGameObjectActive(gZSGameStartTouchTrigger, !popupOpen);
+            }
         });
-        usleep(300 * 1000);
+        usleep(150 * 1000);
     }
 
     return NULL;
