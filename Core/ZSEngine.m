@@ -1529,7 +1529,7 @@ static void zs_apply_custom_font_if_present(void) {
         }
     }
 
-    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "TextMeshProLanguageSetter" };
+    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "PretendardFontSetter", "TextMeshProLanguageSetter" };
     for (size_t i = 0; i < sizeof(setterClassNames) / sizeof(setterClassNames[0]); i++) {
         void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
         if (!setterClass) continue;
@@ -1589,6 +1589,8 @@ static void zs_apply_custom_font_if_present(void) {
     }
 
     ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
+
+    zs_apply_font_to_all_live_tmp_text(fontAsset, fontMaterial);
 }
 
 static const double kFontApplyDelaySeconds = 2.0;
