@@ -96,6 +96,58 @@ static void ZSSetSelectableInteractable(void *component, BOOL interactable) {
     }
 }
 
+static void *ZSTransformOfComponent(void *component) {
+    if (!component) return NULL;
+    void *klass = [IL2CppBridge classOfInstance:component];
+    const void *getTransform = [IL2CppBridge methodOnClass:klass name:"get_transform" argCount:0];
+    if (!getTransform) return NULL;
+    void *exc = NULL;
+    void *transform = [IL2CppBridge invokeMethod:getTransform onInstance:component args:NULL outException:&exc];
+    if (exc) return NULL;
+    return transform;
+}
+
+static void *ZSFindChildTransform(void *transform, NSString *name) {
+    if (!transform) return NULL;
+    void *klass = [IL2CppBridge classOfInstance:transform];
+    const void *findMethod = [IL2CppBridge methodOnClass:klass name:"Find" argCount:1];
+    if (!findMethod) return NULL;
+    void *nameString = [IL2CppBridge il2CppStringFromNSString:name];
+    if (!nameString) return NULL;
+    void *args[1] = { &nameString };
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:findMethod onInstance:transform args:args outException:&exc];
+    if (exc) return NULL;
+    return result;
+}
+
+static void ZSSetDropdownTemplate(void *dropdown, void *templateRectTransform) {
+    if (!dropdown || !templateRectTransform) return;
+    void *klass = [IL2CppBridge classOfInstance:dropdown];
+    const void *setTemplate = [IL2CppBridge methodOnClass:klass name:"set_template" argCount:1];
+    if (!setTemplate) {
+        ZLog(@"[CustomLocalizeEnable] set_template not found on dropdown class");
+        return;
+    }
+    void *args[1] = { &templateRectTransform };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:setTemplate onInstance:dropdown args:args outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] set_template raised a managed exception");
+    }
+}
+
+static void ZSFixCustomLocalizeDropdownTemplate(void *dropdown) {
+    void *dropdownTransform = ZSTransformOfComponent(dropdown);
+    void *templateTransform = ZSFindChildTransform(dropdownTransform, @"Template");
+    if (!templateTransform) {
+        ZLog(@"[CustomLocalizeEnable] couldn't find a Template child under tmp_dropdown");
+        return;
+    }
+    ZSSetDropdownTemplate(dropdown, templateTransform);
+    ZLog(@"[CustomLocalizeEnable] rewired tmp_dropdown.template to the Template child transform");
+}
+
 static void *ZSResolveCustomLocalizeDropdown(void *loginInstance, void *loginKlass) {
     int32_t popupOff = [IL2CppBridge fieldOffsetOnClass:loginKlass name:"_customLocalizePopup"];
     if (popupOff < 0) return NULL;
@@ -129,6 +181,7 @@ static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
     if (dropdown) {
         gZSCustomLocalizeDropdown = dropdown;
         ZSSetSelectableInteractable(dropdown, YES);
+        ZSFixCustomLocalizeDropdownTemplate(dropdown);
         ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup");
     } else {
         ZLog(@"[CustomLocalizeEnable] couldn't resolve tmp_dropdown on CustomLocalizeSettingsUIPopup");
