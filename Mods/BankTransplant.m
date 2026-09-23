@@ -2,6 +2,7 @@
 #import "BankTransplant.h"
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
+#import "ZSModsPaths.h"
 #import <CoreFoundation/CoreFoundation.h>
 
 NSString * const BankTransplantErrorDomain = @"BankTransplantErrorDomain";
@@ -29,11 +30,17 @@ static NSString * const kBTMobileBuildsRelativePath = @"Assets/Sound/FMODBuilds/
     return [documentsDir stringByAppendingPathComponent:kBTMobileBuildsRelativePath];
 }
 
-+ (NSString *)bankBackupDirectory {
++ (nullable NSString *)bt_legacyBankBackupDirectory {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
     NSString *libraryDir = paths.firstObject;
     if (!libraryDir) return nil;
     return [libraryDir stringByAppendingPathComponent:@"ZSingularityBankBackups"];
+}
+
++ (NSString *)bankBackupDirectory {
+    NSString *newDir = [ZSModsPaths modsBackupsBanksDirectory];
+    [ZSModsPaths migrateLegacyDirectoryAtPath:[self bt_legacyBankBackupDirectory] toPath:newDir];
+    return newDir;
 }
 
 + (BOOL)transplantAndSwapModdedBankAtURL:(NSURL *)moddedURL error:(NSError **)error {

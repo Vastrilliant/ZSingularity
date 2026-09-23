@@ -3,6 +3,7 @@
 #import "BankTransplant.h"
 #import "LocalizationMods.h"
 #import "UnityBundleTools.h"
+#import "ZSModsPaths.h"
 #import <compression.h>
 
 #pragma mark - LunartiqueModArchive
@@ -623,6 +624,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
 @end
 
 @interface ModAssetLibrary ()
++ (nullable NSString *)mal_legacyModLibraryRootDirectory;
 + (NSString *)mal_manifestPathForFolder:(NSString *)folderName;
 + (NSString *)mal_remarkPathForFolder:(NSString *)folderName;
 + (BOOL)mal_writeEntries:(NSArray<ModAssetLibraryEntry *> *)entries toFolder:(NSString *)folderName error:(NSError **)error;
@@ -646,11 +648,40 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     return [self mal_sandboxRelativePath:installedURL.path];
 }
 
-+ (NSString *)modLibraryRootDirectory {
++ (nullable NSString *)mal_legacyModLibraryRootDirectory {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
     NSString *libraryDir = paths.firstObject;
     if (!libraryDir) return nil;
     return [libraryDir stringByAppendingPathComponent:@"ZSingularityModsLibrary"];
+}
+
++ (NSString *)modLibraryRootDirectory {
+    NSString *newDir = [ZSModsPaths modsLibraryDirectory];
+    NSString *legacyDir = [self mal_legacyModLibraryRootDirectory];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL legacyIsDir = NO;
+    BOOL legacyExists = legacyDir.length > 0 && [fm fileExistsAtPath:legacyDir isDirectory:&legacyIsDir] && legacyIsDir;
+    if (legacyExists && ![fm fileExistsAtPath:newDir]) {
+
+        NSString *legacyBackups = [legacyDir stringByAppendingPathComponent:kMALOriginalBundleBackupsDirectoryName];
+        BOOL legacyBackupsIsDir = NO;
+        BOOL legacyBackupsExists = [fm fileExistsAtPath:legacyBackups isDirectory:&legacyBackupsIsDir] && legacyBackupsIsDir;
+        NSString *stagedBackups = nil;
+        if (legacyBackupsExists) {
+            stagedBackups = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+            [fm moveItemAtPath:legacyBackups toPath:stagedBackups error:nil];
+        }
+
+        [ZSModsPaths migrateLegacyDirectoryAtPath:legacyDir toPath:newDir];
+
+        if (stagedBackups) {
+            NSString *newAssetsBackups = [ZSModsPaths modsBackupsAssetsDirectory];
+            [ZSModsPaths migrateLegacyDirectoryAtPath:stagedBackups toPath:newAssetsBackups];
+            [fm removeItemAtPath:stagedBackups error:nil];
+        }
+    }
+    return newDir;
 }
 
 + (NSString *)mal_manifestPathForFolder:(NSString *)folderName {
@@ -664,9 +695,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
 }
 
 + (NSString *)originalBundleBackupsDirectory {
-    NSString *root = [self modLibraryRootDirectory];
-    if (!root) return nil;
-    return [root stringByAppendingPathComponent:kMALOriginalBundleBackupsDirectoryName];
+    return [ZSModsPaths modsBackupsAssetsDirectory];
 }
 
 + (NSArray<NSString *> *)folderNames {
@@ -678,7 +707,6 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:root error:nil] ?: @[];
     NSMutableArray<NSString *> *folders = [NSMutableArray array];
     for (NSString *entry in entries) {
-        if ([entry isEqualToString:kMALOriginalBundleBackupsDirectoryName]) continue;
         NSString *full = [root stringByAppendingPathComponent:entry];
         BOOL entryIsDir = NO;
         if ([fm fileExistsAtPath:full isDirectory:&entryIsDir] && entryIsDir) {
@@ -1023,6 +1051,31 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     return [NSString stringWithFormat:@"%@: rejected - its CAB identifier could not be found, meaning it's either malformed or outdated", displayName];
 }
 
++ (BOOL)activateFontForEntry:(ModAssetLibraryEntry *)entry error:(NSError **)error {
+    [self deactivateFontForEntry:entry];
+    NSString *fontsDir = [ZSModsPaths ensuredDirectoryAtPath:[ZSModsPaths modsFontsDirectory]];
+    if (!fontsDir) {
+        if (error) *error = MALError(ModAssetLibraryErrorCopyFailed, @"Couldn't prepare the Fonts directory.");
+        return NO;
+    }
+    NSString *destName = [self mal_uniqueFileNameFor:entry.fileName inFolder:fontsDir];
+    NSString *destPath = [fontsDir stringByAppendingPathComponent:destName];
+    NSError *copyErr = nil;
+    if (![NSFileManager.defaultManager copyItemAtPath:entry.path toPath:destPath error:&copyErr]) {
+        if (error) *error = copyErr ?: MALError(ModAssetLibraryErrorCopyFailed, @"Couldn't activate the font file.");
+        return NO;
+    }
+    entry.livePathDescription = [self mal_sandboxRelativePath:destPath];
+    return YES;
+}
+
++ (void)deactivateFontForEntry:(ModAssetLibraryEntry *)entry {
+    NSString *fontsDir = [ZSModsPaths modsFontsDirectory];
+    NSString *fontFileName = entry.livePathDescription.lastPathComponent;
+    if (fontsDir.length == 0 || fontFileName.length == 0) return;
+    [NSFileManager.defaultManager removeItemAtPath:[fontsDir stringByAppendingPathComponent:fontFileName] error:nil];
+}
+
 + (BOOL)importFileURLs:(NSArray<NSURL *> *)moddedURLs
              intoFolder:(NSString *)folderName
         rejectedFileLines:(NSArray<NSString *> * _Nullable * _Nullable)rejectedFileLines
@@ -1147,6 +1200,14 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
 
         entry.livePathDescription = [self mal_livePathDescriptionForFileName:destName];
         entry.resolvedInstallTargetPath = resolvedTargetPath;
+
+        if ([ZSModsPaths fontKindForFileName:destName] != ZSFontKindUnknown) {
+            NSError *fontErr = nil;
+            if (![self activateFontForEntry:entry error:&fontErr]) {
+                ZLog(@"[ModAssetLibrary] couldn't activate font %@: %@", destName, fontErr.localizedDescription);
+            }
+        }
+
         [entries addObject:entry];
         importedCount++;
     }

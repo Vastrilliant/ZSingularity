@@ -193,6 +193,10 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
               intoFolder:(NSString *)folderName
                    error:(NSError **)error;
 
++ (BOOL)activateFontForEntry:(ModAssetLibraryEntry *)entry error:(NSError **)error;
+
++ (void)deactivateFontForEntry:(ModAssetLibraryEntry *)entry;
+
 + (BOOL)removeEntry:(ModAssetLibraryEntry *)entry fromFolder:(NSString *)folderName error:(NSError **)error;
 
 + (nullable ModAssetLibraryEntry *)moveEntry:(ModAssetLibraryEntry *)entry

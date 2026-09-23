@@ -3,6 +3,7 @@
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
 #import "UnityBundleTools.h"
+#import "ZSModsPaths.h"
 
 NSString * const LocalizationTransplantErrorDomain = @"LocalizationTransplantErrorDomain";
 
@@ -166,11 +167,17 @@ static NSString *LTPackFingerprint(NSString *packPath) {
     return localizeDir ? [localizeDir stringByAppendingPathComponent:languageCode] : nil;
 }
 
-+ (nullable NSString *)backupDirectory {
++ (nullable NSString *)lt_legacyBackupDirectory {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
     NSString *libraryDir = paths.firstObject;
     if (!libraryDir) return nil;
     return [libraryDir stringByAppendingPathComponent:@"ZSingularityLocalizeBackups"];
+}
+
++ (nullable NSString *)backupDirectory {
+    NSString *newDir = [ZSModsPaths modsBackupsLocalizeDirectory];
+    [ZSModsPaths migrateLegacyDirectoryAtPath:[self lt_legacyBackupDirectory] toPath:newDir];
+    return newDir;
 }
 
 + (BOOL)isJunkArchivePathComponents:(NSArray<NSString *> *)components {

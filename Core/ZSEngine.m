@@ -10,6 +10,7 @@
 #import <math.h>
 #include <stdint.h>
 #import "UnityBundleTools.h"
+#import "ZSModsPaths.h"
 
 #pragma mark - ZSScripts
 
@@ -1350,13 +1351,19 @@ static NSString *zs_hex_string(const void *bytes, size_t length) {
     return out;
 }
 
-static NSString *zs_custom_font_directory(void) {
+static NSString *zs_legacy_custom_font_directory(void) {
     NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    if (!documentsDir) {
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:@"Fonts"];
+}
+
+static NSString *zs_custom_font_directory(void) {
+    NSString *fontsDir = [ZSModsPaths modsFontsDirectory];
+    if (!fontsDir) {
         ZLog(@"[ZSFont] no Documents directory available");
         return nil;
     }
-    NSString *fontsDir = [documentsDir stringByAppendingPathComponent:@"Fonts"];
+    [ZSModsPaths migrateLegacyDirectoryAtPath:zs_legacy_custom_font_directory() toPath:fontsDir];
 
     BOOL isDirectory = NO;
     if (![NSFileManager.defaultManager fileExistsAtPath:fontsDir isDirectory:&isDirectory] || !isDirectory) return nil;
