@@ -910,6 +910,7 @@ static void zs_schedule_particle_apply(void) {
     self.targetFPS = expected;
     zs_set_application_target_fps((int32_t)expected);
     zs_reapply_all_settings_except_experimental();
+    zs_schedule_font_apply();
 }
 
 - (void)battleStatePoll {
