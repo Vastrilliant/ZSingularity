@@ -134,6 +134,7 @@ jobs:
             -ICore -IUI -IMods -IBundleTools -ITranscoder -INetwork -IDiagnostics -IResources -INotifications \
             BundleTools/UnityBundleTools.m \
             Core/IL2CppIntrospection.m \
+            Dumper/ZSDumper.m \
             Core/ZSDumpTypeRegistry.m \
             Core/ZSEngine.m \
             Core/ZSInfoPlistPatch.m \

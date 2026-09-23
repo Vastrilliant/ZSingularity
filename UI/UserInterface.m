@@ -19,6 +19,7 @@
 #import "ModAssetManagement.h"
 #import "UnityBundleTools.h"
 #import "IL2CppIntrospection.h"
+#import "Dumper/ZSDumper.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "ZSEmbeddedFont.h"
@@ -5689,6 +5690,9 @@ static const CGFloat kContentFadeHeight = 22;
     [reapplyButton addTarget:self action:@selector(reapplySettingsTapped) forControlEvents:UIControlEventTouchUpInside];
     UIView *resetReapplyRow = zs_make_grouped_action_pair_row(resetButton, reapplyButton);
 
+    UIButton *dumpIL2CCPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CCP methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [dumpIL2CCPMethodsButton addTarget:self action:@selector(dumpIL2CCPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIButton *deleteSpecificAssetButton = zs_make_grouped_action_button(@"Delete Specific Asset", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
     [deleteSpecificAssetButton addTarget:self action:@selector(deleteSpecificAssetTapped) forControlEvents:UIControlEventTouchUpInside];
 
@@ -5707,6 +5711,7 @@ static const CGFloat kContentFadeHeight = 22;
     UIView *configActionsCard = zs_make_grouped_action_card(@[
         manualIndexButton,
         resetReapplyRow,
+        dumpIL2CCPMethodsButton,
         deleteSpecificAssetButton,
         hardResetButton,
         deleteProxyReleasesButton,
@@ -7324,6 +7329,31 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             }
         });
     });
+}
+
+- (void)dumpIL2CCPMethodsTapped {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (!presenter) return;
+
+    UIAlertController *working = [self zs_presentDylibInstallWorkingAlertWithTitle:@"Dumping IL2CPP…"
+                                                                             message:@"Enumerating loaded assemblies, classes, methods, fields, and properties."];
+    __weak typeof(self) weakSelf = self;
+    [ZSDumper dumpIL2CPPToDocumentsWithCompletion:^(NSURL * _Nullable outputURL, NSError * _Nullable error) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            if (error) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeError];
+                [strongSelf zs_presentModsAlertWithTitle:@"IL2CPP Dump Failed"
+                                                  message:error.localizedDescription ?: @"Unknown error."];
+                return;
+            }
+            [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+            [strongSelf zs_presentModsAlertWithTitle:@"IL2CPP Dump Complete"
+                                              message:[NSString stringWithFormat:@"Saved to %@", outputURL.path ?: @"Documents"]];
+        }];
+    }];
 }
 
 #pragma mark Config (Delete Specific Asset)
