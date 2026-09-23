@@ -20,6 +20,31 @@ static NSString *ZSCustomLangStagingDirectory(void) {
     return [documentsDir stringByAppendingPathComponent:@"Lang"];
 }
 
+static void ZSSeedCustomLocalizeCandidateIfEmpty(NSString *targetDir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:targetDir error:nil];
+    BOOL hasSubdirectory = NO;
+    for (NSString *entry in entries) {
+        NSString *fullPath = [targetDir stringByAppendingPathComponent:entry];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:fullPath isDirectory:&isDir] && isDir) {
+            hasSubdirectory = YES;
+            break;
+        }
+    }
+    if (hasSubdirectory) {
+        ZLog(@"[CustomLocalizeEnable] staging Lang directory already has at least one subdirectory, not seeding");
+        return;
+    }
+    NSString *placeholder = [targetDir stringByAppendingPathComponent:@"Default"];
+    NSError *error = nil;
+    if ([fm createDirectoryAtPath:placeholder withIntermediateDirectories:YES attributes:nil error:&error]) {
+        ZLog(@"[CustomLocalizeEnable] staging Lang directory was empty, seeded placeholder candidate at %@", placeholder);
+    } else {
+        ZLog(@"[CustomLocalizeEnable] failed to seed placeholder candidate directory: %@", error);
+    }
+}
+
 static void *ZSFindClass(const char *className, const char *namespaze) {
     return [IL2CppBridge classNamed:className inNamespace:namespaze assemblyContains:"Assembly-CSharp"];
 }
@@ -413,14 +438,18 @@ static void *zs_custom_localize_enable_thread(void *arg) {
     }
 
     __block NSString *langPath = nil;
+    __block NSString *parentPath = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         langPath = ZSInvokeStaticString(localizeManager, "GetLangDataPath");
+        parentPath = ZSInvokeStaticString(localizeManager, "GetParentPath");
     });
     ZLog(@"[CustomLocalizeEnable] game reports its Lang folder at: %@", langPath ?: @"(nil)");
+    ZLog(@"[CustomLocalizeEnable] game reports its candidate-scan parent path at: %@", parentPath ?: @"(nil)");
 
     NSString *targetDir = ZSCustomLangStagingDirectory();
     if (!targetDir) return NULL;
     [NSFileManager.defaultManager createDirectoryAtPath:targetDir withIntermediateDirectories:YES attributes:nil error:nil];
+    ZSSeedCustomLocalizeCandidateIfEmpty(targetDir);
 
     if (langPath.length > 0) {
         NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -432,19 +461,28 @@ static void *zs_custom_localize_enable_thread(void *arg) {
 
     dispatch_sync(dispatch_get_main_queue(), ^{
         const void *langMethod = [IL2CppBridge methodOnClass:localizeManager name:"GetLangDataPath" argCount:0];
+        const void *parentMethod = [IL2CppBridge methodOnClass:localizeManager name:"GetParentPath" argCount:0];
         const void *runningMethod = [IL2CppBridge methodOnClass:localizeManager name:"IsRunning" argCount:0];
 
-        if (langMethod) {
-            void *forcedString = [IL2CppBridge il2CppStringFromNSString:targetDir];
-            if (forcedString) {
-                gZSForcedLangPathString = forcedString;
-                ZSHookMethodPointer(langMethod, (void *)ZSForcedLangDataPathNative);
-                ZLog(@"[CustomLocalizeEnable] hooked GetLangDataPath to return %@", targetDir);
-            } else {
-                ZLog(@"[CustomLocalizeEnable] failed to create managed string for %@", targetDir);
-            }
+        void *forcedString = [IL2CppBridge il2CppStringFromNSString:targetDir];
+        if (forcedString) {
+            gZSForcedLangPathString = forcedString;
         } else {
+            ZLog(@"[CustomLocalizeEnable] failed to create managed string for %@", targetDir);
+        }
+
+        if (langMethod && forcedString) {
+            ZSHookMethodPointer(langMethod, (void *)ZSForcedLangDataPathNative);
+            ZLog(@"[CustomLocalizeEnable] hooked GetLangDataPath to return %@", targetDir);
+        } else if (!langMethod) {
             ZLog(@"[CustomLocalizeEnable] GetLangDataPath method not found for hooking");
+        }
+
+        if (parentMethod && forcedString) {
+            ZSHookMethodPointer(parentMethod, (void *)ZSForcedLangDataPathNative);
+            ZLog(@"[CustomLocalizeEnable] hooked GetParentPath to return %@", targetDir);
+        } else if (!parentMethod) {
+            ZLog(@"[CustomLocalizeEnable] GetParentPath method not found for hooking");
         }
 
         if (runningMethod) {
