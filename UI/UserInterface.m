@@ -7865,13 +7865,17 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             } else {
                 [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - not a localization .json file (it must start with dataList)", url.lastPathComponent]];
             }
+        } else if ([ZSModsPaths fontKindForFileName:url.lastPathComponent] != ZSFontKindUnknown) {
+
+            [validURLs addObject:url];
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: added to Mods Library - tap Dispatch when ready to send it for processing", url.lastPathComponent]];
         } else if ([self zs_isRecognizedBundleURL:url]) {
 
             [validURLs addObject:url];
             [summaryLines addObject:[NSString stringWithFormat:@"%@: added to Mods Library - tap Dispatch when ready to send it for processing", url.lastPathComponent]];
         } else {
 
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: not a recognized bank or bundle", url.lastPathComponent]];
+            [summaryLines addObject:[NSString stringWithFormat:@"%@: not a recognized asset", url.lastPathComponent]];
         }
     }
 
