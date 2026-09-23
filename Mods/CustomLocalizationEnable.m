@@ -48,6 +48,21 @@ static void ZSHookMethodPointer(const void *method, void *replacement) {
     *(void **)(uintptr_t)method = replacement;
 }
 
+static void ZSResetCustomLocalizeCaches(void *klass) {
+    if (!klass) return;
+    static const char *fieldNames[] = { "_data", "_candidates", "_fonts", "_configFile" };
+    uint8_t zero[64] = {0};
+    for (size_t i = 0; i < sizeof(fieldNames) / sizeof(fieldNames[0]); i++) {
+        void *field = [IL2CppBridge fieldNamed:fieldNames[i] onClass:klass];
+        if (!field) {
+            ZLog(@"[CustomLocalizeEnable] cache field %s not found, skipping reset", fieldNames[i]);
+            continue;
+        }
+        [IL2CppBridge setStaticFieldValue:field fromBuffer:zero];
+        ZLog(@"[CustomLocalizeEnable] reset cached field %s", fieldNames[i]);
+    }
+}
+
 static void ZSSetComponentGameObjectActive(void *component, BOOL active) {
     if (!component) return;
     void *klass = [IL2CppBridge classOfInstance:component];
@@ -159,6 +174,8 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         } else {
             ZLog(@"[CustomLocalizeEnable] IsRunning method not found for hooking");
         }
+
+        ZSResetCustomLocalizeCaches(localizeManager);
     });
 
     int loginAttempts = 0;
