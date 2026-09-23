@@ -80,6 +80,7 @@ typedef char *(*zs_type_get_assembly_qualified_name_fn)(const void *);
 typedef bool (*zs_type_is_static_fn)(const void *);
 typedef bool (*zs_type_is_pointer_type_fn)(const void *);
 typedef void *(*zs_type_get_class_or_element_class_fn)(const void *);
+typedef void (*zs_memory_free_fn)(void *);
 
 typedef struct {
     zs_domain_get_fn domain_get;
@@ -152,6 +153,7 @@ typedef struct {
     zs_type_is_static_fn type_is_static;
     zs_type_is_pointer_type_fn type_is_pointer_type;
     zs_type_get_class_or_element_class_fn type_get_class_or_element_class;
+    zs_memory_free_fn memory_free;
 } ZSRuntimeAPI;
 
 static ZSRuntimeAPI gAPI;
@@ -159,11 +161,83 @@ static BOOL gResolved;
 static BOOL gRunning;
 static NSLock *gRuntimeLock;
 
+static const NSUInteger kZSWriterFlushThreshold = 1 << 18;
+static const NSUInteger kZSDumpThreadStackSize = 16 * 1024 * 1024;
+
+static NSError *zs_dump_error(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:@"ZSDumper" code:code userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+@interface ZSDumpWriter : NSObject
+@property (nonatomic, readonly, nullable) NSError *error;
++ (nullable instancetype)writerWithPath:(NSString *)path error:(NSError * _Nullable * _Nullable)error;
+- (void)appendString:(NSString *)string;
+- (void)appendLine:(NSString *)line;
+- (void)finish;
+@end
+
+@implementation ZSDumpWriter {
+    NSFileHandle *_handle;
+    NSMutableData *_buffer;
+    NSError *_error;
+}
+
++ (instancetype)writerWithPath:(NSString *)path error:(NSError * _Nullable *)error {
+    if (![NSFileManager.defaultManager createFileAtPath:path contents:[NSData data] attributes:nil]) {
+        if (error) *error = zs_dump_error(5, [NSString stringWithFormat:@"Could not create %@.", path.lastPathComponent]);
+        return nil;
+    }
+    NSError *openError = nil;
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingToURL:[NSURL fileURLWithPath:path] error:&openError];
+    if (!handle) {
+        if (error) *error = openError ?: zs_dump_error(5, [NSString stringWithFormat:@"Could not open %@ for writing.", path.lastPathComponent]);
+        return nil;
+    }
+    ZSDumpWriter *writer = [ZSDumpWriter new];
+    writer->_handle = handle;
+    writer->_buffer = [NSMutableData dataWithCapacity:kZSWriterFlushThreshold + 4096];
+    return writer;
+}
+
+- (void)flush {
+    if (_buffer.length == 0) return;
+    if (!_error && _handle) {
+        NSError *writeError = nil;
+        if (![_handle writeData:_buffer error:&writeError]) {
+            _error = writeError ?: zs_dump_error(8, @"Writing dump data failed.");
+        }
+    }
+    [_buffer setLength:0];
+}
+
+- (void)appendString:(NSString *)string {
+    if (_error || string.length == 0) return;
+    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:YES];
+    if (!data) return;
+    [_buffer appendData:data];
+    if (_buffer.length >= kZSWriterFlushThreshold) [self flush];
+}
+
+- (void)appendLine:(NSString *)line {
+    [self appendString:line];
+    [self appendString:@"\n"];
+}
+
+- (void)finish {
+    if (!_handle) return;
+    [self flush];
+    NSError *closeError = nil;
+    if (![_handle closeAndReturnError:&closeError] && !_error) _error = closeError;
+    _handle = nil;
+}
+
+@end
+
 static void *zs_symbol(const char *name) {
     return dlsym(RTLD_DEFAULT, name);
 }
 
-#define ZS_RESOLVE(name) gAPI.name = (typeof(gAPI.name))zs_symbol(#name)
+#define ZS_RESOLVE(name) gAPI.name = (typeof(gAPI.name))zs_symbol("il2cpp_" #name)
 
 static BOOL zs_resolve_api(NSError **error) {
     if (gResolved) return YES;
@@ -237,6 +311,7 @@ static BOOL zs_resolve_api(NSError **error) {
     ZS_RESOLVE(type_is_static);
     ZS_RESOLVE(type_is_pointer_type);
     ZS_RESOLVE(type_get_class_or_element_class);
+    gAPI.memory_free = (zs_memory_free_fn)zs_symbol("il2cpp_free");
 
     BOOL required = gAPI.domain_get &&
                     gAPI.domain_get_assemblies &&
@@ -262,7 +337,7 @@ static BOOL zs_resolve_api(NSError **error) {
                     gAPI.type_get_type &&
                     gAPI.type_get_name;
     if (!required) {
-        if (error) *error = [NSError errorWithDomain:@"ZSDumper" code:1 userInfo:@{NSLocalizedDescriptionKey: @"The loaded IL2CPP runtime is missing required reflection exports."}];
+        if (error) *error = zs_dump_error(1, @"The loaded IL2CPP runtime is missing required reflection exports.");
         return NO;
     }
     gResolved = YES;
@@ -278,23 +353,33 @@ static NSString *zs_hex(uint64_t value) {
 }
 
 static NSString *zs_string(const char *value) {
-    return value ? [NSString stringWithUTF8String:value] ?: @"" : @"";
+    if (!value) return @"";
+    return [NSString stringWithUTF8String:value] ?: @"";
+}
+
+static NSString *zs_take_string(const ZSRuntimeAPI *api, char *value) {
+    if (!value) return @"";
+    NSString *result = zs_string(value);
+    if (api->memory_free) api->memory_free(value);
+    return result;
 }
 
 static NSString *zs_json(id object) {
+    if (![NSJSONSerialization isValidJSONObject:object]) return @"null";
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
-    return !error && data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"null" : @"null";
+    NSString *string = (!error && data) ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+    return string ?: @"null";
 }
 
-static void zs_append_json_object(NSFileHandle *handle, NSDictionary *object, BOOL *needsComma) {
-    if (*needsComma) [handle writeData:[@"," dataUsingEncoding:NSUTF8StringEncoding]];
-    [handle writeData:[zs_json(object) dataUsingEncoding:NSUTF8StringEncoding]];
+static void zs_append_json_object(ZSDumpWriter *writer, NSDictionary *object, BOOL *needsComma) {
+    if (*needsComma) [writer appendString:@","];
+    [writer appendString:zs_json(object)];
     *needsComma = YES;
 }
 
-static void zs_write_line(NSFileHandle *handle, NSString *line) {
-    [handle writeData:[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+static void zs_write_line(ZSDumpWriter *writer, NSString *line) {
+    [writer appendLine:line];
 }
 
 static NSString *zs_access(uint32_t flags) {
@@ -309,31 +394,56 @@ static NSString *zs_access(uint32_t flags) {
     }
 }
 
+static inline BOOL zs_is_identifier_char(unichar c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
 static NSString *zs_safe_identifier(NSString *value) {
     if (value.length == 0) return @"_";
-    NSMutableString *result = [NSMutableString stringWithCapacity:value.length];
-    NSCharacterSet *allowed = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"];
+    NSMutableString *result = [NSMutableString stringWithCapacity:value.length + 1];
     for (NSUInteger i = 0; i < value.length; i++) {
         unichar c = [value characterAtIndex:i];
-        [result appendFormat:@"%C", [allowed characterIsMember:c] ? c : '_'];
+        unichar out = zs_is_identifier_char(c) ? c : (unichar)'_';
+        [result appendFormat:@"%C", out];
     }
-    if ([[NSCharacterSet decimalDigitCharacterSet] characterIsMember:[result characterAtIndex:0]]) [result insertString:@"_" atIndex:0];
+    unichar first = [result characterAtIndex:0];
+    if (first >= '0' && first <= '9') [result insertString:@"_" atIndex:0];
     return result;
+}
+
+static NSString *zs_safe_namespace(NSString *value) {
+    NSArray<NSString *> *segments = [value componentsSeparatedByString:@"."];
+    NSMutableArray<NSString *> *safeSegments = [NSMutableArray arrayWithCapacity:segments.count];
+    for (NSString *segment in segments) [safeSegments addObject:zs_safe_identifier(segment)];
+    return [safeSegments componentsJoinedByString:@"."];
 }
 
 static NSString *zs_csharp_type(NSString *typeName) {
     if (typeName.length == 0) return @"void";
-    NSString *result = [typeName stringByReplacingOccurrencesOfString:@"System." withString:@""];
-    NSDictionary *aliases = @{@"Void": @"void", @"Boolean": @"bool", @"Byte": @"byte", @"SByte": @"sbyte", @"Char": @"char", @"Double": @"double", @"Single": @"float", @"Int16": @"short", @"UInt16": @"ushort", @"Int32": @"int", @"UInt32": @"uint", @"Int64": @"long", @"UInt64": @"ulong", @"String": @"string", @"Object": @"object", @"Decimal": @"decimal"};
-    NSString *alias = aliases[result];
-    return alias ?: result;
+    static NSDictionary<NSString *, NSString *> *aliases;
+    static NSRegularExpression *systemTypeExpression;
+    static NSRegularExpression *arityExpression;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        aliases = @{@"Void": @"void", @"Boolean": @"bool", @"Byte": @"byte", @"SByte": @"sbyte", @"Char": @"char", @"Double": @"double", @"Single": @"float", @"Int16": @"short", @"UInt16": @"ushort", @"Int32": @"int", @"UInt32": @"uint", @"Int64": @"long", @"UInt64": @"ulong", @"String": @"string", @"Object": @"object", @"Decimal": @"decimal"};
+        systemTypeExpression = [NSRegularExpression regularExpressionWithPattern:@"(?<![A-Za-z0-9_.])System\\.([A-Za-z0-9_]+)(?![A-Za-z0-9_.])" options:0 error:nil];
+        arityExpression = [NSRegularExpression regularExpressionWithPattern:@"`[0-9]+" options:0 error:nil];
+    });
+    NSMutableString *result = [typeName mutableCopy];
+    NSArray<NSTextCheckingResult *> *matches = [systemTypeExpression matchesInString:result options:0 range:NSMakeRange(0, result.length)];
+    for (NSTextCheckingResult *match in [matches reverseObjectEnumerator]) {
+        NSString *simpleName = [result substringWithRange:[match rangeAtIndex:1]];
+        [result replaceCharactersInRange:match.range withString:aliases[simpleName] ?: simpleName];
+    }
+    [arityExpression replaceMatchesInString:result options:0 range:NSMakeRange(0, result.length) withTemplate:@""];
+    return [result copy];
 }
 
 static NSDictionary *zs_type_dict(const ZSRuntimeAPI *api, const void *type) {
     if (!type) return @{};
     NSMutableDictionary *dict = [NSMutableDictionary dictionaryWithDictionary:@{
         @"pointer": zs_ptr(type),
-        @"name": zs_string(api->type_get_name(type)),
+        @"name": zs_take_string(api, api->type_get_name(type)),
         @"enum": @(api->type_get_type(type)),
         @"attrs": zs_hex(api->type_get_attrs ? api->type_get_attrs(type) : 0),
         @"byref": @(api->type_is_byref ? api->type_is_byref(type) : NO),
@@ -341,7 +451,7 @@ static NSDictionary *zs_type_dict(const ZSRuntimeAPI *api, const void *type) {
         @"pointerType": @(api->type_is_pointer_type ? api->type_is_pointer_type(type) : NO),
         @"classPointer": zs_ptr(api->type_get_class_or_element_class ? api->type_get_class_or_element_class(type) : NULL)
     }];
-    if (api->type_get_assembly_qualified_name) dict[@"assemblyQualifiedName"] = zs_string(api->type_get_assembly_qualified_name(type));
+    if (api->type_get_assembly_qualified_name) dict[@"assemblyQualifiedName"] = zs_take_string(api, api->type_get_assembly_qualified_name(type));
     return dict;
 }
 
@@ -408,25 +518,26 @@ static NSString *zs_method_signature(const ZSRuntimeAPI *api, const void *method
     if ((flags & 0x400) != 0) [parts addObject:@"abstract"];
     if ((flags & 0x40) != 0 && (flags & 0x400) == 0) [parts addObject:@"virtual"];
     const void *returnType = api->method_get_return_type(method);
-    NSString *returnName = returnType ? zs_csharp_type(zs_string(api->type_get_name(returnType))) : @"void";
+    NSString *returnName = returnType ? zs_csharp_type(zs_take_string(api, api->type_get_name(returnType))) : @"void";
     NSMutableArray *parameters = [NSMutableArray array];
     uint32_t count = api->method_get_param_count(method);
     for (uint32_t i = 0; i < count; i++) {
         const void *type = api->method_get_param(method, i);
-        NSString *typeName = type ? zs_csharp_type(zs_string(api->type_get_name(type))) : @"object";
+        NSString *typeName = type ? zs_csharp_type(zs_take_string(api, api->type_get_name(type))) : @"object";
         NSString *parameterName = api->method_get_param_name ? zs_string(api->method_get_param_name(method, i)) : @"";
         if (parameterName.length == 0) parameterName = [NSString stringWithFormat:@"arg%u", i];
         [parameters addObject:[NSString stringWithFormat:@"%@ %@", typeName, zs_safe_identifier(parameterName)]];
     }
     NSString *prefix = parts.count ? [[parts componentsJoinedByString:@" "] stringByAppendingString:@" "] : @"";
-    return [NSString stringWithFormat:@"%@%@ %@(%@) {}", prefix, returnName, zs_safe_identifier(zs_string(api->method_get_name(method))), [parameters componentsJoinedByString:@", "]];
+    NSString *terminator = (flags & 0x400) != 0 ? @";" : @" {}";
+    return [NSString stringWithFormat:@"%@%@ %@(%@)%@", prefix, returnName, zs_safe_identifier(zs_string(api->method_get_name(method))), [parameters componentsJoinedByString:@", "], terminator];
 }
 
 static NSString *zs_csv_quote(NSString *value) {
-    return [NSString stringWithFormat:@"\"%@\"", [value stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""] ?: @""];
+    return [NSString stringWithFormat:@"\"%@\"", [(value ?: @"") stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
 }
 
-static void zs_write_loaded_images(NSFileHandle *handle, BOOL *needsComma) {
+static void zs_write_loaded_images(ZSDumpWriter *writer, BOOL *needsComma) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         NSDictionary *image = @{
@@ -435,7 +546,7 @@ static void zs_write_loaded_images(NSFileHandle *handle, BOOL *needsComma) {
             @"header": zs_ptr(_dyld_get_image_header(i)),
             @"slide": zs_hex((uint64_t)_dyld_get_image_vmaddr_slide(i))
         };
-        zs_append_json_object(handle, image, needsComma);
+        zs_append_json_object(writer, image, needsComma);
     }
 }
 
@@ -445,12 +556,12 @@ static void zs_write_class(const ZSRuntimeAPI *api,
                            NSUInteger assemblyIndex,
                            NSString *assemblyName,
                            NSString *imageFilename,
-                           NSFileHandle *classesJSON,
-                           NSFileHandle *methodsJSON,
-                           NSFileHandle *fieldsJSON,
-                           NSFileHandle *propertiesJSON,
-                           NSFileHandle *cs,
-                           NSFileHandle *csv,
+                           ZSDumpWriter *classesJSON,
+                           ZSDumpWriter *methodsJSON,
+                           ZSDumpWriter *fieldsJSON,
+                           ZSDumpWriter *propertiesJSON,
+                           ZSDumpWriter *cs,
+                           ZSDumpWriter *csv,
                            BOOL *classNeedsComma,
                            BOOL *methodNeedsComma,
                            BOOL *fieldNeedsComma,
@@ -463,9 +574,6 @@ static void zs_write_class(const ZSRuntimeAPI *api,
     void *parent = api->class_get_parent ? api->class_get_parent(klass) : NULL;
     void *declaringType = api->class_get_declaring_type ? api->class_get_declaring_type(klass) : NULL;
     int flags = api->class_get_flags ? api->class_get_flags(klass) : 0;
-    uint32_t alignment = 0;
-    int32_t valueSize = api->class_value_size ? api->class_value_size(klass, &alignment) : -1;
-    size_t fieldCount = api->class_num_fields ? api->class_num_fields(klass) : 0;
     NSString *kind = @"class";
     if (api->class_is_interface && api->class_is_interface(klass)) kind = @"interface";
     else if (api->class_is_enum && api->class_is_enum(klass)) kind = @"enum";
@@ -488,10 +596,6 @@ static void zs_write_class(const ZSRuntimeAPI *api,
         @"blittable": @(api->class_is_blittable ? api->class_is_blittable(klass) : NO),
         @"generic": @(api->class_is_generic ? api->class_is_generic(klass) : NO),
         @"inflated": @(api->class_is_inflated ? api->class_is_inflated(klass) : NO),
-        @"fieldCount": @(fieldCount),
-        @"instanceSize": @(api->class_instance_size ? api->class_instance_size(klass) : -1),
-        @"valueSize": @(valueSize),
-        @"valueAlignment": @(alignment),
         @"parentPointer": zs_ptr(parent),
         @"declaringTypePointer": zs_ptr(declaringType)
     }];
@@ -616,15 +720,21 @@ static void zs_write_class(const ZSRuntimeAPI *api,
         classDict[@"events"] = events;
     }
 
+    uint32_t alignment = 0;
+    int32_t valueSize = api->class_value_size ? api->class_value_size(klass, &alignment) : -1;
+    classDict[@"instanceSize"] = @(api->class_instance_size ? api->class_instance_size(klass) : -1);
+    classDict[@"valueSize"] = @(valueSize);
+    classDict[@"valueAlignment"] = @(alignment);
+    classDict[@"runtimeFieldCount"] = @(api->class_num_fields ? api->class_num_fields(klass) : 0);
+
     zs_append_json_object(classesJSON, classDict, classNeedsComma);
 
-    NSString *namespaceName = namespaze.length ? namespaze : [NSString stringWithFormat:@"__Assembly_%@", zs_safe_identifier(assemblyName)];
+    NSString *namespaceName = namespaze.length ? zs_safe_namespace(namespaze) : [@"__Assembly_" stringByAppendingString:zs_safe_identifier(assemblyName)];
     NSString *className = zs_safe_identifier(name.length ? name : @"UnnamedClass");
-    NSString *kindName = kind;
-    NSString *classPrefix = [kindName isEqualToString:@"interface"] ? @"public interface" : ([kindName isEqualToString:@"enum"] ? @"public enum" : ([kindName isEqualToString:@"struct"] ? @"public struct" : @"public class"));
-    zs_write_line(cs, [NSString stringWithFormat:@"namespace %@ {", zs_safe_identifier(namespaceName)]);
+    NSString *classPrefix = [kind isEqualToString:@"interface"] ? @"public interface" : ([kind isEqualToString:@"enum"] ? @"public enum" : ([kind isEqualToString:@"struct"] ? @"public struct" : @"public class"));
+    zs_write_line(cs, [NSString stringWithFormat:@"namespace %@ {", namespaceName]);
     NSString *parentName = parent ? zs_csharp_type(zs_string(api->class_get_name(parent))) : @"";
-    if (parentName.length > 0 && [kindName isEqualToString:@"class"]) zs_write_line(cs, [NSString stringWithFormat:@"    %@ %@ : %@ {", classPrefix, className, parentName]);
+    if (parentName.length > 0 && [kind isEqualToString:@"class"]) zs_write_line(cs, [NSString stringWithFormat:@"    %@ %@ : %@ {", classPrefix, className, parentName]);
     else zs_write_line(cs, [NSString stringWithFormat:@"    %@ %@ {", classPrefix, className]);
     for (NSDictionary *fieldDict in sourceFields) {
         NSString *fieldAccess = fieldDict[@"access"];
@@ -639,24 +749,16 @@ static void zs_write_class(const ZSRuntimeAPI *api,
     zs_write_line(cs, @"");
 }
 
-static NSError *zs_dump_runtime(NSURL **outputURL) {
-    NSError *error = nil;
-    if (!zs_resolve_api(&error)) return error;
-    void *domain = gAPI.domain_get();
-    if (!domain) return [NSError errorWithDomain:@"ZSDumper" code:2 userInfo:@{NSLocalizedDescriptionKey: @"il2cpp_domain_get returned NULL."}];
-    void *thread = gAPI.thread_current ? gAPI.thread_current() : NULL;
-    BOOL attachedHere = NO;
-    if (!thread) {
-        thread = gAPI.thread_attach(domain);
-        attachedHere = YES;
+static BOOL zs_any_writer_failed(NSArray<ZSDumpWriter *> *writers) {
+    for (ZSDumpWriter *writer in writers) {
+        if (writer.error) return YES;
     }
-    if (!thread) return [NSError errorWithDomain:@"ZSDumper" code:3 userInfo:@{NSLocalizedDescriptionKey: @"Could not attach the dumper thread to the IL2CPP runtime."}];
+    return NO;
+}
 
+static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
     NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    if (documents.length == 0) {
-        if (attachedHere) gAPI.thread_detach(thread);
-        return [NSError errorWithDomain:@"ZSDumper" code:4 userInfo:@{NSLocalizedDescriptionKey: @"The app Documents directory could not be resolved."}];
-    }
+    if (documents.length == 0) return zs_dump_error(4, @"The app Documents directory could not be resolved.");
 
     NSDateFormatter *formatter = [NSDateFormatter new];
     formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
@@ -665,61 +767,50 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
     NSString *timestamp = [formatter stringFromDate:[NSDate date]];
     NSString *folderPath = [documents stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSingularity-IL2CPP-Dump-%@", timestamp]];
     NSFileManager *fm = NSFileManager.defaultManager;
+    NSError *error = nil;
     if (![fm createDirectoryAtPath:folderPath withIntermediateDirectories:YES attributes:nil error:&error]) {
-        if (attachedHere) gAPI.thread_detach(thread);
-        return error;
+        return error ?: zs_dump_error(5, @"Could not create the dump folder.");
     }
 
-    NSArray *jsonNames = @[@"assemblies.json", @"classes.json", @"methods.json", @"fields.json", @"properties.json"];
-    NSMutableArray<NSFileHandle *> *handles = [NSMutableArray arrayWithCapacity:jsonNames.count];
-    for (NSString *name in jsonNames) {
-        NSString *path = [folderPath stringByAppendingPathComponent:name];
-        [fm createFileAtPath:path contents:[NSData data] attributes:nil];
-        NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-        if (!handle) {
-            for (NSFileHandle *opened in handles) [opened closeFile];
-            if (attachedHere) gAPI.thread_detach(thread);
-            return [NSError errorWithDomain:@"ZSDumper" code:5 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Could not open %@ for writing.", name]}];
+    NSArray<NSString *> *fileNames = @[@"assemblies.json", @"classes.json", @"methods.json", @"fields.json", @"properties.json", @"loaded-images.json", @"Dump.cs", @"Methods.csv"];
+    NSMutableArray<ZSDumpWriter *> *writers = [NSMutableArray arrayWithCapacity:fileNames.count];
+    for (NSString *fileName in fileNames) {
+        NSError *openError = nil;
+        ZSDumpWriter *writer = [ZSDumpWriter writerWithPath:[folderPath stringByAppendingPathComponent:fileName] error:&openError];
+        if (!writer) {
+            for (ZSDumpWriter *opened in writers) [opened finish];
+            [fm removeItemAtPath:folderPath error:nil];
+            return openError ?: zs_dump_error(5, [NSString stringWithFormat:@"Could not open %@ for writing.", fileName]);
         }
-        [handle writeData:[@"[" dataUsingEncoding:NSUTF8StringEncoding]];
-        [handles addObject:handle];
+        [writers addObject:writer];
     }
 
-    NSString *csPath = [folderPath stringByAppendingPathComponent:@"Dump.cs"];
-    NSString *csvPath = [folderPath stringByAppendingPathComponent:@"Methods.csv"];
-    NSString *indexPath = [folderPath stringByAppendingPathComponent:@"dump.json"];
-    NSString *readmePath = [folderPath stringByAppendingPathComponent:@"README.txt"];
-    [fm createFileAtPath:csPath contents:[NSData data] attributes:nil];
-    [fm createFileAtPath:csvPath contents:[NSData data] attributes:nil];
-    [fm createFileAtPath:indexPath contents:[NSData data] attributes:nil];
-    [fm createFileAtPath:readmePath contents:[NSData data] attributes:nil];
-    NSFileHandle *cs = [NSFileHandle fileHandleForWritingAtPath:csPath];
-    NSFileHandle *csv = [NSFileHandle fileHandleForWritingAtPath:csvPath];
-    if (!cs || !csv) {
-        for (NSFileHandle *opened in handles) [opened closeFile];
-        if (attachedHere) gAPI.thread_detach(thread);
-        return [NSError errorWithDomain:@"ZSDumper" code:6 userInfo:@{NSLocalizedDescriptionKey: @"Could not open generated source files for writing."}];
-    }
+    ZSDumpWriter *assembliesJSON = writers[0];
+    ZSDumpWriter *classesJSON = writers[1];
+    ZSDumpWriter *methodsJSON = writers[2];
+    ZSDumpWriter *fieldsJSON = writers[3];
+    ZSDumpWriter *propertiesJSON = writers[4];
+    ZSDumpWriter *loadedImagesJSON = writers[5];
+    ZSDumpWriter *cs = writers[6];
+    ZSDumpWriter *csv = writers[7];
+    for (NSUInteger i = 0; i < 6; i++) [writers[i] appendString:@"["];
 
-    NSFileHandle *assembliesJSON = handles[0];
-    NSFileHandle *classesJSON = handles[1];
-    NSFileHandle *methodsJSON = handles[2];
-    NSFileHandle *fieldsJSON = handles[3];
-    NSFileHandle *propertiesJSON = handles[4];
     BOOL assembliesComma = NO;
     BOOL classesComma = NO;
     BOOL methodsComma = NO;
     BOOL fieldsComma = NO;
     BOOL propertiesComma = NO;
+    BOOL loadedImagesComma = NO;
     size_t assemblyCount = 0;
     void **assemblies = gAPI.domain_get_assemblies(domain, &assemblyCount);
+    if (!assemblies) assemblyCount = 0;
     NSUInteger classCount = 0;
     NSUInteger methodCount = 0;
     NSUInteger fieldCount = 0;
     NSUInteger propertyCount = 0;
     NSDate *started = [NSDate date];
 
-    [csv writeData:[@"assembly,namespace,class,method,signature,token,methodInfo,nativePointer,nativeImage,rva,flags,implementationFlags,generic,inflated,instance\n" dataUsingEncoding:NSUTF8StringEncoding]];
+    [csv appendString:@"assembly,namespace,class,method,signature,token,methodInfo,nativePointer,nativeImage,rva,flags,implementationFlags,generic,inflated,instance\n"];
     zs_write_line(cs, @"using System;");
     zs_write_line(cs, @"");
 
@@ -747,23 +838,27 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
                     zs_write_class(&gAPI, klass, classCount, assemblyIndex, assemblyName, filename, classesJSON, methodsJSON, fieldsJSON, propertiesJSON, cs, csv, &classesComma, &methodsComma, &fieldsComma, &propertiesComma, &methodCount, &fieldCount, &propertyCount);
                     classCount++;
                 }
+                if (zs_any_writer_failed(writers)) break;
             }
+        }
+        if (zs_any_writer_failed(writers)) break;
+    }
+
+    zs_write_loaded_images(loadedImagesJSON, &loadedImagesComma);
+    for (NSUInteger i = 0; i < 6; i++) [writers[i] appendString:@"]"];
+    for (ZSDumpWriter *writer in writers) [writer finish];
+    for (ZSDumpWriter *writer in writers) {
+        if (writer.error) {
+            NSString *message = [NSString stringWithFormat:@"Writing the dump failed: %@", writer.error.localizedDescription];
+            [fm removeItemAtPath:folderPath error:nil];
+            return zs_dump_error(8, message);
         }
     }
 
-    [assembliesJSON writeData:[@"]" dataUsingEncoding:NSUTF8StringEncoding]];
-    [classesJSON writeData:[@"]" dataUsingEncoding:NSUTF8StringEncoding]];
-    [methodsJSON writeData:[@"]" dataUsingEncoding:NSUTF8StringEncoding]];
-    [fieldsJSON writeData:[@"]" dataUsingEncoding:NSUTF8StringEncoding]];
-    [propertiesJSON writeData:[@"]" dataUsingEncoding:NSUTF8StringEncoding]];
-    for (NSFileHandle *handle in handles) [handle closeFile];
-    [cs closeFile];
-    [csv closeFile];
-
     NSDictionary *metadata = @{
         @"formatVersion": @3,
-        @"generatedAt": [[ISO8601DateFormatter new] stringFromDate:[NSDate date]],
-        @"processId": @([[NSProcessInfo processInfo] processIdentifier]),
+        @"generatedAt": [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
+        @"processId": @(NSProcessInfo.processInfo.processIdentifier),
         @"pointerSize": @(sizeof(void *)),
         @"bundleIdentifier": NSBundle.mainBundle.bundleIdentifier ?: @"",
         @"executablePath": NSBundle.mainBundle.executablePath ?: @"",
@@ -792,32 +887,43 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
             @"classGetEvents": @(gAPI.class_get_events != NULL),
             @"typeAssemblyQualifiedName": @(gAPI.type_get_assembly_qualified_name != NULL),
             @"typeStatic": @(gAPI.type_is_static != NULL),
-            @"typePointerType": @(gAPI.type_is_pointer_type != NULL)
+            @"typePointerType": @(gAPI.type_is_pointer_type != NULL),
+            @"memoryFree": @(gAPI.memory_free != NULL)
         }
     };
 
+    NSString *readme = [NSString stringWithFormat:@"ZSingularity IL2CPP Runtime Dump\n\nGenerated: %@\nAssemblies: %lu\nClasses: %lu\nMethods: %lu\nFields: %lu\nProperties: %lu\nPointer size: %lu\n\nFiles:\nassemblies.json\nclasses.json\nmethods.json\nfields.json\nproperties.json\nDump.cs\nMethods.csv\nloaded-images.json\ndump.json\n\nMethod native addresses come from il2cpp_method_get_pointer when that export exists; otherwise MethodInfo[0] is used as a compatibility fallback.\n", metadata[@"generatedAt"], (unsigned long)assemblyCount, (unsigned long)classCount, (unsigned long)methodCount, (unsigned long)fieldCount, (unsigned long)propertyCount, (unsigned long)sizeof(void *)];
+
+    NSError *metadataError = nil;
     NSData *metadataData = [zs_json(metadata) dataUsingEncoding:NSUTF8StringEncoding];
-    [metadataData writeToFile:indexPath atomically:YES];
-
-    NSMutableString *readme = [NSMutableString stringWithFormat:@"ZSingularity IL2CPP Runtime Dump\n\nGenerated: %@\nAssemblies: %lu\nClasses: %lu\nMethods: %lu\nFields: %lu\nProperties: %lu\nPointer size: %lu\n\nFiles:\nassemblies.json\nclasses.json\nmethods.json\nfields.json\nproperties.json\nDump.cs\nMethods.csv\nloaded-images.json\ndump.json\n\nMethod native addresses come from il2cpp_method_get_pointer when that export exists; otherwise MethodInfo[0] is used as a compatibility fallback.\n", metadata[@"generatedAt"], (unsigned long)assemblyCount, (unsigned long)classCount, (unsigned long)methodCount, (unsigned long)fieldCount, (unsigned long)propertyCount, (unsigned long)sizeof(void *)];
-    [readme writeToFile:readmePath atomically:YES encoding:NSUTF8StringEncoding error:nil];
-
-    NSMutableArray *loadedImages = [NSMutableArray array];
-    uint32_t loadedImageCount = _dyld_image_count();
-    for (uint32_t i = 0; i < loadedImageCount; i++) {
-        [loadedImages addObject:@{
-            @"index": @(i),
-            @"path": zs_string(_dyld_get_image_name(i)),
-            @"header": zs_ptr(_dyld_get_image_header(i)),
-            @"slide": zs_hex((uint64_t)_dyld_get_image_vmaddr_slide(i))
-        }];
+    NSData *readmeData = [readme dataUsingEncoding:NSUTF8StringEncoding];
+    BOOL metadataWritten = [metadataData writeToFile:[folderPath stringByAppendingPathComponent:@"dump.json"] options:NSDataWritingAtomic error:&metadataError] &&
+                           [readmeData writeToFile:[folderPath stringByAppendingPathComponent:@"README.txt"] options:NSDataWritingAtomic error:&metadataError];
+    if (!metadataWritten) {
+        [fm removeItemAtPath:folderPath error:nil];
+        return metadataError ?: zs_dump_error(8, @"Writing the dump metadata failed.");
     }
-    NSData *loadedImageData = [zs_json(loadedImages) dataUsingEncoding:NSUTF8StringEncoding];
-    [loadedImageData writeToFile:[folderPath stringByAppendingPathComponent:@"loaded-images.json"] atomically:YES];
 
-    if (attachedHere) gAPI.thread_detach(thread);
     if (outputURL) *outputURL = [NSURL fileURLWithPath:folderPath isDirectory:YES];
     return nil;
+}
+
+static NSError *zs_dump_runtime(NSURL **outputURL) {
+    NSError *error = nil;
+    if (!zs_resolve_api(&error)) return error;
+    void *domain = gAPI.domain_get();
+    if (!domain) return zs_dump_error(2, @"il2cpp_domain_get returned NULL.");
+    void *thread = gAPI.thread_current ? gAPI.thread_current() : NULL;
+    BOOL attachedHere = NO;
+    if (!thread) {
+        thread = gAPI.thread_attach(domain);
+        attachedHere = YES;
+    }
+    if (!thread) return zs_dump_error(3, @"Could not attach the dumper thread to the IL2CPP runtime.");
+
+    NSError *result = zs_dump_attached(domain, outputURL);
+    if (attachedHere) gAPI.thread_detach(thread);
+    return result;
 }
 
 @implementation ZSDumper
@@ -826,19 +932,19 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
     if (self == [ZSDumper class]) gRuntimeLock = [NSLock new];
 }
 
-+ (void)dumpIL2CPPToDocumentsWithCompletion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
++ (void)dumpIL2CPPToDocumentsWithCompletion:(void (^ _Nullable)(NSURL * _Nullable, NSError * _Nullable))completion {
     [gRuntimeLock lock];
     if (gRunning) {
         [gRuntimeLock unlock];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (completion) completion(nil, [NSError errorWithDomain:@"ZSDumper" code:7 userInfo:@{NSLocalizedDescriptionKey: @"An IL2CPP dump is already running."}]);
+            if (completion) completion(nil, zs_dump_error(7, @"An IL2CPP dump is already running."));
         });
         return;
     }
     gRunning = YES;
     [gRuntimeLock unlock];
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    NSThread *worker = [[NSThread alloc] initWithBlock:^{
         @autoreleasepool {
             NSURL *url = nil;
             NSError *error = zs_dump_runtime(&url);
@@ -851,7 +957,11 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
                 if (completion) completion(url, error);
             });
         }
-    });
+    }];
+    worker.name = @"ZSingularity.ZSDumper";
+    worker.stackSize = kZSDumpThreadStackSize;
+    worker.qualityOfService = NSQualityOfServiceUtility;
+    [worker start];
 }
 
 @end

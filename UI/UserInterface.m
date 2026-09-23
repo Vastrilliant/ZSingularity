@@ -5652,8 +5652,19 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
     [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
 
+    UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [dumpIL2CPPMethodsButton addTarget:self action:@selector(dumpIL2CPPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIView *developerActionsCard = zs_make_grouped_action_card(@[
+        dumpIL2CPPMethodsButton,
+    ]);
+    developerActionsCard.layer.borderWidth = 1;
+    developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+
     [self.stack addArrangedSubview:overrideTutorialRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:overrideTutorialRow];
+    [self.stack setCustomSpacing:8 afterView:overrideTutorialRow];
+    [self.stack addArrangedSubview:developerActionsCard];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:developerActionsCard];
 
     NSArray<UIView *> *arrangedViews = self.stack.arrangedSubviews;
     self.developerSectionViews = [arrangedViews subarrayWithRange:NSMakeRange(developerViewsStart, arrangedViews.count - developerViewsStart)];
@@ -5690,9 +5701,6 @@ static const CGFloat kContentFadeHeight = 22;
     [reapplyButton addTarget:self action:@selector(reapplySettingsTapped) forControlEvents:UIControlEventTouchUpInside];
     UIView *resetReapplyRow = zs_make_grouped_action_pair_row(resetButton, reapplyButton);
 
-    UIButton *dumpIL2CCPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CCP methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [dumpIL2CCPMethodsButton addTarget:self action:@selector(dumpIL2CCPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
-
     UIButton *deleteSpecificAssetButton = zs_make_grouped_action_button(@"Delete Specific Asset", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
     [deleteSpecificAssetButton addTarget:self action:@selector(deleteSpecificAssetTapped) forControlEvents:UIControlEventTouchUpInside];
 
@@ -5711,7 +5719,6 @@ static const CGFloat kContentFadeHeight = 22;
     UIView *configActionsCard = zs_make_grouped_action_card(@[
         manualIndexButton,
         resetReapplyRow,
-        dumpIL2CCPMethodsButton,
         deleteSpecificAssetButton,
         hardResetButton,
         deleteProxyReleasesButton,
@@ -7331,7 +7338,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     });
 }
 
-- (void)dumpIL2CCPMethodsTapped {
+- (void)dumpIL2CPPMethodsTapped {
     UIViewController *presenter = zs_key_window().rootViewController;
     if (!presenter) return;
 
