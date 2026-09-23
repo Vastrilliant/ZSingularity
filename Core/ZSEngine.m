@@ -1565,6 +1565,70 @@ static void *zs_load_font_manager_data(void) {
     return exc ? NULL : fontManagerData;
 }
 
+static void *zs_tmp_font_asset_class(void) {
+    return mt_class("TMPro", "TMP_FontAsset", "Unity.TextMeshPro");
+}
+
+static BOOL zs_font_asset_fallback_contains(void *listObj, void *font) {
+    if (!listObj || !font) return NO;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *containsMethod = [IL2CppBridge methodOnClass:listClass name:"Contains" argCount:1];
+    if (!containsMethod) return NO;
+    void *args[1] = { font };
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:containsMethod onInstance:listObj args:args outException:&exc];
+    if (exc || !boxed) return NO;
+    return *(uint8_t *)((uint8_t *)boxed + kZSIl2CppObjectHeaderSize) != 0;
+}
+
+static void zs_font_asset_fallback_add(void *listObj, void *font) {
+    if (!listObj || !font) return;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *addMethod = [IL2CppBridge methodOnClass:listClass name:"Add" argCount:1];
+    if (!addMethod) return;
+    void *args[1] = { font };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:addMethod onInstance:listObj args:args outException:&exc];
+}
+
+static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont) {
+    void *fontAssetClass = zs_tmp_font_asset_class();
+    const void *getFallbackMethod = mt_method(fontAssetClass, "get_fallbackFontAssetTable", 0);
+    if (!fontAssetClass || !getFallbackMethod) {
+        ZLog(@"[ZSFont] fallback-patch skipped: class=%p getter=%p", fontAssetClass, getFallbackMethod);
+        return;
+    }
+
+    NSUInteger count = 0;
+    void *fontAssets = zs_resources_find_all_for_class(fontAssetClass, &count);
+    if (!fontAssets) {
+        ZLog(@"[ZSFont] fallback-patch skipped: no live TMP_FontAsset instances");
+        return;
+    }
+
+    NSUInteger patched = 0;
+    for (NSUInteger i = 0; i < count; i++) {
+        void *fontAsset = zs_array_object_at(fontAssets, i);
+        if (!fontAsset || fontAsset == titleFont || fontAsset == contextFont) continue;
+
+        void *exc = NULL;
+        void *listObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:fontAsset args:NULL outException:&exc];
+        if (exc || !listObj) continue;
+
+        BOOL changed = NO;
+        if (titleFont && !zs_font_asset_fallback_contains(listObj, titleFont)) {
+            zs_font_asset_fallback_add(listObj, titleFont);
+            changed = YES;
+        }
+        if (contextFont && contextFont != titleFont && !zs_font_asset_fallback_contains(listObj, contextFont)) {
+            zs_font_asset_fallback_add(listObj, contextFont);
+            changed = YES;
+        }
+        if (changed) patched++;
+    }
+    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s)", (unsigned long)patched, (unsigned long)count);
+}
+
 static void zs_refresh_font_consumers(void *fontManagerData) {
     void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
     const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
@@ -1761,6 +1825,7 @@ static void zs_apply_custom_font_if_present(void) {
 
     void *fontManagerData = zs_load_font_manager_data();
     zs_refresh_font_consumers(fontManagerData);
+    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont);
     zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
 }
 
