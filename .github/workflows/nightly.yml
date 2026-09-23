@@ -97,7 +97,7 @@ jobs:
             Mods/BankTransplant.m \
             Mods/LocalizationMods.m \
             Mods/ModAssetManagement.m \
-            Mods/ZSModPaths.m \
+            Mods/ZSModsPaths.m \
             Network/PatchManifestNetwork.m \
             Network/ZSUpdater.m \
             Transcoder/Transcoder.m \
