@@ -11,6 +11,7 @@ static void *gZSCustomLocalizeDropdown;
 static void *gZSCustomLocalizePopup;
 static void *gZSGameStartTouchTrigger;
 static BOOL gZSCustomLocalizeTemplateFixed;
+static BOOL gZSCustomLocalizeCaptionFixed;
 
 static NSString *ZSCustomLangStagingDirectory(void) {
     NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
@@ -21,6 +22,10 @@ static NSString *ZSCustomLangStagingDirectory(void) {
 
 static void *ZSFindClass(const char *className, const char *namespaze) {
     return [IL2CppBridge classNamed:className inNamespace:namespaze assemblyContains:"Assembly-CSharp"];
+}
+
+static void *ZSFindClassInAssembly(const char *className, const char *namespaze, const char *assemblySubstring) {
+    return [IL2CppBridge classNamed:className inNamespace:namespaze assemblyContains:assemblySubstring];
 }
 
 static NSString *ZSInvokeStaticString(void *klass, const char *methodName) {
@@ -151,9 +156,161 @@ static BOOL ZSFixCustomLocalizeDropdownTemplate(void *dropdown) {
     return YES;
 }
 
+static void *ZSGameObjectOfTransform(void *transform) {
+    if (!transform) return NULL;
+    void *klass = [IL2CppBridge classOfInstance:transform];
+    const void *getGameObject = [IL2CppBridge methodOnClass:klass name:"get_gameObject" argCount:0];
+    if (!getGameObject) return NULL;
+    void *exc = NULL;
+    void *gameObject = [IL2CppBridge invokeMethod:getGameObject onInstance:transform args:NULL outException:&exc];
+    if (exc) return NULL;
+    return gameObject;
+}
+
+static void *ZSGetComponentOnGameObject(void *gameObject, void *componentKlass) {
+    if (!gameObject || !componentKlass) return NULL;
+    void *goKlass = [IL2CppBridge classOfInstance:gameObject];
+    const void *getComponent = [IL2CppBridge methodOnClass:goKlass name:"GetComponent" argCount:1];
+    if (!getComponent) {
+        ZLog(@"[CustomLocalizeEnable] GetComponent(Type) not found on GameObject class");
+        return NULL;
+    }
+    void *type = [IL2CppBridge reflectionTypeForClass:componentKlass];
+    if (!type) {
+        ZLog(@"[CustomLocalizeEnable] couldn't resolve a System.Type for the requested component class");
+        return NULL;
+    }
+    void *args[1] = { type };
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:getComponent onInstance:gameObject args:args outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] GetComponent(Type) raised a managed exception");
+        return NULL;
+    }
+    return result;
+}
+
+static void ZSSetDropdownCaptionText(void *dropdown, void *captionText) {
+    if (!dropdown || !captionText) return;
+    void *klass = [IL2CppBridge classOfInstance:dropdown];
+    const void *setCaptionText = [IL2CppBridge methodOnClass:klass name:"set_captionText" argCount:1];
+    if (!setCaptionText) {
+        ZLog(@"[CustomLocalizeEnable] set_captionText not found on dropdown class");
+        return;
+    }
+    void *args[1] = { captionText };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:setCaptionText onInstance:dropdown args:args outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] set_captionText raised a managed exception");
+    }
+}
+
+static void ZSRefreshDropdownShownValue(void *dropdown) {
+    if (!dropdown) return;
+    void *klass = [IL2CppBridge classOfInstance:dropdown];
+    const void *refresh = [IL2CppBridge methodOnClass:klass name:"RefreshShownValue" argCount:0];
+    if (!refresh) {
+        ZLog(@"[CustomLocalizeEnable] RefreshShownValue not found on dropdown class");
+        return;
+    }
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:refresh onInstance:dropdown args:NULL outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] RefreshShownValue raised a managed exception");
+    }
+}
+
+static BOOL ZSFixCustomLocalizeDropdownCaption(void *dropdown) {
+    void *dropdownTransform = ZSTransformOfComponent(dropdown);
+    void *labelTransform = ZSFindChildTransform(dropdownTransform, @"Label");
+    if (!labelTransform) {
+        return NO;
+    }
+    void *labelGameObject = ZSGameObjectOfTransform(labelTransform);
+    if (!labelGameObject) {
+        return NO;
+    }
+    void *tmpTextKlass = ZSFindClassInAssembly("TMP_Text", "TMPro", "Unity.TextMeshPro");
+    if (!tmpTextKlass) {
+        ZLog(@"[CustomLocalizeEnable] couldn't resolve the TMP_Text class");
+        return NO;
+    }
+    void *labelText = ZSGetComponentOnGameObject(labelGameObject, tmpTextKlass);
+    if (!labelText) {
+        ZLog(@"[CustomLocalizeEnable] Label child has no TMP_Text component");
+        return NO;
+    }
+    ZSSetDropdownCaptionText(dropdown, labelText);
+    ZSRefreshDropdownShownValue(dropdown);
+    ZLog(@"[CustomLocalizeEnable] rewired tmp_dropdown.captionText to the Label child's TMP_Text and refreshed it");
+    return YES;
+}
+
 static BOOL ZSUnboxBoolean(void *boxed) {
     if (!boxed) return NO;
     return *(uint8_t *)((uint8_t *)boxed + 0x10) != 0;
+}
+
+static int32_t ZSUnboxInt32(void *boxed) {
+    if (!boxed) return -1;
+    return *(int32_t *)((uint8_t *)boxed + 0x10);
+}
+
+static void ZSLogCustomLocalizeCandidates(void *localizeManager) {
+    if (!localizeManager) return;
+
+    const void *dirsMethod = [IL2CppBridge methodOnClass:localizeManager name:"GetDirectoriesFrom" argCount:0];
+    if (dirsMethod) {
+        void *exc = NULL;
+        void *array = [IL2CppBridge invokeMethod:dirsMethod onInstance:NULL args:NULL outException:&exc];
+        if (exc) {
+            ZLog(@"[CustomLocalizeEnable] GetDirectoriesFrom raised a managed exception");
+        } else if (!array) {
+            ZLog(@"[CustomLocalizeEnable] GetDirectoriesFrom returned nil");
+        } else {
+            void *arrKlass = [IL2CppBridge classOfInstance:array];
+            const void *getLength = [IL2CppBridge methodOnClass:arrKlass name:"get_Length" argCount:0];
+            int32_t length = -1;
+            if (getLength) {
+                exc = NULL;
+                void *boxedLength = [IL2CppBridge invokeMethod:getLength onInstance:array args:NULL outException:&exc];
+                if (!exc) length = ZSUnboxInt32(boxedLength);
+            }
+            ZLog(@"[CustomLocalizeEnable] GetDirectoriesFrom found %d subdirectory(ies) under the Lang root", length);
+        }
+    } else {
+        ZLog(@"[CustomLocalizeEnable] GetDirectoriesFrom method not found for diagnostic");
+    }
+
+    const void *candidatesMethod = [IL2CppBridge methodOnClass:localizeManager name:"GetCandidates" argCount:0];
+    if (!candidatesMethod) {
+        ZLog(@"[CustomLocalizeEnable] GetCandidates method not found for diagnostic");
+        return;
+    }
+    void *exc = NULL;
+    void *list = [IL2CppBridge invokeMethod:candidatesMethod onInstance:NULL args:NULL outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] GetCandidates raised a managed exception");
+        return;
+    }
+    if (!list) {
+        ZLog(@"[CustomLocalizeEnable] GetCandidates returned nil");
+        return;
+    }
+    void *listKlass = [IL2CppBridge classOfInstance:list];
+    const void *getCount = [IL2CppBridge methodOnClass:listKlass name:"get_Count" argCount:0];
+    if (!getCount) {
+        ZLog(@"[CustomLocalizeEnable] GetCandidates list get_Count not found for diagnostic");
+        return;
+    }
+    exc = NULL;
+    void *boxedCount = [IL2CppBridge invokeMethod:getCount onInstance:list args:NULL outException:&exc];
+    if (exc) {
+        ZLog(@"[CustomLocalizeEnable] GetCandidates.Count raised a managed exception");
+        return;
+    }
+    ZLog(@"[CustomLocalizeEnable] CustomLocalizeManager resolved %d candidate(s)", ZSUnboxInt32(boxedCount));
 }
 
 static BOOL ZSComponentGameObjectActiveInHierarchy(void *component) {
@@ -213,7 +370,8 @@ static BOOL ZSFixLoginSceneCustomLocalizeButton(void) {
         gZSCustomLocalizeDropdown = dropdown;
         ZSSetSelectableInteractable(dropdown, YES);
         gZSCustomLocalizeTemplateFixed = ZSFixCustomLocalizeDropdownTemplate(dropdown);
-        ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup (template fixed: %d)", gZSCustomLocalizeTemplateFixed);
+        gZSCustomLocalizeCaptionFixed = ZSFixCustomLocalizeDropdownCaption(dropdown);
+        ZLog(@"[CustomLocalizeEnable] forced tmp_dropdown interactable on CustomLocalizeSettingsUIPopup (template fixed: %d, caption fixed: %d)", gZSCustomLocalizeTemplateFixed, gZSCustomLocalizeCaptionFixed);
     } else {
         ZLog(@"[CustomLocalizeEnable] couldn't resolve tmp_dropdown on CustomLocalizeSettingsUIPopup");
     }
@@ -297,6 +455,7 @@ static void *zs_custom_localize_enable_thread(void *arg) {
         }
 
         ZSResetCustomLocalizeCaches(localizeManager);
+        ZSLogCustomLocalizeCandidates(localizeManager);
     });
 
     int loginAttempts = 0;
@@ -320,6 +479,9 @@ static void *zs_custom_localize_enable_thread(void *arg) {
             ZSSetSelectableInteractable(gZSCustomLocalizeDropdown, YES);
             if (!gZSCustomLocalizeTemplateFixed) {
                 gZSCustomLocalizeTemplateFixed = ZSFixCustomLocalizeDropdownTemplate(gZSCustomLocalizeDropdown);
+            }
+            if (!gZSCustomLocalizeCaptionFixed) {
+                gZSCustomLocalizeCaptionFixed = ZSFixCustomLocalizeDropdownCaption(gZSCustomLocalizeDropdown);
             }
             if (gZSGameStartTouchTrigger && gZSCustomLocalizePopup) {
                 BOOL popupOpen = ZSComponentGameObjectActiveInHierarchy(gZSCustomLocalizePopup);
