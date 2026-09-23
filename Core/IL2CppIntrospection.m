@@ -279,8 +279,22 @@ static BOOL g_resolveOk = NO;
 }
 
 + (void *)findFirstLiveInstanceOfClass:(void *)klass {
-    ZLog(@"[IL2CppBridge] findFirstLiveInstanceOfClass called but is stubbed, returning NULL (instance-field editing unimplemented)");
-    return NULL;
+    if (!g_resolveOk || !klass) return NULL;
+    void *unityObjectClass = [self classNamed:"Object" inNamespace:"UnityEngine" assemblyContains:"CoreModule"];
+    if (!unityObjectClass) return NULL;
+    const void *findMethod = [self methodOnClass:unityObjectClass name:"FindObjectOfType" argCount:2];
+    if (!findMethod) return NULL;
+    void *typeObj = [self reflectionTypeForClass:klass];
+    if (!typeObj) return NULL;
+    BOOL includeInactive = YES;
+    void *exc = NULL;
+    void *args[2] = { typeObj, &includeInactive };
+    void *instance = [self invokeMethod:findMethod onInstance:NULL args:args outException:&exc];
+    if (exc) {
+        ZLog(@"[IL2CppBridge] findFirstLiveInstanceOfClass raised a managed exception");
+        return NULL;
+    }
+    return instance;
 }
 
 @end
