@@ -22,6 +22,7 @@ static void *zs_array_object_at(void *array, NSUInteger index);
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static void zs_apply_persisted_particle_settings(void);
+static void zs_schedule_font_apply(void);
 static BOOL ZSUID_UnityObjectIsAlive(void *obj);
 void zs_particles_load_from_dictionary(NSDictionary *particles);
 NSDictionary *zs_particles_settings_dictionary(void);
@@ -928,6 +929,7 @@ static void zs_schedule_particle_apply(void) {
 
     if (haveBattleState && isBattle && !wasInBattle) scheduleParticles = YES;
     if (scheduleParticles) zs_schedule_particle_apply();
+    if (scheduleParticles) zs_schedule_font_apply();
 
     if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
         zs_clear_guide_portrait_cache();
@@ -1168,7 +1170,7 @@ static void *background_worker(void *arg) {
     }
 
     dispatch_sync(dispatch_get_main_queue(), ^{
-        zs_apply_custom_font_if_present();
+        zs_schedule_font_apply();
     });
 
     return NULL;
@@ -1536,6 +1538,17 @@ static void zs_apply_custom_font_if_present(void) {
     }
 
     ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
+}
+
+static const double kFontApplyDelaySeconds = 2.0;
+
+static void zs_schedule_font_apply(void) {
+    static uint64_t fontApplyGeneration;
+    uint64_t token = ++fontApplyGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kFontApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != fontApplyGeneration) return;
+        zs_apply_custom_font_if_present();
+    });
 }
 
 #pragma mark - Experimental state
