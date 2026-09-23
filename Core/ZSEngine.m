@@ -1357,30 +1357,70 @@ static void zs_apply_custom_font_if_present(void) {
     int32_t titleOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
     int32_t subOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
     int32_t fontAssetOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
-    int32_t fontMaterialOffsetBoxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontMaterial"];
-    if (titleOffsetBoxed < 0 || subOffsetBoxed < 0 || fontAssetOffsetBoxed < 0 || fontMaterialOffsetBoxed < 0) return;
+    if (titleOffsetBoxed < 0 || subOffsetBoxed < 0 || fontAssetOffsetBoxed < 0) return;
+
+    const char *materialFieldNames[] = {
+        "fontMaterial", "underlineFontMaterial", "burningVersion2FontMaterial", "brownGlowMaterial",
+        "storyOverlayCanvasFontMaterial", "glowFontMaterial", "bronzeGlowFontMaterial",
+        "storyUiTvEffectMaterial", "lyricsMaterial"
+    };
+    size_t materialFieldCount = sizeof(materialFieldNames) / sizeof(materialFieldNames[0]);
+    int32_t materialOffsets[sizeof(materialFieldNames) / sizeof(materialFieldNames[0])];
+    for (size_t i = 0; i < materialFieldCount; i++) {
+        int32_t boxed = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:materialFieldNames[i]];
+        if (boxed < 0) return;
+        materialOffsets[i] = boxed;
+    }
 
     int32_t valueTypeHeaderSize = (int32_t)(sizeof(void *) * 2);
     int32_t titleOffset = titleOffsetBoxed - valueTypeHeaderSize;
     int32_t subOffset = subOffsetBoxed - valueTypeHeaderSize;
     int32_t fontAssetOffset = fontAssetOffsetBoxed - valueTypeHeaderSize;
-    int32_t fontMaterialOffset = fontMaterialOffsetBoxed - valueTypeHeaderSize;
+    for (size_t i = 0; i < materialFieldCount; i++) {
+        materialOffsets[i] -= valueTypeHeaderSize;
+    }
 
     const void *getMaterialMethod = mt_method(tmpFontAssetClass, "get_material", 0);
     void *materialExc = NULL;
     void *fontMaterial = getMaterialMethod ? [IL2CppBridge invokeMethod:getMaterialMethod onInstance:fontAsset args:NULL outException:&materialExc] : NULL;
     if (materialExc) fontMaterial = NULL;
 
+    void (^applyFontAssetStruct)(uint8_t *) = ^(uint8_t *base) {
+        *(void **)(base + fontAssetOffset) = fontAsset;
+        if (!fontMaterial) return;
+        for (size_t i = 0; i < materialFieldCount; i++) {
+            *(void **)(base + materialOffsets[i]) = fontMaterial;
+        }
+    };
+
     const char *setFieldNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
     for (size_t i = 0; i < sizeof(setFieldNames) / sizeof(setFieldNames[0]); i++) {
         int32_t setOffset = zs_offset(fontManagerClass, setFieldNames[i]);
         if (setOffset < 0) continue;
         uint8_t *setBase = (uint8_t *)fontManagerData + setOffset;
-        *(void **)(setBase + titleOffset + fontAssetOffset) = fontAsset;
-        *(void **)(setBase + subOffset + fontAssetOffset) = fontAsset;
-        if (fontMaterial) {
-            *(void **)(setBase + titleOffset + fontMaterialOffset) = fontMaterial;
-            *(void **)(setBase + subOffset + fontMaterialOffset) = fontMaterial;
+        applyFontAssetStruct(setBase + titleOffset);
+        applyFontAssetStruct(setBase + subOffset);
+    }
+
+    int32_t bebasKaiOffset = zs_offset(fontManagerClass, "_bebasKaiAsset");
+    if (bebasKaiOffset >= 0) {
+        applyFontAssetStruct((uint8_t *)fontManagerData + bebasKaiOffset);
+    }
+
+    int32_t excelsiorAssetOffset = zs_offset(fontManagerClass, "excelsiorSansAsset");
+    if (excelsiorAssetOffset >= 0) {
+        *(void **)((uint8_t *)fontManagerData + excelsiorAssetOffset) = fontAsset;
+    }
+
+    if (fontMaterial) {
+        const char *excelsiorMaterialFieldNames[] = {
+            "excelsiorSansDefaultMat", "excelsiorSansUnderlineMat", "excelsiorSansBurningMat",
+            "excelsiorSansGlowMat", "excelsiorSansOutlineMat", "excelsiorSansBlackGlowMat"
+        };
+        for (size_t i = 0; i < sizeof(excelsiorMaterialFieldNames) / sizeof(excelsiorMaterialFieldNames[0]); i++) {
+            int32_t off = zs_offset(fontManagerClass, excelsiorMaterialFieldNames[i]);
+            if (off < 0) continue;
+            *(void **)((uint8_t *)fontManagerData + off) = fontMaterial;
         }
     }
 
@@ -1394,7 +1434,7 @@ static void zs_apply_custom_font_if_present(void) {
         }
     }
 
-    ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet slots, material=%p", fontAsset, fontMaterial);
+    ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
 }
 
 #pragma mark - Experimental state
