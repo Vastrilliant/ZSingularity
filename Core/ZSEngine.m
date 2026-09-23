@@ -1455,6 +1455,24 @@ static void zs_apply_custom_font_if_present(void) {
         ZLog(@"[ZSFont] refreshed %lu live %s instance(s)", (unsigned long)setterCount, setterClassNames[i]);
     }
 
+    void *duiStyleManagerClass = mt_class("DUI.StyleLibs", "DUIStyleManager", "Assembly-CSharp");
+    if (duiStyleManagerClass) {
+        const void *onSceneChangedMethod = mt_method(duiStyleManagerClass, "OnSceneChanged", 0);
+        if (onSceneChangedMethod) {
+            NSUInteger duiCount = 0;
+            void *duiArray = zs_resources_find_all_for_class(duiStyleManagerClass, &duiCount);
+            if (duiArray) {
+                for (NSUInteger j = 0; j < duiCount; j++) {
+                    void *duiInstance = zs_array_object_at(duiArray, j);
+                    if (!duiInstance) continue;
+                    void *duiExc = NULL;
+                    [IL2CppBridge invokeMethod:onSceneChangedMethod onInstance:duiInstance args:NULL outException:&duiExc];
+                }
+                ZLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s)", (unsigned long)duiCount);
+            }
+        }
+    }
+
     ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
 }
 
