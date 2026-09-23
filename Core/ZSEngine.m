@@ -1437,7 +1437,46 @@ static void zs_apply_custom_font_if_present(void) {
         }
     }
 
-    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter" };
+    void *fontCollectionClass = mt_class("", "FontAssetCollectionScriptableObject", "Assembly-CSharp");
+    if (fontCollectionClass) {
+        const char *collectionFontFieldNames[] = {
+            "_kotraBold", "_SCDream", "_mikodacs", "_pretendardRegular",
+            "_corporateLogoBold", "_higashiOmeGothic", "_bebasKai", "_excelsiorSans"
+        };
+        const char *collectionMaterialFieldNames[] = {
+            "_kotraBold_mat", "_kotraBold_Burning_Ver2", "_kotraBold_Grayscale",
+            "_SCDream_normal", "_mikodacs_normal", "_pretendardRegular_normal",
+            "_corporateLogoBold_normal", "_corporateLogoBold_Burning_Ver2", "_corporateLogoBold_Grayscale",
+            "_higashiOmeGothic_normal",
+            "_bebasKai_Normal", "_bebasKai_Burning", "_bebasKai_BronzeGlow", "_bebasKai_GrayGlow",
+            "_excelsiorSans_mat", "_excelsiorSans_Burning_Ver2",
+            "_excelsiorSans_FormationBaton", "_excelsiorSans_FormationBatonUnabled"
+        };
+
+        NSUInteger collectionCount = 0;
+        void *collectionArray = zs_resources_find_all_for_class(fontCollectionClass, &collectionCount);
+        for (NSUInteger i = 0; i < collectionCount; i++) {
+            void *collectionInstance = zs_array_object_at(collectionArray, i);
+            if (!collectionInstance) continue;
+            for (size_t f = 0; f < sizeof(collectionFontFieldNames) / sizeof(collectionFontFieldNames[0]); f++) {
+                int32_t off = zs_offset(fontCollectionClass, collectionFontFieldNames[f]);
+                if (off < 0) continue;
+                *(void **)((uint8_t *)collectionInstance + off) = fontAsset;
+            }
+            if (fontMaterial) {
+                for (size_t m = 0; m < sizeof(collectionMaterialFieldNames) / sizeof(collectionMaterialFieldNames[0]); m++) {
+                    int32_t off = zs_offset(fontCollectionClass, collectionMaterialFieldNames[m]);
+                    if (off < 0) continue;
+                    *(void **)((uint8_t *)collectionInstance + off) = fontMaterial;
+                }
+            }
+        }
+        if (collectionCount > 0) {
+            ZLog(@"[ZSFont] patched %lu live FontAssetCollectionScriptableObject instance(s)", (unsigned long)collectionCount);
+        }
+    }
+
+    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "TextMeshProLanguageSetter" };
     for (size_t i = 0; i < sizeof(setterClassNames) / sizeof(setterClassNames[0]); i++) {
         void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
         if (!setterClass) continue;
@@ -1453,6 +1492,29 @@ static void zs_apply_custom_font_if_present(void) {
             [IL2CppBridge invokeMethod:updateMethod onInstance:setterInstance args:NULL outException:&updateExc];
         }
         ZLog(@"[ZSFont] refreshed %lu live %s instance(s)", (unsigned long)setterCount, setterClassNames[i]);
+    }
+
+    const char *langRefreshClassNames[] = { "TextMeshProLanguageSetterManager", "TextMeshProChildrenSetter" };
+    const char *langRefreshMethodNames[] = { "UpdateUIs", "RefreshLanguage" };
+    int32_t langRefreshValues[] = { 0, 1, 2 };
+    for (size_t i = 0; i < sizeof(langRefreshClassNames) / sizeof(langRefreshClassNames[0]); i++) {
+        void *langRefreshClass = mt_class("UtilityUI", langRefreshClassNames[i], "Assembly-CSharp");
+        if (!langRefreshClass) continue;
+        const void *langRefreshMethod = mt_method(langRefreshClass, langRefreshMethodNames[i], 1);
+        if (!langRefreshMethod) continue;
+        NSUInteger langRefreshCount = 0;
+        void *langRefreshArray = zs_resources_find_all_for_class(langRefreshClass, &langRefreshCount);
+        if (!langRefreshArray) continue;
+        for (NSUInteger j = 0; j < langRefreshCount; j++) {
+            void *langRefreshInstance = zs_array_object_at(langRefreshArray, j);
+            if (!langRefreshInstance) continue;
+            for (size_t k = 0; k < sizeof(langRefreshValues) / sizeof(langRefreshValues[0]); k++) {
+                void *langRefreshArgs[1] = { &langRefreshValues[k] };
+                void *langRefreshExc = NULL;
+                [IL2CppBridge invokeMethod:langRefreshMethod onInstance:langRefreshInstance args:langRefreshArgs outException:&langRefreshExc];
+            }
+        }
+        ZLog(@"[ZSFont] refreshed %lu live %s instance(s)", (unsigned long)langRefreshCount, langRefreshClassNames[i]);
     }
 
     void *duiStyleManagerClass = mt_class("DUI.StyleLibs", "DUIStyleManager", "Assembly-CSharp");
