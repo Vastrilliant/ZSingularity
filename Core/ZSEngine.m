@@ -17,6 +17,8 @@ static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
 static BOOL ZSGlobalScene_Current(int32_t *outState);
 static const int32_t kZSFontSceneStateMain = 2;
+static void *zs_resources_find_all_for_class(void *typeClass, NSUInteger *countOut);
+static void *zs_array_object_at(void *array, NSUInteger index);
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static void zs_apply_persisted_particle_settings(void);
@@ -1433,6 +1435,24 @@ static void zs_apply_custom_font_if_present(void) {
             void *fallbackExc = NULL;
             [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
         }
+    }
+
+    const char *setterClassNames[] = { "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter" };
+    for (size_t i = 0; i < sizeof(setterClassNames) / sizeof(setterClassNames[0]); i++) {
+        void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
+        if (!setterClass) continue;
+        const void *updateMethod = mt_method(setterClass, "UpdateTMP", 0);
+        if (!updateMethod) continue;
+        NSUInteger setterCount = 0;
+        void *setterArray = zs_resources_find_all_for_class(setterClass, &setterCount);
+        if (!setterArray) continue;
+        for (NSUInteger j = 0; j < setterCount; j++) {
+            void *setterInstance = zs_array_object_at(setterArray, j);
+            if (!setterInstance) continue;
+            void *updateExc = NULL;
+            [IL2CppBridge invokeMethod:updateMethod onInstance:setterInstance args:NULL outException:&updateExc];
+        }
+        ZLog(@"[ZSFont] refreshed %lu live %s instance(s)", (unsigned long)setterCount, setterClassNames[i]);
     }
 
     ZLog(@"[ZSFont] custom font asset (%p) installed into all FontSet/ExcelsiorSans/BebasKai slots, material=%p", fontAsset, fontMaterial);
