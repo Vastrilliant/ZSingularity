@@ -1504,17 +1504,18 @@ static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont
     ZLog(@"[ZSFont] install[4] newObject: %p", boxedResult);
     if (!boxedResult) return NO;
 
+    void *unboxedResult = (uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize;
     void *directoryStr = [IL2CppBridge il2CppStringFromNSString:directory];
     void *keyStr = [IL2CppBridge il2CppStringFromNSString:kZSCustomLocalizeKey];
     void *ctorArgs[4] = { titleFont, contextFont, directoryStr, keyStr };
     void *ctorExc = NULL;
-    [IL2CppBridge invokeMethod:ctorMethod onInstance:boxedResult args:ctorArgs outException:&ctorExc];
-    ZLog(@"[ZSFont] install[5] ctor: exception=%@ struct=%@", zs_describe_exception(ctorExc), zs_hex_string((uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize, 0x30));
+    [IL2CppBridge invokeMethod:ctorMethod onInstance:unboxedResult args:ctorArgs outException:&ctorExc];
+    ZLog(@"[ZSFont] install[5] ctor: exception=%@ header=%@ struct=%@", zs_describe_exception(ctorExc), zs_hex_string(boxedResult, kZSIl2CppObjectHeaderSize), zs_hex_string(unboxedResult, 0x30));
     if (ctorExc) return NO;
 
     if (isDataExistMethod) {
         void *existExc = NULL;
-        void *existBoxed = [IL2CppBridge invokeMethod:isDataExistMethod onInstance:boxedResult args:NULL outException:&existExc];
+        void *existBoxed = [IL2CppBridge invokeMethod:isDataExistMethod onInstance:unboxedResult args:NULL outException:&existExc];
         BOOL exists = !existExc && existBoxed && *(uint8_t *)((uint8_t *)existBoxed + kZSIl2CppObjectHeaderSize) != 0;
         ZLog(@"[ZSFont] install[6] IsDataExist after ctor: %d (exception=%@)", exists, zs_describe_exception(existExc));
         if (!exists) {
@@ -1527,7 +1528,7 @@ static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont
     [IL2CppBridge copyStaticFieldValue:dataField toBuffer:before];
     ZLog(@"[ZSFont] install[7] _data before: %@", zs_hex_string(before, 0x30));
 
-    [IL2CppBridge setStaticFieldValue:dataField fromBuffer:(uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize];
+    [IL2CppBridge setStaticFieldValue:dataField fromBuffer:unboxedResult];
 
     uint8_t after[256] = {0};
     [IL2CppBridge copyStaticFieldValue:dataField toBuffer:after];
@@ -1742,14 +1743,18 @@ static void zs_apply_custom_font_if_present(void) {
         }
     }
 
+    g_zsCustomFontTitle = titleFont;
+    g_zsCustomFontContext = contextFont;
+    g_zsCustomFontSignature = signature;
+
     if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
+        g_zsCustomFontTitle = NULL;
+        g_zsCustomFontContext = NULL;
+        g_zsCustomFontSignature = nil;
         ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
         return;
     }
 
-    g_zsCustomFontTitle = titleFont;
-    g_zsCustomFontContext = contextFont;
-    g_zsCustomFontSignature = signature;
     ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
 
     void *fontManagerData = zs_load_font_manager_data();
