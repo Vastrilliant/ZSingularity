@@ -78,6 +78,10 @@ static void zs_add_restart_action(UIAlertController *alert) {
     }]];
 }
 
+static NSString *zs_asset_imported_line(NSString *name) {
+    return [NSString stringWithFormat:@"%@ Asset imported", name];
+}
+
 static void zs_force_dark(UIView *view) {
     if (@available(iOS 13.0, *)) {
         view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -7699,7 +7703,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         }
 
         if (imported) {
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: Lunartique mod imported - tap Dispatch when ready to send it for processing", zipURL.lastPathComponent]];
+            [summaryLines addObject:zs_asset_imported_line(zipURL.lastPathComponent)];
         } else if (rejectedEntryLines.count == 0) {
 
             [summaryLines addObject:[NSString stringWithFormat:@"%@: Lunartique format matched, but import failed - %@", zipURL.lastPathComponent, importErr.localizedDescription ?: @"unknown error"]];
@@ -7712,7 +7716,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         NSError *importErr = nil;
         BOOL imported = [ModAssetLibrary importCarra2URL:carra2URL intoFolder:folderName error:&importErr];
         if (imported) {
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: Carra2 mod imported - tap Dispatch when ready to send it for processing", carra2URL.lastPathComponent]];
+            [summaryLines addObject:zs_asset_imported_line(carra2URL.lastPathComponent)];
         } else {
             [summaryLines addObject:[NSString stringWithFormat:@"%@: rejected - %@", carra2URL.lastPathComponent, importErr.localizedDescription ?: @"doesn't match the Carra2 mod format"]];
         }
@@ -7847,11 +7851,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         } else if ([ZSModsPaths fontKindForFileName:url.lastPathComponent] != ZSFontKindUnknown) {
 
             [validURLs addObject:url];
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: added to Mods Library - tap Dispatch when ready to send it for processing", url.lastPathComponent]];
+            [summaryLines addObject:zs_asset_imported_line(url.lastPathComponent)];
         } else if ([self zs_isRecognizedBundleURL:url]) {
 
             [validURLs addObject:url];
-            [summaryLines addObject:[NSString stringWithFormat:@"%@: added to Mods Library - tap Dispatch when ready to send it for processing", url.lastPathComponent]];
+            [summaryLines addObject:zs_asset_imported_line(url.lastPathComponent)];
         } else {
 
             [summaryLines addObject:[NSString stringWithFormat:@"%@: not a recognized asset", url.lastPathComponent]];
@@ -7961,7 +7965,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             for (NSString *rejectedLine in rejectedFileLines) {
                 NSString *rejectedFileName = [[rejectedLine componentsSeparatedByString:@": rejected"] firstObject];
                 NSUInteger existingIdx = [summaryLines indexOfObjectPassingTest:^BOOL(NSString *line, NSUInteger idx, BOOL *stop) {
-                    return [line hasPrefix:[rejectedFileName stringByAppendingString:@": "]];
+                    return [line hasPrefix:[rejectedFileName stringByAppendingString:@": "]] || [line isEqualToString:zs_asset_imported_line(rejectedFileName)];
                 }];
                 if (existingIdx != NSNotFound) {
                     summaryLines[existingIdx] = rejectedLine;
