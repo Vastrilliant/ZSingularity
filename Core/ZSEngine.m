@@ -1,5 +1,6 @@
 #import "ZSEngine.h"
 #include <string.h>
+#include <dlfcn.h>
 #import "IL2CppIntrospection.h"
 #import "ZTweakLog.h"
 #import <UIKit/UIKit.h>
@@ -1572,13 +1573,82 @@ float zs_exp_get_default_number(NSString *key) {
 
 #pragma mark - Existing cache helpers
 
-void zs_unload_unused_assets_and_collect(void) {
-    void *resources = mt_class("UnityEngine", "Resources", "CoreModule");
-    const void *unload = mt_method(resources, "UnloadUnusedAssets", 0);
-    if (unload) { void *exc = NULL; [IL2CppBridge invokeMethod:unload onInstance:NULL args:NULL outException:&exc]; }
+typedef uint32_t (*zs_gchandle_new_fn)(void *obj, int32_t pinned);
+typedef void *(*zs_gchandle_get_target_fn)(uint32_t handle);
+typedef void (*zs_gchandle_free_fn)(uint32_t handle);
+
+static BOOL g_memoryCleanupInFlight;
+static const NSTimeInterval kMemoryCleanupPollInterval = 0.1;
+static const NSTimeInterval kMemoryCleanupTimeout = 20.0;
+static const NSTimeInterval kMemoryCleanupFallbackDelay = 1.5;
+
+static void zs_run_gc_collect(void) {
     void *gc = mt_class("System", "GC", "mscorlib");
     const void *collect = mt_method(gc, "Collect", 0);
-    if (collect) { void *exc = NULL; [IL2CppBridge invokeMethod:collect onInstance:NULL args:NULL outException:&exc]; }
+    if (!collect) return;
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:collect onInstance:NULL args:NULL outException:&exc];
+}
+
+static void zs_finish_memory_cleanup(void (^completion)(BOOL)) {
+    zs_run_gc_collect();
+    g_memoryCleanupInFlight = NO;
+    if (completion) completion(YES);
+}
+
+void zs_run_memory_cleanup(void (^completion)(BOOL ran)) {
+    if (g_memoryCleanupInFlight) {
+        if (completion) completion(NO);
+        return;
+    }
+    g_memoryCleanupInFlight = YES;
+
+    void *resources = mt_class("UnityEngine", "Resources", "CoreModule");
+    const void *unload = mt_method(resources, "UnloadUnusedAssets", 0);
+    if (!unload) {
+        zs_finish_memory_cleanup(completion);
+        return;
+    }
+
+    void *exc = NULL;
+    void *operation = [IL2CppBridge invokeMethod:unload onInstance:NULL args:NULL outException:&exc];
+    if (exc || !operation) {
+        zs_finish_memory_cleanup(completion);
+        return;
+    }
+
+    zs_gchandle_new_fn newHandle = (zs_gchandle_new_fn)dlsym(RTLD_DEFAULT, "il2cpp_gchandle_new");
+    zs_gchandle_get_target_fn getTarget = (zs_gchandle_get_target_fn)dlsym(RTLD_DEFAULT, "il2cpp_gchandle_get_target");
+    zs_gchandle_free_fn freeHandle = (zs_gchandle_free_fn)dlsym(RTLD_DEFAULT, "il2cpp_gchandle_free");
+    const void *isDone = mt_method([IL2CppBridge classOfInstance:operation], "get_isDone", 0);
+
+    if (!newHandle || !getTarget || !freeHandle || !isDone) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMemoryCleanupFallbackDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            zs_finish_memory_cleanup(completion);
+        });
+        return;
+    }
+
+    uint32_t handle = newHandle(operation, 0);
+    CFTimeInterval startedAt = CACurrentMediaTime();
+    NSTimer *timer = [NSTimer timerWithTimeInterval:kMemoryCleanupPollInterval repeats:YES block:^(NSTimer *t) {
+        void *target = getTarget(handle);
+        BOOL done = (target == NULL);
+        if (target) {
+            void *pollExc = NULL;
+            void *boxed = [IL2CppBridge invokeMethod:isDone onInstance:target args:NULL outException:&pollExc];
+            done = pollExc != NULL || (boxed && *((uint8_t *)boxed + 0x10) != 0);
+        }
+        if (!done && (CACurrentMediaTime() - startedAt) < kMemoryCleanupTimeout) return;
+        [t invalidate];
+        freeHandle(handle);
+        zs_finish_memory_cleanup(completion);
+    }];
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
+void zs_unload_unused_assets_and_collect(void) {
+    zs_run_memory_cleanup(nil);
 }
 
 static NSTimeInterval g_lastMemoryWarningResponseAt;

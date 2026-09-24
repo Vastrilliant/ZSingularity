@@ -5459,6 +5459,22 @@ static const CGFloat kContentFadeHeight = 22;
     }];
 
     [self.pendingSectionBuilders addObject:^{
+    zs_add_section_header(self.stack, @"Memory management", self);
+
+    UIButton *memoryCleanupButton = zs_make_grouped_action_button(@"Memory cleanup", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [memoryCleanupButton addTarget:self action:@selector(memoryCleanupTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIView *memoryActionsCard = zs_make_grouped_action_card(@[
+        memoryCleanupButton,
+    ]);
+    memoryActionsCard.layer.borderWidth = 1;
+    memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+
+    [self.stack addArrangedSubview:memoryActionsCard];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryActionsCard];
+    }];
+
+    [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Mods", self, @selector(docsInfoTapped:));
     ZSRow *modsRow = zs_make_button_pair_row(
         @"Load Mods", [UIColor colorWithRed:0.55 green:0.42 blue:1.0 alpha:1.0],
@@ -7340,6 +7356,18 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
                 afterDismiss();
             }
         });
+    });
+}
+
+- (void)memoryCleanupTapped:(UIButton *)sender {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    sender.enabled = NO;
+    zs_run_memory_cleanup(^(BOOL ran) {
+        sender.enabled = YES;
+        if (!ran) return;
+        UINotificationFeedbackGenerator *doneHaptic = [UINotificationFeedbackGenerator new];
+        [doneHaptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     });
 }
 

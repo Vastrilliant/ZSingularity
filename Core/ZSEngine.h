@@ -318,6 +318,7 @@ float zs_exp_get_default_number(NSString *key);
 #pragma mark - Memory / asset cache controls
 
 void zs_unload_unused_assets_and_collect(void);
+void zs_run_memory_cleanup(void (^ _Nullable completion)(BOOL ran));
 void zs_set_auto_unload_on_memory_warning(BOOL enabled);
 void zs_clear_guide_portrait_cache(void);
 
