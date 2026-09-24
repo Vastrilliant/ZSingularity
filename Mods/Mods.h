@@ -8,6 +8,13 @@ typedef NS_ENUM(NSInteger, ZSFontKind) {
     ZSFontKindOpenType,
 };
 
+typedef NS_ENUM(NSInteger, ZSFontRole) {
+    ZSFontRoleNone = 0,
+    ZSFontRoleTitle,
+    ZSFontRoleContext,
+    ZSFontRoleKanjiHanzi,
+};
+
 @interface ZSModsPaths : NSObject
 
 + (NSString *)modsRootDirectory;
@@ -31,6 +38,8 @@ typedef NS_ENUM(NSInteger, ZSFontKind) {
 + (ZSFontKind)fontKindForFileName:(NSString *)fileName;
 
 + (NSString *)displayNameForFontKind:(ZSFontKind)kind;
+
++ (NSString *)displayNameForFontRole:(ZSFontRole)role;
 
 @end
 
@@ -220,6 +229,8 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
 
 @property (nonatomic, assign) BOOL isAssetBundle;
 
+@property (nonatomic, assign) ZSFontRole fontRole;
+
 @property (nonatomic, copy, nullable) NSString *cabIdentifier;
 
 @property (nonatomic, copy, nullable) NSNumber *targetPlatform;
@@ -288,8 +299,11 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
 
 + (nullable NSArray<ModAssetLibraryEntry *> *)entriesInFolder:(NSString *)folderName error:(NSError **)error;
 
++ (nullable ModAssetLibraryEntry *)fontEntryOccupyingRole:(ZSFontRole)role;
+
 + (BOOL)importFileURLs:(NSArray<NSURL *> *)moddedURLs
              intoFolder:(NSString *)folderName
+              fontRoles:(nullable NSDictionary<NSString *, NSNumber *> *)fontRoles
         rejectedFileLines:(NSArray<NSString *> * _Nullable * _Nullable)rejectedFileLines
                   error:(NSError **)error;
 

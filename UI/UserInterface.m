@@ -82,6 +82,17 @@ static NSString *zs_asset_imported_line(NSString *name) {
     return [NSString stringWithFormat:@"%@ Asset imported", name];
 }
 
+static void zs_drop_font_from_import(NSURL *url, NSString *reason, NSMutableArray<NSURL *> *validURLs, NSMutableArray<NSString *> *summaryLines) {
+    [validURLs removeObject:url];
+    NSString *line = [NSString stringWithFormat:@"%@: %@", url.lastPathComponent, reason];
+    NSUInteger existingIdx = [summaryLines indexOfObject:zs_asset_imported_line(url.lastPathComponent)];
+    if (existingIdx != NSNotFound) {
+        summaryLines[existingIdx] = line;
+    } else {
+        [summaryLines addObject:line];
+    }
+}
+
 static void zs_force_dark(UIView *view) {
     if (@available(iOS 13.0, *)) {
         view.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
@@ -3469,6 +3480,14 @@ static UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL d
     kindLabel.font = subtextFont;
     kindLabel.textColor = subtextColor;
     [panel addArrangedSubview:kindLabel];
+
+    if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) {
+        UILabel *assignedLabel = [[UILabel alloc] init];
+        assignedLabel.text = [NSString stringWithFormat:@"Assigned: %@", [ZSModsPaths displayNameForFontRole:entry.fontRole]];
+        assignedLabel.font = subtextFont;
+        assignedLabel.textColor = subtextColor;
+        [panel addArrangedSubview:assignedLabel];
+    }
 
     if (entry.remark.length > 0) {
         ZSMarqueeLabel *remarkLabel = [[ZSMarqueeLabel alloc] init];
@@ -7801,10 +7820,93 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)zs_promptFontRoleQueue:(NSMutableArray<NSURL *> *)queue
+                    validURLs:(NSMutableArray<NSURL *> *)validURLs
+                    fontRoles:(NSMutableDictionary<NSString *, NSNumber *> *)fontRoles
+                 summaryLines:(NSMutableArray<NSString *> *)summaryLines
+                   completion:(void (^)(void))completion {
+    if (queue.count == 0) {
+        completion();
+        return;
+    }
+
+    NSURL *url = queue.firstObject;
+    [queue removeObjectAtIndex:0];
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    if (!presenter) {
+        zs_drop_font_from_import(url, @"cancelled", validURLs, summaryLines);
+        [self zs_promptFontRoleQueue:queue validURLs:validURLs fontRoles:fontRoles summaryLines:summaryLines completion:completion];
+        return;
+    }
+
+    static const ZSFontRole kRoles[] = { ZSFontRoleTitle, ZSFontRoleContext, ZSFontRoleKanjiHanzi };
+    NSMutableArray<NSNumber *> *freeRoles = [NSMutableArray array];
+    NSMutableArray<NSString *> *takenLines = [NSMutableArray array];
+    for (size_t i = 0; i < sizeof(kRoles) / sizeof(kRoles[0]); i++) {
+        ZSFontRole role = kRoles[i];
+        NSString *occupantName = nil;
+        ModAssetLibraryEntry *occupant = [ModAssetLibrary fontEntryOccupyingRole:role];
+        if (occupant) {
+            occupantName = [ModAssetLibrary displayNameForEntry:occupant];
+        } else {
+            for (NSString *claimedPath in fontRoles) {
+                if (fontRoles[claimedPath].integerValue == role) {
+                    occupantName = claimedPath.lastPathComponent;
+                    break;
+                }
+            }
+        }
+        if (occupantName) {
+            [takenLines addObject:[NSString stringWithFormat:@"%@: %@", [ZSModsPaths displayNameForFontRole:role], occupantName]];
+        } else {
+            [freeRoles addObject:@(role)];
+        }
+    }
+
+    if (freeRoles.count == 0) {
+        zs_drop_font_from_import(url, @"rejected - Title, Context and Kanji/Hanzi are all assigned, delete a font from the library to free one", validURLs, summaryLines);
+        [self zs_promptFontRoleQueue:queue validURLs:validURLs fontRoles:fontRoles summaryLines:summaryLines completion:completion];
+        return;
+    }
+
+    NSString *message = [NSString stringWithFormat:@"Which text should \u201C%@\u201D be used for?", url.lastPathComponent];
+    if (takenLines.count > 0) {
+        message = [message stringByAppendingFormat:@"\n\nAlready assigned:\n%@", [takenLines componentsJoinedByString:@"\n"]];
+    }
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Assign Font"
+                                                                    message:message
+                                                             preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    for (size_t i = 0; i < sizeof(kRoles) / sizeof(kRoles[0]); i++) {
+        ZSFontRole role = kRoles[i];
+        UIAlertAction *action = [UIAlertAction actionWithTitle:[ZSModsPaths displayNameForFontRole:role]
+                                                          style:UIAlertActionStyleDefault
+                                                        handler:^(UIAlertAction *chosen) {
+            fontRoles[url.path] = @(role);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf zs_promptFontRoleQueue:queue validURLs:validURLs fontRoles:fontRoles summaryLines:summaryLines completion:completion];
+            });
+        }];
+        action.enabled = [freeRoles containsObject:@(role)];
+        [alert addAction:action];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *chosen) {
+        zs_drop_font_from_import(url, @"cancelled", validURLs, summaryLines);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf zs_promptFontRoleQueue:queue validURLs:validURLs fontRoles:fontRoles summaryLines:summaryLines completion:completion];
+        });
+    }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)zs_handleLoadModsPickedURLs:(NSArray<NSURL *> *)urls intoFolder:(NSString *)folderName {
     if (urls.count == 0) return;
 
     NSMutableArray<NSURL *> *validURLs = [NSMutableArray array];
+    NSMutableArray<NSURL *> *fontURLs = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSNumber *> *fontRoles = [NSMutableDictionary dictionary];
     NSMutableArray<NSURL *> *bankURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *zipURLs = [NSMutableArray array];
     NSMutableArray<NSURL *> *carra2URLs = [NSMutableArray array];
@@ -7851,6 +7953,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         } else if ([ZSModsPaths fontKindForFileName:url.lastPathComponent] != ZSFontKindUnknown) {
 
             [validURLs addObject:url];
+            [fontURLs addObject:url];
             [summaryLines addObject:zs_asset_imported_line(url.lastPathComponent)];
         } else if ([self zs_isRecognizedBundleURL:url]) {
 
@@ -7910,17 +8013,24 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 
     __weak typeof(self) weakSelf = self;
-    [self zs_promptLocalizationLanguageQueue:promptQueue
-                                        jobs:autoJobs
-                                summaryLines:summaryLines
-                                  completion:^(NSArray<NSDictionary *> *localizationJobs) {
-        [weakSelf zs_runLoadModsImportWithValidURLs:validURLs
-                                           bankURLs:bankURLs
-                                            zipURLs:zipURLs
-                                         carra2URLs:carra2URLs
-                                   localizationJobs:localizationJobs
-                                         intoFolder:folderName
-                                       summaryLines:summaryLines];
+    [self zs_promptFontRoleQueue:fontURLs
+                       validURLs:validURLs
+                       fontRoles:fontRoles
+                    summaryLines:summaryLines
+                      completion:^{
+        [weakSelf zs_promptLocalizationLanguageQueue:promptQueue
+                                                jobs:autoJobs
+                                        summaryLines:summaryLines
+                                          completion:^(NSArray<NSDictionary *> *localizationJobs) {
+            [weakSelf zs_runLoadModsImportWithValidURLs:validURLs
+                                               bankURLs:bankURLs
+                                                zipURLs:zipURLs
+                                             carra2URLs:carra2URLs
+                                       localizationJobs:localizationJobs
+                                             fontRoles:fontRoles
+                                             intoFolder:folderName
+                                           summaryLines:summaryLines];
+        }];
     }];
 }
 
@@ -7929,6 +8039,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
                                   zipURLs:(NSArray<NSURL *> *)zipURLs
                                carra2URLs:(NSArray<NSURL *> *)carra2URLs
                          localizationJobs:(NSArray<NSDictionary *> *)localizationJobs
+                                fontRoles:(NSDictionary<NSString *, NSNumber *> *)fontRoles
                                intoFolder:(NSString *)folderName
                              summaryLines:(NSMutableArray<NSString *> *)summaryLines {
     self.loadModsSummaryLines = summaryLines;
@@ -7957,7 +8068,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         if (validURLs.count > 0) {
             NSError *importError = nil;
             NSArray<NSString *> *rejectedFileLines = nil;
-            BOOL imported = [ModAssetLibrary importFileURLs:validURLs intoFolder:folderName rejectedFileLines:&rejectedFileLines error:&importError];
+            BOOL imported = [ModAssetLibrary importFileURLs:validURLs intoFolder:folderName fontRoles:fontRoles rejectedFileLines:&rejectedFileLines error:&importError];
             if (!imported && rejectedFileLines.count == 0) {
                 ZLog(@"[Mods] couldn't add picked files to Mod Asset Library folder \"%@\": %@", folderName, importError);
             }

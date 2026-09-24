@@ -112,6 +112,15 @@ static NSString * const kZSModsFontsDirectoryName = @"Fonts";
     }
 }
 
++ (NSString *)displayNameForFontRole:(ZSFontRole)role {
+    switch (role) {
+        case ZSFontRoleTitle: return @"Title";
+        case ZSFontRoleContext: return @"Context";
+        case ZSFontRoleKanjiHanzi: return @"Kanji/Hanzi";
+        default: return @"None";
+    }
+}
+
 @end
 
 NSString * const BankTransplantErrorDomain = @"BankTransplantErrorDomain";
@@ -1748,6 +1757,13 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
                             userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+static ZSFontRole MALFontRoleFromValue(id value) {
+    if (![value isKindOfClass:NSNumber.class]) return ZSFontRoleNone;
+    NSInteger raw = [value integerValue];
+    if (raw < ZSFontRoleTitle || raw > ZSFontRoleKanjiHanzi) return ZSFontRoleNone;
+    return (ZSFontRole)raw;
+}
+
 @implementation ModAssetLibraryEntry
 
 - (NSDictionary<NSString *, id> *)mal_dictionaryRepresentation {
@@ -1766,6 +1782,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     if (self.localizationRelativePath.length > 0) d[@"localizationRelativePath"] = self.localizationRelativePath;
     if (self.cachedFromFolder.length > 0) d[@"cachedFromFolder"] = self.cachedFromFolder;
     if (self.isAssetBundle) d[@"isAssetBundle"] = @YES;
+    if (self.fontRole != ZSFontRoleNone) d[@"fontRole"] = @(self.fontRole);
     if (self.cabIdentifier) d[@"cabIdentifier"] = self.cabIdentifier;
     if (self.targetPlatform) d[@"targetPlatform"] = self.targetPlatform;
 
@@ -1803,6 +1820,7 @@ static NSError *MALError(ModAssetLibraryErrorCode code, NSString *message) {
     e.localizationRelativePath = [d[@"localizationRelativePath"] isKindOfClass:NSString.class] ? d[@"localizationRelativePath"] : nil;
 
     e.isAssetBundle = [d[@"isAssetBundle"] isKindOfClass:NSNumber.class] && [d[@"isAssetBundle"] boolValue];
+    e.fontRole = MALFontRoleFromValue(d[@"fontRole"]);
     e.cabIdentifier = [d[@"cabIdentifier"] isKindOfClass:NSString.class] ? d[@"cabIdentifier"] : nil;
     e.targetPlatform = [d[@"targetPlatform"] isKindOfClass:NSNumber.class] ? d[@"targetPlatform"] : nil;
 
@@ -2253,6 +2271,25 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     return [NSString stringWithFormat:@"%@: rejected - its CAB identifier could not be found, meaning it's either malformed or outdated", displayName];
 }
 
++ (void)mal_collectFolderNamesFrom:(NSString *)folderName into:(NSMutableArray<NSString *> *)collected {
+    [collected addObject:folderName];
+    for (NSString *subFolder in [self subFolderNamesInFolder:folderName]) {
+        [self mal_collectFolderNamesFrom:subFolder into:collected];
+    }
+}
+
++ (nullable ModAssetLibraryEntry *)fontEntryOccupyingRole:(ZSFontRole)role {
+    if (role == ZSFontRoleNone) return nil;
+    NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
+    for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
+    for (NSString *folder in allFolders) {
+        for (ModAssetLibraryEntry *entry in [self entriesInFolder:folder error:nil]) {
+            if (entry.fontRole == role && [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) return entry;
+        }
+    }
+    return nil;
+}
+
 + (BOOL)activateFontForEntry:(ModAssetLibraryEntry *)entry error:(NSError **)error {
     [self deactivateFontForEntry:entry];
     NSString *fontsDir = [ZSModsPaths ensuredDirectoryAtPath:[ZSModsPaths modsFontsDirectory]];
@@ -2280,6 +2317,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
 
 + (BOOL)importFileURLs:(NSArray<NSURL *> *)moddedURLs
              intoFolder:(NSString *)folderName
+              fontRoles:(nullable NSDictionary<NSString *, NSNumber *> *)fontRoles
         rejectedFileLines:(NSArray<NSString *> * _Nullable * _Nullable)rejectedFileLines
                   error:(NSError **)error {
     NSString *root = [self modLibraryRootDirectory];
@@ -2304,6 +2342,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
 
     BOOL enforceOverlap = ![self mal_folderIsStored:folderName];
     NSMutableArray<NSString *> *rejectedLines = [NSMutableArray array];
+    NSMutableSet<NSNumber *> *claimedFontRoles = [NSMutableSet set];
     NSInteger importedCount = 0;
     for (NSURL *url in moddedURLs) {
         BOOL accessing = [url startAccessingSecurityScopedResource];
@@ -2361,6 +2400,30 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
             }
         }
 
+        BOOL isFont = [ZSModsPaths fontKindForFileName:url.lastPathComponent] != ZSFontKindUnknown;
+        ZSFontRole fontRole = ZSFontRoleNone;
+        if (isFont) {
+            fontRole = MALFontRoleFromValue(fontRoles[url.path]);
+            NSString *fontRejection = nil;
+            if (fontRole == ZSFontRoleNone) {
+                fontRejection = [NSString stringWithFormat:@"%@: rejected - no font role was chosen", url.lastPathComponent];
+            } else if ([claimedFontRoles containsObject:@(fontRole)]) {
+                fontRejection = [NSString stringWithFormat:@"%@: rejected - %@ is already assigned to another font in this batch",
+                                 url.lastPathComponent, [ZSModsPaths displayNameForFontRole:fontRole]];
+            } else {
+                ModAssetLibraryEntry *occupant = [self fontEntryOccupyingRole:fontRole];
+                if (occupant) {
+                    fontRejection = [NSString stringWithFormat:@"%@: rejected - %@ is already assigned to \"%@\"",
+                                     url.lastPathComponent, [ZSModsPaths displayNameForFontRole:fontRole], [self displayNameForEntry:occupant]];
+                }
+            }
+            if (fontRejection) {
+                if (accessing) [url stopAccessingSecurityScopedResource];
+                [rejectedLines addObject:fontRejection];
+                continue;
+            }
+        }
+
         NSString *destPath = nil;
         NSString *destName = nil;
         if (cabID) {
@@ -2397,13 +2460,15 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
         entry.byteSize = attrs.fileSize;
         entry.dateAdded = now;
         entry.isAssetBundle = isBundle;
+        entry.fontRole = fontRole;
         entry.cabIdentifier = cabID;
         entry.targetPlatform = targetPlatformNumber;
 
         entry.livePathDescription = [self mal_livePathDescriptionForFileName:destName];
         entry.resolvedInstallTargetPath = resolvedTargetPath;
 
-        if ([ZSModsPaths fontKindForFileName:destName] != ZSFontKindUnknown) {
+        if (isFont) {
+            [claimedFontRoles addObject:@(fontRole)];
             NSError *fontErr = nil;
             if (![self activateFontForEntry:entry error:&fontErr]) {
                 ZLog(@"[ModAssetLibrary] couldn't activate font %@: %@", destName, fontErr.localizedDescription);
@@ -3052,6 +3117,7 @@ static NSString *MALTimestampNow(void) {
     movedEntry.resolvedInstallTargetPath = entry.resolvedInstallTargetPath;
     movedEntry.remark = entry.remark;
     movedEntry.isAssetBundle = entry.isAssetBundle;
+    movedEntry.fontRole = entry.fontRole;
     movedEntry.cabIdentifier = entry.cabIdentifier;
     movedEntry.targetPlatform = entry.targetPlatform;
     movedEntry.cachedFromFolder = entry.cachedFromFolder;
@@ -3459,28 +3525,11 @@ static NSString *zs_custom_font_directory(void) {
     return fontsDir;
 }
 
-static NSArray<NSString *> *zs_custom_font_files(NSString *fontsDir) {
-    NSMutableArray<NSString *> *files = [NSMutableArray array];
-    for (NSString *relative in [NSFileManager.defaultManager enumeratorAtPath:fontsDir]) {
-        NSString *extension = relative.pathExtension.lowercaseString;
-        if (![extension isEqualToString:@"ttf"] && ![extension isEqualToString:@"otf"]) continue;
-        [files addObject:[fontsDir stringByAppendingPathComponent:relative]];
-    }
-    return [files sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
-}
-
-static NSString *zs_pick_custom_font(NSArray<NSString *> *files, NSString *token) {
-    for (NSString *path in files) {
-        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
-    }
-    return files.firstObject;
-}
-
-static NSString *zs_pick_custom_font_optional(NSArray<NSString *> *files, NSString *token) {
-    for (NSString *path in files) {
-        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
-    }
-    return nil;
+static NSString *zs_assigned_font_path(ZSFontRole role) {
+    ModAssetLibraryEntry *entry = [ModAssetLibrary fontEntryOccupyingRole:role];
+    if (entry.livePathDescription.length == 0) return nil;
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:entry.livePathDescription];
+    return [NSFileManager.defaultManager fileExistsAtPath:path] ? path : nil;
 }
 
 static NSString *zs_custom_font_signature(NSArray<NSString *> *paths) {
@@ -3743,8 +3792,8 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
         }
     }
 
-    if (cjkFont && titleListObj) zs_font_asset_fallback_insert_front(titleListObj, cjkFont);
-    if (cjkFont && contextListObj && contextListObj != titleListObj) zs_font_asset_fallback_insert_front(contextListObj, cjkFont);
+    if (cjkFont && titleListObj && cjkFont != titleFont) zs_font_asset_fallback_insert_front(titleListObj, cjkFont);
+    if (cjkFont && contextListObj && contextListObj != titleListObj && cjkFont != contextFont) zs_font_asset_fallback_insert_front(contextListObj, cjkFont);
 
     NSUInteger patched = 0;
     for (NSUInteger i = 0; i < count; i++) {
@@ -3920,13 +3969,15 @@ static void zs_apply_custom_font_if_present(void) {
     NSString *fontsDir = zs_custom_font_directory();
     if (!fontsDir) return;
 
-    NSArray<NSString *> *files = zs_custom_font_files(fontsDir);
-    ZLog(@"[ZSFont] apply: directory=%@ fontFiles=%lu", fontsDir, (unsigned long)files.count);
-    if (files.count == 0) return;
+    NSString *assignedTitlePath = zs_assigned_font_path(ZSFontRoleTitle);
+    NSString *assignedContextPath = zs_assigned_font_path(ZSFontRoleContext);
+    NSString *cjkPath = zs_assigned_font_path(ZSFontRoleKanjiHanzi);
+    NSString *titlePath = assignedTitlePath ?: assignedContextPath ?: cjkPath;
+    NSString *contextPath = assignedContextPath ?: assignedTitlePath ?: cjkPath;
+    ZLog(@"[ZSFont] apply: directory=%@ assigned title=%@ context=%@ cjk=%@", fontsDir,
+         assignedTitlePath.lastPathComponent ?: @"(none)", assignedContextPath.lastPathComponent ?: @"(none)", cjkPath.lastPathComponent ?: @"(none)");
+    if (!titlePath || !contextPath) return;
 
-    NSString *titlePath = zs_pick_custom_font(files, @"title");
-    NSString *contextPath = zs_pick_custom_font(files, @"context");
-    NSString *cjkPath = zs_pick_custom_font_optional(files, @"cjk");
     NSMutableArray<NSString *> *signatureInputs = [NSMutableArray arrayWithObjects:titlePath, contextPath, nil];
     if (cjkPath) [signatureInputs addObject:cjkPath];
     NSString *signature = zs_custom_font_signature(signatureInputs);
