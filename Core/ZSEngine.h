@@ -345,6 +345,15 @@ void zs_set_custom_greeting_text(NSString * _Nullable text);
 
 @end
 
+#pragma mark - Shared IL2CPP helpers
+
+void *mt_class(const char *ns, const char *name, const char *assemblySubstring);
+const void *mt_method(void *klass, const char *name, int argCount);
+void *zs_type_object(void *klass);
+void *zs_resources_find_all_for_class(void *typeClass, NSUInteger *countOut);
+void *zs_array_object_at(void *array, NSUInteger index);
+BOOL ZSUID_UnityObjectIsAlive(void *obj);
+
 #pragma mark - Legacy aliases used by existing UI / ZSScripts
 
 #define g_autoUnloadOnMemoryWarning g_expAutoUnloadOnMemoryWarning

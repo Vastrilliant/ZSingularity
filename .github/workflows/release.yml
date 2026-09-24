@@ -131,20 +131,17 @@ jobs:
             -Wl,-ld_classic \
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
             -I. \
-            -ICore -IUI -IMods -IBundleTools -ITranscoder -INetwork -IDiagnostics -IResources -INotifications \
-            BundleTools/UnityBundleTools.m \
+            -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
+            Mods/BundleTools/UnityBundleTools.m \
             Core/IL2CppIntrospection.m \
             Dumper/ZSDumper.m \
             Core/ZSDumpTypeRegistry.m \
             Core/ZSEngine.m \
-            Core/ZSInfoPlistPatch.m \
             Diagnostics/ZSDiagnostics.m \
-            Mods/BankTransplant.m \
-            Mods/LocalizationMods.m \
-            Mods/ModAssetManagement.m \
+            Mods/Mods.m \
+            Mods/Transcoder/Transcoder.m \
             Network/PatchManifestNetwork.m \
             Network/ZSUpdater.m \
-            Transcoder/Transcoder.m \
             UI/UserInterface.m \
             UI/ZSGifTint.m \
             lz4.c \

@@ -2,7 +2,7 @@
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
 #import "UnityBundleTools.h"
-#import "ModAssetManagement.h"
+#import "Mods.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <Security/Security.h>
 

@@ -8,16 +8,12 @@
 #import "ZSEngine.h"
 #import "ZSDiagnostics.h"
 #import "ZTweakLog.h"
-#import "BankTransplant.h"
-#import "ZSModsPaths.h"
-#import "LocalizationMods.h"
+#import "Mods.h"
 #import "Transcoder.h"
 #import "PatchManifestNetwork.h"
-#import "ZSInfoPlistPatch.h"
 #import "ZSVersion.h"
 #import "ZSUpdater.h"
 
-#import "ModAssetManagement.h"
 #import "UnityBundleTools.h"
 #import "IL2CppIntrospection.h"
 #import "Dumper/ZSDumper.h"
@@ -4120,9 +4116,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
 
     [self zs_presentTutorialIfNeeded];
-    if (zs_tutorial_completed() && !self.tutorialPresented) {
-        [self zs_presentRestartPromptIfNeeded];
-    }
 
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -4394,26 +4387,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
     } completion:^(BOOL finished) {
         [overlay removeFromSuperview];
-        [self zs_presentRestartPromptIfNeeded];
     }];
 }
 
 - (void)zs_layoutTutorialForWindow:(UIView *)unityView {
     if (!self.tutorialOverlay || !self.tutorialPanel) return;
     self.tutorialOverlay.frame = unityView.bounds;
-}
-
-- (void)zs_presentRestartPromptIfNeeded {
-    if (!zs_info_plist_needs_restart_prompt()) return;
-    ZLog(@"[UserInterface] presenting restart prompt after Info.plist patch");
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) return;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restart Required"
-                                                                     message:@"ZSingularity added new keys to the game's info.plist. This is necessary for certain features to work."
-                                                              preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    zs_add_restart_action(alert);
-    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)openPanel {

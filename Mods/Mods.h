@@ -1,7 +1,131 @@
-
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSInteger, ZSFontKind) {
+    ZSFontKindUnknown = 0,
+    ZSFontKindTrueType,
+    ZSFontKindOpenType,
+};
+
+@interface ZSModsPaths : NSObject
+
++ (NSString *)modsRootDirectory;
+
++ (NSString *)modsLibraryDirectory;
+
++ (NSString *)modsBackupsDirectory;
+
++ (NSString *)modsBackupsLocalizeDirectory;
+
++ (NSString *)modsBackupsBanksDirectory;
+
++ (NSString *)modsBackupsAssetsDirectory;
+
++ (NSString *)modsFontsDirectory;
+
++ (nullable NSString *)ensuredDirectoryAtPath:(nullable NSString *)path;
+
++ (void)migrateLegacyDirectoryAtPath:(nullable NSString *)oldPath toPath:(nullable NSString *)newPath;
+
++ (ZSFontKind)fontKindForFileName:(NSString *)fileName;
+
++ (NSString *)displayNameForFontKind:(ZSFontKind)kind;
+
+@end
+
+extern NSString * const BankTransplantErrorDomain;
+
+typedef NS_ENUM(NSInteger, BankTransplantErrorCode) {
+    BankTransplantErrorCantReadModded = 1,
+    BankTransplantErrorOriginalNotFound,
+    BankTransplantErrorBackupFailed,
+    BankTransplantErrorWriteFailed,
+};
+
+@interface BankTransplant : NSObject
+
++ (NSString *)mobileFMODBuildsDirectory;
+
++ (NSString *)bankBackupDirectory;
+
++ (BOOL)transplantAndSwapModdedBankAtURL:(NSURL *)moddedURL
+                                    error:(NSError **)error;
+
++ (NSInteger)restoreAllBackedUpBanksWithError:(NSError **)error;
+
++ (NSInteger)restoreAllBackedUpBanksForce:(BOOL)force error:(NSError **)error;
+
++ (NSInteger)restoreBackedUpBankNamed:(NSString *)name error:(NSError **)error;
+
++ (nullable NSDictionary<NSString *, id> *)fmodHeaderInfoForBankAtPath:(NSString *)path;
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedBanks;
+
+@end
+
+extern NSString * const LocalizationTransplantErrorDomain;
+
+typedef NS_ENUM(NSInteger, LocalizationTransplantErrorCode) {
+    LocalizationTransplantErrorInvalidTarget = 1,
+    LocalizationTransplantErrorLanguageFolderNotFound,
+    LocalizationTransplantErrorCantReadModded,
+    LocalizationTransplantErrorBackupFailed,
+    LocalizationTransplantErrorWriteFailed,
+    LocalizationTransplantErrorNotAPack,
+};
+
+@interface LocalizationTransplant : NSObject
+
++ (NSArray<NSString *> *)languageCodes;
+
++ (nullable NSString *)localizeDirectory;
+
++ (nullable NSString *)languageDirectoryForCode:(NSString *)languageCode;
+
++ (nullable NSString *)backupDirectory;
+
++ (BOOL)isJunkArchivePathComponents:(NSArray<NSString *> *)components;
+
++ (BOOL)isLocalizationJSONAtURL:(NSURL *)url;
+
++ (BOOL)isTranslationPackDirectoryAtPath:(NSString *)path;
+
++ (nullable NSString *)packRootFolderNameForArchiveEntryNames:(NSArray<NSString *> *)entryNames;
+
++ (nullable NSString *)packDirectoryInExtractedDirectoryAtPath:(NSString *)path;
+
++ (nullable NSString *)detectedLanguageForPackDirectoryAtPath:(NSString *)path;
+
++ (nullable NSString *)detectedLanguageForArchiveEntryNames:(NSArray<NSString *> *)entryNames;
+
++ (BOOL)prefixPackJSONFilesAtPath:(NSString *)packPath
+                     withLanguage:(NSString *)languageCode
+                            error:(NSError **)error;
+
++ (NSArray<NSString *> *)relativeTargetsForJSONNamed:(NSString *)fileName inLanguage:(NSString *)languageCode;
+
++ (unsigned long long)totalByteSizeAtPath:(NSString *)path;
+
++ (BOOL)applyModFileAtPath:(NSString *)modPath
+          toRelativeTarget:(NSString *)relativeTarget
+                     error:(NSError **)error;
+
++ (BOOL)applyPackAtPath:(NSString *)packPath
+             toLanguage:(NSString *)languageCode
+                  error:(NSError **)error;
+
++ (BOOL)restoreRelativeTarget:(NSString *)relativeTarget
+   ifAppliedFromModFileAtPath:(NSString *)modPath;
+
++ (BOOL)restorePackForLanguage:(NSString *)languageCode
+       ifAppliedFromPackAtPath:(NSString *)packPath;
+
++ (NSInteger)restoreAllBackupsForce:(BOOL)force error:(NSError **)error;
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedFiles;
+
+@end
 
 extern NSString * const LunartiqueModArchiveErrorDomain;
 
@@ -226,5 +350,7 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
 + (BOOL)deleteAllFoldersWithError:(NSError **)error;
 
 @end
+
+void zs_schedule_font_apply(void);
 
 NS_ASSUME_NONNULL_END

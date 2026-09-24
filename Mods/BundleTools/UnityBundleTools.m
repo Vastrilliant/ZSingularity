@@ -2,8 +2,7 @@
 #import "UnityBundleTools.h"
 #import "ZTweakLog.h"
 #import "ZSEngine.h"
-#import "BankTransplant.h"
-#import "LocalizationMods.h"
+#import "Mods.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>

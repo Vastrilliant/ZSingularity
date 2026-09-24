@@ -1,10 +1,1212 @@
-#import "ModAssetManagement.h"
+#import "Mods.h"
 #import "ZTweakLog.h"
-#import "BankTransplant.h"
-#import "LocalizationMods.h"
+#import "ZSEngine.h"
+#import "IL2CppIntrospection.h"
 #import "UnityBundleTools.h"
-#import "ZSModsPaths.h"
+#import <CoreFoundation/CoreFoundation.h>
 #import <compression.h>
+
+static NSString * const kZSModsRootDirectoryName = @"Mods";
+static NSString * const kZSModsLibraryDirectoryName = @"library";
+static NSString * const kZSModsBackupsDirectoryName = @"backups";
+static NSString * const kZSModsBackupsLocalizeDirectoryName = @"Localize";
+static NSString * const kZSModsBackupsBanksDirectoryName = @"Banks";
+static NSString * const kZSModsBackupsAssetsDirectoryName = @"Assets";
+static NSString * const kZSModsFontsDirectoryName = @"Fonts";
+
+@implementation ZSModsPaths
+
++ (nullable NSString *)documentsDirectory {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    return paths.firstObject;
+}
+
++ (NSString *)modsRootDirectory {
+    NSString *documentsDir = [self documentsDirectory];
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:kZSModsRootDirectoryName];
+}
+
++ (NSString *)modsLibraryDirectory {
+    NSString *root = [self modsRootDirectory];
+    if (!root) return nil;
+    return [root stringByAppendingPathComponent:kZSModsLibraryDirectoryName];
+}
+
++ (NSString *)modsBackupsDirectory {
+    NSString *root = [self modsRootDirectory];
+    if (!root) return nil;
+    return [root stringByAppendingPathComponent:kZSModsBackupsDirectoryName];
+}
+
++ (NSString *)modsBackupsLocalizeDirectory {
+    NSString *backups = [self modsBackupsDirectory];
+    if (!backups) return nil;
+    return [backups stringByAppendingPathComponent:kZSModsBackupsLocalizeDirectoryName];
+}
+
++ (NSString *)modsBackupsBanksDirectory {
+    NSString *backups = [self modsBackupsDirectory];
+    if (!backups) return nil;
+    return [backups stringByAppendingPathComponent:kZSModsBackupsBanksDirectoryName];
+}
+
++ (NSString *)modsBackupsAssetsDirectory {
+    NSString *backups = [self modsBackupsDirectory];
+    if (!backups) return nil;
+    return [backups stringByAppendingPathComponent:kZSModsBackupsAssetsDirectoryName];
+}
+
++ (NSString *)modsFontsDirectory {
+    NSString *root = [self modsRootDirectory];
+    if (!root) return nil;
+    return [root stringByAppendingPathComponent:kZSModsFontsDirectoryName];
+}
+
++ (nullable NSString *)ensuredDirectoryAtPath:(nullable NSString *)path {
+    if (!path) return nil;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDir = NO;
+    if ([fm fileExistsAtPath:path isDirectory:&isDir]) {
+        return isDir ? path : nil;
+    }
+    NSError *dirErr = nil;
+    if (![fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        return nil;
+    }
+    return path;
+}
+
++ (void)migrateLegacyDirectoryAtPath:(nullable NSString *)oldPath toPath:(nullable NSString *)newPath {
+    if (oldPath.length == 0 || newPath.length == 0) return;
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    BOOL oldIsDir = NO;
+    if (![fm fileExistsAtPath:oldPath isDirectory:&oldIsDir] || !oldIsDir) return;
+    if ([fm fileExistsAtPath:newPath]) return;
+
+    NSString *newParent = newPath.stringByDeletingLastPathComponent;
+    if (![self ensuredDirectoryAtPath:newParent]) return;
+
+    NSError *moveErr = nil;
+    if (![fm moveItemAtPath:oldPath toPath:newPath error:&moveErr]) {
+        NSError *copyErr = nil;
+        if ([fm copyItemAtPath:oldPath toPath:newPath error:&copyErr]) {
+            [fm removeItemAtPath:oldPath error:nil];
+        }
+    }
+}
+
++ (ZSFontKind)fontKindForFileName:(NSString *)fileName {
+    NSString *ext = fileName.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"ttf"]) return ZSFontKindTrueType;
+    if ([ext isEqualToString:@"otf"]) return ZSFontKindOpenType;
+    return ZSFontKindUnknown;
+}
+
++ (NSString *)displayNameForFontKind:(ZSFontKind)kind {
+    switch (kind) {
+        case ZSFontKindTrueType: return @"TrueType Font";
+        case ZSFontKindOpenType: return @"OpenType Font";
+        default: return @"Unknown Font";
+    }
+}
+
+@end
+
+NSString * const BankTransplantErrorDomain = @"BankTransplantErrorDomain";
+
+static NSError *BTError(BankTransplantErrorCode code, NSString *message) {
+    return [NSError errorWithDomain:BankTransplantErrorDomain
+                                code:code
+                            userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+static NSString * const kBTBackupSuffix = @".orig-bak";
+static NSString * const kBTMobileBuildsRelativePath = @"Assets/Sound/FMODBuilds/Mobile";
+
+@interface BankTransplant ()
++ (BOOL)bt_restoreOneBackupEntry:(NSString *)backupEntryName inBackupDir:(NSString *)backupDir mobileDir:(NSString *)mobileDir force:(BOOL)force;
++ (BOOL)bt_fileAtPath:(NSString *)pathA hasIdenticalBytesToFileAtPath:(NSString *)pathB;
+@end
+
+@implementation BankTransplant
+
++ (NSString *)mobileFMODBuildsDirectory {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = paths.firstObject;
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:kBTMobileBuildsRelativePath];
+}
+
++ (nullable NSString *)bt_legacyBankBackupDirectory {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+    NSString *libraryDir = paths.firstObject;
+    if (!libraryDir) return nil;
+    return [libraryDir stringByAppendingPathComponent:@"ZSingularityBankBackups"];
+}
+
++ (NSString *)bankBackupDirectory {
+    NSString *newDir = [ZSModsPaths modsBackupsBanksDirectory];
+    [ZSModsPaths migrateLegacyDirectoryAtPath:[self bt_legacyBankBackupDirectory] toPath:newDir];
+    return newDir;
+}
+
++ (BOOL)transplantAndSwapModdedBankAtURL:(NSURL *)moddedURL error:(NSError **)error {
+    BOOL accessing = [moddedURL startAccessingSecurityScopedResource];
+
+    NSString *fileName = moddedURL.lastPathComponent;
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *originalPath = mobileDir ? [mobileDir stringByAppendingPathComponent:fileName] : nil;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!originalPath || ![fm fileExistsAtPath:originalPath]) {
+        if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+        if (error) *error = BTError(BankTransplantErrorOriginalNotFound,
+            [NSString stringWithFormat:@"No stock bank named \"%@\" found under Assets/Sound/FMODBuilds/Mobile.", fileName]);
+        return NO;
+    }
+
+    if (![fm isReadableFileAtPath:moddedURL.path]) {
+        if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+        if (error) *error = BTError(BankTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read the picked file %@.", fileName]);
+        return NO;
+    }
+
+    NSString *backupDir = [self bankBackupDirectory];
+    if (!backupDir) {
+        if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+        if (error) *error = BTError(BankTransplantErrorBackupFailed, @"Couldn't resolve the backup directory.");
+        return NO;
+    }
+    if (![fm fileExistsAtPath:backupDir]) {
+        NSError *dirErr = nil;
+        if (![fm createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+            if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+            if (error) *error = BTError(BankTransplantErrorBackupFailed,
+                [NSString stringWithFormat:@"Couldn't create the backup directory: %@", dirErr.localizedDescription]);
+            return NO;
+        }
+    }
+    NSString *backupPath = [backupDir stringByAppendingPathComponent:[fileName stringByAppendingString:kBTBackupSuffix]];
+    if (![fm fileExistsAtPath:backupPath]) {
+        NSError *copyErr = nil;
+        if (![fm copyItemAtPath:originalPath toPath:backupPath error:&copyErr]) {
+            if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+            if (error) *error = BTError(BankTransplantErrorBackupFailed,
+                [NSString stringWithFormat:@"Couldn't back up %@ before touching it: %@", fileName, copyErr.localizedDescription]);
+            return NO;
+        }
+        ZLog(@"[BankTransplant] backed up %@ -> %@", fileName, backupPath);
+    }
+
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.swap.%@", fileName, [NSUUID UUID].UUIDString]];
+
+    NSError *copyErr = nil;
+    BOOL staged = [fm copyItemAtPath:moddedURL.path toPath:tmpPath error:&copyErr];
+
+    if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+
+    if (!staged) {
+        [fm removeItemAtPath:tmpPath error:nil];
+        if (error) *error = BTError(BankTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read the picked file %@: %@", fileName, copyErr.localizedDescription]);
+        return NO;
+    }
+
+    NSError *replaceErr = nil;
+    BOOL ok = [fm replaceItemAtURL:[NSURL fileURLWithPath:originalPath]
+                      withItemAtURL:[NSURL fileURLWithPath:tmpPath]
+                     backupItemName:nil
+                            options:0
+                   resultingItemURL:nil
+                              error:&replaceErr];
+    [fm removeItemAtPath:tmpPath error:nil];
+
+    if (!ok) {
+        if (error) *error = BTError(BankTransplantErrorWriteFailed,
+            [NSString stringWithFormat:@"Swapping %@ in place failed: %@", fileName, replaceErr.localizedDescription]);
+        return NO;
+    }
+
+    ZLog(@"[BankTransplant] swapped %@ in place with the modded file's bytes as-is", fileName);
+
+    zs_track_asset_path(originalPath);
+
+    return YES;
+}
+
++ (BOOL)bt_fileAtPath:(NSString *)pathA hasIdenticalBytesToFileAtPath:(NSString *)pathB {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm fileExistsAtPath:pathA] || ![fm fileExistsAtPath:pathB]) return NO;
+
+    NSDictionary<NSFileAttributeKey, id> *attrsA = [fm attributesOfItemAtPath:pathA error:nil];
+    NSDictionary<NSFileAttributeKey, id> *attrsB = [fm attributesOfItemAtPath:pathB error:nil];
+    unsigned long long sizeA = [attrsA[NSFileSize] unsignedLongLongValue];
+    unsigned long long sizeB = [attrsB[NSFileSize] unsignedLongLongValue];
+    if (sizeA != sizeB) return NO;
+
+    NSData *dataA = [NSData dataWithContentsOfFile:pathA];
+    NSData *dataB = [NSData dataWithContentsOfFile:pathB];
+    if (!dataA || !dataB) return NO;
+    return [dataA isEqualToData:dataB];
+}
+
++ (BOOL)bt_restoreOneBackupEntry:(NSString *)backupEntryName inBackupDir:(NSString *)backupDir mobileDir:(NSString *)mobileDir force:(BOOL)force {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backupPath = [backupDir stringByAppendingPathComponent:backupEntryName];
+    NSString *fileName = [backupEntryName substringToIndex:backupEntryName.length - kBTBackupSuffix.length];
+    NSString *originalPath = [mobileDir stringByAppendingPathComponent:fileName];
+
+    if (!force && [self bt_fileAtPath:originalPath hasIdenticalBytesToFileAtPath:backupPath]) {
+        return NO;
+    }
+
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:backupPath toPath:tmpPath error:&copyErr]) {
+        ZLog(@"[BankTransplant] restore: couldn't stage %@: %@", backupEntryName, copyErr.localizedDescription);
+        return NO;
+    }
+    NSError *replaceErr = nil;
+    BOOL ok = [fm replaceItemAtURL:[NSURL fileURLWithPath:originalPath]
+                      withItemAtURL:[NSURL fileURLWithPath:tmpPath]
+                     backupItemName:nil
+                            options:0
+                   resultingItemURL:nil
+                              error:&replaceErr];
+    [fm removeItemAtPath:tmpPath error:nil];
+    if (!ok) {
+        ZLog(@"[BankTransplant] restore: couldn't swap %@ back in: %@", originalPath.lastPathComponent, replaceErr.localizedDescription);
+    }
+    return ok;
+}
+
++ (NSInteger)restoreAllBackedUpBanksForce:(BOOL)force error:(NSError **)error {
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *backupDir = [self bankBackupDirectory];
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    if (!backupDir || ![fm fileExistsAtPath:backupDir]) {
+        return 0;
+    }
+
+    NSError *listErr = nil;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:backupDir error:&listErr];
+    if (!entries) {
+        if (error) *error = listErr ?: BTError(BankTransplantErrorOriginalNotFound, @"Couldn't list the bank backup directory.");
+        return -1;
+    }
+
+    NSInteger restored = 0;
+    for (NSString *entry in entries) {
+        if (![entry hasSuffix:kBTBackupSuffix]) continue;
+        if ([self bt_restoreOneBackupEntry:entry inBackupDir:backupDir mobileDir:mobileDir force:force]) restored++;
+    }
+
+    return restored;
+}
+
++ (NSInteger)restoreAllBackedUpBanksWithError:(NSError **)error {
+    return [self restoreAllBackedUpBanksForce:NO error:error];
+}
+
++ (NSInteger)restoreBackedUpBankNamed:(NSString *)name error:(NSError **)error {
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *backupDir = [self bankBackupDirectory];
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    if (!backupDir || ![fm fileExistsAtPath:backupDir]) {
+        return 0;
+    }
+
+    NSString *backupEntryName = [name stringByAppendingString:kBTBackupSuffix];
+    NSString *backupPath = [backupDir stringByAppendingPathComponent:backupEntryName];
+    if (![fm fileExistsAtPath:backupPath]) {
+        return 0;
+    }
+
+    return [self bt_restoreOneBackupEntry:backupEntryName inBackupDir:backupDir mobileDir:mobileDir force:NO] ? 1 : 0;
+}
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedBanks {
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *backupDir = [self bankBackupDirectory];
+    if (!mobileDir || !backupDir) return @[];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableArray<NSString *> *result = [NSMutableArray array];
+    for (NSString *entry in [fm contentsOfDirectoryAtPath:backupDir error:nil] ?: @[]) {
+        if (![entry hasSuffix:kBTBackupSuffix]) continue;
+
+        NSString *fileName = [entry substringToIndex:entry.length - kBTBackupSuffix.length];
+        NSString *livePath = [mobileDir stringByAppendingPathComponent:fileName];
+        NSString *backupPath = [backupDir stringByAppendingPathComponent:entry];
+        if (![fm fileExistsAtPath:livePath]) continue;
+        if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+        [result addObject:[kBTMobileBuildsRelativePath stringByAppendingPathComponent:fileName]];
+    }
+    return result;
+}
+
+static NSString *BTFSB5CodecName(uint32_t mode) {
+    switch (mode) {
+        case 0:  return @"None";
+        case 1:  return @"PCM8";
+        case 2:  return @"PCM16";
+        case 3:  return @"PCM24";
+        case 4:  return @"PCM32";
+        case 5:  return @"PCM Float";
+        case 6:  return @"GameCube ADPCM";
+        case 7:  return @"IMA ADPCM";
+        case 8:  return @"PS2/PSP VAG";
+        case 9:  return @"PS Vita HEVAG";
+        case 10: return @"Xbox 360 XMA";
+        case 11: return @"MPEG (MP3)";
+        case 12: return @"CELT";
+        case 13: return @"PS4/Vita AT9";
+        case 14: return @"Xbox XWMA";
+        case 15: return @"Vorbis";
+        default: return [NSString stringWithFormat:@"Unknown (%u)", mode];
+    }
+}
+
++ (nullable NSDictionary<NSString *, id> *)fmodHeaderInfoForBankAtPath:(NSString *)path {
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!handle) return nil;
+
+    static const NSUInteger kScanWindow = 65536;
+    NSData *window = [handle readDataOfLength:kScanWindow];
+    [handle closeFile];
+    if (window.length < 32) return nil;
+
+    static const uint8_t kFSB5Magic[4] = {'F', 'S', 'B', '5'};
+    NSData *needle = [NSData dataWithBytes:kFSB5Magic length:4];
+    NSRange found = [window rangeOfData:needle options:0 range:NSMakeRange(0, window.length)];
+    if (found.location == NSNotFound) return nil;
+
+    NSUInteger fieldsOffset = found.location + 4;
+    static const NSUInteger kFieldsSize = 6 * sizeof(uint32_t);
+    if (fieldsOffset + kFieldsSize > window.length) return nil;
+
+    uint32_t fields[6] = {0};
+    [window getBytes:fields range:NSMakeRange(fieldsOffset, kFieldsSize)];
+
+    uint32_t version    = CFSwapInt32LittleToHost(fields[0]);
+    uint32_t numSamples  = CFSwapInt32LittleToHost(fields[1]);
+    uint32_t mode        = CFSwapInt32LittleToHost(fields[5]);
+
+    return @{
+        @"codec": BTFSB5CodecName(mode),
+        @"fsbVersion": @(version),
+        @"numSamples": @(numSamples),
+    };
+}
+
+@end
+
+NSString * const LocalizationTransplantErrorDomain = @"LocalizationTransplantErrorDomain";
+
+static NSError *LTError(LocalizationTransplantErrorCode code, NSString *message) {
+    return [NSError errorWithDomain:LocalizationTransplantErrorDomain
+                                code:code
+                            userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+static NSString * const kLTBackupSuffix = @".orig-bak";
+static NSString * const kLTMarkerSuffix = @".applied";
+static NSString * const kLTFileBackupsDirectoryName = @"files";
+static NSString * const kLTPackBackupsDirectoryName = @"packs";
+static NSString * const kLTLocalizeRelativePath = @"Assets/Resources_moved/Localize";
+
+static NSArray<NSString *> *LTLanguageCodes(void) {
+    static NSArray<NSString *> *codes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        codes = @[@"en", @"jp", @"kr"];
+    });
+    return codes;
+}
+
+static BOOL LTIsValidLanguageCode(NSString *code) {
+    return code.length > 0 && [LTLanguageCodes() containsObject:code];
+}
+
+static NSSet<NSString *> *LTKnownPackFolderNames(void) {
+    static NSSet<NSString *> *names;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        names = [NSSet setWithArray:@[
+            @"battleannouncerdlg",
+            @"battleannouncersdlg",
+            @"bgmlyrics",
+            @"egovoicedig",
+            @"egovoicedlg",
+            @"personalityvoicedlg",
+            @"rpgsystem",
+            @"storydata",
+        ]];
+    });
+    return names;
+}
+
+static NSString *LTLanguageCodeForFileName(NSString *fileName) {
+    NSString *lower = fileName.lowercaseString;
+    for (NSString *code in LTLanguageCodes()) {
+        if ([lower hasPrefix:[code stringByAppendingString:@"_"]]) return code;
+    }
+    return nil;
+}
+
+static NSString *LTNameWithoutLanguagePrefix(NSString *fileName) {
+    NSString *lower = fileName.lowercaseString;
+    NSString *code = LTLanguageCodeForFileName(fileName);
+    return code ? [lower substringFromIndex:code.length + 1] : lower;
+}
+
+static NSString *LTDetectLanguage(NSArray<NSString *> *paths) {
+    NSCountedSet<NSString *> *tally = [NSCountedSet set];
+    NSUInteger jsonCount = 0;
+    for (NSString *path in paths) {
+        NSString *leaf = path.lastPathComponent;
+        if ([leaf.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+        if ([leaf hasPrefix:@"._"]) continue;
+        jsonCount++;
+        NSString *code = LTLanguageCodeForFileName(leaf);
+        if (code) [tally addObject:code];
+    }
+    NSString *best = nil;
+    NSUInteger bestCount = 0;
+    for (NSString *code in LTLanguageCodes()) {
+        NSUInteger count = [tally countForObject:code];
+        if (count > bestCount) {
+            best = code;
+            bestCount = count;
+        }
+    }
+    if (bestCount * 2 <= jsonCount) return nil;
+    return best;
+}
+
+static BOOL LTRelativeTargetIsSafe(NSString *relativeTarget) {
+    NSArray<NSString *> *components = relativeTarget.pathComponents;
+    if (components.count < 2) return NO;
+    if (!LTIsValidLanguageCode(components.firstObject)) return NO;
+    for (NSString *component in components) {
+        if ([component isEqualToString:@".."] || [component isEqualToString:@"/"]) return NO;
+    }
+    return YES;
+}
+
+static NSString *LTFileBackupPath(NSString *relativeTarget) {
+    NSString *base = [LocalizationTransplant backupDirectory];
+    if (!base) return nil;
+    NSString *filesRoot = [base stringByAppendingPathComponent:kLTFileBackupsDirectoryName];
+    return [[filesRoot stringByAppendingPathComponent:relativeTarget] stringByAppendingString:kLTBackupSuffix];
+}
+
+static NSString *LTPackBackupPath(NSString *languageCode) {
+    NSString *base = [LocalizationTransplant backupDirectory];
+    if (!base) return nil;
+    NSString *packsRoot = [base stringByAppendingPathComponent:kLTPackBackupsDirectoryName];
+    return [packsRoot stringByAppendingPathComponent:[languageCode stringByAppendingString:kLTBackupSuffix]];
+}
+
+static NSString *LTPackMarkerPath(NSString *languageCode) {
+    NSString *base = [LocalizationTransplant backupDirectory];
+    if (!base) return nil;
+    NSString *packsRoot = [base stringByAppendingPathComponent:kLTPackBackupsDirectoryName];
+    return [packsRoot stringByAppendingPathComponent:[languageCode stringByAppendingString:kLTMarkerSuffix]];
+}
+
+static NSString *LTPackFingerprint(NSString *packPath) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSUInteger fileCount = 0;
+    unsigned long long byteCount = 0;
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:packPath];
+    for (NSString *relative in enumerator) {
+        (void)relative;
+        NSDictionary *attributes = enumerator.fileAttributes;
+        if ([attributes.fileType isEqualToString:NSFileTypeRegular]) {
+            fileCount++;
+            byteCount += attributes.fileSize;
+        }
+    }
+    return [NSString stringWithFormat:@"%lu:%llu", (unsigned long)fileCount, byteCount];
+}
+
+@interface LocalizationTransplant ()
++ (BOOL)lt_dataLooksLikeLocalizationJSON:(NSData *)head;
++ (nullable NSString *)lt_originalSourcePathForRelativeTarget:(NSString *)relativeTarget;
++ (BOOL)lt_ensureFileBackupForRelativeTarget:(NSString *)relativeTarget error:(NSError **)error;
++ (BOOL)lt_ensurePackBackupForLanguage:(NSString *)languageCode error:(NSError **)error;
++ (BOOL)lt_placeFileAtPath:(NSString *)sourcePath atPath:(NSString *)destPath error:(NSError **)error;
++ (BOOL)lt_replaceDirectoryAtPath:(NSString *)destDir withCopyOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error;
++ (BOOL)lt_mergeDirectoryAtPath:(NSString *)destDir withContentsOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error;
++ (BOOL)lt_restoreFileBackupAtPath:(NSString *)backupPath toRelativeTarget:(NSString *)relativeTarget force:(BOOL)force;
++ (NSInteger)lt_restoreFileBackupsForLanguage:(NSString *)languageCode force:(BOOL)force;
++ (BOOL)lt_restorePackBackupForLanguage:(NSString *)languageCode force:(BOOL)force;
+@end
+
+@implementation LocalizationTransplant
+
++ (NSArray<NSString *> *)languageCodes {
+    return LTLanguageCodes();
+}
+
++ (nullable NSString *)localizeDirectory {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentsDir = paths.firstObject;
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:kLTLocalizeRelativePath];
+}
+
++ (nullable NSString *)languageDirectoryForCode:(NSString *)languageCode {
+    if (!LTIsValidLanguageCode(languageCode)) return nil;
+    NSString *localizeDir = [self localizeDirectory];
+    return localizeDir ? [localizeDir stringByAppendingPathComponent:languageCode] : nil;
+}
+
++ (nullable NSString *)lt_legacyBackupDirectory {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+    NSString *libraryDir = paths.firstObject;
+    if (!libraryDir) return nil;
+    return [libraryDir stringByAppendingPathComponent:@"ZSingularityLocalizeBackups"];
+}
+
++ (nullable NSString *)backupDirectory {
+    NSString *newDir = [ZSModsPaths modsBackupsLocalizeDirectory];
+    [ZSModsPaths migrateLegacyDirectoryAtPath:[self lt_legacyBackupDirectory] toPath:newDir];
+    return newDir;
+}
+
++ (BOOL)isJunkArchivePathComponents:(NSArray<NSString *> *)components {
+    if (components.count == 0) return NO;
+    if ([components.firstObject isEqualToString:@"__MACOSX"]) return YES;
+    for (NSString *component in components) {
+        if ([component isEqualToString:@".DS_Store"] || [component hasPrefix:@"._"]) return YES;
+    }
+    return NO;
+}
+
++ (BOOL)lt_dataLooksLikeLocalizationJSON:(NSData *)head {
+    const uint8_t *bytes = head.bytes;
+    NSUInteger length = head.length;
+    NSUInteger i = 0;
+    if (length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) i = 3;
+
+    while (i < length && (bytes[i] == ' ' || bytes[i] == '\t' || bytes[i] == '\r' || bytes[i] == '\n')) i++;
+    if (i < length && bytes[i] == '{') {
+        i++;
+        while (i < length && (bytes[i] == ' ' || bytes[i] == '\t' || bytes[i] == '\r' || bytes[i] == '\n')) i++;
+    }
+    if (i < length && bytes[i] == '"') i++;
+
+    static const char kKey[] = "dataList";
+    const NSUInteger keyLength = sizeof(kKey) - 1;
+    return i + keyLength <= length && memcmp(bytes + i, kKey, keyLength) == 0;
+}
+
++ (BOOL)isLocalizationJSONAtURL:(NSURL *)url {
+    if ([url.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) return NO;
+
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    NSFileHandle *handle = [NSFileHandle fileHandleForReadingAtPath:url.path];
+    NSData *head = [handle readDataOfLength:256];
+    [handle closeFile];
+    if (accessing) [url stopAccessingSecurityScopedResource];
+
+    if (head.length == 0) return NO;
+    return [self lt_dataLooksLikeLocalizationJSON:head];
+}
+
++ (BOOL)isTranslationPackDirectoryAtPath:(NSString *)path {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDirectory] || !isDirectory) return NO;
+
+    NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:path error:nil] ?: @[];
+    NSUInteger knownFolderCount = 0;
+    for (NSString *child in children) {
+        BOOL childIsDirectory = NO;
+        NSString *childPath = [path stringByAppendingPathComponent:child];
+        if (![fm fileExistsAtPath:childPath isDirectory:&childIsDirectory] || !childIsDirectory) continue;
+        if ([LTKnownPackFolderNames() containsObject:child.lowercaseString]) knownFolderCount++;
+    }
+    return knownFolderCount >= 2;
+}
+
++ (nullable NSString *)packRootFolderNameForArchiveEntryNames:(NSArray<NSString *> *)entryNames {
+    NSMutableOrderedSet<NSString *> *topLevel = [NSMutableOrderedSet orderedSet];
+    NSMutableSet<NSString *> *knownFound = [NSMutableSet set];
+    BOOL hasRootFile = NO;
+
+    for (NSString *name in entryNames) {
+        NSString *normalized = [name stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+        BOOL isDirectoryEntry = [normalized hasSuffix:@"/"];
+
+        NSMutableArray<NSString *> *components = [NSMutableArray array];
+        for (NSString *component in [normalized componentsSeparatedByString:@"/"]) {
+            if (component.length == 0 || [component isEqualToString:@"."]) continue;
+            if ([component isEqualToString:@".."]) return nil;
+            [components addObject:component];
+        }
+        if (components.count == 0 || [self isJunkArchivePathComponents:components]) continue;
+
+        [topLevel addObject:components[0]];
+        if (components.count == 1 && !isDirectoryEntry) hasRootFile = YES;
+        if (components.count >= 3 || (components.count == 2 && isDirectoryEntry)) {
+            NSString *lowered = components[1].lowercaseString;
+            if ([LTKnownPackFolderNames() containsObject:lowered]) [knownFound addObject:lowered];
+        }
+    }
+
+    if (hasRootFile || topLevel.count != 1 || knownFound.count < 2) return nil;
+    return topLevel.firstObject;
+}
+
++ (nullable NSString *)packDirectoryInExtractedDirectoryAtPath:(NSString *)path {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:path error:nil] ?: @[];
+    if (children.count != 1) return nil;
+
+    NSString *candidate = [path stringByAppendingPathComponent:children.firstObject];
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:candidate isDirectory:&isDirectory] || !isDirectory) return nil;
+    return [self isTranslationPackDirectoryAtPath:candidate] ? candidate : nil;
+}
+
++ (nullable NSString *)detectedLanguageForPackDirectoryAtPath:(NSString *)path {
+    NSMutableArray<NSString *> *relativePaths = [NSMutableArray array];
+    NSDirectoryEnumerator *enumerator = [NSFileManager.defaultManager enumeratorAtPath:path];
+    for (NSString *relative in enumerator) {
+        [relativePaths addObject:relative];
+    }
+    return LTDetectLanguage(relativePaths);
+}
+
++ (nullable NSString *)detectedLanguageForArchiveEntryNames:(NSArray<NSString *> *)entryNames {
+    return LTDetectLanguage(entryNames);
+}
+
++ (BOOL)prefixPackJSONFilesAtPath:(NSString *)packPath
+                     withLanguage:(NSString *)languageCode
+                            error:(NSError **)error {
+    if (!LTIsValidLanguageCode(languageCode)) {
+        if (error) *error = LTError(LocalizationTransplantErrorInvalidTarget, @"Unknown language folder.");
+        return NO;
+    }
+    if ([self detectedLanguageForPackDirectoryAtPath:packPath]) return YES;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *prefix = [languageCode.uppercaseString stringByAppendingString:@"_"];
+
+    NSMutableArray<NSString *> *jsonRelativePaths = [NSMutableArray array];
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:packPath];
+    for (NSString *relative in enumerator) {
+        if ([relative.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+        if ([self isJunkArchivePathComponents:relative.pathComponents]) continue;
+        if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+        [jsonRelativePaths addObject:relative];
+    }
+
+    for (NSString *relative in jsonRelativePaths) {
+        NSString *sourcePath = [packPath stringByAppendingPathComponent:relative];
+        NSString *renamedLeaf = [prefix stringByAppendingString:relative.lastPathComponent];
+        NSString *destPath = [sourcePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:renamedLeaf];
+
+        NSError *moveErr = nil;
+        if (![fm moveItemAtPath:sourcePath toPath:destPath error:&moveErr]) {
+            if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+                [NSString stringWithFormat:@"Couldn't add the \"%@\" prefix to %@: %@",
+                    prefix, relative.lastPathComponent, moveErr.localizedDescription]);
+            return NO;
+        }
+    }
+    ZLog(@"[LocalizationTransplant] prefixed %lu .json files with \"%@\"", (unsigned long)jsonRelativePaths.count, prefix);
+    return YES;
+}
+
++ (NSArray<NSString *> *)relativeTargetsForJSONNamed:(NSString *)fileName inLanguage:(NSString *)languageCode {
+    NSString *localizeDir = [self localizeDirectory];
+    if (!localizeDir || !LTIsValidLanguageCode(languageCode)) return @[];
+
+    NSString *wanted = [[languageCode stringByAppendingString:@"_"] stringByAppendingString:LTNameWithoutLanguagePrefix(fileName)];
+
+    NSArray<NSString *> *(^lookup)(void) = ^NSArray<NSString *> *{
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSMutableArray<NSString *> *matches = [NSMutableArray array];
+        for (NSString *relativeTarget in [ZSFileIndex cachedLocalizationPathsInLanguage:languageCode] ?: @[]) {
+            NSString *leaf = relativeTarget.lastPathComponent;
+            if ([leaf.pathExtension caseInsensitiveCompare:@"json"] != NSOrderedSame) continue;
+            if (![leaf.lowercaseString isEqualToString:wanted]) continue;
+            if ([fm fileExistsAtPath:[localizeDir stringByAppendingPathComponent:relativeTarget]]) [matches addObject:relativeTarget];
+        }
+        return matches;
+    };
+
+    if (![ZSFileIndex cachedLocalizationPathsInLanguage:languageCode]) [ZSFileIndex ensureLocalizationIndexUpToDate];
+    NSArray<NSString *> *matches = lookup();
+    if (matches.count == 0) {
+        [ZSFileIndex ensureLocalizationIndexUpToDate];
+        matches = lookup();
+    }
+    return matches;
+}
+
++ (unsigned long long)totalByteSizeAtPath:(NSString *)path {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:path isDirectory:&isDirectory]) return 0;
+    if (!isDirectory) return [[fm attributesOfItemAtPath:path error:nil] fileSize];
+
+    unsigned long long total = 0;
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:path];
+    for (NSString *relative in enumerator) {
+        (void)relative;
+        NSDictionary *attributes = enumerator.fileAttributes;
+        if ([attributes.fileType isEqualToString:NSFileTypeRegular]) total += attributes.fileSize;
+    }
+    return total;
+}
+
++ (nullable NSString *)lt_originalSourcePathForRelativeTarget:(NSString *)relativeTarget {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *components = relativeTarget.pathComponents;
+    NSString *languageCode = components.firstObject;
+    NSString *packBackup = LTPackBackupPath(languageCode);
+
+    NSString *candidate = nil;
+    if (packBackup && [fm fileExistsAtPath:packBackup]) {
+        NSString *rest = [[components subarrayWithRange:NSMakeRange(1, components.count - 1)] componentsJoinedByString:@"/"];
+        candidate = [packBackup stringByAppendingPathComponent:rest];
+    } else {
+        candidate = [[self localizeDirectory] stringByAppendingPathComponent:relativeTarget];
+    }
+    return [fm fileExistsAtPath:candidate] ? candidate : nil;
+}
+
++ (BOOL)lt_ensureFileBackupForRelativeTarget:(NSString *)relativeTarget error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backupPath = LTFileBackupPath(relativeTarget);
+    if (!backupPath) {
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed, @"Couldn't resolve the backup directory.");
+        return NO;
+    }
+    if ([fm fileExistsAtPath:backupPath]) return YES;
+
+    NSString *source = [self lt_originalSourcePathForRelativeTarget:relativeTarget];
+    if (!source) return YES;
+
+    NSError *dirErr = nil;
+    if (![fm createDirectoryAtPath:backupPath.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed,
+            [NSString stringWithFormat:@"Couldn't create the backup directory: %@", dirErr.localizedDescription]);
+        return NO;
+    }
+
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:source toPath:backupPath error:&copyErr]) {
+        [fm removeItemAtPath:backupPath error:nil];
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed,
+            [NSString stringWithFormat:@"Couldn't back up %@ before touching it: %@", relativeTarget.lastPathComponent, copyErr.localizedDescription]);
+        return NO;
+    }
+    ZLog(@"[LocalizationTransplant] backed up %@ -> %@", relativeTarget, backupPath);
+    return YES;
+}
+
++ (BOOL)lt_ensurePackBackupForLanguage:(NSString *)languageCode error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *packBackup = LTPackBackupPath(languageCode);
+    if (!packBackup) {
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed, @"Couldn't resolve the backup directory.");
+        return NO;
+    }
+    if ([fm fileExistsAtPath:packBackup]) return YES;
+
+    [self lt_restoreFileBackupsForLanguage:languageCode force:NO];
+
+    NSError *dirErr = nil;
+    if (![fm createDirectoryAtPath:packBackup.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed,
+            [NSString stringWithFormat:@"Couldn't create the backup directory: %@", dirErr.localizedDescription]);
+        return NO;
+    }
+
+    NSString *partialPath = [packBackup stringByAppendingString:@".partial"];
+    [fm removeItemAtPath:partialPath error:nil];
+
+    NSError *copyErr = nil;
+    NSString *languageDir = [self languageDirectoryForCode:languageCode];
+    NSError *moveErr = nil;
+    if (![fm copyItemAtPath:languageDir toPath:partialPath error:&copyErr]
+        || ![fm moveItemAtPath:partialPath toPath:packBackup error:&moveErr]) {
+        [fm removeItemAtPath:partialPath error:nil];
+        if (error) *error = LTError(LocalizationTransplantErrorBackupFailed,
+            [NSString stringWithFormat:@"Couldn't back up the \"%@\" language folder before touching it: %@",
+                languageCode, (copyErr ?: moveErr).localizedDescription]);
+        return NO;
+    }
+    ZLog(@"[LocalizationTransplant] backed up the \"%@\" language folder -> %@", languageCode, packBackup);
+    return YES;
+}
+
++ (BOOL)lt_placeFileAtPath:(NSString *)sourcePath atPath:(NSString *)destPath error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    NSError *dirErr = nil;
+    if (![fm createDirectoryAtPath:destPath.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+        if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+            [NSString stringWithFormat:@"Couldn't create the folder for %@: %@", destPath.lastPathComponent, dirErr.localizedDescription]);
+        return NO;
+    }
+
+    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"%@.loc.%@", destPath.lastPathComponent, [NSUUID UUID].UUIDString]];
+
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:sourcePath toPath:tmpPath error:&copyErr]) {
+        [fm removeItemAtPath:tmpPath error:nil];
+        if (error) *error = LTError(LocalizationTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read %@: %@", sourcePath.lastPathComponent, copyErr.localizedDescription]);
+        return NO;
+    }
+
+    NSError *placeErr = nil;
+    BOOL ok;
+    if ([fm fileExistsAtPath:destPath]) {
+        ok = [fm replaceItemAtURL:[NSURL fileURLWithPath:destPath]
+                    withItemAtURL:[NSURL fileURLWithPath:tmpPath]
+                   backupItemName:nil
+                          options:0
+                 resultingItemURL:nil
+                            error:&placeErr];
+    } else {
+        ok = [fm moveItemAtPath:tmpPath toPath:destPath error:&placeErr];
+    }
+    [fm removeItemAtPath:tmpPath error:nil];
+
+    if (!ok) {
+        if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+            [NSString stringWithFormat:@"Swapping %@ in place failed: %@", destPath.lastPathComponent, placeErr.localizedDescription]);
+        return NO;
+    }
+    return YES;
+}
+
++ (BOOL)lt_replaceDirectoryAtPath:(NSString *)destDir withCopyOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    NSString *stagedPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"zs-loc-stage-%@", [NSUUID UUID].UUIDString]];
+    NSError *copyErr = nil;
+    if (![fm copyItemAtPath:sourceDir toPath:stagedPath error:&copyErr]) {
+        [fm removeItemAtPath:stagedPath error:nil];
+        if (error) *error = LTError(LocalizationTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read %@: %@", sourceDir.lastPathComponent, copyErr.localizedDescription]);
+        return NO;
+    }
+
+    BOOL destExists = [fm fileExistsAtPath:destDir];
+    NSString *sidelinedPath = [destDir stringByAppendingString:@".zs-old"];
+    if (destExists) {
+        [fm removeItemAtPath:sidelinedPath error:nil];
+        NSError *sidelineErr = nil;
+        if (![fm moveItemAtPath:destDir toPath:sidelinedPath error:&sidelineErr]) {
+            [fm removeItemAtPath:stagedPath error:nil];
+            if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+                [NSString stringWithFormat:@"Couldn't move the current \"%@\" folder aside: %@", destDir.lastPathComponent, sidelineErr.localizedDescription]);
+            return NO;
+        }
+    } else {
+        [fm createDirectoryAtPath:destDir.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    NSError *moveErr = nil;
+    if (![fm moveItemAtPath:stagedPath toPath:destDir error:&moveErr]) {
+        if (destExists) [fm moveItemAtPath:sidelinedPath toPath:destDir error:nil];
+        [fm removeItemAtPath:stagedPath error:nil];
+        if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+            [NSString stringWithFormat:@"Swapping the \"%@\" folder in place failed: %@", destDir.lastPathComponent, moveErr.localizedDescription]);
+        return NO;
+    }
+
+    if (destExists) [fm removeItemAtPath:sidelinedPath error:nil];
+    return YES;
+}
+
++ (BOOL)lt_mergeDirectoryAtPath:(NSString *)destDir withContentsOfDirectoryAtPath:(NSString *)sourceDir error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    BOOL destIsDirectory = NO;
+    if (![fm fileExistsAtPath:destDir isDirectory:&destIsDirectory] || !destIsDirectory) {
+        NSError *dirErr = nil;
+        if (![fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:&dirErr]) {
+            if (error) *error = LTError(LocalizationTransplantErrorWriteFailed,
+                [NSString stringWithFormat:@"Couldn't create the \"%@\" folder: %@", destDir.lastPathComponent, dirErr.localizedDescription]);
+            return NO;
+        }
+    }
+
+    NSError *listErr = nil;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:sourceDir error:&listErr];
+    if (!entries) {
+        if (error) *error = LTError(LocalizationTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read %@: %@", sourceDir.lastPathComponent, listErr.localizedDescription]);
+        return NO;
+    }
+
+    for (NSString *entryName in entries) {
+        if ([entryName isEqualToString:@".DS_Store"] || [entryName hasPrefix:@"._"]) continue;
+
+        NSString *sourceItemPath = [sourceDir stringByAppendingPathComponent:entryName];
+        NSString *destItemPath = [destDir stringByAppendingPathComponent:entryName];
+
+        BOOL sourceItemIsDirectory = NO;
+        [fm fileExistsAtPath:sourceItemPath isDirectory:&sourceItemIsDirectory];
+
+        if (sourceItemIsDirectory) {
+            if (![self lt_mergeDirectoryAtPath:destItemPath withContentsOfDirectoryAtPath:sourceItemPath error:error]) return NO;
+            continue;
+        }
+
+        if (![self lt_placeFileAtPath:sourceItemPath atPath:destItemPath error:error]) return NO;
+    }
+
+    return YES;
+}
+
++ (BOOL)applyModFileAtPath:(NSString *)modPath toRelativeTarget:(NSString *)relativeTarget error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    if (!LTRelativeTargetIsSafe(relativeTarget)) {
+        if (error) *error = LTError(LocalizationTransplantErrorInvalidTarget, @"The target path inside the Localize folder isn't valid.");
+        return NO;
+    }
+
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *languageCode = relativeTarget.pathComponents.firstObject;
+    NSString *languageDir = [self languageDirectoryForCode:languageCode];
+    BOOL languageIsDirectory = NO;
+    if (!localizeDir || !languageDir || ![fm fileExistsAtPath:languageDir isDirectory:&languageIsDirectory] || !languageIsDirectory) {
+        if (error) *error = LTError(LocalizationTransplantErrorLanguageFolderNotFound,
+            [NSString stringWithFormat:@"No \"%@\" language folder found under Assets/Resources_moved/Localize.", languageCode]);
+        return NO;
+    }
+
+    if (![fm isReadableFileAtPath:modPath]) {
+        if (error) *error = LTError(LocalizationTransplantErrorCantReadModded,
+            [NSString stringWithFormat:@"Couldn't read %@.", modPath.lastPathComponent]);
+        return NO;
+    }
+
+    if (![self lt_ensureFileBackupForRelativeTarget:relativeTarget error:error]) return NO;
+
+    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+    if (![self lt_placeFileAtPath:modPath atPath:targetPath error:error]) return NO;
+
+    zs_track_asset_path(targetPath);
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
+    ZLog(@"[LocalizationTransplant] swapped %@ in place with the modded file's bytes as-is", relativeTarget);
+    return YES;
+}
+
++ (BOOL)applyPackAtPath:(NSString *)packPath toLanguage:(NSString *)languageCode error:(NSError **)error {
+    NSFileManager *fm = NSFileManager.defaultManager;
+
+    NSString *languageDir = [self languageDirectoryForCode:languageCode];
+    BOOL languageIsDirectory = NO;
+    if (!languageDir || ![fm fileExistsAtPath:languageDir isDirectory:&languageIsDirectory] || !languageIsDirectory) {
+        if (error) *error = LTError(LocalizationTransplantErrorLanguageFolderNotFound,
+            [NSString stringWithFormat:@"No \"%@\" language folder found under Assets/Resources_moved/Localize.", languageCode]);
+        return NO;
+    }
+
+    if (![self isTranslationPackDirectoryAtPath:packPath]) {
+        if (error) *error = LTError(LocalizationTransplantErrorNotAPack, @"This folder doesn't look like a localization pack.");
+        return NO;
+    }
+
+    if (![self lt_ensurePackBackupForLanguage:languageCode error:error]) return NO;
+    if (![self lt_mergeDirectoryAtPath:languageDir withContentsOfDirectoryAtPath:packPath error:error]) return NO;
+
+    NSString *markerPath = LTPackMarkerPath(languageCode);
+    if (markerPath) {
+        [LTPackFingerprint(packPath) writeToFile:markerPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+
+    zs_track_asset_path(languageDir);
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
+    ZLog(@"[LocalizationTransplant] merged %@ into the \"%@\" language folder", packPath.lastPathComponent, languageCode);
+    return YES;
+}
+
++ (BOOL)lt_restoreFileBackupAtPath:(NSString *)backupPath toRelativeTarget:(NSString *)relativeTarget force:(BOOL)force {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!LTRelativeTargetIsSafe(relativeTarget)) return NO;
+
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *languageDir = [self languageDirectoryForCode:relativeTarget.pathComponents.firstObject];
+    BOOL languageIsDirectory = NO;
+    if (!localizeDir || !languageDir || ![fm fileExistsAtPath:languageDir isDirectory:&languageIsDirectory] || !languageIsDirectory) return NO;
+
+    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+    if (!force && [fm contentsEqualAtPath:targetPath andPath:backupPath]) return NO;
+
+    NSError *placeErr = nil;
+    if (![self lt_placeFileAtPath:backupPath atPath:targetPath error:&placeErr]) {
+        ZLog(@"[LocalizationTransplant] restore: couldn't swap %@ back in: %@", relativeTarget, placeErr.localizedDescription);
+        return NO;
+    }
+    return YES;
+}
+
++ (NSInteger)lt_restoreFileBackupsForLanguage:(NSString *)languageCode force:(BOOL)force {
+    NSString *base = [self backupDirectory];
+    if (!base) return 0;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *languageBackupRoot = [[base stringByAppendingPathComponent:kLTFileBackupsDirectoryName] stringByAppendingPathComponent:languageCode];
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:languageBackupRoot isDirectory:&isDirectory] || !isDirectory) return 0;
+
+    NSInteger restored = 0;
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:languageBackupRoot];
+    for (NSString *relative in enumerator) {
+        if (![relative hasSuffix:kLTBackupSuffix]) continue;
+
+        NSString *backupPath = [languageBackupRoot stringByAppendingPathComponent:relative];
+        BOOL backupIsDirectory = NO;
+        if (![fm fileExistsAtPath:backupPath isDirectory:&backupIsDirectory] || backupIsDirectory) continue;
+
+        NSString *withoutSuffix = [relative substringToIndex:relative.length - kLTBackupSuffix.length];
+        NSString *relativeTarget = [languageCode stringByAppendingPathComponent:withoutSuffix];
+        if ([self lt_restoreFileBackupAtPath:backupPath toRelativeTarget:relativeTarget force:force]) restored++;
+    }
+    return restored;
+}
+
++ (BOOL)lt_restorePackBackupForLanguage:(NSString *)languageCode force:(BOOL)force {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *packBackup = LTPackBackupPath(languageCode);
+    NSString *languageDir = [self languageDirectoryForCode:languageCode];
+    if (!packBackup || !languageDir || ![fm fileExistsAtPath:packBackup]) return NO;
+
+    NSString *markerPath = LTPackMarkerPath(languageCode);
+    if (!force && [fm contentsEqualAtPath:languageDir andPath:packBackup]) {
+        if (markerPath) [fm removeItemAtPath:markerPath error:nil];
+        return NO;
+    }
+
+    NSError *replaceErr = nil;
+    if (![self lt_replaceDirectoryAtPath:languageDir withCopyOfDirectoryAtPath:packBackup error:&replaceErr]) {
+        ZLog(@"[LocalizationTransplant] restore: couldn't swap the \"%@\" language folder back in: %@", languageCode, replaceErr.localizedDescription);
+        return NO;
+    }
+    if (markerPath) [fm removeItemAtPath:markerPath error:nil];
+    [ZSFileIndex ensureLocalizationIndexUpToDate];
+    return YES;
+}
+
++ (BOOL)restoreRelativeTarget:(NSString *)relativeTarget ifAppliedFromModFileAtPath:(NSString *)modPath {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!LTRelativeTargetIsSafe(relativeTarget)) return NO;
+
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *backupPath = LTFileBackupPath(relativeTarget);
+    if (!localizeDir || !backupPath || ![fm fileExistsAtPath:backupPath]) {
+        ZLog(@"[LocalizationTransplant] no backup for %@ - nothing to restore", relativeTarget);
+        return NO;
+    }
+
+    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+    if (![fm contentsEqualAtPath:targetPath andPath:modPath]) {
+        ZLog(@"[LocalizationTransplant] %@ no longer matches this mod - leaving it as is", relativeTarget);
+        return NO;
+    }
+    return [self lt_restoreFileBackupAtPath:backupPath toRelativeTarget:relativeTarget force:YES];
+}
+
++ (BOOL)restorePackForLanguage:(NSString *)languageCode ifAppliedFromPackAtPath:(NSString *)packPath {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!LTIsValidLanguageCode(languageCode)) return NO;
+
+    NSString *markerPath = LTPackMarkerPath(languageCode);
+    NSString *appliedFingerprint = markerPath
+        ? [NSString stringWithContentsOfFile:markerPath encoding:NSUTF8StringEncoding error:nil]
+        : nil;
+    if (appliedFingerprint.length == 0 || ![fm fileExistsAtPath:packPath]) {
+        ZLog(@"[LocalizationTransplant] no pack is applied to the \"%@\" language folder - nothing to restore", languageCode);
+        return NO;
+    }
+    if (![appliedFingerprint isEqualToString:LTPackFingerprint(packPath)]) {
+        ZLog(@"[LocalizationTransplant] the \"%@\" language folder holds a different pack - leaving it as is", languageCode);
+        return NO;
+    }
+    return [self lt_restorePackBackupForLanguage:languageCode force:YES];
+}
+
++ (NSInteger)restoreAllBackupsForce:(BOOL)force error:(NSError **)error {
+    NSInteger restored = 0;
+    for (NSString *languageCode in LTLanguageCodes()) {
+        restored += [self lt_restoreFileBackupsForLanguage:languageCode force:force];
+    }
+    for (NSString *languageCode in LTLanguageCodes()) {
+        if ([self lt_restorePackBackupForLanguage:languageCode force:force]) restored++;
+    }
+    return restored;
+}
+
++ (NSArray<NSString *> *)documentsRelativePathsOfSwappedFiles {
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *base = [self backupDirectory];
+    if (!localizeDir || !base) return @[];
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableOrderedSet<NSString *> *result = [NSMutableOrderedSet orderedSet];
+
+    NSString *filesRoot = [base stringByAppendingPathComponent:kLTFileBackupsDirectoryName];
+    NSDirectoryEnumerator *fileBackups = [fm enumeratorAtPath:filesRoot];
+    for (NSString *relative in fileBackups) {
+        if (![relative hasSuffix:kLTBackupSuffix]) continue;
+        if (![fileBackups.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+
+        NSString *relativeTarget = [relative substringToIndex:relative.length - kLTBackupSuffix.length];
+        NSString *livePath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+        NSString *backupPath = [filesRoot stringByAppendingPathComponent:relative];
+        if (![fm fileExistsAtPath:livePath]) continue;
+        if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+        [result addObject:[kLTLocalizeRelativePath stringByAppendingPathComponent:relativeTarget]];
+    }
+
+    for (NSString *languageCode in LTLanguageCodes()) {
+        NSString *packBackup = LTPackBackupPath(languageCode);
+        NSString *languageDir = [self languageDirectoryForCode:languageCode];
+        if (!packBackup || !languageDir || ![fm fileExistsAtPath:packBackup]) continue;
+
+        NSDirectoryEnumerator *packFiles = [fm enumeratorAtPath:packBackup];
+        for (NSString *relative in packFiles) {
+            if (![packFiles.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+
+            NSString *livePath = [languageDir stringByAppendingPathComponent:relative];
+            NSString *backupPath = [packBackup stringByAppendingPathComponent:relative];
+            if (![fm fileExistsAtPath:livePath]) continue;
+            if ([fm contentsEqualAtPath:livePath andPath:backupPath]) continue;
+
+            NSString *relativeTarget = [languageCode stringByAppendingPathComponent:relative];
+            [result addObject:[kLTLocalizeRelativePath stringByAppendingPathComponent:relativeTarget]];
+        }
+    }
+
+    return result.array;
+}
+
+@end
 
 #pragma mark - LunartiqueModArchive
 
@@ -2194,3 +3396,614 @@ static NSString *MALTimestampNow(void) {
 
 @end
 
+static const int32_t kZSCustomFontSamplingPointSize = 90;
+static const int32_t kZSCustomFontPadding = 5;
+static const int32_t kZSCustomFontAtlasSize = 2048;
+static const int32_t kZSFontTypeCount = 2;
+static const int32_t kZSFontLanguageCount = 3;
+static const size_t kZSIl2CppObjectHeaderSize = sizeof(void *) * 2;
+static NSString *const kZSCustomLocalizeKey = @"ZSingularity";
+
+static void *g_zsCustomFontTitle;
+static void *g_zsCustomFontContext;
+static void *g_zsCustomFontCJK;
+static NSString *g_zsCustomFontSignature;
+
+static void *zs_custom_localize_manager_class(void) {
+    return mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
+}
+
+static void *zs_custom_localize_result_class(void) {
+    return mt_class("ProjectMoon.CustomLocalization", "SearchResult", "Assembly-CSharp");
+}
+
+static NSString *zs_describe_exception(void *exception) {
+    if (!exception) return @"(none)";
+    void *exceptionClass = mt_class("System", "Exception", "mscorlib");
+    const void *getMessage = mt_method(exceptionClass, "get_Message", 0);
+    void *classOfException = [IL2CppBridge classOfInstance:exception];
+    NSString *typeName = [NSString stringWithFormat:@"class=%p", classOfException];
+    if (!getMessage) return [NSString stringWithFormat:@"%p %@ (no get_Message)", exception, typeName];
+    void *messageExc = NULL;
+    void *messageStr = [IL2CppBridge invokeMethod:getMessage onInstance:exception args:NULL outException:&messageExc];
+    if (messageExc || !messageStr) return [NSString stringWithFormat:@"%p %@ (message unavailable)", exception, typeName];
+    return [NSString stringWithFormat:@"%p %@ message=\"%@\"", exception, typeName, [IL2CppBridge nsStringFromIl2CppString:messageStr]];
+}
+
+static NSString *zs_hex_string(const void *bytes, size_t length) {
+    NSMutableString *out = [NSMutableString string];
+    const uint8_t *p = (const uint8_t *)bytes;
+    for (size_t i = 0; i < length; i++) {
+        if (i && i % 8 == 0) [out appendString:@" "];
+        [out appendFormat:@"%02x", p[i]];
+    }
+    return out;
+}
+
+static NSString *zs_legacy_custom_font_directory(void) {
+    NSString *documentsDir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (!documentsDir) return nil;
+    return [documentsDir stringByAppendingPathComponent:@"Fonts"];
+}
+
+static NSString *zs_custom_font_directory(void) {
+    NSString *fontsDir = [ZSModsPaths modsFontsDirectory];
+    if (!fontsDir) {
+        ZLog(@"[ZSFont] no Documents directory available");
+        return nil;
+    }
+    [ZSModsPaths migrateLegacyDirectoryAtPath:zs_legacy_custom_font_directory() toPath:fontsDir];
+
+    BOOL isDirectory = NO;
+    if (![NSFileManager.defaultManager fileExistsAtPath:fontsDir isDirectory:&isDirectory] || !isDirectory) return nil;
+    return fontsDir;
+}
+
+static NSArray<NSString *> *zs_custom_font_files(NSString *fontsDir) {
+    NSMutableArray<NSString *> *files = [NSMutableArray array];
+    for (NSString *relative in [NSFileManager.defaultManager enumeratorAtPath:fontsDir]) {
+        NSString *extension = relative.pathExtension.lowercaseString;
+        if (![extension isEqualToString:@"ttf"] && ![extension isEqualToString:@"otf"]) continue;
+        [files addObject:[fontsDir stringByAppendingPathComponent:relative]];
+    }
+    return [files sortedArrayUsingSelector:@selector(caseInsensitiveCompare:)];
+}
+
+static NSString *zs_pick_custom_font(NSArray<NSString *> *files, NSString *token) {
+    for (NSString *path in files) {
+        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
+    }
+    return files.firstObject;
+}
+
+static NSString *zs_pick_custom_font_optional(NSArray<NSString *> *files, NSString *token) {
+    for (NSString *path in files) {
+        if ([path.lastPathComponent.lowercaseString containsString:token]) return path;
+    }
+    return nil;
+}
+
+static NSString *zs_custom_font_signature(NSArray<NSString *> *paths) {
+    NSMutableString *signature = [NSMutableString string];
+    for (NSString *path in paths) {
+        NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+        [signature appendFormat:@"%@|%llu|%.0f;", path, attributes.fileSize, attributes.fileModificationDate.timeIntervalSince1970];
+    }
+    return signature;
+}
+
+static BOOL zs_custom_localize_static_bool(const char *methodName, BOOL *outValue) {
+    void *managerClass = zs_custom_localize_manager_class();
+    const void *method = mt_method(managerClass, methodName, 0);
+    if (!method || !outValue) {
+        ZLog(@"[ZSFont] static bool %s unavailable (class=%p method=%p)", methodName, managerClass, method);
+        return NO;
+    }
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc || !boxed) {
+        ZLog(@"[ZSFont] static bool %s failed: %@", methodName, zs_describe_exception(exc));
+        return NO;
+    }
+    *outValue = *(uint8_t *)((uint8_t *)boxed + kZSIl2CppObjectHeaderSize) != 0;
+    return YES;
+}
+
+static void *zs_load_custom_font(NSString *path) {
+    void *managerClass = zs_custom_localize_manager_class();
+    const void *tryLoadMethod = mt_method(managerClass, "TryLoadFont", 5);
+    ZLog(@"[ZSFont] TryLoadFont resolve: managerClass=%p method=%p", managerClass, tryLoadMethod);
+    if (!tryLoadMethod) return NULL;
+
+    NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    ZLog(@"[ZSFont] TryLoadFont input: path=%@ size=%llu exists=%d sampling=%d padding=%d atlas=%d",
+         path, attributes.fileSize, (int)[NSFileManager.defaultManager fileExistsAtPath:path],
+         kZSCustomFontSamplingPointSize, kZSCustomFontPadding, kZSCustomFontAtlasSize);
+
+    void *pathStr = [IL2CppBridge il2CppStringFromNSString:path];
+    int32_t samplingPointSize = kZSCustomFontSamplingPointSize;
+    int32_t padding = kZSCustomFontPadding;
+    int32_t atlasSize = kZSCustomFontAtlasSize;
+    void *output = NULL;
+    void *args[5] = { pathStr, &samplingPointSize, &padding, &atlasSize, &output };
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:tryLoadMethod onInstance:NULL args:args outException:&exc];
+    if (exc || !result) {
+        ZLog(@"[ZSFont] TryLoadFont invoke failed: result=%p exception=%@", result, zs_describe_exception(exc));
+        return NULL;
+    }
+
+    BOOL loaded = *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
+    ZLog(@"[ZSFont] TryLoadFont returned loaded=%d output=%p alive=%d", loaded, output, output ? (int)ZSUID_UnityObjectIsAlive(output) : -1);
+    if (!loaded || !output) return NULL;
+    return output;
+}
+
+static BOOL zs_read_custom_localize_fonts(void **titleFont, void **contextFont) {
+    void *managerClass = zs_custom_localize_manager_class();
+    void *resultClass = zs_custom_localize_result_class();
+    if (!managerClass || !resultClass) return NO;
+
+    void *dataField = [IL2CppBridge fieldNamed:"_data" onClass:managerClass];
+    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<TitleFont>k__BackingField"];
+    int32_t contextOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<ContextFont>k__BackingField"];
+    if (!dataField || titleOffset < 0 || contextOffset < 0) return NO;
+
+    uint8_t buffer[256] = {0};
+    if (![IL2CppBridge copyStaticFieldValue:dataField toBuffer:buffer]) return NO;
+
+    if (titleFont) *titleFont = *(void **)(buffer + titleOffset - kZSIl2CppObjectHeaderSize);
+    if (contextFont) *contextFont = *(void **)(buffer + contextOffset - kZSIl2CppObjectHeaderSize);
+    return YES;
+}
+
+static BOOL zs_read_custom_localize_fonts_via_get(void **titleFont, void **contextFont) {
+    void *managerClass = zs_custom_localize_manager_class();
+    void *resultClass = zs_custom_localize_result_class();
+    const void *getMethod = mt_method(managerClass, "Get", 0);
+    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<TitleFont>k__BackingField"];
+    int32_t contextOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<ContextFont>k__BackingField"];
+    int32_t initedOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<IsInited>k__BackingField"];
+    int32_t existOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"_isDataExist"];
+    if (!getMethod || titleOffset < 0 || contextOffset < 0) {
+        ZLog(@"[ZSFont] Get() unavailable: method=%p titleOffset=%d contextOffset=%d", getMethod, titleOffset, contextOffset);
+        return NO;
+    }
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:getMethod onInstance:NULL args:NULL outException:&exc];
+    if (exc || !boxed) {
+        ZLog(@"[ZSFont] Get() failed: result=%p exception=%@", boxed, zs_describe_exception(exc));
+        return NO;
+    }
+    void *title = *(void **)((uint8_t *)boxed + titleOffset);
+    void *context = *(void **)((uint8_t *)boxed + contextOffset);
+    int inited = initedOffset >= 0 ? *((uint8_t *)boxed + initedOffset) : -1;
+    int exists = existOffset >= 0 ? *((uint8_t *)boxed + existOffset) : -1;
+    ZLog(@"[ZSFont] Get() -> boxed=%p inited=%d dataExist=%d title=%p context=%p", boxed, inited, exists, title, context);
+    if (titleFont) *titleFont = title;
+    if (contextFont) *contextFont = context;
+    return YES;
+}
+
+static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont, NSString *directory) {
+    ZLog(@"[ZSFont] install: begin title=%p context=%p directory=%@", titleFont, contextFont, directory);
+
+    void *managerClass = zs_custom_localize_manager_class();
+    void *resultClass = zs_custom_localize_result_class();
+    ZLog(@"[ZSFont] install[1] classes: manager=%p searchResult=%p", managerClass, resultClass);
+    if (!managerClass || !resultClass) return NO;
+
+    BOOL isRunning = NO;
+    BOOL haveRunning = zs_custom_localize_static_bool("IsRunning", &isRunning);
+    ZLog(@"[ZSFont] install[2] class init via IsRunning: ok=%d value=%d", haveRunning, isRunning);
+
+    const void *ctorMethod = mt_method(resultClass, ".ctor", 4);
+    const void *isDataExistMethod = mt_method(resultClass, "IsDataExist", 0);
+    void *dataField = [IL2CppBridge fieldNamed:"_data" onClass:managerClass];
+    int32_t dataExistOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"_isDataExist"];
+    ZLog(@"[ZSFont] install[3] resolve: ctor=%p isDataExist=%p _data field=%p _isDataExist offset=%d", ctorMethod, isDataExistMethod, dataField, dataExistOffset);
+    if (!ctorMethod || !dataField || dataExistOffset < 0) return NO;
+
+    void *boxedResult = [IL2CppBridge newObjectForClass:resultClass];
+    ZLog(@"[ZSFont] install[4] newObject: %p", boxedResult);
+    if (!boxedResult) return NO;
+
+    void *unboxedResult = (uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize;
+    void *directoryStr = [IL2CppBridge il2CppStringFromNSString:directory];
+    void *keyStr = [IL2CppBridge il2CppStringFromNSString:kZSCustomLocalizeKey];
+    void *ctorArgs[4] = { titleFont, contextFont, directoryStr, keyStr };
+    void *ctorExc = NULL;
+    [IL2CppBridge invokeMethod:ctorMethod onInstance:unboxedResult args:ctorArgs outException:&ctorExc];
+    ZLog(@"[ZSFont] install[5] ctor: exception=%@ header=%@ struct=%@", zs_describe_exception(ctorExc), zs_hex_string(boxedResult, kZSIl2CppObjectHeaderSize), zs_hex_string(unboxedResult, 0x30));
+    if (ctorExc) return NO;
+
+    if (isDataExistMethod) {
+        void *existExc = NULL;
+        void *existBoxed = [IL2CppBridge invokeMethod:isDataExistMethod onInstance:unboxedResult args:NULL outException:&existExc];
+        BOOL exists = !existExc && existBoxed && *(uint8_t *)((uint8_t *)existBoxed + kZSIl2CppObjectHeaderSize) != 0;
+        ZLog(@"[ZSFont] install[6] IsDataExist after ctor: %d (exception=%@)", exists, zs_describe_exception(existExc));
+        if (!exists) {
+            *((uint8_t *)boxedResult + dataExistOffset) = 1;
+            ZLog(@"[ZSFont] install[6] forced _isDataExist=1");
+        }
+    }
+
+    uint8_t before[256] = {0};
+    [IL2CppBridge copyStaticFieldValue:dataField toBuffer:before];
+    ZLog(@"[ZSFont] install[7] _data before: %@", zs_hex_string(before, 0x30));
+
+    [IL2CppBridge setStaticFieldValue:dataField fromBuffer:unboxedResult];
+
+    uint8_t after[256] = {0};
+    [IL2CppBridge copyStaticFieldValue:dataField toBuffer:after];
+    ZLog(@"[ZSFont] install[8] _data after:  %@", zs_hex_string(after, 0x30));
+
+    void *rawTitle = NULL;
+    void *rawContext = NULL;
+    BOOL rawOk = zs_read_custom_localize_fonts(&rawTitle, &rawContext);
+    ZLog(@"[ZSFont] install[9] raw readback ok=%d title=%p context=%p (expected %p / %p)", rawOk, rawTitle, rawContext, titleFont, contextFont);
+
+    void *getTitle = NULL;
+    void *getContext = NULL;
+    BOOL getOk = zs_read_custom_localize_fonts_via_get(&getTitle, &getContext);
+    ZLog(@"[ZSFont] install[10] Get() readback ok=%d match=%d", getOk, getOk && getTitle == titleFont && getContext == contextFont);
+
+    BOOL rawMatch = rawOk && rawTitle == titleFont && rawContext == contextFont;
+    BOOL getMatch = getOk && getTitle == titleFont && getContext == contextFont;
+    return rawMatch || getMatch;
+}
+
+static void *zs_load_font_manager_data(void) {
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    void *resourcesClass = mt_class("UnityEngine", "Resources", "UnityEngine.CoreModule");
+    const void *loadMethod = mt_method(resourcesClass, "Load", 2);
+    void *typeObj = zs_type_object(fontManagerClass);
+    ZLog(@"[ZSFont] FontManager load: class=%p resources=%p load=%p typeObj=%p", fontManagerClass, resourcesClass, loadMethod, typeObj);
+    if (!loadMethod || !typeObj) return NULL;
+
+    void *resourcePathStr = [IL2CppBridge il2CppStringFromNSString:@"Font/FontSet/FontManagerScriptableObject"];
+    void *loadArgs[2] = { resourcePathStr, typeObj };
+    void *exc = NULL;
+    void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
+    ZLog(@"[ZSFont] FontManager load result=%p exception=%@", fontManagerData, zs_describe_exception(exc));
+    return exc ? NULL : fontManagerData;
+}
+
+static void *zs_tmp_font_asset_class(void) {
+    return mt_class("TMPro", "TMP_FontAsset", "Unity.TextMeshPro");
+}
+
+static BOOL zs_font_asset_fallback_contains(void *listObj, void *font) {
+    if (!listObj || !font) return NO;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *containsMethod = [IL2CppBridge methodOnClass:listClass name:"Contains" argCount:1];
+    if (!containsMethod) return NO;
+    void *args[1] = { font };
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:containsMethod onInstance:listObj args:args outException:&exc];
+    if (exc || !boxed) return NO;
+    return *(uint8_t *)((uint8_t *)boxed + kZSIl2CppObjectHeaderSize) != 0;
+}
+
+static void zs_font_asset_fallback_add(void *listObj, void *font) {
+    if (!listObj || !font) return;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *addMethod = [IL2CppBridge methodOnClass:listClass name:"Add" argCount:1];
+    if (!addMethod) return;
+    void *args[1] = { font };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:addMethod onInstance:listObj args:args outException:&exc];
+}
+
+static void zs_font_asset_fallback_insert_front(void *listObj, void *font) {
+    if (!listObj || !font) return;
+    if (zs_font_asset_fallback_contains(listObj, font)) return;
+    void *listClass = [IL2CppBridge classOfInstance:listObj];
+    const void *insertMethod = [IL2CppBridge methodOnClass:listClass name:"Insert" argCount:2];
+    if (!insertMethod) {
+        zs_font_asset_fallback_add(listObj, font);
+        return;
+    }
+    int32_t index = 0;
+    void *args[2] = { &index, font };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:insertMethod onInstance:listObj args:args outException:&exc];
+    if (exc) zs_font_asset_fallback_add(listObj, font);
+}
+
+static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont, void *cjkFont) {
+    void *fontAssetClass = zs_tmp_font_asset_class();
+    const void *getFallbackMethod = mt_method(fontAssetClass, "get_fallbackFontAssetTable", 0);
+    if (!fontAssetClass || !getFallbackMethod) {
+        ZLog(@"[ZSFont] fallback-patch skipped: class=%p getter=%p", fontAssetClass, getFallbackMethod);
+        return;
+    }
+
+    NSUInteger count = 0;
+    void *fontAssets = zs_resources_find_all_for_class(fontAssetClass, &count);
+    if (!fontAssets) {
+        ZLog(@"[ZSFont] fallback-patch skipped: no live TMP_FontAsset instances");
+        return;
+    }
+
+    void *titleListObj = NULL;
+    void *contextListObj = NULL;
+    if (titleFont) {
+        void *titleExc = NULL;
+        titleListObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:titleFont args:NULL outException:&titleExc];
+        if (titleExc) titleListObj = NULL;
+    }
+    if (contextFont) {
+        if (contextFont == titleFont) {
+            contextListObj = titleListObj;
+        } else {
+            void *contextExc = NULL;
+            contextListObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:contextFont args:NULL outException:&contextExc];
+            if (contextExc) contextListObj = NULL;
+        }
+    }
+
+    if (cjkFont && titleListObj) zs_font_asset_fallback_insert_front(titleListObj, cjkFont);
+    if (cjkFont && contextListObj && contextListObj != titleListObj) zs_font_asset_fallback_insert_front(contextListObj, cjkFont);
+
+    NSUInteger patched = 0;
+    for (NSUInteger i = 0; i < count; i++) {
+        void *fontAsset = zs_array_object_at(fontAssets, i);
+        if (!fontAsset || fontAsset == titleFont || fontAsset == contextFont || fontAsset == cjkFont) continue;
+
+        void *exc = NULL;
+        void *listObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:fontAsset args:NULL outException:&exc];
+        if (exc || !listObj) continue;
+
+        BOOL changed = NO;
+        if (cjkFont && !zs_font_asset_fallback_contains(listObj, cjkFont)) {
+            zs_font_asset_fallback_insert_front(listObj, cjkFont);
+            changed = YES;
+        }
+        if (titleFont && !zs_font_asset_fallback_contains(listObj, titleFont)) {
+            zs_font_asset_fallback_add(listObj, titleFont);
+            changed = YES;
+        }
+        if (contextFont && contextFont != titleFont && !zs_font_asset_fallback_contains(listObj, contextFont)) {
+            zs_font_asset_fallback_add(listObj, contextFont);
+            changed = YES;
+        }
+        if (changed) patched++;
+
+        if (titleListObj && !zs_font_asset_fallback_contains(titleListObj, fontAsset)) {
+            zs_font_asset_fallback_add(titleListObj, fontAsset);
+        }
+        if (contextListObj && contextListObj != titleListObj && !zs_font_asset_fallback_contains(contextListObj, fontAsset)) {
+            zs_font_asset_fallback_add(contextListObj, fontAsset);
+        }
+    }
+    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p", (unsigned long)patched, (unsigned long)count, cjkFont);
+}
+
+static void zs_refresh_font_consumers(void *fontManagerData) {
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
+    ZLog(@"[ZSFont] refresh: fontManagerData=%p setFallback=%p", fontManagerData, setFallbackMethod);
+    if (fontManagerData && setFallbackMethod) {
+        for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+            int32_t languageValue = language;
+            void *langArgs[1] = { &languageValue };
+            void *fallbackExc = NULL;
+            [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
+            ZLog(@"[ZSFont] SetFallbackFontsByLanguage(%d) exception=%@", language, zs_describe_exception(fallbackExc));
+        }
+    }
+
+    const char *setterClassNames[] = {
+        "FontSetter", "FontTypesCategorySetter", "BebasKaiFontSetter", "ExcelsiorSansFontSetter",
+        "FixedFontSetter", "PretendardFontSetter", "TextMeshProLanguageSetter"
+    };
+    for (size_t i = 0; i < sizeof(setterClassNames) / sizeof(setterClassNames[0]); i++) {
+        void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
+        const void *updateMethod = mt_method(setterClass, "UpdateTMP", 0);
+        if (!setterClass || !updateMethod) {
+            ZLog(@"[ZSFont] refresh %s skipped: class=%p UpdateTMP=%p", setterClassNames[i], setterClass, updateMethod);
+            continue;
+        }
+        NSUInteger setterCount = 0;
+        void *setterArray = zs_resources_find_all_for_class(setterClass, &setterCount);
+        if (!setterArray) {
+            ZLog(@"[ZSFont] refresh %s skipped: no instance array", setterClassNames[i]);
+            continue;
+        }
+        NSUInteger failures = 0;
+        for (NSUInteger j = 0; j < setterCount; j++) {
+            void *setterInstance = zs_array_object_at(setterArray, j);
+            if (!setterInstance) continue;
+            void *updateExc = NULL;
+            [IL2CppBridge invokeMethod:updateMethod onInstance:setterInstance args:NULL outException:&updateExc];
+            if (updateExc) failures++;
+        }
+        ZLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)setterCount, setterClassNames[i], (unsigned long)failures);
+    }
+
+    const char *langRefreshClassNames[] = { "TextMeshProLanguageSetterManager", "TextMeshProChildrenSetter" };
+    const char *langRefreshMethodNames[] = { "UpdateUIs", "RefreshLanguage" };
+    for (size_t i = 0; i < sizeof(langRefreshClassNames) / sizeof(langRefreshClassNames[0]); i++) {
+        void *langRefreshClass = mt_class("UtilityUI", langRefreshClassNames[i], "Assembly-CSharp");
+        const void *langRefreshMethod = mt_method(langRefreshClass, langRefreshMethodNames[i], 1);
+        if (!langRefreshClass || !langRefreshMethod) {
+            ZLog(@"[ZSFont] refresh %s.%s skipped: class=%p method=%p", langRefreshClassNames[i], langRefreshMethodNames[i], langRefreshClass, langRefreshMethod);
+            continue;
+        }
+        NSUInteger langRefreshCount = 0;
+        void *langRefreshArray = zs_resources_find_all_for_class(langRefreshClass, &langRefreshCount);
+        if (!langRefreshArray) {
+            ZLog(@"[ZSFont] refresh %s skipped: no instance array", langRefreshClassNames[i]);
+            continue;
+        }
+        NSUInteger failures = 0;
+        for (NSUInteger j = 0; j < langRefreshCount; j++) {
+            void *langRefreshInstance = zs_array_object_at(langRefreshArray, j);
+            if (!langRefreshInstance) continue;
+            for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+                int32_t languageValue = language;
+                void *langRefreshArgs[1] = { &languageValue };
+                void *langRefreshExc = NULL;
+                [IL2CppBridge invokeMethod:langRefreshMethod onInstance:langRefreshInstance args:langRefreshArgs outException:&langRefreshExc];
+                if (langRefreshExc) failures++;
+            }
+        }
+        ZLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)langRefreshCount, langRefreshClassNames[i], (unsigned long)failures);
+    }
+
+    void *duiStyleManagerClass = mt_class("DUI.StyleLibs", "DUIStyleManager", "Assembly-CSharp");
+    const void *onSceneChangedMethod = mt_method(duiStyleManagerClass, "OnSceneChanged", 0);
+    if (onSceneChangedMethod) {
+        NSUInteger duiCount = 0;
+        void *duiArray = zs_resources_find_all_for_class(duiStyleManagerClass, &duiCount);
+        NSUInteger failures = 0;
+        for (NSUInteger j = 0; duiArray && j < duiCount; j++) {
+            void *duiInstance = zs_array_object_at(duiArray, j);
+            if (!duiInstance) continue;
+            void *duiExc = NULL;
+            [IL2CppBridge invokeMethod:onSceneChangedMethod onInstance:duiInstance args:NULL outException:&duiExc];
+            if (duiExc) failures++;
+        }
+        ZLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s), %lu exception(s)", (unsigned long)duiCount, (unsigned long)failures);
+    } else {
+        ZLog(@"[ZSFont] refresh DUIStyleManager skipped: class=%p OnSceneChanged=%p", duiStyleManagerClass, onSceneChangedMethod);
+    }
+}
+
+static void zs_log_custom_localize_state(void *fontManagerData, void *titleFont, void *contextFont) {
+    BOOL isRunning = NO;
+    BOOL isUsing = NO;
+    BOOL haveRunning = zs_custom_localize_static_bool("IsRunning", &isRunning);
+    BOOL haveUsing = zs_custom_localize_static_bool("IsUsing", &isUsing);
+    ZLog(@"[ZSFont] CustomLocalizeManager IsRunning=%d IsUsing=%d", haveRunning ? isRunning : -1, haveUsing ? isUsing : -1);
+
+    void *getTitle = NULL;
+    void *getContext = NULL;
+    zs_read_custom_localize_fonts_via_get(&getTitle, &getContext);
+
+    void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    void *fontAssetStructClass = mt_class("UtilityUI", "FontAsset", "Assembly-CSharp");
+    const void *getFontAssetMethod = mt_method(fontManagerClass, "GetFontAsset", 2);
+    int32_t fontAssetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
+    if (!fontManagerData || !getFontAssetMethod || fontAssetOffset < 0) {
+        ZLog(@"[ZSFont] slot check skipped: data=%p method=%p offset=%d", fontManagerData, getFontAssetMethod, fontAssetOffset);
+        return;
+    }
+
+    static const char *typeNames[] = { "Title", "Sub" };
+    static const char *languageNames[] = { "KR", "EN", "JP" };
+    int32_t matched = 0;
+    int32_t total = 0;
+    for (int32_t type = 0; type < kZSFontTypeCount; type++) {
+        for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
+            int32_t typeValue = type;
+            int32_t languageValue = language;
+            void *args[2] = { &typeValue, &languageValue };
+            void *exc = NULL;
+            void *boxed = [IL2CppBridge invokeMethod:getFontAssetMethod onInstance:fontManagerData args:args outException:&exc];
+            total++;
+            if (exc || !boxed) {
+                ZLog(@"[ZSFont] slot %s/%s: GetFontAsset failed exception=%@", typeNames[type], languageNames[language], zs_describe_exception(exc));
+                continue;
+            }
+            void *resolved = *(void **)((uint8_t *)boxed + fontAssetOffset);
+            BOOL isCustom = resolved == titleFont || resolved == contextFont;
+            if (isCustom) matched++;
+            ZLog(@"[ZSFont] slot %s/%s: fontAsset=%p custom=%d", typeNames[type], languageNames[language], resolved, isCustom);
+        }
+    }
+    ZLog(@"[ZSFont] FontManager primary slots resolving to the custom font: %d/%d", matched, total);
+}
+
+static void zs_apply_custom_font_if_present(void) {
+    NSString *fontsDir = zs_custom_font_directory();
+    if (!fontsDir) return;
+
+    NSArray<NSString *> *files = zs_custom_font_files(fontsDir);
+    ZLog(@"[ZSFont] apply: directory=%@ fontFiles=%lu", fontsDir, (unsigned long)files.count);
+    if (files.count == 0) return;
+
+    NSString *titlePath = zs_pick_custom_font(files, @"title");
+    NSString *contextPath = zs_pick_custom_font(files, @"context");
+    NSString *cjkPath = zs_pick_custom_font_optional(files, @"cjk");
+    NSMutableArray<NSString *> *signatureInputs = [NSMutableArray arrayWithObjects:titlePath, contextPath, nil];
+    if (cjkPath) [signatureInputs addObject:cjkPath];
+    NSString *signature = zs_custom_font_signature(signatureInputs);
+    ZLog(@"[ZSFont] apply: title=%@ context=%@ cjk=%@", titlePath.lastPathComponent, contextPath.lastPathComponent, cjkPath.lastPathComponent ?: @"(none)");
+
+    BOOL cjkCachedUsable = !cjkPath || (g_zsCustomFontCJK && ZSUID_UnityObjectIsAlive(g_zsCustomFontCJK));
+    BOOL cachedFontsUsable = g_zsCustomFontTitle && g_zsCustomFontContext &&
+        [signature isEqualToString:g_zsCustomFontSignature] &&
+        ZSUID_UnityObjectIsAlive(g_zsCustomFontTitle) && ZSUID_UnityObjectIsAlive(g_zsCustomFontContext) &&
+        cjkCachedUsable;
+
+    void *currentTitle = NULL;
+    void *currentContext = NULL;
+    BOOL haveCurrent = zs_read_custom_localize_fonts(&currentTitle, &currentContext);
+    ZLog(@"[ZSFont] apply: cachedUsable=%d cached=%p/%p current(haveCurrent=%d)=%p/%p",
+         cachedFontsUsable, g_zsCustomFontTitle, g_zsCustomFontContext, haveCurrent, currentTitle, currentContext);
+    BOOL alreadyInstalled = cachedFontsUsable && haveCurrent && currentTitle == g_zsCustomFontTitle && currentContext == g_zsCustomFontContext;
+
+    void *titleFont = g_zsCustomFontTitle;
+    void *contextFont = g_zsCustomFontContext;
+    void *cjkFont = g_zsCustomFontCJK;
+
+    if (!alreadyInstalled) {
+        if (!cachedFontsUsable) {
+            titleFont = zs_load_custom_font(titlePath);
+            if (!titleFont) {
+                ZLog(@"[ZSFont] apply: aborting, title font failed to load");
+                return;
+            }
+            contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
+            if (!contextFont) {
+                ZLog(@"[ZSFont] apply: aborting, context font failed to load");
+                return;
+            }
+            cjkFont = NULL;
+            if (cjkPath) {
+                if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
+                else if ([cjkPath isEqualToString:contextPath]) cjkFont = contextFont;
+                else {
+                    cjkFont = zs_load_custom_font(cjkPath);
+                    if (!cjkFont) ZLog(@"[ZSFont] apply: CJK font failed to load, continuing without it");
+                }
+            }
+        }
+
+        g_zsCustomFontTitle = titleFont;
+        g_zsCustomFontContext = contextFont;
+        g_zsCustomFontCJK = cjkFont;
+        g_zsCustomFontSignature = signature;
+
+        if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
+            g_zsCustomFontTitle = NULL;
+            g_zsCustomFontContext = NULL;
+            g_zsCustomFontCJK = NULL;
+            g_zsCustomFontSignature = nil;
+            ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
+            return;
+        }
+
+        ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
+    } else {
+        ZLog(@"[ZSFont] apply: already installed, refreshing consumers for the current scene");
+    }
+
+    void *fontManagerData = zs_load_font_manager_data();
+    zs_refresh_font_consumers(fontManagerData);
+    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont);
+    zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
+}
+
+static const double kFontApplyDelaySeconds = 2.0;
+
+void zs_schedule_font_apply(void) {
+    static uint64_t fontApplyGeneration;
+    uint64_t token = ++fontApplyGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kFontApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != fontApplyGeneration) return;
+        zs_apply_custom_font_if_present();
+    });
+}
