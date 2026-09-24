@@ -3760,7 +3760,39 @@ static void zs_font_asset_fallback_insert_front(void *listObj, void *font) {
     if (exc) zs_font_asset_fallback_add(listObj, font);
 }
 
-static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont, void *cjkFont) {
+static void zs_read_default_font_families(void *fontManagerData, NSMutableSet<NSValue *> *titleFamily, NSMutableSet<NSValue *> *contextFamily) {
+    if (!fontManagerData) return;
+    void *managerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
+    void *fontSetClass = mt_class("UtilityUI", "FontSet", "Assembly-CSharp");
+    void *fontAssetClass = mt_class("UtilityUI", "FontAsset", "Assembly-CSharp");
+    if (!managerClass || !fontSetClass || !fontAssetClass) return;
+
+    int32_t titleOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"title"];
+    int32_t subOffset = [IL2CppBridge fieldOffsetOnClass:fontSetClass name:"sub"];
+    int32_t assetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetClass name:"fontAsset"];
+    if (titleOffset < 0 || subOffset < 0 || assetOffset < 0) return;
+
+    static const char *setNames[] = { "krSet", "enSet", "jpSet", "romanSet", "specialKanjiSet" };
+    for (size_t i = 0; i < sizeof(setNames) / sizeof(setNames[0]); i++) {
+        int32_t setOffset = [IL2CppBridge fieldOffsetOnClass:managerClass name:setNames[i]];
+        if (setOffset < 0) continue;
+        uint8_t *setBase = (uint8_t *)fontManagerData + setOffset;
+        void *titleAsset = *(void **)(setBase + (titleOffset - kZSIl2CppObjectHeaderSize) + (assetOffset - kZSIl2CppObjectHeaderSize));
+        void *subAsset = *(void **)(setBase + (subOffset - kZSIl2CppObjectHeaderSize) + (assetOffset - kZSIl2CppObjectHeaderSize));
+        if (titleAsset) [titleFamily addObject:[NSValue valueWithPointer:titleAsset]];
+        if (subAsset) [contextFamily addObject:[NSValue valueWithPointer:subAsset]];
+    }
+}
+
+static void zs_append_font_group(void *listObj, NSArray<NSValue *> *group) {
+    if (!listObj) return;
+    for (NSValue *value in group) {
+        void *asset = value.pointerValue;
+        if (!zs_font_asset_fallback_contains(listObj, asset)) zs_font_asset_fallback_add(listObj, asset);
+    }
+}
+
+static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, void *contextFont, void *cjkFont, void *fontManagerData) {
     void *fontAssetClass = zs_tmp_font_asset_class();
     const void *getFallbackMethod = mt_method(fontAssetClass, "get_fallbackFontAssetTable", 0);
     if (!fontAssetClass || !getFallbackMethod) {
@@ -3795,6 +3827,14 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
     if (cjkFont && titleListObj && cjkFont != titleFont) zs_font_asset_fallback_insert_front(titleListObj, cjkFont);
     if (cjkFont && contextListObj && contextListObj != titleListObj && cjkFont != contextFont) zs_font_asset_fallback_insert_front(contextListObj, cjkFont);
 
+    NSMutableSet<NSValue *> *titleFamily = [NSMutableSet set];
+    NSMutableSet<NSValue *> *contextFamily = [NSMutableSet set];
+    zs_read_default_font_families(fontManagerData, titleFamily, contextFamily);
+
+    NSMutableArray<NSValue *> *titleGroup = [NSMutableArray array];
+    NSMutableArray<NSValue *> *contextGroup = [NSMutableArray array];
+    NSMutableArray<NSValue *> *neutralGroup = [NSMutableArray array];
+
     NSUInteger patched = 0;
     for (NSUInteger i = 0; i < count; i++) {
         void *fontAsset = zs_array_object_at(fontAssets, i);
@@ -3804,9 +3844,27 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
         void *listObj = [IL2CppBridge invokeMethod:getFallbackMethod onInstance:fontAsset args:NULL outException:&exc];
         if (exc || !listObj) continue;
 
+        NSValue *assetKey = [NSValue valueWithPointer:fontAsset];
+        BOOL inTitleFamily = [titleFamily containsObject:assetKey];
+        BOOL inContextFamily = [contextFamily containsObject:assetKey];
+        void *ownRoleFont = NULL;
+        if (inTitleFamily && !inContextFamily) {
+            ownRoleFont = titleFont;
+            [titleGroup addObject:assetKey];
+        } else if (inContextFamily && !inTitleFamily) {
+            ownRoleFont = contextFont;
+            [contextGroup addObject:assetKey];
+        } else {
+            [neutralGroup addObject:assetKey];
+        }
+
         BOOL changed = NO;
         if (cjkFont && !zs_font_asset_fallback_contains(listObj, cjkFont)) {
             zs_font_asset_fallback_insert_front(listObj, cjkFont);
+            changed = YES;
+        }
+        if (ownRoleFont && !zs_font_asset_fallback_contains(listObj, ownRoleFont)) {
+            zs_font_asset_fallback_insert_front(listObj, ownRoleFont);
             changed = YES;
         }
         if (titleFont && !zs_font_asset_fallback_contains(listObj, titleFont)) {
@@ -3818,15 +3876,19 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
             changed = YES;
         }
         if (changed) patched++;
-
-        if (titleListObj && !zs_font_asset_fallback_contains(titleListObj, fontAsset)) {
-            zs_font_asset_fallback_add(titleListObj, fontAsset);
-        }
-        if (contextListObj && contextListObj != titleListObj && !zs_font_asset_fallback_contains(contextListObj, fontAsset)) {
-            zs_font_asset_fallback_add(contextListObj, fontAsset);
-        }
     }
-    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p", (unsigned long)patched, (unsigned long)count, cjkFont);
+
+    zs_append_font_group(titleListObj, titleGroup);
+    zs_append_font_group(titleListObj, neutralGroup);
+    zs_append_font_group(titleListObj, contextGroup);
+    if (contextListObj != titleListObj) {
+        zs_append_font_group(contextListObj, contextGroup);
+        zs_append_font_group(contextListObj, neutralGroup);
+        zs_append_font_group(contextListObj, titleGroup);
+    }
+    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p families title=%lu context=%lu neutral=%lu",
+         (unsigned long)patched, (unsigned long)count, cjkFont,
+         (unsigned long)titleGroup.count, (unsigned long)contextGroup.count, (unsigned long)neutralGroup.count);
 }
 
 static void zs_refresh_font_consumers(void *fontManagerData) {
@@ -4044,7 +4106,7 @@ static void zs_apply_custom_font_if_present(void) {
 
     void *fontManagerData = zs_load_font_manager_data();
     zs_refresh_font_consumers(fontManagerData);
-    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont);
+    zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont, fontManagerData);
     zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
 }
 
