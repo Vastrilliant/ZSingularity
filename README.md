@@ -44,6 +44,7 @@ Supported Mods:
 - .carra2 mod format
 - Announcer mods
 - Translation mods
+- Custom Fonts
 
 ## Installation
 
