@@ -346,10 +346,6 @@ void zs_set_custom_greeting_text(NSString * _Nullable text);
 
 @end
 
-#pragma mark - Custom Localization Lang Directory (iOS Lang folder support)
-
-NSString * _Nullable zs_custom_lang_directory_path(void);
-
 #pragma mark - Shared IL2CPP helpers
 
 void *mt_class(const char *ns, const char *name, const char *assemblySubstring);
