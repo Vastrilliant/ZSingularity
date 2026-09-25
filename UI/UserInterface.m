@@ -966,28 +966,32 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
 @end
 
-#pragma mark - Pie chart
+#pragma mark - Pillar chart
 
-@interface ZSPieChartView : UIView
-- (void)setSlicesWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors;
+static const NSInteger kZSPillarSegmentCount = 36;
+static const CGFloat kZSPillarSegmentGap = 3.0;
+static const CGFloat kZSPillarSegmentCornerRadius = 3.0;
+
+@interface ZSPillarChartView : UIView
+- (void)setSegmentsWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors;
 @end
 
-@implementation ZSPieChartView {
+@implementation ZSPillarChartView {
     NSArray<NSNumber *> *_fractions;
     NSArray<UIColor *> *_colors;
-    NSMutableArray<CAShapeLayer *> *_sliceLayers;
+    NSMutableArray<CAShapeLayer *> *_segmentLayers;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        _sliceLayers = [NSMutableArray new];
+        _segmentLayers = [NSMutableArray new];
         self.backgroundColor = UIColor.clearColor;
     }
     return self;
 }
 
-- (void)setSlicesWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors {
+- (void)setSegmentsWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors {
     _fractions = [fractions copy];
     _colors = [colors copy];
     [self setNeedsLayout];
@@ -996,38 +1000,102 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    [self zs_rebuildSliceLayers];
+    [self zs_rebuildSegmentLayers];
 }
 
-- (void)zs_rebuildSliceLayers {
-    for (CAShapeLayer *layer in _sliceLayers) {
+- (NSArray<NSNumber *> *)zs_segmentCountsForFractions:(NSArray<NSNumber *> *)fractions total:(NSInteger)total {
+    NSInteger n = fractions.count;
+    if (n == 0 || total <= 0) return @[];
+
+    NSMutableArray<NSNumber *> *counts = [NSMutableArray arrayWithCapacity:n];
+    NSMutableArray<NSNumber *> *remainders = [NSMutableArray arrayWithCapacity:n];
+    NSInteger assigned = 0;
+
+    for (NSNumber *fractionNum in fractions) {
+        double fraction = fractionNum.doubleValue;
+        double raw = fraction * (double)total;
+        NSInteger base = (NSInteger)floor(raw);
+        if (base < 1 && fraction > 0.0) base = 1;
+        [counts addObject:@(base)];
+        [remainders addObject:@(raw - floor(raw))];
+        assigned += base;
+    }
+
+    NSInteger overflow = assigned - total;
+    NSMutableArray<NSNumber *> *order = [NSMutableArray arrayWithCapacity:n];
+    for (NSInteger i = 0; i < n; i++) [order addObject:@(i)];
+
+    if (overflow > 0) {
+        [order sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            double ra = remainders[a.integerValue].doubleValue;
+            double rb = remainders[b.integerValue].doubleValue;
+            return ra < rb ? NSOrderedAscending : (ra > rb ? NSOrderedDescending : NSOrderedSame);
+        }];
+        for (NSNumber *idxNum in order) {
+            if (overflow <= 0) break;
+            NSInteger idx = idxNum.integerValue;
+            NSInteger c = counts[idx].integerValue;
+            if (c > 1) {
+                counts[idx] = @(c - 1);
+                overflow--;
+            }
+        }
+    } else if (overflow < 0) {
+        [order sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            double ra = remainders[a.integerValue].doubleValue;
+            double rb = remainders[b.integerValue].doubleValue;
+            return ra > rb ? NSOrderedAscending : (ra < rb ? NSOrderedDescending : NSOrderedSame);
+        }];
+        NSInteger remaining = -overflow;
+        NSInteger orderIdx = 0;
+        while (remaining > 0 && order.count > 0) {
+            NSInteger idx = order[orderIdx % order.count].integerValue;
+            counts[idx] = @(counts[idx].integerValue + 1);
+            remaining--;
+            orderIdx++;
+        }
+    }
+
+    return counts;
+}
+
+- (void)zs_rebuildSegmentLayers {
+    for (CAShapeLayer *layer in _segmentLayers) {
         [layer removeFromSuperlayer];
     }
-    [_sliceLayers removeAllObjects];
+    [_segmentLayers removeAllObjects];
 
     if (_fractions.count == 0 || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
 
-    CGPoint center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
-    CGFloat radius = MIN(self.bounds.size.width, self.bounds.size.height) / 2.0;
-    CGFloat startAngle = -M_PI_2;
+    NSArray<NSNumber *> *segmentCounts = [self zs_segmentCountsForFractions:_fractions total:kZSPillarSegmentCount];
 
-    for (NSUInteger i = 0; i < _fractions.count; i++) {
-        CGFloat sweep = _fractions[i].doubleValue * 2.0 * M_PI;
-        CGFloat endAngle = startAngle + sweep;
+    NSMutableArray<UIColor *> *segmentColors = [NSMutableArray new];
+    for (NSUInteger i = 0; i < segmentCounts.count; i++) {
+        UIColor *color = (i < _colors.count) ? _colors[i] : UIColor.grayColor;
+        NSInteger count = segmentCounts[i].integerValue;
+        for (NSInteger s = 0; s < count; s++) {
+            [segmentColors addObject:color];
+        }
+    }
 
-        UIBezierPath *path = [UIBezierPath bezierPathWithArcCenter:center radius:radius startAngle:startAngle endAngle:endAngle clockwise:YES];
-        [path addLineToPoint:center];
-        [path closePath];
+    NSInteger renderedCount = segmentColors.count;
+    if (renderedCount == 0) return;
 
-        CAShapeLayer *slice = [CAShapeLayer new];
-        slice.path = path.CGPath;
-        slice.fillColor = (i < _colors.count ? _colors[i] : UIColor.grayColor).CGColor;
-        slice.strokeColor = [UIColor colorWithWhite:0.07 alpha:1].CGColor;
-        slice.lineWidth = 1.5;
-        [self.layer addSublayer:slice];
-        [_sliceLayers addObject:slice];
+    CGFloat width = self.bounds.size.width;
+    CGFloat totalGap = kZSPillarSegmentGap * (renderedCount - 1);
+    CGFloat segmentHeight = (self.bounds.size.height - totalGap) / (CGFloat)renderedCount;
+    if (segmentHeight <= 0) return;
 
-        startAngle = endAngle;
+    CGFloat y = 0;
+    for (NSInteger i = 0; i < renderedCount; i++) {
+        CGRect rect = CGRectMake(0, y, width, segmentHeight);
+        CAShapeLayer *segment = [CAShapeLayer new];
+        segment.path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:kZSPillarSegmentCornerRadius].CGPath;
+        segment.fillColor = segmentColors[i].CGColor;
+        [self.layer addSublayer:segment];
+        [_segmentLayers addObject:segment];
+
+        y += segmentHeight + kZSPillarSegmentGap;
     }
 }
 
@@ -2748,6 +2816,41 @@ static UIView *zs_make_memory_legend_row(NSString *title, NSString *detailText, 
     return row;
 }
 
+static UIView *zs_make_memory_stat_row(NSString *title, NSString *value) {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = title;
+    titleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+    titleLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    titleLabel.numberOfLines = 1;
+    [row addSubview:titleLabel];
+
+    UILabel *valueLabel = [[UILabel alloc] init];
+    valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    valueLabel.text = value;
+    valueLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    valueLabel.font = zs_mono_font(11, UIFontWeightMedium);
+    valueLabel.numberOfLines = 1;
+    valueLabel.textAlignment = NSTextAlignmentRight;
+    [row addSubview:valueLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [titleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+
+        [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8],
+        [valueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+    ]];
+
+    return row;
+}
+
 static UIVisualEffectView *zs_wrap_field_in_native_glass(UITextField *field, CGFloat cornerRadius) {
     field.borderStyle = UITextBorderStyleNone;
     UIView *leftPadding = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
@@ -4244,10 +4347,10 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIStackView *browseFieldsContainer;
 
 @property (nonatomic, strong) UIButton *memoryUsageAnalyzeButton;
-@property (nonatomic, strong) ZSPieChartView *memoryUsagePieChart;
+@property (nonatomic, strong) ZSPillarChartView *memoryUsagePillarChart;
 @property (nonatomic, strong) UIStackView *memoryUsageLegendStack;
 @property (nonatomic, strong) UILabel *memoryUsageStatusLabel;
-@property (nonatomic, strong) UILabel *memoryUsageProcessLabel;
+@property (nonatomic, strong) UIStackView *memoryUsageStatsStack;
 @property (nonatomic, strong) UIView *memoryUsageChartRow;
 
 + (instancetype)shared;
@@ -4854,10 +4957,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.browseFieldsContainer = nil;
 
     self.memoryUsageAnalyzeButton = nil;
-    self.memoryUsagePieChart = nil;
+    self.memoryUsagePillarChart = nil;
     self.memoryUsageLegendStack = nil;
     self.memoryUsageStatusLabel = nil;
-    self.memoryUsageProcessLabel = nil;
+    self.memoryUsageStatsStack = nil;
     self.memoryUsageChartRow = nil;
 }
 
@@ -7555,9 +7658,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (UIView *)zs_buildMemoryUsageCard {
-    ZSPieChartView *pieChart = [[ZSPieChartView alloc] init];
-    pieChart.translatesAutoresizingMaskIntoConstraints = NO;
-    self.memoryUsagePieChart = pieChart;
+    ZSPillarChartView *pillarChart = [[ZSPillarChartView alloc] init];
+    pillarChart.translatesAutoresizingMaskIntoConstraints = NO;
+    self.memoryUsagePillarChart = pillarChart;
 
     UIStackView *legendStack = [[UIStackView alloc] init];
     legendStack.translatesAutoresizingMaskIntoConstraints = NO;
@@ -7567,42 +7670,43 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
     UIView *chartRow = [[UIView alloc] init];
     chartRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [chartRow addSubview:pieChart];
+    [chartRow addSubview:pillarChart];
     [chartRow addSubview:legendStack];
     chartRow.hidden = YES;
     self.memoryUsageChartRow = chartRow;
 
     [NSLayoutConstraint activateConstraints:@[
-        [pieChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
-        [pieChart.centerYAnchor constraintEqualToAnchor:chartRow.centerYAnchor],
-        [pieChart.widthAnchor constraintEqualToConstant:84],
-        [pieChart.heightAnchor constraintEqualToConstant:84],
-        [pieChart.topAnchor constraintGreaterThanOrEqualToAnchor:chartRow.topAnchor],
-        [pieChart.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
+        [pillarChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
+        [pillarChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
+        [pillarChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
+        [pillarChart.widthAnchor constraintEqualToConstant:40],
+        [pillarChart.heightAnchor constraintGreaterThanOrEqualToConstant:220],
 
-        [legendStack.leadingAnchor constraintEqualToAnchor:pieChart.trailingAnchor constant:16],
+        [legendStack.leadingAnchor constraintEqualToAnchor:pillarChart.trailingAnchor constant:16],
         [legendStack.trailingAnchor constraintEqualToAnchor:chartRow.trailingAnchor],
         [legendStack.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
-        [legendStack.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
+        [legendStack.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
     ]];
 
-    UILabel *statusLabel = zs_make_hint_label(@"Tap Analyze memory usage to scan loaded textures, meshes, audio and other assets.");
+    UILabel *statusLabel = zs_make_hint_label(@"Tap Analyze memory usage to scan subsystems and loaded assets.");
     statusLabel.textAlignment = NSTextAlignmentCenter;
     self.memoryUsageStatusLabel = statusLabel;
 
-    UILabel *processLabel = zs_make_hint_label(@"");
-    processLabel.textAlignment = NSTextAlignmentCenter;
-    processLabel.hidden = YES;
-    self.memoryUsageProcessLabel = processLabel;
+    UIStackView *statsStack = [[UIStackView alloc] init];
+    statsStack.translatesAutoresizingMaskIntoConstraints = NO;
+    statsStack.axis = UILayoutConstraintAxisVertical;
+    statsStack.spacing = 6;
+    statsStack.hidden = YES;
+    self.memoryUsageStatsStack = statsStack;
 
     UIStackView *contentStack = [[UIStackView alloc] init];
     contentStack.translatesAutoresizingMaskIntoConstraints = NO;
     contentStack.axis = UILayoutConstraintAxisVertical;
     contentStack.spacing = 8;
     [contentStack addArrangedSubview:statusLabel];
-    [contentStack addArrangedSubview:processLabel];
+    [contentStack addArrangedSubview:statsStack];
     [contentStack addArrangedSubview:chartRow];
-    [contentStack setCustomSpacing:16 afterView:processLabel];
+    [contentStack setCustomSpacing:16 afterView:statsStack];
 
     UIView *card = zs_make_glass_container_card(contentStack, UIEdgeInsetsMake(16, 16, 16, 16));
     card.layer.borderWidth = 1;
@@ -7615,9 +7719,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
     sender.enabled = NO;
-    self.memoryUsageStatusLabel.text = @"Scanning loaded assets…";
-    self.memoryUsageProcessLabel.hidden = YES;
+    self.memoryUsageStatusLabel.text = @"Scanning subsystems and loaded assets…";
+    self.memoryUsageStatsStack.hidden = YES;
     self.memoryUsageChartRow.hidden = YES;
+
+    [self zs_applyMemorySystemStats:zs_collect_memory_system_stats()];
 
     __weak typeof(self) weakSelf = self;
     zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageCategory *> *categories) {
@@ -7628,16 +7734,30 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     });
 }
 
-- (void)zs_applyMemoryUsageCategories:(NSArray<ZSMemoryUsageCategory *> *)categories {
-    int64_t processBytes = zs_current_process_resident_memory_bytes();
-    if (processBytes > 0) {
-        NSString *processText = [NSByteCountFormatter stringFromByteCount:(long long)processBytes countStyle:NSByteCountFormatterCountStyleMemory];
-        self.memoryUsageProcessLabel.text = [NSString stringWithFormat:@"Process memory (all subsystems): %@", processText];
-        self.memoryUsageProcessLabel.hidden = NO;
-    } else {
-        self.memoryUsageProcessLabel.hidden = YES;
+- (void)zs_applyMemorySystemStats:(ZSMemorySystemStats)stats {
+    for (UIView *row in self.memoryUsageStatsStack.arrangedSubviews.copy) {
+        [row removeFromSuperview];
     }
 
+    NSByteCountFormatter *formatter = [NSByteCountFormatter new];
+    formatter.countStyle = NSByteCountFormatterCountStyleMemory;
+
+    NSString *residentText = [formatter stringFromByteCount:(long long)MAX(0, stats.residentBytes)];
+    NSString *availableText = stats.availableBytes > 0 ? [formatter stringFromByteCount:(long long)stats.availableBytes] : @"Unknown";
+    NSString *systemFreeText = stats.systemFreeBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemFreeBytes] : @"Unknown";
+    NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
+    NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
+
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory used", residentText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Available headroom", availableText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System free", systemFreeText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Device memory", deviceTotalText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory pressure", pressureText)];
+
+    self.memoryUsageStatsStack.hidden = NO;
+}
+
+- (void)zs_applyMemoryUsageCategories:(NSArray<ZSMemoryUsageCategory *> *)categories {
     if (categories.count == 0) {
         self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
         self.memoryUsageChartRow.hidden = YES;
@@ -7694,9 +7814,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         [self.memoryUsageLegendStack addArrangedSubview:legendRow];
     }
 
-    [self.memoryUsagePieChart setSlicesWithFractions:fractions colors:colors];
+    [self.memoryUsagePillarChart setSegmentsWithFractions:fractions colors:colors];
     NSString *totalText = [NSByteCountFormatter stringFromByteCount:(long long)grandTotal countStyle:NSByteCountFormatterCountStyleFile];
-    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Tracked asset memory: %@", totalText];
+    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Asset & subsystem breakdown: %@", totalText];
     self.memoryUsageChartRow.hidden = NO;
 }
 

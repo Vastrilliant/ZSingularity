@@ -10,6 +10,7 @@
 #import <math.h>
 #include <stdint.h>
 #import <mach/mach.h>
+#import <os/proc.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
 
@@ -1289,6 +1290,18 @@ static BOOL mt_call_static_object_int64(const char *ns, const char *klassName, c
     return YES;
 }
 
+static BOOL mt_call_static_int64(const char *ns, const char *klassName, const char *assembly, const char *methodName, int64_t *outValue) {
+    if (!outValue) return NO;
+    void *klass = mt_class(ns, klassName, assembly);
+    const void *method = mt_method(klass, methodName, 0);
+    if (!method) return NO;
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *outValue = *(int64_t *)((uint8_t *)boxed + 0x10);
+    return YES;
+}
+
 #pragma mark - Experimental state
 
 #define EXP_DEFAULTS(X) \
@@ -1719,6 +1732,59 @@ static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[]
     {"UnityEngine", "Font", "TextRenderingModule", "Fonts"},
 };
 
+static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCategory *> *results, int64_t assetTrackedBytes) {
+    int64_t totalAllocated = 0;
+    int64_t totalReserved = 0;
+    int64_t totalUnusedReserved = 0;
+    int64_t monoUsed = 0;
+
+    BOOL hasTotalAllocated = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalAllocatedMemoryLong", &totalAllocated);
+    BOOL hasTotalReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalReservedMemoryLong", &totalReserved);
+    BOOL hasUnusedReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalUnusedReservedMemoryLong", &totalUnusedReserved);
+    BOOL hasMonoUsed = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoUsedSizeLong", &monoUsed);
+
+    if (hasMonoUsed && monoUsed > 0) {
+        ZSMemoryUsageCategory *managed = [ZSMemoryUsageCategory new];
+        managed.name = @"Managed heap (IL2CPP)";
+        managed.totalBytes = monoUsed;
+        managed.objectCount = 0;
+        [results addObject:managed];
+    }
+
+    if (hasTotalAllocated && totalAllocated > 0) {
+        int64_t accountedFor = assetTrackedBytes + (hasMonoUsed ? monoUsed : 0);
+        int64_t nativeEngine = totalAllocated - accountedFor;
+        if (nativeEngine > 0) {
+            ZSMemoryUsageCategory *native = [ZSMemoryUsageCategory new];
+            native.name = @"Native / engine";
+            native.totalBytes = nativeEngine;
+            native.objectCount = 0;
+            [results addObject:native];
+        }
+    }
+
+    if (hasUnusedReserved && totalUnusedReserved > 0) {
+        ZSMemoryUsageCategory *reserved = [ZSMemoryUsageCategory new];
+        reserved.name = @"Reserved (unused)";
+        reserved.totalBytes = totalUnusedReserved;
+        reserved.objectCount = 0;
+        [results addObject:reserved];
+    }
+
+    int64_t residentBytes = zs_current_process_resident_memory_bytes();
+    int64_t engineFootprint = hasTotalReserved ? totalReserved : totalAllocated;
+    if (residentBytes > 0 && engineFootprint > 0) {
+        int64_t systemOverhead = residentBytes - engineFootprint;
+        if (systemOverhead > 0) {
+            ZSMemoryUsageCategory *overhead = [ZSMemoryUsageCategory new];
+            overhead.name = @"iOS / system overhead";
+            overhead.totalBytes = systemOverhead;
+            overhead.objectCount = 0;
+            [results addObject:overhead];
+        }
+    }
+}
+
 static NSArray<ZSMemoryUsageCategory *> *zs_scan_memory_usage_breakdown_sync(void) {
     NSMutableArray<ZSMemoryUsageCategory *> *results = [NSMutableArray new];
     NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
@@ -1753,6 +1819,10 @@ static NSArray<ZSMemoryUsageCategory *> *zs_scan_memory_usage_breakdown_sync(voi
         [results addObject:category];
     }
 
+    int64_t assetTrackedBytes = 0;
+    for (ZSMemoryUsageCategory *category in results) assetTrackedBytes += category.totalBytes;
+    zs_append_subsystem_memory_categories(results, assetTrackedBytes);
+
     [results sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
         if (a.totalBytes == b.totalBytes) return NSOrderedSame;
         return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
@@ -1782,6 +1852,43 @@ int64_t zs_current_process_resident_memory_bytes(void) {
     kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
     if (kr != KERN_SUCCESS) return 0;
     return (int64_t)info.phys_footprint;
+}
+
+ZSMemorySystemStats zs_collect_memory_system_stats(void) {
+    ZSMemorySystemStats stats;
+    memset(&stats, 0, sizeof(stats));
+
+    stats.residentBytes = zs_current_process_resident_memory_bytes();
+    stats.deviceTotalBytes = (int64_t)NSProcessInfo.processInfo.physicalMemory;
+
+    if (@available(iOS 13.0, *)) {
+        stats.availableBytes = (int64_t)os_proc_available_memory();
+    } else {
+        stats.availableBytes = 0;
+    }
+
+    mach_port_t host = mach_host_self();
+    vm_size_t pageSize = 0;
+    host_page_size(host, &pageSize);
+    vm_statistics64_data_t vmStats;
+    mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
+    if (pageSize > 0 && host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vmStats, &vmCount) == KERN_SUCCESS) {
+        stats.systemFreeBytes = (int64_t)vmStats.free_count * (int64_t)pageSize;
+    } else {
+        stats.systemFreeBytes = 0;
+    }
+
+    if (stats.availableBytes <= 0) {
+        stats.pressureLabel = "Unknown";
+    } else if (stats.availableBytes < (int64_t)50 * 1024 * 1024) {
+        stats.pressureLabel = "Critical";
+    } else if (stats.availableBytes < (int64_t)150 * 1024 * 1024) {
+        stats.pressureLabel = "Elevated";
+    } else {
+        stats.pressureLabel = "Normal";
+    }
+
+    return stats;
 }
 
 #pragma mark - Scene-wide performance surfaces

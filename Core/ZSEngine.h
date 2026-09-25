@@ -335,6 +335,16 @@ int32_t zs_last_observed_memory_usage_tier(void);
 void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageCategory *> * _Nonnull categories));
 int64_t zs_current_process_resident_memory_bytes(void);
 
+typedef struct {
+    int64_t residentBytes;
+    int64_t availableBytes;
+    int64_t deviceTotalBytes;
+    int64_t systemFreeBytes;
+    const char * _Nonnull pressureLabel;
+} ZSMemorySystemStats;
+
+ZSMemorySystemStats zs_collect_memory_system_stats(void);
+
 #pragma mark - Dev debug HUD
 
 #pragma mark - Custom Greeting Text
