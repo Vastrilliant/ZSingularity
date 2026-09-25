@@ -1275,6 +1275,19 @@ static BOOL mt_get_static_int(const char *ns, const char *klassName, const char 
     return YES;
 }
 
+static BOOL mt_call_static_object_int64(const char *ns, const char *klassName, const char *assembly, const char *methodName, void *objArg, int64_t *outValue) {
+    if (!outValue) return NO;
+    void *klass = mt_class(ns, klassName, assembly);
+    const void *method = mt_method(klass, methodName, 1);
+    if (!method) return NO;
+    void *args[1] = { objArg };
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:args outException:&exc];
+    if (exc || !boxed) return NO;
+    *outValue = *(int64_t *)((uint8_t *)boxed + 0x10);
+    return YES;
+}
+
 #pragma mark - Experimental state
 
 #define EXP_DEFAULTS(X) \
@@ -1678,6 +1691,85 @@ void *zs_resources_find_all_for_class(void *typeClass, NSUInteger *countOut) {
 void *zs_array_object_at(void *array, NSUInteger index) {
     if (!array) return NULL;
     return *(void **)((uint8_t *)array + 0x20 + index * sizeof(void *));
+}
+
+@implementation ZSMemoryUsageCategory
+@end
+
+typedef struct {
+    const char *ns;
+    const char *klassName;
+    const char *assembly;
+    const char *displayName;
+} ZSMemoryUsageCategoryDescriptor;
+
+static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[] = {
+    {"UnityEngine", "Texture2D", "CoreModule", "Textures"},
+    {"UnityEngine", "RenderTexture", "CoreModule", "Render Textures"},
+    {"UnityEngine", "Mesh", "CoreModule", "Meshes"},
+    {"UnityEngine", "Material", "CoreModule", "Materials"},
+    {"UnityEngine", "Shader", "CoreModule", "Shaders"},
+    {"UnityEngine", "AudioClip", "AudioModule", "Audio Clips"},
+    {"UnityEngine", "AnimationClip", "AnimationModule", "Animation Clips"},
+    {"UnityEngine", "Sprite", "CoreModule", "Sprites"},
+    {"UnityEngine", "Font", "TextRenderingModule", "Fonts"},
+};
+
+static NSArray<ZSMemoryUsageCategory *> *zs_scan_memory_usage_breakdown_sync(void) {
+    NSMutableArray<ZSMemoryUsageCategory *> *results = [NSMutableArray new];
+    NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
+
+    for (NSUInteger d = 0; d < descriptorCount; d++) {
+        ZSMemoryUsageCategoryDescriptor descriptor = kZSMemoryUsageCategoryDescriptors[d];
+        void *klass = mt_class(descriptor.ns, descriptor.klassName, descriptor.assembly);
+        if (!klass) continue;
+
+        NSUInteger count = 0;
+        void *array = zs_resources_find_all_for_class(klass, &count);
+        if (!array || count == 0) continue;
+
+        int64_t categoryTotal = 0;
+        NSUInteger liveCount = 0;
+        for (NSUInteger i = 0; i < count; i++) {
+            void *obj = zs_array_object_at(array, i);
+            if (!obj) continue;
+            int64_t size = 0;
+            if (mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size) && size > 0) {
+                categoryTotal += size;
+                liveCount++;
+            }
+        }
+
+        if (categoryTotal <= 0) continue;
+
+        ZSMemoryUsageCategory *category = [ZSMemoryUsageCategory new];
+        category.name = [NSString stringWithUTF8String:descriptor.displayName];
+        category.totalBytes = categoryTotal;
+        category.objectCount = liveCount;
+        [results addObject:category];
+    }
+
+    [results sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
+        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    return results;
+}
+
+void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageCategory *> *categories)) {
+    if (!completion) return;
+    NSThread *worker = [[NSThread alloc] initWithBlock:^{
+        @autoreleasepool {
+            NSArray<ZSMemoryUsageCategory *> *results = zs_scan_memory_usage_breakdown_sync();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                completion(results);
+            });
+        }
+    }];
+    worker.name = @"ZSingularity.MemoryUsageScan";
+    worker.qualityOfService = NSQualityOfServiceUtility;
+    [worker start];
 }
 
 #pragma mark - Scene-wide performance surfaces

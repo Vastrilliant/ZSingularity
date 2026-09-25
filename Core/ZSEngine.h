@@ -326,6 +326,14 @@ void zs_set_debug_log_memory_usage_tier(BOOL enabled);
 void zs_set_auto_unload_on_elevated_memory_usage(BOOL enabled);
 int32_t zs_last_observed_memory_usage_tier(void);
 
+@interface ZSMemoryUsageCategory : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) int64_t totalBytes;
+@property (nonatomic, assign) NSUInteger objectCount;
+@end
+
+void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageCategory *> * _Nonnull categories));
+
 #pragma mark - Dev debug HUD
 
 #pragma mark - Custom Greeting Text

@@ -966,6 +966,73 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
 @end
 
+#pragma mark - Pie chart
+
+@interface ZSPieChartView : UIView
+- (void)setSlicesWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors;
+@end
+
+@implementation ZSPieChartView {
+    NSArray<NSNumber *> *_fractions;
+    NSArray<UIColor *> *_colors;
+    NSMutableArray<CAShapeLayer *> *_sliceLayers;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        _sliceLayers = [NSMutableArray new];
+        self.backgroundColor = UIColor.clearColor;
+    }
+    return self;
+}
+
+- (void)setSlicesWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors {
+    _fractions = [fractions copy];
+    _colors = [colors copy];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self zs_rebuildSliceLayers];
+}
+
+- (void)zs_rebuildSliceLayers {
+    for (CAShapeLayer *layer in _sliceLayers) {
+        [layer removeFromSuperlayer];
+    }
+    [_sliceLayers removeAllObjects];
+
+    if (_fractions.count == 0 || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
+
+    CGPoint center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    CGFloat radius = MIN(self.bounds.size.width, self.bounds.size.height) / 2.0;
+    CGFloat startAngle = -M_PI_2;
+
+    for (NSUInteger i = 0; i < _fractions.count; i++) {
+        CGFloat sweep = _fractions[i].doubleValue * 2.0 * M_PI;
+        CGFloat endAngle = startAngle + sweep;
+
+        UIBezierPath *path = [UIBezierPath bezierPathWithArcCenter:center radius:radius startAngle:startAngle endAngle:endAngle clockwise:YES];
+        [path addLineToPoint:center];
+        [path closePath];
+
+        CAShapeLayer *slice = [CAShapeLayer new];
+        slice.path = path.CGPath;
+        slice.fillColor = (i < _colors.count ? _colors[i] : UIColor.grayColor).CGColor;
+        slice.strokeColor = [UIColor colorWithWhite:0.07 alpha:1].CGColor;
+        slice.lineWidth = 1.5;
+        [self.layer addSublayer:slice];
+        [_sliceLayers addObject:slice];
+
+        startAngle = endAngle;
+    }
+}
+
+@end
+
 @interface ZSCapsuleSlider : UIControl
 @property (nonatomic, assign) float minimumValue;
 @property (nonatomic, assign) float maximumValue;
@@ -2587,6 +2654,101 @@ static UIView *zs_make_grouped_action_card(NSArray<UIView *> *rows) {
     return card;
 }
 
+static UIView *zs_make_glass_container_card(UIView *contentView, UIEdgeInsets insets) {
+    UIView *card;
+    UIView *contentHost;
+    if (zs_has_liquid_glass()) {
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
+        glass.translatesAutoresizingMaskIntoConstraints = NO;
+        zs_configure_glass_corners(glass, kZSGroupedCardCornerRadius, NO);
+        zs_register_suspendable_glass(glass);
+        card = glass;
+        contentHost = glass.contentView;
+    } else {
+        UIView *plain = [[UIView alloc] init];
+        plain.translatesAutoresizingMaskIntoConstraints = NO;
+        plain.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
+        plain.layer.cornerRadius = kZSGroupedCardCornerRadius;
+        plain.layer.cornerCurve = kCACornerCurveContinuous;
+        plain.clipsToBounds = YES;
+        card = plain;
+        contentHost = plain;
+    }
+
+    contentView.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentHost addSubview:contentView];
+    [NSLayoutConstraint activateConstraints:@[
+        [contentView.topAnchor constraintEqualToAnchor:contentHost.topAnchor constant:insets.top],
+        [contentView.bottomAnchor constraintEqualToAnchor:contentHost.bottomAnchor constant:-insets.bottom],
+        [contentView.leadingAnchor constraintEqualToAnchor:contentHost.leadingAnchor constant:insets.left],
+        [contentView.trailingAnchor constraintEqualToAnchor:contentHost.trailingAnchor constant:-insets.right],
+    ]];
+
+    return card;
+}
+
+static NSArray<UIColor *> *zs_memory_chart_palette(void) {
+    return @[
+        [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0],
+        [UIColor colorWithRed:0x30 / 255.0 green:0xD1 / 255.0 blue:0x58 / 255.0 alpha:1.0],
+        [UIColor colorWithRed:1.0 green:0.82 blue:0.2 alpha:1.0],
+        [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0],
+        [UIColor colorWithRed:0.68 green:0.42 blue:1.0 alpha:1.0],
+        [UIColor colorWithRed:0.42 green:0.88 blue:0.88 alpha:1.0],
+        [UIColor colorWithRed:1.0 green:0.6 blue:0.32 alpha:1.0],
+        [UIColor colorWithWhite:0.7 alpha:1.0],
+    ];
+}
+
+static UIView *zs_make_memory_legend_row(NSString *title, NSString *detailText, UIColor *color) {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView *swatch = [[UIView alloc] init];
+    swatch.translatesAutoresizingMaskIntoConstraints = NO;
+    swatch.backgroundColor = color;
+    swatch.layer.cornerRadius = 3;
+    swatch.layer.cornerCurve = kCACornerCurveContinuous;
+    [row addSubview:swatch];
+
+    UILabel *nameLabel = [[UILabel alloc] init];
+    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    nameLabel.text = title;
+    nameLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    nameLabel.font = zs_mono_font(10, UIFontWeightMedium);
+    nameLabel.numberOfLines = 1;
+    nameLabel.adjustsFontSizeToFitWidth = YES;
+    nameLabel.minimumScaleFactor = 0.75;
+    [row addSubview:nameLabel];
+
+    UILabel *detailLabel = [[UILabel alloc] init];
+    detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    detailLabel.text = detailText;
+    detailLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+    detailLabel.font = zs_mono_font(10, UIFontWeightRegular);
+    detailLabel.textAlignment = NSTextAlignmentRight;
+    [detailLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [row addSubview:detailLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [swatch.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [swatch.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [swatch.widthAnchor constraintEqualToConstant:10],
+        [swatch.heightAnchor constraintEqualToConstant:10],
+
+        [nameLabel.leadingAnchor constraintEqualToAnchor:swatch.trailingAnchor constant:7],
+        [nameLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:detailLabel.leadingAnchor constant:-6],
+
+        [detailLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [detailLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+
+        [row.heightAnchor constraintEqualToConstant:16],
+    ]];
+
+    return row;
+}
+
 static UIVisualEffectView *zs_wrap_field_in_native_glass(UITextField *field, CGFloat cornerRadius) {
     field.borderStyle = UITextBorderStyleNone;
     UIView *leftPadding = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
@@ -4082,6 +4244,12 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIButton *browseClassButton;
 @property (nonatomic, strong) UIStackView *browseFieldsContainer;
 
+@property (nonatomic, strong) UIButton *memoryUsageAnalyzeButton;
+@property (nonatomic, strong) ZSPieChartView *memoryUsagePieChart;
+@property (nonatomic, strong) UIStackView *memoryUsageLegendStack;
+@property (nonatomic, strong) UILabel *memoryUsageStatusLabel;
+@property (nonatomic, strong) UIView *memoryUsageChartRow;
+
 + (instancetype)shared;
 - (void)installIfNeeded;
 @end
@@ -4684,6 +4852,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.browseCategoryButton = nil;
     self.browseClassButton = nil;
     self.browseFieldsContainer = nil;
+
+    self.memoryUsageAnalyzeButton = nil;
+    self.memoryUsagePieChart = nil;
+    self.memoryUsageLegendStack = nil;
+    self.memoryUsageStatusLabel = nil;
+    self.memoryUsageChartRow = nil;
 }
 
 - (void)zs_closeButtonTapped {
@@ -5464,14 +5638,22 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *memoryCleanupButton = zs_make_grouped_action_button(@"Memory cleanup", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [memoryCleanupButton addTarget:self action:@selector(memoryCleanupTapped:) forControlEvents:UIControlEventTouchUpInside];
 
+    self.memoryUsageAnalyzeButton = zs_make_grouped_action_button(@"Analyze memory usage", zs_accent_green_color());
+    [self.memoryUsageAnalyzeButton addTarget:self action:@selector(memoryUsageAnalyzeTapped:) forControlEvents:UIControlEventTouchUpInside];
+
     UIView *memoryActionsCard = zs_make_grouped_action_card(@[
         memoryCleanupButton,
+        self.memoryUsageAnalyzeButton,
     ]);
     memoryActionsCard.layer.borderWidth = 1;
     memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
     [self.stack addArrangedSubview:memoryActionsCard];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryActionsCard];
+    [self.stack setCustomSpacing:12 afterView:memoryActionsCard];
+
+    UIView *memoryUsageCard = [self zs_buildMemoryUsageCard];
+    [self.stack addArrangedSubview:memoryUsageCard];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryUsageCard];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -7369,6 +7551,135 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         UINotificationFeedbackGenerator *doneHaptic = [UINotificationFeedbackGenerator new];
         [doneHaptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     });
+}
+
+- (UIView *)zs_buildMemoryUsageCard {
+    ZSPieChartView *pieChart = [[ZSPieChartView alloc] init];
+    pieChart.translatesAutoresizingMaskIntoConstraints = NO;
+    self.memoryUsagePieChart = pieChart;
+
+    UIStackView *legendStack = [[UIStackView alloc] init];
+    legendStack.translatesAutoresizingMaskIntoConstraints = NO;
+    legendStack.axis = UILayoutConstraintAxisVertical;
+    legendStack.spacing = 6;
+    self.memoryUsageLegendStack = legendStack;
+
+    UIView *chartRow = [[UIView alloc] init];
+    chartRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [chartRow addSubview:pieChart];
+    [chartRow addSubview:legendStack];
+    chartRow.hidden = YES;
+    self.memoryUsageChartRow = chartRow;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [pieChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
+        [pieChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
+        [pieChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
+        [pieChart.widthAnchor constraintEqualToConstant:84],
+        [pieChart.heightAnchor constraintEqualToConstant:84],
+
+        [legendStack.leadingAnchor constraintEqualToAnchor:pieChart.trailingAnchor constant:16],
+        [legendStack.trailingAnchor constraintEqualToAnchor:chartRow.trailingAnchor],
+        [legendStack.centerYAnchor constraintEqualToAnchor:chartRow.centerYAnchor],
+        [legendStack.topAnchor constraintGreaterThanOrEqualToAnchor:chartRow.topAnchor],
+        [legendStack.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
+    ]];
+
+    UILabel *statusLabel = zs_make_hint_label(@"Tap Analyze memory usage to scan loaded textures, meshes, audio and other assets.");
+    statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.memoryUsageStatusLabel = statusLabel;
+
+    UIStackView *contentStack = [[UIStackView alloc] init];
+    contentStack.translatesAutoresizingMaskIntoConstraints = NO;
+    contentStack.axis = UILayoutConstraintAxisVertical;
+    contentStack.spacing = 10;
+    [contentStack addArrangedSubview:statusLabel];
+    [contentStack addArrangedSubview:chartRow];
+
+    UIView *card = zs_make_glass_container_card(contentStack, UIEdgeInsetsMake(14, 14, 14, 14));
+    card.layer.borderWidth = 1;
+    card.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+
+    return card;
+}
+
+- (void)memoryUsageAnalyzeTapped:(UIButton *)sender {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    sender.enabled = NO;
+    self.memoryUsageStatusLabel.text = @"Scanning loaded assets…";
+    self.memoryUsageChartRow.hidden = YES;
+
+    __weak typeof(self) weakSelf = self;
+    zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageCategory *> *categories) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        sender.enabled = YES;
+        [strongSelf zs_applyMemoryUsageCategories:categories];
+    });
+}
+
+- (void)zs_applyMemoryUsageCategories:(NSArray<ZSMemoryUsageCategory *> *)categories {
+    if (categories.count == 0) {
+        self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
+        self.memoryUsageChartRow.hidden = YES;
+        return;
+    }
+
+    NSArray<UIColor *> *palette = zs_memory_chart_palette();
+    NSUInteger maxSlices = palette.count;
+    NSMutableArray<ZSMemoryUsageCategory *> *merged = [NSMutableArray new];
+
+    if (categories.count > maxSlices) {
+        [merged addObjectsFromArray:[categories subarrayWithRange:NSMakeRange(0, maxSlices - 1)]];
+        int64_t otherTotal = 0;
+        NSUInteger otherCount = 0;
+        for (NSUInteger i = maxSlices - 1; i < categories.count; i++) {
+            otherTotal += categories[i].totalBytes;
+            otherCount += categories[i].objectCount;
+        }
+        ZSMemoryUsageCategory *other = [ZSMemoryUsageCategory new];
+        other.name = @"Other";
+        other.totalBytes = otherTotal;
+        other.objectCount = otherCount;
+        [merged addObject:other];
+    } else {
+        [merged addObjectsFromArray:categories];
+    }
+
+    int64_t grandTotal = 0;
+    for (ZSMemoryUsageCategory *category in merged) grandTotal += category.totalBytes;
+
+    if (grandTotal <= 0) {
+        self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
+        self.memoryUsageChartRow.hidden = YES;
+        return;
+    }
+
+    for (UIView *row in self.memoryUsageLegendStack.arrangedSubviews.copy) {
+        [row removeFromSuperview];
+    }
+
+    NSMutableArray<NSNumber *> *fractions = [NSMutableArray new];
+    NSMutableArray<UIColor *> *colors = [NSMutableArray new];
+
+    for (NSUInteger i = 0; i < merged.count; i++) {
+        ZSMemoryUsageCategory *category = merged[i];
+        double fraction = (double)category.totalBytes / (double)grandTotal;
+        UIColor *color = palette[i % palette.count];
+        [fractions addObject:@(fraction)];
+        [colors addObject:color];
+
+        NSString *sizeText = [NSByteCountFormatter stringFromByteCount:(long long)category.totalBytes countStyle:NSByteCountFormatterCountStyleFile];
+        NSString *detailText = [NSString stringWithFormat:@"%.0f%% · %@", fraction * 100.0, sizeText];
+        UIView *legendRow = zs_make_memory_legend_row(category.name, detailText, color);
+        [self.memoryUsageLegendStack addArrangedSubview:legendRow];
+    }
+
+    [self.memoryUsagePieChart setSlicesWithFractions:fractions colors:colors];
+    NSString *totalText = [NSByteCountFormatter stringFromByteCount:(long long)grandTotal countStyle:NSByteCountFormatterCountStyleFile];
+    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Total tracked: %@", totalText];
+    self.memoryUsageChartRow.hidden = NO;
 }
 
 - (void)dumpIL2CPPMethodsTapped {
