@@ -337,9 +337,14 @@ int64_t zs_current_process_resident_memory_bytes(void);
 
 typedef struct {
     int64_t residentBytes;
+    int64_t peakResidentBytes;
     int64_t availableBytes;
+    int64_t memoryLimitApproxBytes;
+    int64_t compressedBytes;
     int64_t deviceTotalBytes;
     int64_t systemFreeBytes;
+    int64_t systemActiveBytes;
+    int64_t systemWiredBytes;
     const char * _Nonnull pressureLabel;
 } ZSMemorySystemStats;
 

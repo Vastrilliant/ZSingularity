@@ -1737,28 +1737,59 @@ static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCa
     int64_t totalReserved = 0;
     int64_t totalUnusedReserved = 0;
     int64_t monoUsed = 0;
+    int64_t monoHeap = 0;
+    int64_t graphicsDriverBytes = 0;
+    int64_t tempAllocatorBytes = 0;
 
     BOOL hasTotalAllocated = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalAllocatedMemoryLong", &totalAllocated);
     BOOL hasTotalReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalReservedMemoryLong", &totalReserved);
     BOOL hasUnusedReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalUnusedReservedMemoryLong", &totalUnusedReserved);
     BOOL hasMonoUsed = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoUsedSizeLong", &monoUsed);
+    BOOL hasMonoHeap = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoHeapSizeLong", &monoHeap);
+    BOOL hasGraphicsDriver = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetAllocatedMemoryForGraphicsDriver", &graphicsDriverBytes);
+    BOOL hasTempAllocator = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTempAllocatorSize", &tempAllocatorBytes);
 
     if (hasMonoUsed && monoUsed > 0) {
-        ZSMemoryUsageCategory *managed = [ZSMemoryUsageCategory new];
-        managed.name = @"Managed heap (IL2CPP)";
-        managed.totalBytes = monoUsed;
-        managed.objectCount = 0;
-        [results addObject:managed];
+        ZSMemoryUsageCategory *managedUsed = [ZSMemoryUsageCategory new];
+        managedUsed.name = @"Managed Heap (used)";
+        managedUsed.totalBytes = monoUsed;
+        [results addObject:managedUsed];
+    }
+
+    if (hasMonoHeap && hasMonoUsed) {
+        int64_t monoFree = monoHeap - monoUsed;
+        if (monoFree > 0) {
+            ZSMemoryUsageCategory *managedFree = [ZSMemoryUsageCategory new];
+            managedFree.name = @"Managed Heap (reserved)";
+            managedFree.totalBytes = monoFree;
+            [results addObject:managedFree];
+        }
+    }
+
+    if (hasGraphicsDriver && graphicsDriverBytes > 0) {
+        ZSMemoryUsageCategory *gfx = [ZSMemoryUsageCategory new];
+        gfx.name = @"Graphics driver (Unity)";
+        gfx.totalBytes = graphicsDriverBytes;
+        [results addObject:gfx];
+    }
+
+    if (hasTempAllocator && tempAllocatorBytes > 0) {
+        ZSMemoryUsageCategory *temp = [ZSMemoryUsageCategory new];
+        temp.name = @"Temp allocator";
+        temp.totalBytes = tempAllocatorBytes;
+        [results addObject:temp];
     }
 
     if (hasTotalAllocated && totalAllocated > 0) {
-        int64_t accountedFor = assetTrackedBytes + (hasMonoUsed ? monoUsed : 0);
+        int64_t accountedFor = assetTrackedBytes
+            + (hasMonoUsed ? monoUsed : 0)
+            + (hasGraphicsDriver ? graphicsDriverBytes : 0)
+            + (hasTempAllocator ? tempAllocatorBytes : 0);
         int64_t nativeEngine = totalAllocated - accountedFor;
         if (nativeEngine > 0) {
             ZSMemoryUsageCategory *native = [ZSMemoryUsageCategory new];
-            native.name = @"Native / engine";
+            native.name = @"Engine";
             native.totalBytes = nativeEngine;
-            native.objectCount = 0;
             [results addObject:native];
         }
     }
@@ -1767,21 +1798,44 @@ static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCa
         ZSMemoryUsageCategory *reserved = [ZSMemoryUsageCategory new];
         reserved.name = @"Reserved (unused)";
         reserved.totalBytes = totalUnusedReserved;
-        reserved.objectCount = 0;
         [results addObject:reserved];
     }
 
     int64_t residentBytes = zs_current_process_resident_memory_bytes();
     int64_t engineFootprint = hasTotalReserved ? totalReserved : totalAllocated;
-    if (residentBytes > 0 && engineFootprint > 0) {
-        int64_t systemOverhead = residentBytes - engineFootprint;
-        if (systemOverhead > 0) {
-            ZSMemoryUsageCategory *overhead = [ZSMemoryUsageCategory new];
-            overhead.name = @"iOS / system overhead";
-            overhead.totalBytes = systemOverhead;
-            overhead.objectCount = 0;
-            [results addObject:overhead];
-        }
+    int64_t systemOverhead = (residentBytes > 0 && engineFootprint > 0) ? (residentBytes - engineFootprint) : 0;
+    if (systemOverhead <= 0) return;
+
+    task_vm_info_data_t info;
+    mach_msg_type_number_t infoCount = TASK_VM_INFO_COUNT;
+    int64_t internalBytes = 0, externalBytes = 0, compressedBytes = 0, purgeableBytes = 0, deviceBytes = 0;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &infoCount) == KERN_SUCCESS) {
+        internalBytes = (int64_t)info.internal;
+        externalBytes = (int64_t)info.external;
+        compressedBytes = (int64_t)info.compressed;
+        purgeableBytes = (int64_t)info.purgeable_volatile_resident;
+        deviceBytes = (int64_t)info.device;
+    }
+
+    int64_t rawSum = internalBytes + externalBytes + compressedBytes + purgeableBytes + deviceBytes;
+    if (rawSum <= 0) {
+        ZSMemoryUsageCategory *overhead = [ZSMemoryUsageCategory new];
+        overhead.name = @"iOS";
+        overhead.totalBytes = systemOverhead;
+        [results addObject:overhead];
+        return;
+    }
+
+    NSString *overheadNames[5] = { @"Graphics (IOSurface)", @"Compressed", @"File-backed (frameworks)", @"Purgeable / caches", @"iOS" };
+    int64_t overheadRawValues[5] = { deviceBytes, compressedBytes, externalBytes, purgeableBytes, internalBytes };
+    for (int i = 0; i < 5; i++) {
+        if (overheadRawValues[i] <= 0) continue;
+        int64_t scaled = (int64_t)llround((double)overheadRawValues[i] * (double)systemOverhead / (double)rawSum);
+        if (scaled <= 0) continue;
+        ZSMemoryUsageCategory *part = [ZSMemoryUsageCategory new];
+        part.name = overheadNames[i];
+        part.totalBytes = scaled;
+        [results addObject:part];
     }
 }
 
@@ -1858,13 +1912,24 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
     ZSMemorySystemStats stats;
     memset(&stats, 0, sizeof(stats));
 
-    stats.residentBytes = zs_current_process_resident_memory_bytes();
+    task_vm_info_data_t info;
+    mach_msg_type_number_t infoCount = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &infoCount) == KERN_SUCCESS) {
+        stats.residentBytes = (int64_t)info.phys_footprint;
+        stats.peakResidentBytes = (int64_t)info.resident_size_peak;
+        stats.compressedBytes = (int64_t)info.compressed;
+    }
+
     stats.deviceTotalBytes = (int64_t)NSProcessInfo.processInfo.physicalMemory;
 
     if (@available(iOS 13.0, *)) {
         stats.availableBytes = (int64_t)os_proc_available_memory();
     } else {
         stats.availableBytes = 0;
+    }
+
+    if (stats.residentBytes > 0 && stats.availableBytes > 0) {
+        stats.memoryLimitApproxBytes = stats.residentBytes + stats.availableBytes;
     }
 
     mach_port_t host = mach_host_self();
@@ -1874,8 +1939,8 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
     mach_msg_type_number_t vmCount = HOST_VM_INFO64_COUNT;
     if (pageSize > 0 && host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vmStats, &vmCount) == KERN_SUCCESS) {
         stats.systemFreeBytes = (int64_t)vmStats.free_count * (int64_t)pageSize;
-    } else {
-        stats.systemFreeBytes = 0;
+        stats.systemActiveBytes = (int64_t)vmStats.active_count * (int64_t)pageSize;
+        stats.systemWiredBytes = (int64_t)vmStats.wire_count * (int64_t)pageSize;
     }
 
     if (stats.availableBytes <= 0) {

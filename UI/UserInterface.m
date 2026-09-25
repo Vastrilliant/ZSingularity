@@ -968,9 +968,8 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
 #pragma mark - Pillar chart
 
-static const NSInteger kZSPillarSegmentCount = 36;
-static const CGFloat kZSPillarSegmentGap = 3.0;
-static const CGFloat kZSPillarSegmentCornerRadius = 3.0;
+static const NSInteger kZSPillarSegmentCount = 60;
+static const CGFloat kZSPillarSegmentGap = 2.0;
 
 @interface ZSPillarChartView : UIView
 - (void)setSegmentsWithFractions:(NSArray<NSNumber *> *)fractions colors:(NSArray<UIColor *> *)colors;
@@ -1090,7 +1089,7 @@ static const CGFloat kZSPillarSegmentCornerRadius = 3.0;
     for (NSInteger i = 0; i < renderedCount; i++) {
         CGRect rect = CGRectMake(0, y, width, segmentHeight);
         CAShapeLayer *segment = [CAShapeLayer new];
-        segment.path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:kZSPillarSegmentCornerRadius].CGPath;
+        segment.path = [UIBezierPath bezierPathWithRect:rect].CGPath;
         segment.fillColor = segmentColors[i].CGColor;
         [self.layer addSublayer:segment];
         [_segmentLayers addObject:segment];
@@ -2757,14 +2756,18 @@ static UIView *zs_make_glass_container_card(UIView *contentView, UIEdgeInsets in
 
 static NSArray<UIColor *> *zs_memory_chart_palette(void) {
     return @[
-        [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0],
-        [UIColor colorWithRed:0x30 / 255.0 green:0xD1 / 255.0 blue:0x58 / 255.0 alpha:1.0],
-        [UIColor colorWithRed:1.0 green:0.82 blue:0.2 alpha:1.0],
-        [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0],
-        [UIColor colorWithRed:0.68 green:0.42 blue:1.0 alpha:1.0],
-        [UIColor colorWithRed:0.42 green:0.88 blue:0.88 alpha:1.0],
-        [UIColor colorWithRed:1.0 green:0.6 blue:0.32 alpha:1.0],
-        [UIColor colorWithWhite:0.7 alpha:1.0],
+        [UIColor colorWithRed:0.20 green:0.34 blue:0.62 alpha:1.0],
+        [UIColor colorWithRed:0.13 green:0.48 blue:0.26 alpha:1.0],
+        [UIColor colorWithRed:0.62 green:0.50 blue:0.08 alpha:1.0],
+        [UIColor colorWithRed:0.58 green:0.20 blue:0.20 alpha:1.0],
+        [UIColor colorWithRed:0.36 green:0.20 blue:0.58 alpha:1.0],
+        [UIColor colorWithRed:0.18 green:0.46 blue:0.46 alpha:1.0],
+        [UIColor colorWithRed:0.58 green:0.32 blue:0.14 alpha:1.0],
+        [UIColor colorWithRed:0.24 green:0.24 blue:0.56 alpha:1.0],
+        [UIColor colorWithRed:0.50 green:0.30 blue:0.42 alpha:1.0],
+        [UIColor colorWithRed:0.22 green:0.42 blue:0.20 alpha:1.0],
+        [UIColor colorWithRed:0.46 green:0.42 blue:0.12 alpha:1.0],
+        [UIColor colorWithWhite:0.32 alpha:1.0],
     ];
 }
 
@@ -4352,6 +4355,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UILabel *memoryUsageStatusLabel;
 @property (nonatomic, strong) UIStackView *memoryUsageStatsStack;
 @property (nonatomic, strong) UIView *memoryUsageChartRow;
+@property (nonatomic, strong) NSTimer *memoryUsageRefreshTimer;
 
 + (instancetype)shared;
 - (void)installIfNeeded;
@@ -4957,6 +4961,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.browseFieldsContainer = nil;
 
     self.memoryUsageAnalyzeButton = nil;
+    [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
     self.memoryUsagePillarChart = nil;
     self.memoryUsageLegendStack = nil;
     self.memoryUsageStatusLabel = nil;
@@ -7679,7 +7685,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         [pillarChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
         [pillarChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
         [pillarChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
-        [pillarChart.widthAnchor constraintEqualToConstant:40],
+        [pillarChart.widthAnchor constraintEqualToConstant:52],
         [pillarChart.heightAnchor constraintGreaterThanOrEqualToConstant:220],
 
         [legendStack.leadingAnchor constraintEqualToAnchor:pillarChart.trailingAnchor constant:16],
@@ -7718,18 +7724,50 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 - (void)memoryUsageAnalyzeTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
-    sender.enabled = NO;
-    self.memoryUsageStatusLabel.text = @"Scanning subsystems and loaded assets…";
+
+    if (self.memoryUsageRefreshTimer) {
+        [self zs_stopMemoryUsageAutoRefresh];
+        return;
+    }
+
+    [self zs_startMemoryUsageAutoRefresh];
+}
+
+- (void)zs_startMemoryUsageAutoRefresh {
+    [self.memoryUsageAnalyzeButton setTitle:@"Stop analysis" forState:UIControlStateNormal];
+    [self.memoryUsageAnalyzeButton setTitleColor:[UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0] forState:UIControlStateNormal];
+
+    [self zs_runMemoryUsageScan];
+
+    __weak typeof(self) weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf zs_runMemoryUsageScan];
+    }];
+    self.memoryUsageRefreshTimer = timer;
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)zs_stopMemoryUsageAutoRefresh {
+    [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
+
+    [self.memoryUsageAnalyzeButton setTitle:@"Analyze memory usage" forState:UIControlStateNormal];
+    [self.memoryUsageAnalyzeButton setTitleColor:zs_accent_green_color() forState:UIControlStateNormal];
+
     self.memoryUsageStatsStack.hidden = YES;
     self.memoryUsageChartRow.hidden = YES;
+    self.memoryUsageStatusLabel.hidden = NO;
+    self.memoryUsageStatusLabel.text = @"Tap Analyze memory usage to scan subsystems and loaded assets.";
+}
 
+- (void)zs_runMemoryUsageScan {
     [self zs_applyMemorySystemStats:zs_collect_memory_system_stats()];
 
     __weak typeof(self) weakSelf = self;
     zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageCategory *> *categories) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
-        sender.enabled = YES;
+        if (!strongSelf.memoryUsageRefreshTimer) return;
         [strongSelf zs_applyMemoryUsageCategories:categories];
     });
 }
@@ -7743,14 +7781,24 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     formatter.countStyle = NSByteCountFormatterCountStyleMemory;
 
     NSString *residentText = [formatter stringFromByteCount:(long long)MAX(0, stats.residentBytes)];
+    NSString *peakText = stats.peakResidentBytes > 0 ? [formatter stringFromByteCount:(long long)stats.peakResidentBytes] : @"Unknown";
     NSString *availableText = stats.availableBytes > 0 ? [formatter stringFromByteCount:(long long)stats.availableBytes] : @"Unknown";
+    NSString *limitText = stats.memoryLimitApproxBytes > 0 ? [formatter stringFromByteCount:(long long)stats.memoryLimitApproxBytes] : @"Unknown";
+    NSString *compressedText = stats.compressedBytes > 0 ? [formatter stringFromByteCount:(long long)stats.compressedBytes] : @"None";
     NSString *systemFreeText = stats.systemFreeBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemFreeBytes] : @"Unknown";
+    NSString *systemActiveText = stats.systemActiveBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemActiveBytes] : @"Unknown";
+    NSString *systemWiredText = stats.systemWiredBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemWiredBytes] : @"Unknown";
     NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
     NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
 
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory used", residentText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Available headroom", availableText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Peak memory used", peakText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Available memory", availableText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Approx. memory limit", limitText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Compressed memory", compressedText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System free", systemFreeText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System active", systemActiveText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System wired", systemWiredText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Device memory", deviceTotalText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory pressure", pressureText)];
 
@@ -7759,6 +7807,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
 - (void)zs_applyMemoryUsageCategories:(NSArray<ZSMemoryUsageCategory *> *)categories {
     if (categories.count == 0) {
+        self.memoryUsageStatusLabel.hidden = NO;
         self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
         self.memoryUsageChartRow.hidden = YES;
         return;
@@ -7789,6 +7838,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     for (ZSMemoryUsageCategory *category in merged) grandTotal += category.totalBytes;
 
     if (grandTotal <= 0) {
+        self.memoryUsageStatusLabel.hidden = NO;
         self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
         self.memoryUsageChartRow.hidden = YES;
         return;
@@ -7815,8 +7865,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 
     [self.memoryUsagePillarChart setSegmentsWithFractions:fractions colors:colors];
-    NSString *totalText = [NSByteCountFormatter stringFromByteCount:(long long)grandTotal countStyle:NSByteCountFormatterCountStyleFile];
-    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Asset & subsystem breakdown: %@", totalText];
+    self.memoryUsageStatusLabel.hidden = YES;
     self.memoryUsageChartRow.hidden = NO;
 }
 
