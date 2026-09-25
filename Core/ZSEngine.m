@@ -3199,6 +3199,121 @@ static BOOL zs_patch_native_method_pointer(const void *method, void *replacement
     return verifyReadBack == replacement;
 }
 
+static NSString *zs_custom_localize_invoke_static_string(void *managerClass, const char *methodName) {
+    const void *method = mt_method(managerClass, methodName, 0);
+    ZLog(@"[ZSCustomLangDir] diag: resolving %s -> %p", methodName, method);
+    if (!method) return nil;
+
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc) {
+        ZLog(@"[ZSCustomLangDir] diag: %s() threw a managed exception (exc=%p)", methodName, exc);
+        return nil;
+    }
+    NSString *str = result ? [IL2CppBridge nsStringFromIl2CppString:result] : nil;
+    ZLog(@"[ZSCustomLangDir] diag: %s() -> raw=%p value=%@", methodName, result, str);
+    return str;
+}
+
+static BOOL zs_custom_localize_invoke_static_bool(void *managerClass, const char *methodName, BOOL *outValue) {
+    const void *method = mt_method(managerClass, methodName, 0);
+    ZLog(@"[ZSCustomLangDir] diag: resolving %s -> %p", methodName, method);
+    if (!method) return NO;
+
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc || !boxed) {
+        ZLog(@"[ZSCustomLangDir] diag: %s() invoke failed (boxed=%p exc=%p)", methodName, boxed, exc);
+        return NO;
+    }
+    BOOL value = *(uint8_t *)((uint8_t *)boxed + sizeof(void *) * 2) != 0;
+    ZLog(@"[ZSCustomLangDir] diag: %s() -> %d", methodName, value);
+    if (outValue) *outValue = value;
+    return YES;
+}
+
+static void zs_custom_localize_log_directories_from(void *managerClass) {
+    const void *method = mt_method(managerClass, "GetDirectoriesFrom", 0);
+    ZLog(@"[ZSCustomLangDir] diag: resolving GetDirectoriesFrom -> %p", method);
+    if (!method) return;
+
+    void *exc = NULL;
+    void *array = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    if (exc) {
+        ZLog(@"[ZSCustomLangDir] diag: GetDirectoriesFrom() threw a managed exception (exc=%p)", exc);
+        return;
+    }
+    if (!array) {
+        ZLog(@"[ZSCustomLangDir] diag: GetDirectoriesFrom() -> NULL array");
+        return;
+    }
+    NSUInteger count = (NSUInteger)(*(uintptr_t *)((uint8_t *)array + 0x18));
+    ZLog(@"[ZSCustomLangDir] diag: GetDirectoriesFrom() -> %lu entr(ies)", (unsigned long)count);
+    for (NSUInteger i = 0; i < count; i++) {
+        void *element = zs_array_object_at(array, i);
+        NSString *entry = element ? [IL2CppBridge nsStringFromIl2CppString:element] : nil;
+        ZLog(@"[ZSCustomLangDir] diag:   directory[%lu] = %@", (unsigned long)i, entry);
+    }
+}
+
+static void zs_custom_localize_log_candidates_object(void *managerClass) {
+    const void *method = mt_method(managerClass, "GetCandidates", 0);
+    ZLog(@"[ZSCustomLangDir] diag: resolving GetCandidates -> %p", method);
+    if (!method) return;
+
+    void *exc = NULL;
+    void *listObj = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+    ZLog(@"[ZSCustomLangDir] diag: GetCandidates() -> object=%p exception=%p", listObj, exc);
+}
+
+static void zs_custom_localize_log_state(void *managerClass, NSString *label) {
+    ZLog(@"[ZSCustomLangDir] ----- CustomLocalizeManager state dump (%@) BEGIN -----", label);
+
+    BOOL isRunning = NO, isUsing = NO;
+    zs_custom_localize_invoke_static_bool(managerClass, "IsRunning", &isRunning);
+    zs_custom_localize_invoke_static_bool(managerClass, "IsUsing", &isUsing);
+    ZLog(@"[ZSCustomLangDir] diag: summary IsRunning=%d IsUsing=%d", isRunning, isUsing);
+
+    zs_custom_localize_invoke_static_string(managerClass, "GetLangDataPath");
+    zs_custom_localize_invoke_static_string(managerClass, "GetLastSelected");
+    zs_custom_localize_log_directories_from(managerClass);
+    zs_custom_localize_log_candidates_object(managerClass);
+
+    void *candidatesField = [IL2CppBridge fieldNamed:"_candidates" onClass:managerClass];
+    if (candidatesField) {
+        uint8_t buf[8] = {0};
+        [IL2CppBridge copyStaticFieldValue:candidatesField toBuffer:buf];
+        ZLog(@"[ZSCustomLangDir] diag: cached static field _candidates = %p (non-NULL means already computed/cached)", *(void **)buf);
+    } else {
+        ZLog(@"[ZSCustomLangDir] diag: _candidates field not found");
+    }
+
+    ZLog(@"[ZSCustomLangDir] ----- CustomLocalizeManager state dump (%@) END -----", label);
+}
+
+static void zs_custom_localize_reset_candidate_cache(void *managerClass) {
+    void *candidatesField = [IL2CppBridge fieldNamed:"_candidates" onClass:managerClass];
+    ZLog(@"[ZSCustomLangDir] diag: resolving _candidates field -> %p", candidatesField);
+    if (!candidatesField) return;
+
+    uint8_t before[8] = {0};
+    [IL2CppBridge copyStaticFieldValue:candidatesField toBuffer:before];
+    ZLog(@"[ZSCustomLangDir] diag: _candidates cached pointer BEFORE reset = %p", *(void **)before);
+
+    if (*(void **)before == NULL) {
+        ZLog(@"[ZSCustomLangDir] diag: _candidates already NULL, nothing to reset");
+        return;
+    }
+
+    ZLog(@"[ZSCustomLangDir] WARNING: _candidates was already cached before the patch could take effect - clearing it so the next access rescans with the patched Lang path");
+    uint8_t zero[8] = {0};
+    [IL2CppBridge setStaticFieldValue:candidatesField fromBuffer:zero];
+
+    uint8_t after[8] = {0};
+    [IL2CppBridge copyStaticFieldValue:candidatesField toBuffer:after];
+    ZLog(@"[ZSCustomLangDir] diag: _candidates cached pointer AFTER reset = %p", *(void **)after);
+}
+
 static void zs_install_custom_lang_directory_patch(void) {
     ZLog(@"[ZSCustomLangDir] ===== zs_install_custom_lang_directory_patch BEGIN =====");
 
@@ -3216,6 +3331,8 @@ static void zs_install_custom_lang_directory_patch(void) {
         ZLog(@"[ZSCustomLangDir] ERROR: CustomLocalizeManager class not found - assembly may not be loaded yet, or namespace/name/assembly substring mismatch");
         return;
     }
+
+    zs_custom_localize_log_state(managerClass, @"BEFORE patch");
 
     ZLog(@"[ZSCustomLangDir] resolving method GetLangDataPath (argCount=0) on class %p", managerClass);
     const void *method = mt_method(managerClass, "GetLangDataPath", 0);
@@ -3236,6 +3353,9 @@ static void zs_install_custom_lang_directory_patch(void) {
         ZLog(@"[ZSCustomLangDir] native function pointer AFTER patch = %p (hook fn = %p)", nativePtrAfterPatch, (void *)zs_custom_lang_data_path_hook);
         NSString *resolvedLangDir = zs_custom_lang_directory_path();
         ZLog(@"[ZSCustomLangDir] SUCCESS: patched GetLangDataPath -> will report %@", resolvedLangDir);
+
+        zs_custom_localize_reset_candidate_cache(managerClass);
+        zs_custom_localize_log_state(managerClass, @"AFTER patch + cache reset");
     } else {
         ZLog(@"[ZSCustomLangDir] FAILURE: patch could not be applied, GetLangDataPath left untouched (still returns whatever the game's own logic returns, likely nil on iOS)");
     }
