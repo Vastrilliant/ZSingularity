@@ -795,35 +795,9 @@ static BOOL zs_set_application_target_fps(int32_t fps) {
 
 static const int32_t kSceneStateBattle = 1;
 
-static void *g_cachedGameManagerInstance;
-static int g_ticksSinceInstanceRefresh;
-static const int kInstanceRefreshTicks = 8;
-
-static void *zs_get_cached_game_manager_instance(void) {
-    BOOL needsRefresh = (!g_cachedGameManagerInstance || g_ticksSinceInstanceRefresh >= kInstanceRefreshTicks);
-    if (needsRefresh) {
-        void *instance = zs_get_global_game_manager_instance();
-        if (!instance) {
-            g_cachedGameManagerInstance = NULL;
-            return NULL;
-        }
-        g_cachedGameManagerInstance = instance;
-        g_ticksSinceInstanceRefresh = 0;
-    } else {
-        g_ticksSinceInstanceRefresh++;
-    }
-    return g_cachedGameManagerInstance;
-}
-
 static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
-    void *klass = zs_class("", "GlobalGameManager", "Assembly-CSharp");
-    if (!klass) return NO;
-    void *instance = zs_get_cached_game_manager_instance();
-    if (!instance) return NO;
-
-    int32_t off = zs_offset(klass, "sceneState");
-    if (off < 0) return NO;
-    int32_t sceneState = *(int32_t *)((uint8_t *)instance + off);
+    int32_t sceneState = 0;
+    if (!ZSGlobalScene_Current(&sceneState)) return NO;
     *outIsBattle = (sceneState == kSceneStateBattle);
     return YES;
 }

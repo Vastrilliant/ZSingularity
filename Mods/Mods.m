@@ -3760,6 +3760,24 @@ static void zs_font_asset_fallback_insert_front(void *listObj, void *font) {
     if (exc) zs_font_asset_fallback_add(listObj, font);
 }
 
+static NSString *const kZSCustomFontPrewarmCharacters = @" !\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ÀÈÌÒÙàèìòùÁÉÍÓÚáéíóúÂÊÎÔÛâêîôûÃÑÕãñõÄËÏÖÜäëïöüĀĒĪŌŪāēīōū";
+
+static void zs_font_asset_try_add_characters(void *fontAsset, NSString *characters) {
+    if (!fontAsset || characters.length == 0) return;
+    void *fontAssetClass = zs_tmp_font_asset_class();
+    const void *tryAddMethod = mt_method(fontAssetClass, "TryAddCharacters", 1);
+    if (!fontAssetClass || !tryAddMethod) {
+        ZLog(@"[ZSFont] TryAddCharacters unavailable: class=%p method=%p", fontAssetClass, tryAddMethod);
+        return;
+    }
+    void *charsStr = [IL2CppBridge il2CppStringFromNSString:characters];
+    void *args[1] = { charsStr };
+    void *exc = NULL;
+    void *result = [IL2CppBridge invokeMethod:tryAddMethod onInstance:fontAsset args:args outException:&exc];
+    BOOL added = !exc && result && *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
+    ZLog(@"[ZSFont] TryAddCharacters on %p added=%d exception=%@", fontAsset, added, zs_describe_exception(exc));
+}
+
 static void zs_read_default_font_families(void *fontManagerData, NSMutableSet<NSValue *> *titleFamily, NSMutableSet<NSValue *> *contextFamily) {
     if (!fontManagerData) return;
     void *managerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
@@ -4074,6 +4092,8 @@ static void zs_apply_custom_font_if_present(void) {
                 ZLog(@"[ZSFont] apply: aborting, context font failed to load");
                 return;
             }
+            zs_font_asset_try_add_characters(titleFont, kZSCustomFontPrewarmCharacters);
+            if (contextFont != titleFont) zs_font_asset_try_add_characters(contextFont, kZSCustomFontPrewarmCharacters);
             cjkFont = NULL;
             if (cjkPath) {
                 if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
