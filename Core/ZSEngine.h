@@ -333,6 +333,7 @@ int32_t zs_last_observed_memory_usage_tier(void);
 @end
 
 void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageCategory *> * _Nonnull categories));
+int64_t zs_current_process_resident_memory_bytes(void);
 
 #pragma mark - Dev debug HUD
 

@@ -9,6 +9,7 @@
 #import <pthread.h>
 #import <math.h>
 #include <stdint.h>
+#import <mach/mach.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
 
@@ -1705,6 +1706,9 @@ typedef struct {
 
 static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[] = {
     {"UnityEngine", "Texture2D", "CoreModule", "Textures"},
+    {"UnityEngine", "Cubemap", "CoreModule", "Cubemaps"},
+    {"UnityEngine", "Texture2DArray", "CoreModule", "Texture Arrays"},
+    {"UnityEngine", "Texture3D", "CoreModule", "3D Textures"},
     {"UnityEngine", "RenderTexture", "CoreModule", "Render Textures"},
     {"UnityEngine", "Mesh", "CoreModule", "Meshes"},
     {"UnityEngine", "Material", "CoreModule", "Materials"},
@@ -1770,6 +1774,14 @@ void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageC
     worker.name = @"ZSingularity.MemoryUsageScan";
     worker.qualityOfService = NSQualityOfServiceUtility;
     [worker start];
+}
+
+int64_t zs_current_process_resident_memory_bytes(void) {
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) return 0;
+    return (int64_t)info.phys_footprint;
 }
 
 #pragma mark - Scene-wide performance surfaces

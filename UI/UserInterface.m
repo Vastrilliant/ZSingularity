@@ -2715,10 +2715,10 @@ static UIView *zs_make_memory_legend_row(NSString *title, NSString *detailText, 
     nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
     nameLabel.text = title;
     nameLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-    nameLabel.font = zs_mono_font(10, UIFontWeightMedium);
+    nameLabel.font = zs_mono_font(11, UIFontWeightMedium);
     nameLabel.numberOfLines = 1;
     nameLabel.adjustsFontSizeToFitWidth = YES;
-    nameLabel.minimumScaleFactor = 0.75;
+    nameLabel.minimumScaleFactor = 0.8;
     [row addSubview:nameLabel];
 
     UILabel *detailLabel = [[UILabel alloc] init];
@@ -2726,24 +2726,23 @@ static UIView *zs_make_memory_legend_row(NSString *title, NSString *detailText, 
     detailLabel.text = detailText;
     detailLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
     detailLabel.font = zs_mono_font(10, UIFontWeightRegular);
-    detailLabel.textAlignment = NSTextAlignmentRight;
-    [detailLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    detailLabel.numberOfLines = 1;
     [row addSubview:detailLabel];
 
     [NSLayoutConstraint activateConstraints:@[
         [swatch.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [swatch.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [swatch.widthAnchor constraintEqualToConstant:10],
         [swatch.heightAnchor constraintEqualToConstant:10],
+        [swatch.centerYAnchor constraintEqualToAnchor:nameLabel.centerYAnchor],
 
         [nameLabel.leadingAnchor constraintEqualToAnchor:swatch.trailingAnchor constant:7],
-        [nameLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [nameLabel.trailingAnchor constraintLessThanOrEqualToAnchor:detailLabel.leadingAnchor constant:-6],
+        [nameLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
 
+        [detailLabel.leadingAnchor constraintEqualToAnchor:nameLabel.leadingAnchor],
         [detailLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [detailLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [row.heightAnchor constraintEqualToConstant:16],
+        [detailLabel.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:2],
+        [detailLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
     ]];
 
     return row;
@@ -4248,6 +4247,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) ZSPieChartView *memoryUsagePieChart;
 @property (nonatomic, strong) UIStackView *memoryUsageLegendStack;
 @property (nonatomic, strong) UILabel *memoryUsageStatusLabel;
+@property (nonatomic, strong) UILabel *memoryUsageProcessLabel;
 @property (nonatomic, strong) UIView *memoryUsageChartRow;
 
 + (instancetype)shared;
@@ -4857,6 +4857,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.memoryUsagePieChart = nil;
     self.memoryUsageLegendStack = nil;
     self.memoryUsageStatusLabel = nil;
+    self.memoryUsageProcessLabel = nil;
     self.memoryUsageChartRow = nil;
 }
 
@@ -7561,7 +7562,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIStackView *legendStack = [[UIStackView alloc] init];
     legendStack.translatesAutoresizingMaskIntoConstraints = NO;
     legendStack.axis = UILayoutConstraintAxisVertical;
-    legendStack.spacing = 6;
+    legendStack.spacing = 10;
     self.memoryUsageLegendStack = legendStack;
 
     UIView *chartRow = [[UIView alloc] init];
@@ -7573,30 +7574,37 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
     [NSLayoutConstraint activateConstraints:@[
         [pieChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
-        [pieChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
-        [pieChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
+        [pieChart.centerYAnchor constraintEqualToAnchor:chartRow.centerYAnchor],
         [pieChart.widthAnchor constraintEqualToConstant:84],
         [pieChart.heightAnchor constraintEqualToConstant:84],
+        [pieChart.topAnchor constraintGreaterThanOrEqualToAnchor:chartRow.topAnchor],
+        [pieChart.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
 
         [legendStack.leadingAnchor constraintEqualToAnchor:pieChart.trailingAnchor constant:16],
         [legendStack.trailingAnchor constraintEqualToAnchor:chartRow.trailingAnchor],
-        [legendStack.centerYAnchor constraintEqualToAnchor:chartRow.centerYAnchor],
-        [legendStack.topAnchor constraintGreaterThanOrEqualToAnchor:chartRow.topAnchor],
-        [legendStack.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
+        [legendStack.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
+        [legendStack.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
     ]];
 
     UILabel *statusLabel = zs_make_hint_label(@"Tap Analyze memory usage to scan loaded textures, meshes, audio and other assets.");
     statusLabel.textAlignment = NSTextAlignmentCenter;
     self.memoryUsageStatusLabel = statusLabel;
 
+    UILabel *processLabel = zs_make_hint_label(@"");
+    processLabel.textAlignment = NSTextAlignmentCenter;
+    processLabel.hidden = YES;
+    self.memoryUsageProcessLabel = processLabel;
+
     UIStackView *contentStack = [[UIStackView alloc] init];
     contentStack.translatesAutoresizingMaskIntoConstraints = NO;
     contentStack.axis = UILayoutConstraintAxisVertical;
-    contentStack.spacing = 10;
+    contentStack.spacing = 8;
     [contentStack addArrangedSubview:statusLabel];
+    [contentStack addArrangedSubview:processLabel];
     [contentStack addArrangedSubview:chartRow];
+    [contentStack setCustomSpacing:16 afterView:processLabel];
 
-    UIView *card = zs_make_glass_container_card(contentStack, UIEdgeInsetsMake(14, 14, 14, 14));
+    UIView *card = zs_make_glass_container_card(contentStack, UIEdgeInsetsMake(16, 16, 16, 16));
     card.layer.borderWidth = 1;
     card.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
@@ -7608,6 +7616,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [tapHaptic impactOccurred];
     sender.enabled = NO;
     self.memoryUsageStatusLabel.text = @"Scanning loaded assets…";
+    self.memoryUsageProcessLabel.hidden = YES;
     self.memoryUsageChartRow.hidden = YES;
 
     __weak typeof(self) weakSelf = self;
@@ -7620,6 +7629,15 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_applyMemoryUsageCategories:(NSArray<ZSMemoryUsageCategory *> *)categories {
+    int64_t processBytes = zs_current_process_resident_memory_bytes();
+    if (processBytes > 0) {
+        NSString *processText = [NSByteCountFormatter stringFromByteCount:(long long)processBytes countStyle:NSByteCountFormatterCountStyleMemory];
+        self.memoryUsageProcessLabel.text = [NSString stringWithFormat:@"Process memory (all subsystems): %@", processText];
+        self.memoryUsageProcessLabel.hidden = NO;
+    } else {
+        self.memoryUsageProcessLabel.hidden = YES;
+    }
+
     if (categories.count == 0) {
         self.memoryUsageStatusLabel.text = @"No trackable asset memory usage found.";
         self.memoryUsageChartRow.hidden = YES;
@@ -7678,7 +7696,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
     [self.memoryUsagePieChart setSlicesWithFractions:fractions colors:colors];
     NSString *totalText = [NSByteCountFormatter stringFromByteCount:(long long)grandTotal countStyle:NSByteCountFormatterCountStyleFile];
-    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Total tracked: %@", totalText];
+    self.memoryUsageStatusLabel.text = [NSString stringWithFormat:@"Tracked asset memory: %@", totalText];
     self.memoryUsageChartRow.hidden = NO;
 }
 
