@@ -1751,7 +1751,7 @@ static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCa
 
     if (hasMonoUsed && monoUsed > 0) {
         ZSMemoryUsageCategory *managedUsed = [ZSMemoryUsageCategory new];
-        managedUsed.name = @"Managed Heap (used)";
+        managedUsed.name = @"Managed Heap";
         managedUsed.totalBytes = monoUsed;
         [results addObject:managedUsed];
     }
@@ -1826,7 +1826,7 @@ static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCa
         return;
     }
 
-    NSString *overheadNames[5] = { @"Graphics (IOSurface)", @"Compressed", @"File-backed (frameworks)", @"Purgeable / caches", @"iOS" };
+    NSString *overheadNames[5] = { @"Graphics (IOSurface)", @"Compressed", @"Frameworks", @"Purgeable / caches", @"iOS" };
     int64_t overheadRawValues[5] = { deviceBytes, compressedBytes, externalBytes, purgeableBytes, internalBytes };
     for (int i = 0; i < 5; i++) {
         if (overheadRawValues[i] <= 0) continue;

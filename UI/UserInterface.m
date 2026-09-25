@@ -968,7 +968,7 @@ static const CGFloat kDefaultSnapFraction = 0.035;
 
 #pragma mark - Pillar chart
 
-static const NSInteger kZSPillarSegmentCount = 60;
+static const NSInteger kZSPillarSegmentCount = 120;
 static const CGFloat kZSPillarSegmentGap = 2.0;
 
 @interface ZSPillarChartView : UIView
@@ -2756,18 +2756,18 @@ static UIView *zs_make_glass_container_card(UIView *contentView, UIEdgeInsets in
 
 static NSArray<UIColor *> *zs_memory_chart_palette(void) {
     return @[
-        [UIColor colorWithRed:0.20 green:0.34 blue:0.62 alpha:1.0],
-        [UIColor colorWithRed:0.13 green:0.48 blue:0.26 alpha:1.0],
-        [UIColor colorWithRed:0.62 green:0.50 blue:0.08 alpha:1.0],
-        [UIColor colorWithRed:0.58 green:0.20 blue:0.20 alpha:1.0],
-        [UIColor colorWithRed:0.36 green:0.20 blue:0.58 alpha:1.0],
-        [UIColor colorWithRed:0.18 green:0.46 blue:0.46 alpha:1.0],
-        [UIColor colorWithRed:0.58 green:0.32 blue:0.14 alpha:1.0],
-        [UIColor colorWithRed:0.24 green:0.24 blue:0.56 alpha:1.0],
-        [UIColor colorWithRed:0.50 green:0.30 blue:0.42 alpha:1.0],
-        [UIColor colorWithRed:0.22 green:0.42 blue:0.20 alpha:1.0],
-        [UIColor colorWithRed:0.46 green:0.42 blue:0.12 alpha:1.0],
-        [UIColor colorWithWhite:0.32 alpha:1.0],
+        [UIColor colorWithRed:0.09 green:0.24 blue:0.58 alpha:1.0],
+        [UIColor colorWithRed:0.04 green:0.46 blue:0.22 alpha:1.0],
+        [UIColor colorWithRed:0.74 green:0.52 blue:0.02 alpha:1.0],
+        [UIColor colorWithRed:0.66 green:0.06 blue:0.12 alpha:1.0],
+        [UIColor colorWithRed:0.34 green:0.08 blue:0.58 alpha:1.0],
+        [UIColor colorWithRed:0.02 green:0.42 blue:0.44 alpha:1.0],
+        [UIColor colorWithRed:0.70 green:0.30 blue:0.02 alpha:1.0],
+        [UIColor colorWithRed:0.16 green:0.10 blue:0.60 alpha:1.0],
+        [UIColor colorWithRed:0.58 green:0.06 blue:0.36 alpha:1.0],
+        [UIColor colorWithRed:0.08 green:0.38 blue:0.10 alpha:1.0],
+        [UIColor colorWithRed:0.52 green:0.42 blue:0.02 alpha:1.0],
+        [UIColor colorWithWhite:0.24 alpha:1.0],
     ];
 }
 
@@ -4356,6 +4356,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIStackView *memoryUsageStatsStack;
 @property (nonatomic, strong) UIView *memoryUsageChartRow;
 @property (nonatomic, strong) NSTimer *memoryUsageRefreshTimer;
+@property (nonatomic, assign) BOOL memoryUsageAutoRefreshActive;
 
 + (instancetype)shared;
 - (void)installIfNeeded;
@@ -4765,6 +4766,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.panelOpen = NO;
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
+
+    [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
 
     if (self.zsFloatingField) [self zs_commitFloatingFieldSaving:NO];
 
@@ -7685,7 +7689,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         [pillarChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
         [pillarChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
         [pillarChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
-        [pillarChart.widthAnchor constraintEqualToConstant:52],
+        [pillarChart.widthAnchor constraintEqualToConstant:68],
         [pillarChart.heightAnchor constraintGreaterThanOrEqualToConstant:220],
 
         [legendStack.leadingAnchor constraintEqualToAnchor:pillarChart.trailingAnchor constant:16],
@@ -7718,6 +7722,10 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     card.layer.borderWidth = 1;
     card.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
+    if (self.memoryUsageAutoRefreshActive) {
+        [self zs_startMemoryUsageAutoRefresh];
+    }
+
     return card;
 }
 
@@ -7734,13 +7742,15 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_startMemoryUsageAutoRefresh {
+    self.memoryUsageAutoRefreshActive = YES;
+
     [self.memoryUsageAnalyzeButton setTitle:@"Stop analysis" forState:UIControlStateNormal];
     [self.memoryUsageAnalyzeButton setTitleColor:[UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0] forState:UIControlStateNormal];
 
     [self zs_runMemoryUsageScan];
 
     __weak typeof(self) weakSelf = self;
-    NSTimer *timer = [NSTimer timerWithTimeInterval:5.0 repeats:YES block:^(NSTimer *timer) {
+    NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
         [weakSelf zs_runMemoryUsageScan];
     }];
     self.memoryUsageRefreshTimer = timer;
@@ -7748,6 +7758,8 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_stopMemoryUsageAutoRefresh {
+    self.memoryUsageAutoRefreshActive = NO;
+
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
 
