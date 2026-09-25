@@ -3765,13 +3765,14 @@ static NSString *const kZSCustomFontPrewarmCharacters = @" !\"#$%&'()*+,-./01234
 static void zs_font_asset_try_add_characters(void *fontAsset, NSString *characters) {
     if (!fontAsset || characters.length == 0) return;
     void *fontAssetClass = zs_tmp_font_asset_class();
-    const void *tryAddMethod = mt_method(fontAssetClass, "TryAddCharacters", 1);
+    const void *tryAddMethod = mt_method(fontAssetClass, "TryAddCharacters", 2);
     if (!fontAssetClass || !tryAddMethod) {
         ZLog(@"[ZSFont] TryAddCharacters unavailable: class=%p method=%p", fontAssetClass, tryAddMethod);
         return;
     }
     void *charsStr = [IL2CppBridge il2CppStringFromNSString:characters];
-    void *args[1] = { charsStr };
+    uint8_t includeFontFeatures = 1;
+    void *args[2] = { charsStr, &includeFontFeatures };
     void *exc = NULL;
     void *result = [IL2CppBridge invokeMethod:tryAddMethod onInstance:fontAsset args:args outException:&exc];
     BOOL added = !exc && result && *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
