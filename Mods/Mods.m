@@ -3762,6 +3762,25 @@ static void zs_font_asset_fallback_insert_front(void *listObj, void *font) {
 
 static NSString *const kZSCustomFontPrewarmCharacters = @" !\"#$%&'()*+,-./0123456789:;<=>?@[\\]^_`{|}~ÀÈÌÒÙàèìòùÁÉÍÓÚáéíóúÂÊÎÔÛâêîôûÃÑÕãñõÄËÏÖÜäëïöüĀĒĪŌŪāēīōū";
 
+static void zs_font_asset_log_character_presence(void *fontAsset, NSString *characters) {
+    if (!fontAsset || characters.length == 0) return;
+    void *fontAssetClass = zs_tmp_font_asset_class();
+    const void *hasCharMethod = mt_method(fontAssetClass, "HasCharacter", 1);
+    if (!hasCharMethod) {
+        ZLog(@"[ZSFont] HasCharacter unavailable on class=%p", fontAssetClass);
+        return;
+    }
+    for (NSUInteger i = 0; i < characters.length; i++) {
+        unichar c = [characters characterAtIndex:i];
+        int32_t codepoint = (int32_t)c;
+        void *args[1] = { &codepoint };
+        void *exc = NULL;
+        void *result = [IL2CppBridge invokeMethod:hasCharMethod onInstance:fontAsset args:args outException:&exc];
+        BOOL has = !exc && result && *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
+        ZLog(@"[ZSFont] HasCharacter(%p, U+%04X '%C') = %d exception=%@", fontAsset, codepoint, c, has, zs_describe_exception(exc));
+    }
+}
+
 static void zs_font_asset_try_add_characters(void *fontAsset, NSString *characters) {
     if (!fontAsset || characters.length == 0) return;
     void *fontAssetClass = zs_tmp_font_asset_class();
@@ -4099,6 +4118,8 @@ static void zs_apply_custom_font_if_present(void) {
             }
             zs_font_asset_try_add_characters(titleFont, kZSCustomFontPrewarmCharacters);
             if (contextFont != titleFont) zs_font_asset_try_add_characters(contextFont, kZSCustomFontPrewarmCharacters);
+            zs_font_asset_log_character_presence(titleFont, @"[](){}+-");
+            if (contextFont != titleFont) zs_font_asset_log_character_presence(contextFont, @"[](){}+-");
             cjkFont = NULL;
             if (cjkPath) {
                 if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
@@ -4133,6 +4154,8 @@ static void zs_apply_custom_font_if_present(void) {
     zs_refresh_font_consumers(fontManagerData);
     zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont, fontManagerData);
     zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
+    zs_font_asset_log_character_presence(titleFont, @"[](){}+-");
+    if (contextFont != titleFont) zs_font_asset_log_character_presence(contextFont, @"[](){}+-");
 }
 
 static const double kFontApplyDelaySeconds = 2.0;
