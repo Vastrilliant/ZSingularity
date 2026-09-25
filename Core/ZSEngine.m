@@ -9,6 +9,8 @@
 #import <pthread.h>
 #import <math.h>
 #include <stdint.h>
+#import <sys/mman.h>
+#import <errno.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
 
@@ -3077,5 +3079,204 @@ __attribute__((constructor))
 static void UIDRedactorConstructor(void) {
     pthread_t t;
     pthread_create(&t, NULL, UIDRedactor_WaitForUnityThenInstall, NULL);
+    pthread_detach(t);
+}
+
+#pragma mark - Custom Localization Lang Directory (iOS Lang folder support)
+
+static NSString * const kZSCustomLangFolderName = @"Lang";
+static int32_t g_zsCustomLangDirHookCallCount = 0;
+
+NSString *zs_custom_lang_directory_path(void) {
+    ZLog(@"[ZSCustomLangDir] zs_custom_lang_directory_path: resolving Documents directory");
+    NSArray<NSString *> *searchPaths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    ZLog(@"[ZSCustomLangDir] NSSearchPathForDirectoriesInDomains(NSDocumentDirectory) -> %@", searchPaths);
+
+    NSString *documentsDir = searchPaths.firstObject;
+    if (!documentsDir) {
+        ZLog(@"[ZSCustomLangDir] ERROR: no Documents directory returned by NSSearchPathForDirectoriesInDomains - cannot build Lang path");
+        return nil;
+    }
+    ZLog(@"[ZSCustomLangDir] Documents directory = %@", documentsDir);
+
+    NSString *langDir = [documentsDir stringByAppendingPathComponent:kZSCustomLangFolderName];
+    ZLog(@"[ZSCustomLangDir] candidate Lang directory = %@", langDir);
+
+    BOOL isDirectory = NO;
+    BOOL exists = [NSFileManager.defaultManager fileExistsAtPath:langDir isDirectory:&isDirectory];
+    ZLog(@"[ZSCustomLangDir] fileExistsAtPath -> exists=%d isDirectory=%d", exists, isDirectory);
+
+    if (!exists || !isDirectory) {
+        if (exists && !isDirectory) {
+            ZLog(@"[ZSCustomLangDir] WARNING: %@ exists but is NOT a directory - createDirectoryAtPath will likely fail", langDir);
+        }
+        ZLog(@"[ZSCustomLangDir] Lang directory missing, attempting to create it (withIntermediateDirectories=YES)");
+        NSError *createErr = nil;
+        BOOL created = [NSFileManager.defaultManager createDirectoryAtPath:langDir withIntermediateDirectories:YES attributes:nil error:&createErr];
+        ZLog(@"[ZSCustomLangDir] createDirectoryAtPath -> success=%d error=%@", created, createErr);
+        if (!created) {
+            ZLog(@"[ZSCustomLangDir] ERROR: couldn't create %@: %@ (domain=%@ code=%ld userInfo=%@)",
+                 langDir, createErr.localizedDescription, createErr.domain, (long)createErr.code, createErr.userInfo);
+            return nil;
+        }
+        ZLog(@"[ZSCustomLangDir] successfully created Lang directory at %@", langDir);
+    } else {
+        ZLog(@"[ZSCustomLangDir] Lang directory already exists at %@", langDir);
+    }
+
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:langDir error:nil];
+    ZLog(@"[ZSCustomLangDir] Lang directory attributes: permissions=%@ owner=%@ size=%@",
+         attrs[NSFilePosixPermissions], attrs[NSFileOwnerAccountName], attrs[NSFileSize]);
+
+    NSArray<NSString *> *contents = [NSFileManager.defaultManager contentsOfDirectoryAtPath:langDir error:nil];
+    ZLog(@"[ZSCustomLangDir] Lang directory currently contains %lu item(s): %@", (unsigned long)contents.count, contents);
+
+    ZLog(@"[ZSCustomLangDir] zs_custom_lang_directory_path returning %@", langDir);
+    return langDir;
+}
+
+static void *zs_custom_lang_data_path_hook(const void *method) {
+    g_zsCustomLangDirHookCallCount++;
+    ZLog(@"[ZSCustomLangDir] >>> zs_custom_lang_data_path_hook ENTER (call #%d, method=%p, thread=%@)",
+         g_zsCustomLangDirHookCallCount, method, [NSThread currentThread]);
+
+    NSString *langDir = zs_custom_lang_directory_path();
+    ZLog(@"[ZSCustomLangDir] zs_custom_lang_directory_path() returned %@", langDir);
+
+    if (!langDir) {
+        ZLog(@"[ZSCustomLangDir] ERROR: langDir is nil - hook will return NULL to managed code, GetLangDataPath will behave as if unavailable");
+        ZLog(@"[ZSCustomLangDir] <<< zs_custom_lang_data_path_hook EXIT (call #%d) -> NULL", g_zsCustomLangDirHookCallCount);
+        return NULL;
+    }
+
+    void *il2cppStr = [IL2CppBridge il2CppStringFromNSString:langDir];
+    ZLog(@"[ZSCustomLangDir] il2CppStringFromNSString(%@) -> %p", langDir, il2cppStr);
+
+    if (!il2cppStr) {
+        ZLog(@"[ZSCustomLangDir] ERROR: il2CppStringFromNSString returned NULL - il2cpp_string_new may have failed or symbols unresolved");
+    }
+
+    ZLog(@"[ZSCustomLangDir] <<< zs_custom_lang_data_path_hook EXIT (call #%d) -> %p", g_zsCustomLangDirHookCallCount, il2cppStr);
+    return il2cppStr;
+}
+
+static BOOL zs_patch_native_method_pointer(const void *method, void *replacement) {
+    ZLog(@"[ZSCustomLangDir] zs_patch_native_method_pointer: method=%p replacement=%p", method, replacement);
+
+    if (!method || !replacement) {
+        ZLog(@"[ZSCustomLangDir] ERROR: zs_patch_native_method_pointer called with method=%p replacement=%p, aborting", method, replacement);
+        return NO;
+    }
+
+    void **slot = (void **)method;
+    void *originalPointer = *slot;
+    ZLog(@"[ZSCustomLangDir] original methodPointer at slot %p = %p", slot, originalPointer);
+
+    long pageSize = sysconf(_SC_PAGESIZE);
+    uintptr_t addr = (uintptr_t)slot;
+    uintptr_t pageStart = addr & ~(uintptr_t)(pageSize - 1);
+    size_t spanEnd = (size_t)((addr + sizeof(void *)) - pageStart);
+    size_t protectLen = spanEnd > (size_t)pageSize ? spanEnd : (size_t)pageSize;
+    ZLog(@"[ZSCustomLangDir] pageSize=%ld slotAddr=0x%lx pageStart=0x%lx protectLen=%zu",
+         pageSize, (unsigned long)addr, (unsigned long)pageStart, protectLen);
+
+    int mprotectResult = mprotect((void *)pageStart, protectLen, PROT_READ | PROT_WRITE);
+    ZLog(@"[ZSCustomLangDir] mprotect(0x%lx, %zu, RW) -> %d (errno=%d/%s)",
+         (unsigned long)pageStart, protectLen, mprotectResult, errno, strerror(errno));
+
+    if (mprotectResult != 0) {
+        ZLog(@"[ZSCustomLangDir] ERROR: mprotect failed for method slot %p: %s - patch NOT applied", slot, strerror(errno));
+        return NO;
+    }
+
+    *slot = replacement;
+    ZLog(@"[ZSCustomLangDir] wrote replacement pointer %p into slot %p (was %p)", replacement, slot, originalPointer);
+
+    void *verifyReadBack = *slot;
+    ZLog(@"[ZSCustomLangDir] verification read-back of slot %p = %p (expected %p) -> %@",
+         slot, verifyReadBack, replacement, (verifyReadBack == replacement) ? @"MATCH" : @"MISMATCH");
+
+    return verifyReadBack == replacement;
+}
+
+static void zs_install_custom_lang_directory_patch(void) {
+    ZLog(@"[ZSCustomLangDir] ===== zs_install_custom_lang_directory_patch BEGIN =====");
+
+    BOOL bridgeReady = [IL2CppBridge resolveSymbols];
+    ZLog(@"[ZSCustomLangDir] IL2CppBridge resolveSymbols -> %d", bridgeReady);
+    if (!bridgeReady) {
+        ZLog(@"[ZSCustomLangDir] ERROR: il2cpp symbols not resolved, aborting install");
+        return;
+    }
+
+    ZLog(@"[ZSCustomLangDir] resolving class ProjectMoon.CustomLocalization.CustomLocalizeManager (assembly~=Assembly-CSharp)");
+    void *managerClass = mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
+    ZLog(@"[ZSCustomLangDir] CustomLocalizeManager class resolve -> %p", managerClass);
+    if (!managerClass) {
+        ZLog(@"[ZSCustomLangDir] ERROR: CustomLocalizeManager class not found - assembly may not be loaded yet, or namespace/name/assembly substring mismatch");
+        return;
+    }
+
+    ZLog(@"[ZSCustomLangDir] resolving method GetLangDataPath (argCount=0) on class %p", managerClass);
+    const void *method = mt_method(managerClass, "GetLangDataPath", 0);
+    ZLog(@"[ZSCustomLangDir] GetLangDataPath method resolve -> %p", method);
+    if (!method) {
+        ZLog(@"[ZSCustomLangDir] ERROR: GetLangDataPath method not found on CustomLocalizeManager - method name/signature may have changed");
+        return;
+    }
+
+    void *nativePtrBeforePatch = [IL2CppBridge nativeFunctionPointerForMethod:method];
+    ZLog(@"[ZSCustomLangDir] native function pointer BEFORE patch = %p", nativePtrBeforePatch);
+
+    BOOL patched = zs_patch_native_method_pointer(method, (void *)zs_custom_lang_data_path_hook);
+    ZLog(@"[ZSCustomLangDir] zs_patch_native_method_pointer -> %d", patched);
+
+    if (patched) {
+        void *nativePtrAfterPatch = [IL2CppBridge nativeFunctionPointerForMethod:method];
+        ZLog(@"[ZSCustomLangDir] native function pointer AFTER patch = %p (hook fn = %p)", nativePtrAfterPatch, (void *)zs_custom_lang_data_path_hook);
+        NSString *resolvedLangDir = zs_custom_lang_directory_path();
+        ZLog(@"[ZSCustomLangDir] SUCCESS: patched GetLangDataPath -> will report %@", resolvedLangDir);
+    } else {
+        ZLog(@"[ZSCustomLangDir] FAILURE: patch could not be applied, GetLangDataPath left untouched (still returns whatever the game's own logic returns, likely nil on iOS)");
+    }
+
+    ZLog(@"[ZSCustomLangDir] ===== zs_install_custom_lang_directory_patch END =====");
+}
+
+static void *ZSCustomLangDir_WaitForUnityThenInstall(void *arg) {
+    (void)arg;
+    ZLog(@"[ZSCustomLangDir] background wait-for-unity thread started, waiting for Unity view before installing patch");
+
+    __block BOOL unityReady = NO;
+    int32_t pollCount = 0;
+    while (!unityReady) {
+        pollCount++;
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id appController = [[UIApplication sharedApplication] delegate];
+            UIView *unityView = appController ? find_unity_view(appController) : nil;
+            if (appController && unityView) {
+                unityReady = YES;
+                ZLog(@"[ZSCustomLangDir] poll #%d: appController=%p unityView=%p -> READY", pollCount, appController, unityView);
+            } else {
+                ZLog(@"[ZSCustomLangDir] poll #%d: appController=%p unityView=%p -> not ready yet", pollCount, appController, unityView);
+            }
+        });
+        if (!unityReady) usleep(200 * 1000);
+    }
+
+    ZLog(@"[ZSCustomLangDir] Unity view detected after %d poll(s), dispatching install to main thread", pollCount);
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        zs_install_custom_lang_directory_patch();
+    });
+    ZLog(@"[ZSCustomLangDir] install dispatch completed, background wait-for-unity thread exiting");
+    return NULL;
+}
+
+__attribute__((constructor))
+static void ZSCustomLangDirConstructor(void) {
+    ZLog(@"[ZSCustomLangDir] dylib constructor fired, spawning background wait-for-unity thread");
+    pthread_t t;
+    int rc = pthread_create(&t, NULL, ZSCustomLangDir_WaitForUnityThenInstall, NULL);
+    ZLog(@"[ZSCustomLangDir] pthread_create -> %d", rc);
     pthread_detach(t);
 }
