@@ -3765,7 +3765,11 @@ static NSString *const kZSCustomFontPrewarmCharacters = @" !\"#$%&'()*+,-./01234
 static void zs_font_asset_try_add_characters(void *fontAsset, NSString *characters) {
     if (!fontAsset || characters.length == 0) return;
     void *fontAssetClass = zs_tmp_font_asset_class();
-    const void *tryAddMethod = mt_method(fontAssetClass, "TryAddCharacters", 2);
+    void *stringClass = mt_class("System", "String", "mscorlib");
+    const void *tryAddMethod = [IL2CppBridge methodOnClass:fontAssetClass
+                                                        name:"TryAddCharacters"
+                                                    argCount:2
+                                               param0ClassIs:stringClass];
     if (!fontAssetClass || !tryAddMethod) {
         ZLog(@"[ZSFont] TryAddCharacters unavailable: class=%p method=%p", fontAssetClass, tryAddMethod);
         return;

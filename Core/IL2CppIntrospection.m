@@ -34,6 +34,9 @@ typedef void (*il2cpp_field_get_value_fn)(void *obj, void *field, void *value);
 typedef void (*il2cpp_field_set_value_fn)(void *obj, void *field, void *value);
 typedef void (*il2cpp_field_static_set_value_fn)(void *field, void *value);
 typedef void *(*il2cpp_string_new_fn)(const char *str);
+typedef const void *(*il2cpp_class_get_methods_fn)(void *klass, void **iter);
+typedef const char *(*il2cpp_method_get_name_fn)(const void *method);
+typedef uint32_t (*il2cpp_method_get_param_count_fn)(const void *method);
 
 static il2cpp_domain_get_fn p_domain_get;
 static il2cpp_domain_get_assemblies_fn p_domain_get_assemblies;
@@ -62,6 +65,9 @@ static il2cpp_field_get_value_fn p_field_get_value;
 static il2cpp_field_set_value_fn p_field_set_value;
 static il2cpp_field_static_set_value_fn p_field_static_set_value;
 static il2cpp_string_new_fn p_string_new;
+static il2cpp_class_get_methods_fn p_class_get_methods;
+static il2cpp_method_get_name_fn p_method_get_name;
+static il2cpp_method_get_param_count_fn p_method_get_param_count;
 
 static BOOL g_resolved = NO;
 static BOOL g_resolveOk = NO;
@@ -90,6 +96,9 @@ static BOOL g_resolveOk = NO;
     p_string_new = (il2cpp_string_new_fn)dlsym(RTLD_DEFAULT, "il2cpp_string_new");
 
     p_method_get_param = (il2cpp_method_get_param_fn)dlsym(RTLD_DEFAULT, "il2cpp_method_get_param");
+    p_class_get_methods = (il2cpp_class_get_methods_fn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_methods");
+    p_method_get_name = (il2cpp_method_get_name_fn)dlsym(RTLD_DEFAULT, "il2cpp_method_get_name");
+    p_method_get_param_count = (il2cpp_method_get_param_count_fn)dlsym(RTLD_DEFAULT, "il2cpp_method_get_param_count");
     p_class_from_type = (il2cpp_class_from_type_fn)dlsym(RTLD_DEFAULT, "il2cpp_class_from_type");
     p_object_new = (il2cpp_object_new_fn)dlsym(RTLD_DEFAULT, "il2cpp_object_new");
     p_class_get_fields = (il2cpp_class_get_fields_fn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_fields");
@@ -140,6 +149,45 @@ static BOOL g_resolveOk = NO;
     if (!g_resolveOk || !klass) return NULL;
     const void *method = p_class_get_method_from_name(klass, methodName, argCount);
     return method;
+}
+
++ (const void *)nextMethodOnClass:(void *)klass iterator:(void **)iter {
+    if (!g_resolveOk || !klass || !p_class_get_methods || !iter) return NULL;
+    return p_class_get_methods(klass, iter);
+}
+
++ (const char *)nameOfMethod:(const void *)method {
+    if (!method || !p_method_get_name) return NULL;
+    return p_method_get_name(method);
+}
+
++ (uint32_t)paramCountOfMethod:(const void *)method {
+    if (!method || !p_method_get_param_count) return 0;
+    return p_method_get_param_count(method);
+}
+
++ (const void *)methodOnClass:(void *)klass
+                          name:(const char *)methodName
+                      argCount:(int)argCount
+             param0ClassIs:(void *)expectedParam0Class {
+    if (!g_resolveOk || !klass || !methodName) return NULL;
+    if (!p_class_get_methods || !p_method_get_name || !p_method_get_param_count || !expectedParam0Class) {
+        return [self methodOnClass:klass name:methodName argCount:argCount];
+    }
+    void *iter = NULL;
+    const void *method;
+    const void *fallback = NULL;
+    while ((method = p_class_get_methods(klass, &iter))) {
+        const char *name = p_method_get_name(method);
+        if (!name || strcmp(name, methodName) != 0) continue;
+        if ((int)p_method_get_param_count(method) != argCount) continue;
+        if (!fallback) fallback = method;
+        if (argCount == 0) return method;
+        const void *param0Type = p_method_get_param ? p_method_get_param(method, 0) : NULL;
+        void *param0Class = param0Type && p_class_from_type ? p_class_from_type(param0Type) : NULL;
+        if (param0Class == expectedParam0Class) return method;
+    }
+    return fallback;
 }
 
 + (void *)invokeMethod:(const void *)method

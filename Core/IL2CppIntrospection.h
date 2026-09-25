@@ -16,6 +16,15 @@ NS_ASSUME_NONNULL_BEGIN
                           name:(const char *)methodName
                       argCount:(int)argCount;
 
++ (const void *)methodOnClass:(void *)klass
+                          name:(const char *)methodName
+                      argCount:(int)argCount
+                 param0ClassIs:(void *)expectedParam0Class;
+
++ (const void *)nextMethodOnClass:(void *)klass iterator:(void **)iter;
++ (const char *)nameOfMethod:(const void *)method;
++ (uint32_t)paramCountOfMethod:(const void *)method;
+
 + (void *)invokeMethod:(const void *)method
              onInstance:(void *)obj
                    args:(void **)args
