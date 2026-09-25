@@ -11,6 +11,7 @@
 #include <stdint.h>
 #import <sys/mman.h>
 #import <errno.h>
+#import <libkern/OSCacheControl.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
 
@@ -3160,43 +3161,48 @@ static void *zs_custom_lang_data_path_hook(const void *method) {
     return il2cppStr;
 }
 
-static BOOL zs_patch_native_method_pointer(const void *method, void *replacement) {
-    ZLog(@"[ZSCustomLangDir] zs_patch_native_method_pointer: method=%p replacement=%p", method, replacement);
+static BOOL zs_patch_native_method_pointer(const void *targetFunction, void *replacement) {
+    ZLog(@"[ZSCustomLangDir] zs_patch_native_method_pointer: targetFunction=%p replacement=%p", targetFunction, replacement);
 
-    if (!method || !replacement) {
-        ZLog(@"[ZSCustomLangDir] ERROR: zs_patch_native_method_pointer called with method=%p replacement=%p, aborting", method, replacement);
+    if (!targetFunction || !replacement) {
+        ZLog(@"[ZSCustomLangDir] ERROR: zs_patch_native_method_pointer called with targetFunction=%p replacement=%p, aborting", targetFunction, replacement);
         return NO;
     }
 
-    void **slot = (void **)method;
-    void *originalPointer = *slot;
-    ZLog(@"[ZSCustomLangDir] original methodPointer at slot %p = %p", slot, originalPointer);
+    uint8_t stub[16];
+    uint32_t ldrX16PcPlus8 = 0x58000050;
+    uint32_t brX16 = 0xD61F0200;
+    memcpy(stub, &ldrX16PcPlus8, 4);
+    memcpy(stub + 4, &brX16, 4);
+    memcpy(stub + 8, &replacement, 8);
 
     long pageSize = sysconf(_SC_PAGESIZE);
-    uintptr_t addr = (uintptr_t)slot;
+    uintptr_t addr = (uintptr_t)targetFunction;
     uintptr_t pageStart = addr & ~(uintptr_t)(pageSize - 1);
-    size_t spanEnd = (size_t)((addr + sizeof(void *)) - pageStart);
+    size_t spanEnd = (size_t)((addr + sizeof(stub)) - pageStart);
     size_t protectLen = spanEnd > (size_t)pageSize ? spanEnd : (size_t)pageSize;
-    ZLog(@"[ZSCustomLangDir] pageSize=%ld slotAddr=0x%lx pageStart=0x%lx protectLen=%zu",
+    ZLog(@"[ZSCustomLangDir] pageSize=%ld targetAddr=0x%lx pageStart=0x%lx protectLen=%zu",
          pageSize, (unsigned long)addr, (unsigned long)pageStart, protectLen);
 
-    int mprotectResult = mprotect((void *)pageStart, protectLen, PROT_READ | PROT_WRITE);
-    ZLog(@"[ZSCustomLangDir] mprotect(0x%lx, %zu, RW) -> %d (errno=%d/%s)",
+    int mprotectResult = mprotect((void *)pageStart, protectLen, PROT_READ | PROT_WRITE | PROT_EXEC);
+    ZLog(@"[ZSCustomLangDir] mprotect(0x%lx, %zu, RWX) -> %d (errno=%d/%s)",
          (unsigned long)pageStart, protectLen, mprotectResult, errno, strerror(errno));
 
     if (mprotectResult != 0) {
-        ZLog(@"[ZSCustomLangDir] ERROR: mprotect failed for method slot %p: %s - patch NOT applied", slot, strerror(errno));
+        ZLog(@"[ZSCustomLangDir] ERROR: mprotect failed for target function %p: %s - patch NOT applied", targetFunction, strerror(errno));
         return NO;
     }
 
-    *slot = replacement;
-    ZLog(@"[ZSCustomLangDir] wrote replacement pointer %p into slot %p (was %p)", replacement, slot, originalPointer);
+    memcpy((void *)targetFunction, stub, sizeof(stub));
+    sys_icache_invalidate((void *)targetFunction, sizeof(stub));
+    ZLog(@"[ZSCustomLangDir] wrote inline trampoline at %p redirecting to %p", targetFunction, replacement);
 
-    void *verifyReadBack = *slot;
-    ZLog(@"[ZSCustomLangDir] verification read-back of slot %p = %p (expected %p) -> %@",
-         slot, verifyReadBack, replacement, (verifyReadBack == replacement) ? @"MATCH" : @"MISMATCH");
+    void *verifyReplacement = NULL;
+    memcpy(&verifyReplacement, (uint8_t *)targetFunction + 8, sizeof(void *));
+    ZLog(@"[ZSCustomLangDir] verification read-back of trampoline target at %p = %p (expected %p) -> %@",
+         targetFunction, verifyReplacement, replacement, (verifyReplacement == replacement) ? @"MATCH" : @"MISMATCH");
 
-    return verifyReadBack == replacement;
+    return verifyReplacement == replacement;
 }
 
 static NSString *zs_custom_localize_invoke_static_string(void *managerClass, const char *methodName) {
@@ -3388,7 +3394,7 @@ static void zs_install_custom_lang_directory_patch(void) {
         void *nativePtrBeforePatch = [IL2CppBridge nativeFunctionPointerForMethod:method];
         ZLog(@"[ZSCustomLangDir] %s native function pointer BEFORE patch = %p", methodName, nativePtrBeforePatch);
 
-        BOOL patched = zs_patch_native_method_pointer(method, (void *)zs_custom_lang_data_path_hook);
+        BOOL patched = zs_patch_native_method_pointer(nativePtrBeforePatch, (void *)zs_custom_lang_data_path_hook);
         ZLog(@"[ZSCustomLangDir] zs_patch_native_method_pointer(%s) -> %d", methodName, patched);
 
         if (patched) {
