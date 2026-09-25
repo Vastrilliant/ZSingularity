@@ -1887,17 +1887,12 @@ static NSArray<ZSMemoryUsageCategory *> *zs_scan_memory_usage_breakdown_sync(voi
 
 void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageCategory *> *categories)) {
     if (!completion) return;
-    NSThread *worker = [[NSThread alloc] initWithBlock:^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
             NSArray<ZSMemoryUsageCategory *> *results = zs_scan_memory_usage_breakdown_sync();
-            dispatch_async(dispatch_get_main_queue(), ^{
-                completion(results);
-            });
+            completion(results);
         }
-    }];
-    worker.name = @"ZSingularity.MemoryUsageScan";
-    worker.qualityOfService = NSQualityOfServiceUtility;
-    [worker start];
+    });
 }
 
 int64_t zs_current_process_resident_memory_bytes(void) {
