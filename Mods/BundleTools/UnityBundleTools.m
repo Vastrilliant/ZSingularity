@@ -1278,15 +1278,17 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
         NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
         NSString *relPath;
         while ((relPath = [walker nextObject])) {
-            NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
-            if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+            @autoreleasepool {
+                NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
+                if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
 
-            NSString *fullPath = [root stringByAppendingPathComponent:relPath];
+                NSString *fullPath = [root stringByAppendingPathComponent:relPath];
 
-            NSError *fileErr = nil;
-            NSString *fileCAB = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
-            if (fileCAB && [fileCAB isEqualToString:cab]) {
-                [matches addObject:fullPath];
+                NSError *fileErr = nil;
+                NSString *fileCAB = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
+                if (fileCAB && [fileCAB isEqualToString:cab]) {
+                    [matches addObject:fullPath];
+                }
             }
         }
     }
@@ -1477,23 +1479,25 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
             NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
             NSString *relPath;
             while ((relPath = [walker nextObject])) {
-                NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
-                if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+                @autoreleasepool {
+                    NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
+                    if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
 
-                NSString *fullPath = [root stringByAppendingPathComponent:relPath];
-                if (fullPath.length > kZSFIMaxPathLength) continue;
-                filesScanned++;
+                    NSString *fullPath = [root stringByAppendingPathComponent:relPath];
+                    if (fullPath.length > kZSFIMaxPathLength) continue;
+                    filesScanned++;
 
-                NSError *fileErr = nil;
-                NSString *cab = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
-                if (cab.length == 0) continue;
-
-                NSMutableArray<NSString *> *bucket = map[cab];
-                if (!bucket) {
-                    bucket = [NSMutableArray array];
-                    map[cab] = bucket;
+                    NSError *fileErr = nil;
+                    NSString *cab = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
+                    if (cab.length > 0) {
+                        NSMutableArray<NSString *> *bucket = map[cab];
+                        if (!bucket) {
+                            bucket = [NSMutableArray array];
+                            map[cab] = bucket;
+                        }
+                        [bucket addObject:fullPath];
+                    }
                 }
-                [bucket addObject:fullPath];
             }
         } @catch (NSException *exception) {
             ZLog(@"[ZSFileIndex] skipping root %@ after Foundation threw during enumeration: %@", root, exception);
