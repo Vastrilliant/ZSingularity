@@ -7914,8 +7914,8 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
 - (void)librarySymlinkTapped {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSURL *documents = [fm URLForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
-    NSURL *library = [fm URLForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
+    NSURL *documents = [fm URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL *library = [fm URLsForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask].firstObject;
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
 
     if (!documents || !library) {
