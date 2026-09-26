@@ -5972,8 +5972,12 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [dumpIL2CPPMethodsButton addTarget:self action:@selector(dumpIL2CPPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         dumpIL2CPPMethodsButton,
+        librarySymlinkButton,
     ]);
     developerActionsCard.layer.borderWidth = 1;
     developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -7906,7 +7910,48 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }];
 }
 
-#pragma mark Config (Delete Specific Asset)
+#pragma mark Developer (Library Symlink)
+
+- (void)librarySymlinkTapped {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSURL *documents = [fm URLForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
+    NSURL *library = [fm URLForDirectory:NSLibraryDirectory inDomains:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+
+    if (!documents || !library) {
+        [haptic notificationOccurred:UINotificationFeedbackTypeError];
+        [self zs_presentModsAlertWithTitle:@"Library Symlink Failed" message:@"Could not resolve the Documents or Library directory."];
+        return;
+    }
+
+    NSURL *linkURL = [documents URLByAppendingPathComponent:@"Library"];
+    NSDictionary *existingAttrs = [fm attributesOfItemAtPath:linkURL.path error:nil];
+
+    if (existingAttrs && [existingAttrs[NSFileType] isEqualToString:NSFileTypeSymbolicLink]) {
+        [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+        [self zs_presentModsAlertWithTitle:@"Library Symlink" message:@"Already exposed at Documents/Library in the Files app."];
+        return;
+    }
+
+    if (existingAttrs) {
+        [haptic notificationOccurred:UINotificationFeedbackTypeError];
+        [self zs_presentModsAlertWithTitle:@"Library Symlink Failed" message:@"Documents/Library already exists and isn't a symlink, so it wasn't overwritten."];
+        return;
+    }
+
+    NSError *error = nil;
+    BOOL created = [fm createSymbolicLinkAtURL:linkURL withDestinationURL:library error:&error];
+    if (!created) {
+        [haptic notificationOccurred:UINotificationFeedbackTypeError];
+        [self zs_presentModsAlertWithTitle:@"Library Symlink Failed" message:error.localizedDescription ?: @"Unknown error."];
+        return;
+    }
+
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+    [self zs_presentModsAlertWithTitle:@"Library Symlink Created" message:@"The Library folder is now browsable at Documents/Library in the Files app, including its internal logs."];
+}
+
+
 
 - (void)deleteSpecificAssetTapped {
     UIViewController *presenter = zs_key_window().rootViewController;
