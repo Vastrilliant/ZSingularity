@@ -3052,25 +3052,6 @@ static ZSRow *zs_make_reencode_format_row(NSString *selectedFormat, id target, S
     return row;
 }
 
-static ZSRow *zs_make_full_width_glass_button_row(NSString *buttonTitle, UIColor *buttonTint) {
-    ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UIButton *button = zs_make_grouped_action_button(buttonTitle, buttonTint);
-    [row addSubview:button];
-    objc_setAssociatedObject(row, "zs_button", button, OBJC_ASSOCIATION_RETAIN);
-
-    [NSLayoutConstraint activateConstraints:@[
-        [button.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [button.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [button.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [button.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [row.heightAnchor constraintEqualToConstant:34],
-    ]];
-
-    return row;
-}
-
 static ZSRow *zs_make_full_width_glass_field_row(UITextField *field) {
     ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
     row.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5851,23 +5832,20 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    ZSRow *syslogEnableRow = zs_make_full_width_glass_button_row(@"Enable system logs",
-                                                                  [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    UIButton *syslogButton = objc_getAssociatedObject(syslogEnableRow, "zs_button");
+    UIButton *syslogButton = zs_make_grouped_action_button(@"Enable system logs", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     self.syslogButton = syslogButton;
-
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UILongPressGestureRecognizer *syslogHold =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSyslogButtonLongPress:)];
-    syslogHold.minimumPressDuration = 1.0;
+    syslogHold.minimumPressDuration = 0.8;
     syslogHold.cancelsTouchesInView = NO;
     [syslogButton addGestureRecognizer:syslogHold];
 
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         dumpIL2CPPMethodsButton,
         librarySymlinkButton,
-        syslogEnableRow,
+        syslogButton,
     ]);
     developerActionsCard.layer.borderWidth = 1;
     developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -11329,10 +11307,12 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     overlay.clipsToBounds = YES;
     overlay.layer.cornerRadius = 0;
     overlay.layer.cornerCurve = kCACornerCurveContinuous;
-    overlay.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
     overlay.userInteractionEnabled = YES;
     [unityView addSubview:overlay];
     zs_force_dark(overlay);
+    if (self.contentOverlay) {
+        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
+    }
     self.syslogFullScreenOverlay = overlay;
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
@@ -11464,8 +11444,8 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
         [NSLayoutConstraint activateConstraints:@[
             [rowLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
             [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
-            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:28],
-            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-28],
+            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:24],
+            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-24],
         ]];
 
         objc_setAssociatedObject(rowView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
@@ -11550,7 +11530,7 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
             [label.trailingAnchor constraintEqualToAnchor:toastGlass.contentView.trailingAnchor constant:-16],
 
             [toastGlass.centerXAnchor constraintEqualToAnchor:unityView.centerXAnchor],
-            [toastGlass.bottomAnchor constraintEqualToAnchor:unityView.safeAreaLayoutGuide.bottomAnchor constant:-16],
+            [toastGlass.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor constant:-16],
         ]];
 
         self.syslogCopyToastView = toastGlass;
@@ -12280,7 +12260,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^changes)(void) = ^{
         if (docsVisible) {
-            self.contentOverlay.hidden = self.syslogFullScreenOpen;
             self.docsContentOverlay.hidden = self.syslogFullScreenOpen;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = !self.syslogFullScreenOpen;
             self.docsPanelSeparator.hidden = NO;
@@ -12330,9 +12309,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
-        if (self.syslogFullScreenOverlay) {
-            self.syslogFullScreenOverlay.frame = self.syslogFullScreenOpen ? unityView.bounds : [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            self.syslogFullScreenOverlay.layer.cornerRadius = 0;
+        if (self.syslogFullScreenOverlay && self.syslogFullScreenOpen) {
+            self.syslogFullScreenOverlay.frame = unityView.bounds;
         }
 
         [self zs_updateSliderGlassVisibility];
@@ -12340,7 +12318,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (!docsVisible) {
-            self.contentOverlay.hidden = NO;
             self.docsContentOverlay.hidden = YES;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;
