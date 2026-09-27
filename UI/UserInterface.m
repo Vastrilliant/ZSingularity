@@ -3106,6 +3106,34 @@ static ZSRow *zs_make_button_and_glass_field_row(NSString *buttonTitle, UIColor 
     return row;
 }
 
+static ZSRow *zs_make_full_width_glass_button_row(NSString *buttonTitle, UIColor *buttonTint) {
+    ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIFont *font = zs_mono_font(11, UIFontWeightSemibold);
+
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_native_glass_with_font(button, buttonTitle, buttonTint, font);
+    button.titleLabel.adjustsFontSizeToFitWidth = YES;
+    button.titleLabel.minimumScaleFactor = 0.75;
+    [row addSubview:button];
+    UIButton *buttonFallback = zs_make_liquid_glass_fallback_twin(button, buttonTitle, buttonTint, font);
+    buttonFallback.titleLabel.adjustsFontSizeToFitWidth = YES;
+    buttonFallback.titleLabel.minimumScaleFactor = 0.75;
+    objc_setAssociatedObject(row, "zs_button", zs_has_liquid_glass() ? button : buttonFallback, OBJC_ASSOCIATION_RETAIN);
+
+    [NSLayoutConstraint activateConstraints:@[
+        [button.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [button.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [button.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [button.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
+        [row.heightAnchor constraintEqualToConstant:34],
+    ]];
+
+    return row;
+}
+
 static BOOL zs_parse_github_repo_link(NSString *raw, NSString **outOwner, NSString **outName) {
     NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (s.length == 0) return NO;
@@ -4330,6 +4358,14 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) NSTimeInterval syslogHoldStartTime;
 @property (nonatomic, assign) BOOL syslogHoldTriggered;
 
+@property (nonatomic, strong) UIButton *syslogExpandButton;
+@property (nonatomic, strong) UIView *syslogFullScreenOverlay;
+@property (nonatomic, strong) UITextField *syslogSearchField;
+@property (nonatomic, strong) UIButton *syslogCopyAllButton;
+@property (nonatomic, strong) UIScrollView *syslogFullScreenScrollView;
+@property (nonatomic, strong) UIStackView *syslogFullScreenRowsStack;
+@property (nonatomic, assign) BOOL syslogFullScreenOpen;
+
 @property (nonatomic, strong) ZSCapsuleSlider *normalFpsSlider;
 @property (nonatomic, strong) UILabel *normalFpsValueLabel;
 @property (nonatomic, strong) ZSCapsuleSlider *combatFpsSlider;
@@ -4838,6 +4874,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogHoldTriggered = NO;
     self.syslogHoldStartTime = 0;
     self.syslogDebugModeEnabled = NO;
+    self.syslogFullScreenOpen = NO;
 
     for (NSTimer *timer in self.doctorPollTimers.allValues) {
         [timer invalidate];
@@ -4926,6 +4963,14 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogBlacklistEntriesStack = nil;
     self.syslogButton = nil;
     self.syslogButtonFillLayer = nil;
+    self.syslogExpandButton = nil;
+
+    [self.syslogFullScreenOverlay removeFromSuperview];
+    self.syslogFullScreenOverlay = nil;
+    self.syslogSearchField = nil;
+    self.syslogCopyAllButton = nil;
+    self.syslogFullScreenScrollView = nil;
+    self.syslogFullScreenRowsStack = nil;
 
     self.authRepoLinkField = nil;
     self.authTokenField = nil;
@@ -5042,7 +5087,7 @@ static UIButton *zs_make_section_info_button(NSString *docKey, id target, SEL ac
     return button;
 }
 
-static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blacklistHeader, UILabel *statusLabel, UIScrollView *entriesScroll) {
+static UIView *zs_make_syslog_blacklist_card(UIView *enableRow, UIView *syslogRow, UILabel *blacklistHeader, UILabel *statusLabel, UIScrollView *entriesScroll) {
     UIView *card;
     UIView *host;
     if (zs_has_liquid_glass()) {
@@ -5071,6 +5116,7 @@ static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blackli
     separator.translatesAutoresizingMaskIntoConstraints = NO;
     separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
 
+    [host addSubview:enableRow];
     [host addSubview:syslogRow];
     [host addSubview:separator];
     [host addSubview:blacklistHeader];
@@ -5078,9 +5124,14 @@ static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blackli
     [host addSubview:entriesScroll];
 
     [NSLayoutConstraint activateConstraints:@[
+        [enableRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
+        [enableRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
+        [enableRow.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
+        [enableRow.heightAnchor constraintEqualToConstant:34],
+
         [syslogRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
         [syslogRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [syslogRow.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
+        [syslogRow.topAnchor constraintEqualToAnchor:enableRow.bottomAnchor constant:10],
         [syslogRow.heightAnchor constraintEqualToConstant:34],
 
         [separator.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
@@ -5824,10 +5875,9 @@ static const CGFloat kContentFadeHeight = 22;
     [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Debug", self, @selector(docsInfoTapped:));
 
-    ZSRow *syslogRow = zs_make_button_and_glass_field_row(@"Syslog",
-                                                            [UIColor colorWithWhite:1 alpha:0.88],
-                                                            @"Blacklist keywords");
-    UIButton *syslogButton = objc_getAssociatedObject(syslogRow, "zs_button");
+    ZSRow *syslogEnableRow = zs_make_full_width_glass_button_row(@"Enable system logs",
+                                                                  [UIColor colorWithWhite:1 alpha:0.88]);
+    UIButton *syslogButton = objc_getAssociatedObject(syslogEnableRow, "zs_button");
     self.syslogButton = syslogButton;
 
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -5837,6 +5887,14 @@ static const CGFloat kContentFadeHeight = 22;
     syslogHold.minimumPressDuration = 0;
     syslogHold.cancelsTouchesInView = NO;
     [syslogButton addGestureRecognizer:syslogHold];
+
+    ZSRow *syslogRow = zs_make_button_and_glass_field_row(@"View Logs",
+                                                            [UIColor colorWithWhite:1 alpha:0.88],
+                                                            @"Blacklist keywords");
+    UIButton *syslogExpandButton = objc_getAssociatedObject(syslogRow, "zs_button");
+    self.syslogExpandButton = syslogExpandButton;
+
+    [syslogExpandButton addTarget:self action:@selector(zs_expandSyslogPanelTapped) forControlEvents:UIControlEventTouchUpInside];
 
     self.syslogBlacklistField = objc_getAssociatedObject(syslogRow, "zs_textfield");
     self.syslogBlacklistField.delegate = self;
@@ -5924,7 +5982,8 @@ static const CGFloat kContentFadeHeight = 22;
         [self.syslogTextLabel.widthAnchor constraintEqualToAnchor:self.syslogConsoleScrollView.widthAnchor constant:-(kZSSyslogConsolePadding * 2)],
     ]];
 
-    UIView *syslogBlacklistCard = zs_make_syslog_blacklist_card(syslogRow,
+    UIView *syslogBlacklistCard = zs_make_syslog_blacklist_card(syslogEnableRow,
+                                                                 syslogRow,
                                                                  blacklistHeader,
                                                                  self.syslogBlacklistStatusLabel,
                                                                  blacklistEntriesScroll);
@@ -11264,7 +11323,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_enterSyslogDebugMode {
     self.syslogDebugModeEnabled = YES;
 
-    zs_style_button_mirroring_glass_state(self.syslogButton, @"Debug", [UIColor colorWithWhite:1 alpha:0.95], zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_mirroring_glass_state(self.syslogButton, @"Disable system logs", [UIColor colorWithWhite:1 alpha:0.95], zs_mono_font(11, UIFontWeightSemibold));
 
     self.syslogTabEnabled = YES;
 
@@ -11287,7 +11346,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 - (void)zs_resetSyslogDebugMode {
     self.syslogDebugModeEnabled = NO;
-    zs_style_button_mirroring_glass_state(self.syslogButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.88], zs_mono_font(11, UIFontWeightSemibold));
+    zs_style_button_mirroring_glass_state(self.syslogButton, @"Enable system logs", [UIColor colorWithWhite:1 alpha:0.88], zs_mono_font(11, UIFontWeightSemibold));
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -11314,9 +11373,13 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     self.syslogTextLabel.attributedText = nil;
 }
 
+static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
+
 - (BOOL)zs_syslogLineIsBlacklisted:(NSString *)line {
-    if (self.syslogBlacklist.count == 0) return NO;
     NSString *lower = line.lowercaseString;
+    if ([lower containsString:kZSHardcodedSyslogBlacklistTerm]) return YES;
+
+    if (self.syslogBlacklist.count == 0) return NO;
     for (NSString *term in self.syslogBlacklist) {
         if (term.length > 0 && [lower containsString:term]) return YES;
     }
@@ -11374,6 +11437,279 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
             self.syslogConsoleScrollView.contentOffset = CGPointMake(0, maxOffsetY);
         }
     });
+
+    if (self.syslogFullScreenOpen) {
+        [self zs_renderSyslogFullScreenRows];
+    }
+}
+
+#pragma mark Syslog full-screen viewer
+
+- (void)zs_buildSyslogFullScreenPanelIfNeeded {
+    if (self.syslogFullScreenOverlay) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:unityView.bounds];
+    overlay.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.985];
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.hidden = YES;
+    overlay.clipsToBounds = YES;
+    zs_force_dark(overlay);
+    self.syslogFullScreenOverlay = overlay;
+
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [closeButton setTitle:@"\u2715" forState:UIControlStateNormal];
+    closeButton.titleLabel.font = zs_mono_font(15, UIFontWeightSemibold);
+    closeButton.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    [closeButton addTarget:self action:@selector(zs_closeSyslogFullScreenPanelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:closeButton];
+
+    UITextField *searchField = [[UITextField alloc] init];
+    searchField.font = zs_mono_font(12, UIFontWeightRegular);
+    searchField.textColor = UIColor.whiteColor;
+    searchField.tintColor = zs_accent_green_color();
+    searchField.attributedPlaceholder =
+        [[NSAttributedString alloc] initWithString:@"Search logs"
+                                         attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
+    searchField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    searchField.autocorrectionType = UITextAutocorrectionTypeNo;
+    searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
+    searchField.returnKeyType = UIReturnKeyDone;
+    searchField.delegate = self;
+    [searchField addTarget:self action:@selector(zs_syslogSearchFieldChanged:) forControlEvents:UIControlEventEditingChanged];
+    self.syslogSearchField = searchField;
+
+    UIVisualEffectView *searchGlass = zs_wrap_field_in_native_glass(searchField, 8);
+    UIView *searchContainer = searchGlass ?: searchField;
+    searchContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [overlay addSubview:searchContainer];
+
+    UIFont *copyFont = zs_mono_font(11, UIFontWeightSemibold);
+    UIButton *copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    copyButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_native_glass_with_font(copyButton, @"Copy", [UIColor colorWithWhite:1 alpha:0.9], copyFont);
+    [overlay addSubview:copyButton];
+    UIButton *copyFallback = zs_make_liquid_glass_fallback_twin(copyButton, @"Copy", [UIColor colorWithWhite:1 alpha:0.9], copyFont);
+    self.syslogCopyAllButton = zs_has_liquid_glass() ? copyButton : copyFallback;
+    [self.syslogCopyAllButton addTarget:self action:@selector(zs_copySyslogVisibleLogsTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.backgroundColor = UIColor.clearColor;
+    scrollView.showsVerticalScrollIndicator = YES;
+    scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    scrollView.alwaysBounceVertical = YES;
+    [overlay addSubview:scrollView];
+    self.syslogFullScreenScrollView = scrollView;
+
+    UIStackView *rowsStack = [[UIStackView alloc] init];
+    rowsStack.axis = UILayoutConstraintAxisVertical;
+    rowsStack.spacing = 0;
+    rowsStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [scrollView addSubview:rowsStack];
+    self.syslogFullScreenRowsStack = rowsStack;
+
+    static const CGFloat kZSSyslogFullScreenPadding = 16;
+    [NSLayoutConstraint activateConstraints:@[
+        [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kZSSyslogFullScreenPadding],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenPadding],
+        [closeButton.widthAnchor constraintEqualToConstant:30],
+        [closeButton.heightAnchor constraintEqualToConstant:30],
+
+        [copyButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [copyButton.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kZSSyslogFullScreenPadding],
+        [copyButton.heightAnchor constraintEqualToConstant:30],
+
+        [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [searchContainer.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:10],
+        [searchContainer.trailingAnchor constraintEqualToAnchor:copyButton.leadingAnchor constant:-10],
+        [searchContainer.heightAnchor constraintEqualToConstant:30],
+
+        [scrollView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [scrollView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
+
+        [rowsStack.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
+        [rowsStack.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
+        [rowsStack.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
+        [rowsStack.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
+        [rowsStack.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor],
+    ]];
+
+    [unityView addSubview:overlay];
+}
+
+- (NSArray<NSString *> *)zs_syslogFullScreenFilteredLines {
+    NSArray<NSString *> *base = [self zs_syslogDisplayLines];
+    NSString *query = [self.syslogSearchField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (query.length == 0) return base;
+
+    NSString *lowerQuery = query.lowercaseString;
+    NSMutableArray<NSString *> *filtered = [NSMutableArray array];
+    for (NSString *line in base) {
+        if ([line.lowercaseString containsString:lowerQuery]) {
+            [filtered addObject:line];
+        }
+    }
+    return filtered;
+}
+
+- (void)zs_renderSyslogFullScreenRows {
+    if (!self.syslogFullScreenRowsStack) return;
+
+    for (UIView *sub in self.syslogFullScreenRowsStack.arrangedSubviews) {
+        [self.syslogFullScreenRowsStack removeArrangedSubview:sub];
+        [sub removeFromSuperview];
+    }
+
+    NSArray<NSString *> *lines = [self zs_syslogFullScreenFilteredLines];
+    UIFont *rowFont = [UIFont fontWithName:@"Menlo-Regular" size:11]
+        ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+
+    NSInteger index = 0;
+    for (NSString *line in lines) {
+        UIView *rowView = [[UIView alloc] init];
+        rowView.translatesAutoresizingMaskIntoConstraints = NO;
+        rowView.backgroundColor = (index % 2 == 0)
+            ? [UIColor colorWithWhite:1 alpha:0.045]
+            : UIColor.clearColor;
+        rowView.userInteractionEnabled = YES;
+
+        UILabel *rowLabel = [[UILabel alloc] init];
+        rowLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        rowLabel.numberOfLines = 0;
+        rowLabel.font = rowFont;
+        rowLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+        rowLabel.text = line;
+        [rowView addSubview:rowLabel];
+
+        [NSLayoutConstraint activateConstraints:@[
+            [rowLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
+            [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
+            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:16],
+            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-16],
+        ]];
+
+        objc_setAssociatedObject(rowView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
+
+        UILongPressGestureRecognizer *longPress =
+            [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSyslogFullScreenRowLongPress:)];
+        longPress.minimumPressDuration = 0.4;
+        [rowView addGestureRecognizer:longPress];
+
+        [self.syslogFullScreenRowsStack addArrangedSubview:rowView];
+        index++;
+    }
+
+    if (lines.count == 0) {
+        UILabel *emptyLabel = [[UILabel alloc] init];
+        emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        emptyLabel.text = self.syslogSearchField.text.length > 0 ? @"No matching log lines" : @"[syslog] no output yet";
+        emptyLabel.font = rowFont;
+        emptyLabel.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+        emptyLabel.textAlignment = NSTextAlignmentCenter;
+        [NSLayoutConstraint activateConstraints:@[
+            [emptyLabel.heightAnchor constraintGreaterThanOrEqualToConstant:40],
+        ]];
+        [self.syslogFullScreenRowsStack addArrangedSubview:emptyLabel];
+    }
+}
+
+- (void)handleSyslogFullScreenRowLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+
+    NSString *text = objc_getAssociatedObject(gesture.view, "zs_logLineText");
+    if (!text.length) return;
+
+    [UIPasteboard generalPasteboard].string = text;
+
+    UIView *flash = [[UIView alloc] initWithFrame:gesture.view.bounds];
+    flash.backgroundColor = [zs_accent_green_color() colorWithAlphaComponent:0.25];
+    flash.userInteractionEnabled = NO;
+    flash.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [gesture.view addSubview:flash];
+    [UIView animateWithDuration:0.3 animations:^{
+        flash.alpha = 0;
+    } completion:^(BOOL finished) {
+        [flash removeFromSuperview];
+    }];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+}
+
+- (void)zs_syslogSearchFieldChanged:(UITextField *)field {
+    [self zs_renderSyslogFullScreenRows];
+}
+
+- (void)zs_copySyslogVisibleLogsTapped {
+    NSArray<NSString *> *lines = [self zs_syslogFullScreenFilteredLines];
+    [UIPasteboard generalPasteboard].string = [lines componentsJoinedByString:@"\n"];
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+}
+
+- (void)zs_expandSyslogPanelTapped {
+    [self zs_buildSyslogFullScreenPanelIfNeeded];
+    if (!self.syslogFullScreenOverlay || self.syslogFullScreenOpen) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (unityView) {
+        self.syslogFullScreenOverlay.frame = unityView.bounds;
+        [unityView bringSubviewToFront:self.syslogFullScreenOverlay];
+    }
+
+    [self zs_renderSyslogFullScreenRows];
+
+    self.syslogFullScreenOverlay.hidden = NO;
+    self.syslogFullScreenOverlay.alpha = 0;
+    self.syslogFullScreenOverlay.transform =
+        CGAffineTransformMakeTranslation(self.syslogFullScreenOverlay.bounds.size.width * 0.06, 0);
+    self.syslogFullScreenOpen = YES;
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.28
+                          delay:0
+         usingSpringWithDamping:0.85
+          initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        weakSelf.syslogFullScreenOverlay.alpha = 1;
+        weakSelf.syslogFullScreenOverlay.transform = CGAffineTransformIdentity;
+    } completion:nil];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_closeSyslogFullScreenPanelTapped {
+    if (!self.syslogFullScreenOverlay || !self.syslogFullScreenOpen) return;
+
+    [self.syslogSearchField resignFirstResponder];
+    self.syslogFullScreenOpen = NO;
+
+    CGAffineTransform endTransform =
+        CGAffineTransformMakeTranslation(self.syslogFullScreenOverlay.bounds.size.width * 0.06, 0);
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        weakSelf.syslogFullScreenOverlay.alpha = 0;
+        weakSelf.syslogFullScreenOverlay.transform = endTransform;
+    } completion:^(BOOL finished) {
+        weakSelf.syslogFullScreenOverlay.hidden = YES;
+        weakSelf.syslogFullScreenOverlay.transform = CGAffineTransformIdentity;
+    }];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
 }
 
 #pragma mark Auth
@@ -11819,6 +12155,10 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         [textField resignFirstResponder];
         return YES;
     }
+    if (textField == self.syslogSearchField) {
+        [textField resignFirstResponder];
+        return YES;
+    }
     if (textField != self.syslogBlacklistField) return YES;
 
     NSString *raw = textField.text ?: @"";
@@ -11921,6 +12261,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [self zs_updateSliderGlassVisibility];
     [self layoutDocsPanelForWindow:unityView];
 
+    if (self.syslogFullScreenOverlay && self.syslogFullScreenOpen) {
+        self.syslogFullScreenOverlay.frame = unityView.bounds;
+    }
 }
 
 #pragma mark Scroll-linked slider glass
