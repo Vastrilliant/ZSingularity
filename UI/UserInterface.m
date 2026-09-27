@@ -4307,14 +4307,11 @@ static UIView *zs_make_title_block(void) {
 
 @property (nonatomic, strong) UIButton *syslogButton;
 @property (nonatomic, assign) BOOL syslogDebugModeEnabled;
-@property (nonatomic, strong) CALayer *syslogButtonFillLayer;
-@property (nonatomic, strong) CADisplayLink *syslogHoldDisplayLink;
-@property (nonatomic, assign) NSTimeInterval syslogHoldStartTime;
-@property (nonatomic, assign) BOOL syslogHoldTriggered;
 
 @property (nonatomic, strong) UIView *syslogFullScreenOverlay;
 @property (nonatomic, strong) UITextField *syslogSearchField;
 @property (nonatomic, strong) UIButton *syslogExportButton;
+@property (nonatomic, strong) UIButton *syslogChannelToggleButton;
 @property (nonatomic, strong) UIScrollView *syslogFullScreenScrollView;
 @property (nonatomic, strong) UIStackView *syslogFullScreenRowsStack;
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
@@ -4828,10 +4825,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.holdConfirmTriggered = NO;
     self.holdConfirmStartTime = 0;
 
-    [self.syslogHoldDisplayLink invalidate];
-    self.syslogHoldDisplayLink = nil;
-    self.syslogHoldTriggered = NO;
-    self.syslogHoldStartTime = 0;
     self.syslogDebugModeEnabled = NO;
     self.syslogFullScreenOpen = NO;
 
@@ -4918,12 +4911,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogBlacklistStatusLabel = nil;
     self.syslogBlacklistEntriesStack = nil;
     self.syslogButton = nil;
-    self.syslogButtonFillLayer = nil;
 
     [self.syslogFullScreenOverlay removeFromSuperview];
     self.syslogFullScreenOverlay = nil;
     self.syslogSearchField = nil;
     self.syslogExportButton = nil;
+    self.syslogChannelToggleButton = nil;
     self.syslogFullScreenScrollView = nil;
     self.syslogFullScreenRowsStack = nil;
     self.syslogCopyToastView = nil;
@@ -5483,6 +5476,10 @@ static const CGFloat kContentFadeHeight = 22;
     [ZSyslogController sharedController].lineHandler = ^(NSString *line) {
         [weakSelf appendSyslogLine:line];
     };
+    BOOL syslogCaptureStarted = [[ZSyslogController sharedController] start];
+    if (!syslogCaptureStarted) {
+        [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
+    }
 
     self.scrollViewport = [[UIView alloc] init];
     self.scrollViewport.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5829,12 +5826,6 @@ static const CGFloat kContentFadeHeight = 22;
     self.syslogButton = syslogButton;
 
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UILongPressGestureRecognizer *syslogHold =
-        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSyslogButtonLongPress:)];
-    syslogHold.minimumPressDuration = 0;
-    syslogHold.cancelsTouchesInView = NO;
-    [syslogButton addGestureRecognizer:syslogHold];
 
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         dumpIL2CPPMethodsButton,
@@ -11105,30 +11096,15 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 #pragma mark Syslog
 
 - (void)toggleSyslogTapped {
-
-    if (self.syslogHoldTriggered) {
-        self.syslogHoldTriggered = NO;
-        return;
-    }
-
-    if (self.syslogDebugModeEnabled) {
-        [self zs_resetSyslogDebugMode];
-        return;
-    }
-
     self.syslogTabEnabled = !self.syslogTabEnabled;
 
     if (self.syslogTabEnabled) {
-        BOOL started = [[ZSyslogController sharedController] start];
+        [self.syslogButton setTitle:@"Disable system logs" forState:UIControlStateNormal];
         [self zs_renderSyslogBuffer];
-        if (!started) {
-            [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
-        }
         [self zs_openSyslogFullScreenPanel];
         ZLog(@"[UserInterface] syslog console opened");
     } else {
-        [self stopSyslog];
-        [self zs_renderSyslogBuffer];
+        [self.syslogButton setTitle:@"Enable system logs" forState:UIControlStateNormal];
         if (self.syslogFullScreenOpen) {
             [self closeDocsPanel];
         }
@@ -11140,126 +11116,21 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [haptic impactOccurred];
 }
 
-- (void)handleSyslogButtonLongPress:(UILongPressGestureRecognizer *)gesture {
-    switch (gesture.state) {
-        case UIGestureRecognizerStateBegan: {
-            self.syslogHoldStartTime = CACurrentMediaTime();
-            self.syslogHoldTriggered = NO;
-
-            if (!self.syslogButtonFillLayer) {
-                CALayer *fill = [CALayer layer];
-
-                fill.backgroundColor = [UIColor colorWithRed:1.0 green:0.08 blue:0.08 alpha:0.85].CGColor;
-                fill.anchorPoint = CGPointMake(0, 0);
-
-                fill.cornerRadius = 200;
-                fill.cornerCurve = kCACornerCurveContinuous;
-
-                [self.syslogButton.layer insertSublayer:fill atIndex:0];
-                self.syslogButtonFillLayer = fill;
-            }
-
-            [self.syslogHoldDisplayLink invalidate];
-            self.syslogHoldDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_syslogHoldTick:)];
-            [self.syslogHoldDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-            break;
-        }
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled:
-        case UIGestureRecognizerStateFailed: {
-            [self.syslogHoldDisplayLink invalidate];
-            self.syslogHoldDisplayLink = nil;
-
-            if (!self.syslogHoldTriggered) {
-
-                [CATransaction begin];
-                [CATransaction setAnimationDuration:0.18];
-                self.syslogButtonFillLayer.frame = CGRectMake(0, 0, 0, self.syslogButton.bounds.size.height);
-                self.syslogButtonFillLayer.cornerRadius = 200;
-                [CATransaction commit];
-            } else {
-                __weak typeof(self) weakSelf = self;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    weakSelf.syslogHoldTriggered = NO;
-                });
-            }
-            break;
-        }
-        default:
-            break;
-    }
-}
-
-- (void)zs_syslogHoldTick:(CADisplayLink *)link {
-
-    static const NSTimeInterval kSyslogHoldDuration = 1.0;
-    NSTimeInterval elapsed = CACurrentMediaTime() - self.syslogHoldStartTime;
-    CGFloat pct = (CGFloat)MIN(1.0, elapsed / kSyslogHoldDuration);
-
-    CGRect bounds = self.syslogButton.bounds;
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.syslogButtonFillLayer.frame = CGRectMake(0, 0, bounds.size.width * pct, bounds.size.height);
-    self.syslogButtonFillLayer.cornerRadius = 200;
-    [CATransaction commit];
-
-    if (pct >= 1.0 && !self.syslogHoldTriggered) {
-        self.syslogHoldTriggered = YES;
-        [link invalidate];
-        self.syslogHoldDisplayLink = nil;
-        [self zs_enterSyslogDebugMode];
-    }
-}
-
-- (void)zs_enterSyslogDebugMode {
-    self.syslogDebugModeEnabled = YES;
-
-    [self.syslogButton setTitle:@"Disable system logs" forState:UIControlStateNormal];
-    [self.syslogButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.95] forState:UIControlStateNormal];
-
-    self.syslogTabEnabled = YES;
-
-    BOOL started = [[ZSyslogController sharedController] start];
-    [self zs_renderSyslogBuffer];
-    if (!started) {
-        [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
-    }
-
-    [self zs_openSyslogFullScreenPanel];
-
-    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
-
-    ZLog(@"Debug syslog mode enabled - filtering to tweak-only log lines");
-}
-
-- (void)zs_resetSyslogDebugMode {
-    self.syslogDebugModeEnabled = NO;
-    [self.syslogButton setTitle:@"Enable system logs" forState:UIControlStateNormal];
-    [self.syslogButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.88] forState:UIControlStateNormal];
-
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    self.syslogButtonFillLayer.frame = CGRectMake(0, 0, 0, self.syslogButton.bounds.size.height);
-    self.syslogButtonFillLayer.cornerRadius = 200;
-    [CATransaction commit];
-
-    UIView *unityView = zs_ui_host_view();
-    if (unityView) {
-        [self layoutPanelForWindow:unityView];
-    }
+- (void)zs_toggleSyslogChannelTapped {
+    self.syslogDebugModeEnabled = !self.syslogDebugModeEnabled;
+    [self zs_updateSyslogChannelToggleButtonTitle];
     [self zs_renderSyslogBuffer];
 
     UIImpactFeedbackGenerator *haptic =
         [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
-    ZLog(@"Debug syslog mode disabled");
+    ZLog(@"[UserInterface] syslog channel switched to %@", self.syslogDebugModeEnabled ? @"tweak-only" : @"all logs");
 }
 
-- (void)stopSyslog {
-    [[ZSyslogController sharedController] stop];
-    [self.syslogLines removeAllObjects];
+- (void)zs_updateSyslogChannelToggleButtonTitle {
+    [self.syslogChannelToggleButton setTitle:(self.syslogDebugModeEnabled ? @"Debug" : @"Syslog")
+                                     forState:UIControlStateNormal];
 }
 
 static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
@@ -11452,6 +11323,16 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
     self.syslogExportButton = zs_has_liquid_glass() ? exportButton : exportFallback;
     [self.syslogExportButton addTarget:self action:@selector(zs_exportSyslogVisibleLogsTapped) forControlEvents:UIControlEventTouchUpInside];
 
+    UIFont *channelToggleFont = zs_mono_font(11, UIFontWeightSemibold);
+    UIButton *channelToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    channelToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_native_glass_with_font(channelToggleButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.9], channelToggleFont);
+    [overlay addSubview:channelToggleButton];
+    UIButton *channelToggleFallback = zs_make_liquid_glass_fallback_twin(channelToggleButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.9], channelToggleFont);
+    self.syslogChannelToggleButton = zs_has_liquid_glass() ? channelToggleButton : channelToggleFallback;
+    [self.syslogChannelToggleButton addTarget:self action:@selector(zs_toggleSyslogChannelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self zs_updateSyslogChannelToggleButtonTitle];
+
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     scrollView.backgroundColor = UIColor.clearColor;
@@ -11478,8 +11359,12 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
         [exportButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:10],
         [exportButton.heightAnchor constraintEqualToConstant:30],
 
+        [channelToggleButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [channelToggleButton.leadingAnchor constraintEqualToAnchor:exportButton.trailingAnchor constant:8],
+        [channelToggleButton.heightAnchor constraintEqualToConstant:30],
+
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:exportButton.trailingAnchor constant:10],
+        [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:channelToggleButton.trailingAnchor constant:10],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
         [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
@@ -11579,7 +11464,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
             UILabel *headerLabel = [[UILabel alloc] init];
             headerLabel.translatesAutoresizingMaskIntoConstraints = NO;
             headerLabel.numberOfLines = 0;
-            headerLabel.textAlignment = NSTextAlignmentRight;
+            headerLabel.textAlignment = NSTextAlignmentLeft;
             headerLabel.font = headerFont;
             headerLabel.textColor = [UIColor colorWithWhite:1 alpha:0.32];
             headerLabel.text = header;
@@ -11587,8 +11472,8 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
             [NSLayoutConstraint activateConstraints:@[
                 [headerLabel.topAnchor constraintEqualToAnchor:rowLabel.bottomAnchor constant:3],
-                [headerLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:rowLabel.leadingAnchor],
-                [headerLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
+                [headerLabel.leadingAnchor constraintEqualToAnchor:rowLabel.leadingAnchor],
+                [headerLabel.trailingAnchor constraintLessThanOrEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
                 [headerLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
             ]];
         } else {
