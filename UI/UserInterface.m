@@ -4355,6 +4355,7 @@ static UIView *zs_make_title_block(void) {
 
 + (instancetype)shared;
 - (void)installIfNeeded;
+- (void)zs_bootstrapSyslogCaptureIfNeeded;
 @end
 
 static const NSTimeInterval kPostFXReapplyInterval = 1.0;
@@ -4389,13 +4390,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     return instance;
 }
 
-- (void)installIfNeeded {
-    if (self.installed) return;
-    UIView *unityView = zs_ui_host_view();
-    if (!unityView) return;
-
-    ZLog(@"[UserInterface] installing gesture-based panel opener");
-    self.installed = YES;
+- (void)zs_bootstrapSyslogCaptureIfNeeded {
+    if (self.syslogChannelLines) return;
 
     self.syslogChannelLines = [NSMutableArray array];
     self.debugChannelLines = [NSMutableArray array];
@@ -4414,6 +4410,15 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     if (!syslogCaptureStarted) {
         [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
     }
+}
+
+- (void)installIfNeeded {
+    if (self.installed) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    ZLog(@"[UserInterface] installing gesture-based panel opener");
+    self.installed = YES;
 
     [unityView setMultipleTouchEnabled:YES];
     unityView.exclusiveTouch = NO;
@@ -13574,6 +13579,8 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 
 __attribute__((constructor))
 static void graphics_debug_overlay_init(void) {
+    [[UserInterface shared] zs_bootstrapSyslogCaptureIfNeeded];
+
     __block NSTimer *installTimer;
     installTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
         [[UserInterface shared] installIfNeeded];
