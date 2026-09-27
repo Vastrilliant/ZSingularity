@@ -22,6 +22,7 @@ typedef NS_ENUM(int32_t, ZSGlobalSceneState) {
 };
 
 BOOL ZSGlobalScene_Current(int32_t * _Nonnull outState);
+NSString * _Nonnull ZSGlobalSceneState_Name(int32_t state);
 
 #pragma mark - FPS120Controller
 

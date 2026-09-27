@@ -2695,6 +2695,22 @@ BOOL ZSGlobalScene_Current(int32_t *outState) {
     return YES;
 }
 
+NSString *ZSGlobalSceneState_Name(int32_t state) {
+    switch (state) {
+        case ZSGlobalSceneStateLogin: return @"Login";
+        case ZSGlobalSceneStateBattle: return @"Battle";
+        case ZSGlobalSceneStateMain: return @"Main";
+        case ZSGlobalSceneStateStory: return @"Story";
+        case ZSGlobalSceneStateDungeon: return @"Dungeon";
+        case ZSGlobalSceneStateMirrorDungeon: return @"MirrorDungeon";
+        case ZSGlobalSceneStateRailwayDungeon: return @"RailwayDungeon";
+        case ZSGlobalSceneStateStoryMirrorDungeon: return @"StoryMirrorDungeon";
+        case ZSGlobalSceneStateProjectGS: return @"ProjectGS";
+        case ZSGlobalSceneStateRpg: return @"Rpg";
+        default: return @"Unknown";
+    }
+}
+
 #pragma mark - Custom Greeting Text
 
 static NSString * const kZSMiscSettingsSection = @"misc";

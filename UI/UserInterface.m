@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreText/CoreText.h>
+#import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <string.h>
@@ -4163,7 +4164,7 @@ static UIView *zs_make_title_block(void) {
 
 #pragma mark - Overlay
 
-@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate>
+@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate>
 @property (nonatomic, strong) UIVisualEffectView *glassContainer;
 @property (nonatomic, strong) UIVisualEffectView *panelGlass;
 @property (nonatomic, strong) UIVisualEffectView *handleGlass;
@@ -4308,10 +4309,16 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIButton *syslogButton;
 @property (nonatomic, assign) BOOL syslogDebugModeEnabled;
 
+@property (nonatomic, strong) UIButton *keepAliveButton;
+@property (nonatomic, assign) BOOL keepAliveEnabled;
+@property (nonatomic, strong) CLLocationManager *keepAliveLocationManager;
+
 @property (nonatomic, strong) UIView *syslogFullScreenOverlay;
 @property (nonatomic, strong) UITextField *syslogSearchField;
 @property (nonatomic, strong) UIButton *syslogExportButton;
 @property (nonatomic, strong) UIButton *syslogChannelToggleButton;
+@property (nonatomic, strong) UILabel *syslogInfoLabel;
+@property (nonatomic, strong) NSTimer *syslogInfoRefreshTimer;
 @property (nonatomic, strong) UIScrollView *syslogFullScreenScrollView;
 @property (nonatomic, strong) UIStackView *syslogFullScreenRowsStack;
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
@@ -4827,6 +4834,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     self.syslogDebugModeEnabled = NO;
     self.syslogFullScreenOpen = NO;
+    [self.syslogInfoRefreshTimer invalidate];
+    self.syslogInfoRefreshTimer = nil;
 
     for (NSTimer *timer in self.doctorPollTimers.allValues) {
         [timer invalidate];
@@ -4917,6 +4926,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogSearchField = nil;
     self.syslogExportButton = nil;
     self.syslogChannelToggleButton = nil;
+    self.syslogInfoLabel = nil;
     self.syslogFullScreenScrollView = nil;
     self.syslogFullScreenRowsStack = nil;
     self.syslogCopyToastView = nil;
@@ -5827,10 +5837,15 @@ static const CGFloat kContentFadeHeight = 22;
 
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *keepAliveButton = zs_make_grouped_action_button(@"Keep Alive", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    self.keepAliveButton = keepAliveButton;
+    [keepAliveButton addTarget:self action:@selector(toggleKeepAliveTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         dumpIL2CPPMethodsButton,
         librarySymlinkButton,
         syslogButton,
+        keepAliveButton,
     ]);
     developerActionsCard.layer.borderWidth = 1;
     developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -7849,6 +7864,60 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
                                               message:[NSString stringWithFormat:@"Saved to %@", outputURL.path ?: @"Documents"]];
         }];
     }];
+}
+
+#pragma mark Developer (Keep Alive)
+
+- (void)toggleKeepAliveTapped {
+    self.keepAliveEnabled = !self.keepAliveEnabled;
+
+    if (self.keepAliveEnabled) {
+        if (!self.keepAliveLocationManager) {
+            self.keepAliveLocationManager = [[CLLocationManager alloc] init];
+            self.keepAliveLocationManager.delegate = self;
+        }
+        self.keepAliveLocationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
+        self.keepAliveLocationManager.distanceFilter = kCLDistanceFilterNone;
+        self.keepAliveLocationManager.allowsBackgroundLocationUpdates = YES;
+        self.keepAliveLocationManager.pausesLocationUpdatesAutomatically = NO;
+
+        CLAuthorizationStatus status = self.keepAliveLocationManager.authorizationStatus;
+        if (status == kCLAuthorizationStatusNotDetermined) {
+            [self.keepAliveLocationManager requestAlwaysAuthorization];
+        } else {
+            [self.keepAliveLocationManager startUpdatingLocation];
+        }
+
+        [self.keepAliveButton setTitle:@"Keep Alive (Active)" forState:UIControlStateNormal];
+        ZLog(@"[UserInterface] Keep Alive enabled - starting low-accuracy location updates");
+    } else {
+        [self.keepAliveLocationManager stopUpdatingLocation];
+        [self.keepAliveButton setTitle:@"Keep Alive" forState:UIControlStateNormal];
+        ZLog(@"[UserInterface] Keep Alive disabled - stopped location updates");
+    }
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
+    if (!self.keepAliveEnabled) return;
+
+    CLAuthorizationStatus status = manager.authorizationStatus;
+    if (status == kCLAuthorizationStatusAuthorizedAlways || status == kCLAuthorizationStatusAuthorizedWhenInUse) {
+        [manager startUpdatingLocation];
+    } else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
+        self.keepAliveEnabled = NO;
+        [self.keepAliveButton setTitle:@"Keep Alive" forState:UIControlStateNormal];
+        ZLog(@"[UserInterface] Keep Alive: location permission denied");
+    }
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+}
+
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    ZLog(@"[UserInterface] Keep Alive location error: %@", error.localizedDescription);
 }
 
 #pragma mark Developer (Library Symlink)
@@ -11118,7 +11187,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 - (void)zs_toggleSyslogChannelTapped {
     self.syslogDebugModeEnabled = !self.syslogDebugModeEnabled;
-    [self zs_updateSyslogChannelToggleButtonTitle];
+    [self zs_updateSyslogInfoLabel];
     [self zs_renderSyslogBuffer];
 
     UIImpactFeedbackGenerator *haptic =
@@ -11128,9 +11197,34 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     ZLog(@"[UserInterface] syslog channel switched to %@", self.syslogDebugModeEnabled ? @"tweak-only" : @"all logs");
 }
 
-- (void)zs_updateSyslogChannelToggleButtonTitle {
-    [self.syslogChannelToggleButton setTitle:(self.syslogDebugModeEnabled ? @"Debug" : @"Syslog")
-                                     forState:UIControlStateNormal];
+- (void)zs_updateSyslogInfoLabel {
+    if (!self.syslogInfoLabel) return;
+
+    NSString *channelName = self.syslogDebugModeEnabled ? @"Debug" : @"Syslog";
+    BOOL isBattle = [FPS120Controller shared].isInBattle;
+
+    int32_t sceneState = 0;
+    NSString *sceneName = ZSGlobalScene_Current(&sceneState) ? ZSGlobalSceneState_Name(sceneState) : @"Unknown";
+
+    self.syslogInfoLabel.text = [NSString stringWithFormat:@"Channel: %@\nIsBattle: %d\nSceneState: %@[%d]",
+                                  channelName, isBattle ? 1 : 0, sceneName, sceneState];
+}
+
+- (void)zs_startSyslogInfoRefresh {
+    if (self.syslogInfoRefreshTimer) return;
+    __weak typeof(self) weakSelf = self;
+    self.syslogInfoRefreshTimer = [NSTimer timerWithTimeInterval:1.0
+                                                           repeats:YES
+                                                             block:^(NSTimer *timer) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.syslogFullScreenOpen) {
+            [timer invalidate];
+            if (strongSelf) strongSelf.syslogInfoRefreshTimer = nil;
+            return;
+        }
+        [strongSelf zs_updateSyslogInfoLabel];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.syslogInfoRefreshTimer forMode:NSRunLoopCommonModes];
 }
 
 static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
@@ -11316,24 +11410,33 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
     searchContainer.translatesAutoresizingMaskIntoConstraints = NO;
     [overlay addSubview:searchContainer];
 
-    UIFont *exportFont = zs_mono_font(11, UIFontWeightSemibold);
+    UIImageSymbolConfiguration *pillSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+
+    UIImage *exportImage = [UIImage systemImageNamed:@"square.and.arrow.up" withConfiguration:pillSymbolConfig];
     UIButton *exportButton = [UIButton buttonWithType:UIButtonTypeSystem];
     exportButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(exportButton, @"Export Logs", [UIColor colorWithWhite:1 alpha:0.9], exportFont);
+    zs_style_pill_icon_button_as_native_glass(exportButton, exportImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [overlay addSubview:exportButton];
-    UIButton *exportFallback = zs_make_liquid_glass_fallback_twin(exportButton, @"Export Logs", [UIColor colorWithWhite:1 alpha:0.9], exportFont);
-    self.syslogExportButton = zs_has_liquid_glass() ? exportButton : exportFallback;
+    self.syslogExportButton = exportButton;
     [self.syslogExportButton addTarget:self action:@selector(zs_exportSyslogVisibleLogsTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    UIFont *channelToggleFont = zs_mono_font(11, UIFontWeightSemibold);
+    UIImage *channelToggleImage = [UIImage systemImageNamed:@"switch.2" withConfiguration:pillSymbolConfig];
     UIButton *channelToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
     channelToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(channelToggleButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.9], channelToggleFont);
+    zs_style_pill_icon_button_as_native_glass(channelToggleButton, channelToggleImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [overlay addSubview:channelToggleButton];
-    UIButton *channelToggleFallback = zs_make_liquid_glass_fallback_twin(channelToggleButton, @"Syslog", [UIColor colorWithWhite:1 alpha:0.9], channelToggleFont);
-    self.syslogChannelToggleButton = zs_has_liquid_glass() ? channelToggleButton : channelToggleFallback;
+    self.syslogChannelToggleButton = channelToggleButton;
     [self.syslogChannelToggleButton addTarget:self action:@selector(zs_toggleSyslogChannelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self zs_updateSyslogChannelToggleButtonTitle];
+
+    UILabel *infoLabel = [[UILabel alloc] init];
+    infoLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    infoLabel.numberOfLines = 3;
+    infoLabel.textAlignment = NSTextAlignmentLeft;
+    infoLabel.font = zs_mono_font(9, UIFontWeightRegular);
+    infoLabel.textColor = [UIColor colorWithWhite:1 alpha:0.6];
+    [overlay addSubview:infoLabel];
+    self.syslogInfoLabel = infoLabel;
+    [self zs_updateSyslogInfoLabel];
 
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -11359,14 +11462,19 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
 
         [exportButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [exportButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:10],
+        [exportButton.widthAnchor constraintEqualToConstant:30],
         [exportButton.heightAnchor constraintEqualToConstant:30],
 
         [channelToggleButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [channelToggleButton.leadingAnchor constraintEqualToAnchor:exportButton.trailingAnchor constant:8],
+        [channelToggleButton.widthAnchor constraintEqualToConstant:30],
         [channelToggleButton.heightAnchor constraintEqualToConstant:30],
 
+        [infoLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [infoLabel.leadingAnchor constraintEqualToAnchor:channelToggleButton.trailingAnchor constant:12],
+
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:channelToggleButton.trailingAnchor constant:10],
+        [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
         [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
@@ -11617,6 +11725,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = YES;
     [self zs_renderSyslogFullScreenRows];
+    [self zs_updateSyslogInfoLabel];
+    [self zs_startSyslogInfoRefresh];
 
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];

@@ -131,6 +131,15 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :$key bool true" "$PLIST"
           done
 
+          for key in NSLocationWhenInUseUsageDescription NSLocationAlwaysAndWhenInUseUsageDescription; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$PLIST" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :$key string 'Used by the Keep Alive developer tool to prevent suspension during testing.'" "$PLIST"
+          done
+
+          /usr/libexec/PlistBuddy -c "Delete :UIBackgroundModes" "$PLIST" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string location" "$PLIST"
+
       - name: Install injection tooling
         run: python3 -m pip install --quiet --break-system-packages lief
 

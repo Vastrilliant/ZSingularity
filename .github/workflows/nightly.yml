@@ -79,6 +79,7 @@ jobs:
             -framework ImageIO \
             -framework UniformTypeIdentifiers \
             -framework Security \
+            -framework CoreLocation \
             -lcompression \
             -lc++ \
             -stdlib=libc++ \
