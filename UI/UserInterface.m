@@ -11351,7 +11351,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
     [NSLayoutConstraint activateConstraints:@[
         [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
-        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kPanelPadding],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kPanelPadding / 2],
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
@@ -11410,9 +11410,9 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat logIndent = kPanelPadding + overlaySafeInsets.left;
+    CGFloat logIndent = (kPanelPadding / 2) + overlaySafeInsets.left;
     CGFloat indexColumnWidth = 22;
-    CGFloat rowLeadingInset = logIndent + indexColumnWidth + 6;
+    CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
     CGFloat rowTrailingInset = 16 + overlaySafeInsets.right;
 
     UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
