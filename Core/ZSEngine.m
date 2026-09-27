@@ -520,13 +520,42 @@ static NSString *zs_file_index_file_path(void) {
     return [documentsDir stringByAppendingPathComponent:@"Index.json"];
 }
 
+// Index.json can grow to hold thousands of cached file paths (CAB map, FMOD
+// names, localization paths). Loading/writing it as one NSData blob means one
+// single contiguous allocation for the whole thing - on iOS that has to be
+// satisfied by one vm_allocate call, and a large-enough or unlucky-enough one
+// can fail even when there's technically free memory elsewhere (address space
+// fragmentation, not just total free RAM). When that allocation fails, malloc
+// aborts the process outright. Both sides below stream instead of building
+// one giant buffer, and the write goes through a temp file + rename so a
+// crash or kill mid-write can never leave Index.json half-written/corrupt.
+
 static NSDictionary *zs_load_file_index_dictionary(void) {
     NSString *path = zs_file_index_file_path();
     if (!path) return nil;
-    NSData *data = [NSData dataWithContentsOfFile:path];
-    if (!data) return nil;
+
+    // Memory-map rather than copy the file into a fresh heap buffer; the
+    // pages are paged in on demand instead of requiring one upfront
+    // contiguous allocation the size of the whole file.
+    NSError *readError = nil;
+    NSData *data = [NSData dataWithContentsOfFile:path
+                                           options:NSDataReadingMappedIfSafe
+                                             error:&readError];
+    if (!data) {
+        if (readError && readError.code != NSFileReadNoSuchFileError) {
+            ZLog(@"[ZSScripts] failed to read Index.json: %@", readError);
+        }
+        return nil;
+    }
+
     NSError *error = nil;
-    id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    id obj = nil;
+    @try {
+        obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+    } @catch (NSException *exception) {
+        ZLog(@"[ZSScripts] Index.json parse threw, treating as unreadable: %@", exception);
+        return nil;
+    }
     if (error || ![obj isKindOfClass:[NSDictionary class]]) {
         if (error) ZLog(@"[ZSScripts] failed to parse Index.json: %@", error);
         return nil;
@@ -537,15 +566,46 @@ static NSDictionary *zs_load_file_index_dictionary(void) {
 static void zs_write_file_index_dictionary(NSDictionary *dict) {
     NSString *path = zs_file_index_file_path();
     if (!path) return;
-    NSError *error = nil;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:&error];
-    if (error || !data) {
-        ZLog(@"[ZSScripts] failed to encode Index.json: %@", error);
+
+    if (![NSJSONSerialization isValidJSONObject:dict]) {
+        ZLog(@"[ZSScripts] refusing to write Index.json: not a valid JSON object");
         return;
     }
-    NSError *writeError = nil;
-    if (![data writeToFile:path options:NSDataWritingAtomic error:&writeError]) {
-        ZLog(@"[ZSScripts] failed to write Index.json: %@", writeError);
+
+    NSString *tmpPath = [path stringByAppendingPathExtension:@"tmp"];
+    [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+    if (![NSFileManager.defaultManager createFileAtPath:tmpPath contents:nil attributes:nil]) {
+        ZLog(@"[ZSScripts] failed to create temp file for Index.json");
+        return;
+    }
+
+    NSOutputStream *stream = [NSOutputStream outputStreamToFileAtPath:tmpPath append:NO];
+    [stream open];
+
+    // Streams the encoded JSON out incrementally instead of materializing the
+    // whole encoded document as one NSData first - the fix for the single
+    // huge allocation described above.
+    NSError *error = nil;
+    NSInteger written = 0;
+    @try {
+        written = [NSJSONSerialization writeJSONObject:dict toStream:stream options:0 error:&error];
+    } @catch (NSException *exception) {
+        ZLog(@"[ZSScripts] Index.json encode threw: %@", exception);
+        written = -1;
+    }
+    [stream close];
+
+    if (written <= 0 || error) {
+        if (error) ZLog(@"[ZSScripts] failed to encode Index.json: %@", error);
+        [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
+        return;
+    }
+
+    NSError *moveError = nil;
+    [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    if (![NSFileManager.defaultManager moveItemAtPath:tmpPath toPath:path error:&moveError]) {
+        ZLog(@"[ZSScripts] failed to move Index.json into place: %@", moveError);
+        [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
     }
 }
 

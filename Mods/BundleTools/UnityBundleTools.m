@@ -1449,6 +1449,15 @@ static NSSet<NSString *> *s_fmodNames = nil;
 static NSDictionary<NSString *, NSArray<NSString *> *> *s_localizeMap = nil;
 static BOOL s_hasIndex = NO;
 static const NSUInteger kZSFIMaxPathLength = 1024;
+// Hard ceilings on how much a single index pass is allowed to accumulate in memory.
+// Without these, a bloated UnityCache/Shared folder (or a pathological localization
+// tree) can grow the in-memory maps and the on-disk Index.json without bound. On
+// iOS that eventually means a single very large contiguous allocation (the JSON
+// buffer) that the allocator can't satisfy - malloc/vm_allocate fails and the
+// process aborts. Capping the totals keeps every pass, and the file it writes,
+// bounded regardless of how large the cache on disk has grown.
+static const NSUInteger kZSFIMaxTotalIndexedFiles = 100000;
+static const NSUInteger kZSFIMaxPathsPerCAB = 64;
 
 @implementation ZSFileIndex
 
@@ -1456,35 +1465,46 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
 
 + (NSDictionary *)zsfi_fingerprintForRoots:(NSArray<NSString *> *)roots {
     NSFileManager *fm = NSFileManager.defaultManager;
-    NSUInteger fileCount = 0;
-    unsigned long long totalSize = 0;
-    NSTimeInterval newestModified = 0;
+    __block NSUInteger fileCount = 0;
+    __block unsigned long long totalSize = 0;
+    __block NSTimeInterval newestModified = 0;
 
     NSArray<NSURLResourceKey> *keys = @[NSURLIsRegularFileKey, NSURLFileSizeKey, NSURLContentModificationDateKey];
 
     for (NSString *root in roots) {
-        NSDirectoryEnumerator<NSURL *> *walker =
-            [fm enumeratorAtURL:[NSURL fileURLWithPath:root]
-     includingPropertiesForKeys:keys
-                        options:0
-                   errorHandler:^BOOL(NSURL *url, NSError *error) {
-                       return YES;
-                   }];
-        for (NSURL *fileURL in walker) {
-            NSNumber *isRegular = nil;
-            [fileURL getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
-            if (!isRegular.boolValue) continue;
+        if (root.length > kZSFIMaxPathLength) continue;
+        @try {
+            NSDirectoryEnumerator<NSURL *> *walker =
+                [fm enumeratorAtURL:[NSURL fileURLWithPath:root]
+         includingPropertiesForKeys:keys
+                            options:0
+                       errorHandler:^BOOL(NSURL *url, NSError *error) {
+                           return YES;
+                       }];
+            for (NSURL *fileURL in walker) {
+                @autoreleasepool {
+                    NSNumber *isRegular = nil;
+                    [fileURL getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+                    if (!isRegular.boolValue) continue;
 
-            NSNumber *size = nil;
-            [fileURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            NSDate *modified = nil;
-            [fileURL getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+                    NSNumber *size = nil;
+                    [fileURL getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
+                    NSDate *modified = nil;
+                    [fileURL getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
 
-            fileCount++;
-            totalSize += size.unsignedLongLongValue;
-            NSTimeInterval modInterval = modified.timeIntervalSince1970;
-            if (modInterval > newestModified) newestModified = modInterval;
+                    fileCount++;
+                    totalSize += size.unsignedLongLongValue;
+                    NSTimeInterval modInterval = modified.timeIntervalSince1970;
+                    if (modInterval > newestModified) newestModified = modInterval;
+
+                    if (fileCount >= kZSFIMaxTotalIndexedFiles) break;
+                }
+            }
+        } @catch (NSException *exception) {
+            ZLog(@"[ZSFileIndex] skipping root %@ while fingerprinting after Foundation threw: %@", root, exception);
+            continue;
         }
+        if (fileCount >= kZSFIMaxTotalIndexedFiles) break;
     }
 
     return @{
@@ -1499,15 +1519,26 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
 + (NSDictionary<NSString *, NSArray<NSString *> *> *)zsfi_buildCABMapForRoots:(NSArray<NSString *> *)roots {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *map = [NSMutableDictionary dictionary];
+    // Captured once, from attributes we already fetched during the walk, so the
+    // later sort never has to touch the filesystem again (see below).
+    NSMutableDictionary<NSString *, NSDate *> *mtimeByPath = [NSMutableDictionary dictionary];
     NSUInteger filesScanned = 0;
+    NSUInteger totalIndexed = 0;
+    BOOL truncated = NO;
 
     for (NSString *root in roots) {
+        if (truncated) break;
         if (root.length > kZSFIMaxPathLength) continue;
         @try {
             NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
             NSString *relPath;
             while ((relPath = [walker nextObject])) {
                 @autoreleasepool {
+                    if (totalIndexed >= kZSFIMaxTotalIndexedFiles) {
+                        truncated = YES;
+                        break;
+                    }
+
                     NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
                     if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
 
@@ -1523,7 +1554,14 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
                             bucket = [NSMutableArray array];
                             map[cab] = bucket;
                         }
-                        [bucket addObject:fullPath];
+                        // Cap per-CAB so a single collided hash can't blow the
+                        // total budget on its own.
+                        if (bucket.count < kZSFIMaxPathsPerCAB) {
+                            [bucket addObject:fullPath];
+                            NSDate *modified = attrs[NSFileModificationDate];
+                            if (modified) mtimeByPath[fullPath] = modified;
+                            totalIndexed++;
+                        }
                     }
                 }
             }
@@ -1533,12 +1571,23 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
         }
     }
 
+    // Sort using the modification dates gathered above instead of re-stat'ing
+    // every path from inside the comparator. The old comparator called
+    // -attributesOfItemAtPath: twice per comparison, which is O(n log n) extra
+    // filesystem round-trips for every CAB bucket - on a large cache that adds
+    // up to enormous syscall/allocation churn during a single sort and was a
+    // major contributor to the crashes under heavy indexing load.
     for (NSString *cab in map) {
         [map[cab] sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-            NSDate *da = [fm attributesOfItemAtPath:a error:nil][NSFileModificationDate];
-            NSDate *db = [fm attributesOfItemAtPath:b error:nil][NSFileModificationDate];
-            return [db compare:da ?: NSDate.distantPast];
+            NSDate *da = mtimeByPath[a] ?: NSDate.distantPast;
+            NSDate *db = mtimeByPath[b] ?: NSDate.distantPast;
+            return [db compare:da];
         }];
+    }
+
+    if (truncated) {
+        ZLog(@"[ZSFileIndex] CAB index capped at %lu indexed file(s) to bound memory use - some entries under UnityCache/Shared were left out of this pass",
+             (unsigned long)kZSFIMaxTotalIndexedFiles);
     }
 
     ZLog(@"[ZSFileIndex] rebuilt CAB index: %lu file(s) scanned under UnityCache/Shared, %lu distinct CAB(s) found",
@@ -1562,8 +1611,11 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableDictionary<NSString *, NSArray<NSString *> *> *map = [NSMutableDictionary dictionary];
     NSUInteger totalFiles = 0;
+    BOOL truncated = NO;
 
     for (NSString *code in [LocalizationTransplant languageCodes]) {
+        if (truncated) { map[code] = @[]; continue; }
+
         NSString *languageDir = [LocalizationTransplant languageDirectoryForCode:code];
         BOOL isDirectory = NO;
         NSMutableArray<NSString *> *paths = [NSMutableArray array];
@@ -1572,9 +1624,15 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
                 NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:languageDir];
                 NSString *relPath;
                 while ((relPath = [walker nextObject])) {
-                    if (![walker.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
-                    if ([relPath.lastPathComponent hasPrefix:@"."]) continue;
-                    [paths addObject:[code stringByAppendingPathComponent:relPath]];
+                    @autoreleasepool {
+                        if (totalFiles + paths.count >= kZSFIMaxTotalIndexedFiles) {
+                            truncated = YES;
+                            break;
+                        }
+                        if (![walker.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
+                        if ([relPath.lastPathComponent hasPrefix:@"."]) continue;
+                        [paths addObject:[code stringByAppendingPathComponent:relPath]];
+                    }
                 }
             } @catch (NSException *exception) {
                 ZLog(@"[ZSFileIndex] skipping localization folder %@ after Foundation threw during enumeration: %@", code, exception);
@@ -1583,6 +1641,10 @@ static const NSUInteger kZSFIMaxPathLength = 1024;
         [paths sortUsingSelector:@selector(compare:)];
         map[code] = paths;
         totalFiles += paths.count;
+    }
+
+    if (truncated) {
+        ZLog(@"[ZSFileIndex] localization index capped at %lu indexed file(s) to bound memory use", (unsigned long)kZSFIMaxTotalIndexedFiles);
     }
 
     ZLog(@"[ZSFileIndex] rebuilt localization index: %lu file(s) across %lu language folder(s)",

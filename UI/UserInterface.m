@@ -11410,7 +11410,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat logIndent = (kPanelPadding / 2) + overlaySafeInsets.left;
+    CGFloat logIndent = 0;
     CGFloat indexColumnWidth = 22;
     CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
     CGFloat rowTrailingInset = 16 + overlaySafeInsets.right;
