@@ -11275,6 +11275,91 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     return NO;
 }
 
+static NSString *zs_stringByTrimmingLeadingWhitespace(NSString *str) {
+    NSUInteger i = 0;
+    while (i < str.length && [[NSCharacterSet whitespaceCharacterSet] characterIsMember:[str characterAtIndex:i]]) {
+        i++;
+    }
+    return [str substringFromIndex:i];
+}
+
+static NSRegularExpression *zs_syslogTimestampRegex(void) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?"
+                                                         options:0 error:nil];
+    });
+    return re;
+}
+
+static NSRegularExpression *zs_syslogProcessRegex(void) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^[^\\s\\[\\]]+\\[\\d+:\\d+\\]"
+                                                         options:0 error:nil];
+    });
+    return re;
+}
+
+static NSRegularExpression *zs_syslogBracketTagRegex(void) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"^\\[[^\\[\\]]+\\]"
+                                                         options:0 error:nil];
+    });
+    return re;
+}
+
+static BOOL zs_consumeSyslogPrefix(NSRegularExpression *regex, NSString **stringPtr, NSString **capturedPtr) {
+    NSString *str = *stringPtr;
+    NSTextCheckingResult *match = [regex firstMatchInString:str options:NSMatchingAnchored range:NSMakeRange(0, str.length)];
+    if (!match) return NO;
+
+    NSString *matched = [str substringWithRange:match.range];
+    NSString *rest = zs_stringByTrimmingLeadingWhitespace([str substringFromIndex:NSMaxRange(match.range)]);
+    *stringPtr = rest;
+    if (capturedPtr) *capturedPtr = matched;
+    return YES;
+}
+
+static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSString **outMessage) {
+    NSString *remaining = line;
+    NSMutableArray<NSString *> *headerParts = [NSMutableArray array];
+    NSString *captured = nil;
+
+    if (zs_consumeSyslogPrefix(zs_syslogTimestampRegex(), &remaining, &captured)) {
+        [headerParts addObject:captured];
+
+        if (zs_consumeSyslogPrefix(zs_syslogProcessRegex(), &remaining, &captured)) {
+            [headerParts addObject:captured];
+
+            NSString *beforeTag = remaining;
+            if (zs_consumeSyslogPrefix(zs_syslogBracketTagRegex(), &remaining, &captured) &&
+                [captured isEqualToString:kZLogTag]) {
+                [headerParts addObject:captured];
+
+                if (zs_consumeSyslogPrefix(zs_syslogBracketTagRegex(), &remaining, &captured)) {
+                    [headerParts addObject:captured];
+                }
+            } else {
+                remaining = beforeTag;
+            }
+        }
+    }
+
+    if (headerParts.count == 0) {
+        if (outHeader) *outHeader = nil;
+        if (outMessage) *outMessage = line;
+        return;
+    }
+
+    if (outHeader) *outHeader = [headerParts componentsJoinedByString:@"  "];
+    if (outMessage) *outMessage = remaining;
+}
+
 - (void)appendSyslogLine:(NSString *)line {
     if (!line.length) return;
     if ([self zs_syslogLineIsBlacklisted:line]) return;
@@ -11385,7 +11470,7 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
 
     [NSLayoutConstraint activateConstraints:@[
         [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
-        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kPanelPadding],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kPanelPadding],
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
@@ -11440,11 +11525,22 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat rowLeadingInset = 16 + overlaySafeInsets.left;
+    CGFloat logIndent = kPanelPadding + overlaySafeInsets.left;
+    CGFloat indexColumnWidth = 22;
+    CGFloat rowLeadingInset = logIndent + indexColumnWidth + 6;
     CGFloat rowTrailingInset = 16 + overlaySafeInsets.right;
+
+    UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
+        ?: [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    UIFont *headerFont = [UIFont fontWithName:@"Menlo-Regular" size:9]
+        ?: [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
 
     NSInteger index = 0;
     for (NSString *line in lines) {
+        NSString *header = nil;
+        NSString *message = nil;
+        zs_parseSyslogLineHeader(line, &header, &message);
+
         UIView *rowView = [[UIView alloc] init];
         rowView.translatesAutoresizingMaskIntoConstraints = NO;
         rowView.backgroundColor = (index % 2 == 0)
@@ -11452,20 +11548,52 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
             : UIColor.clearColor;
         rowView.userInteractionEnabled = YES;
 
+        UILabel *indexLabel = [[UILabel alloc] init];
+        indexLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        indexLabel.numberOfLines = 1;
+        indexLabel.font = indexFont;
+        indexLabel.textColor = [UIColor colorWithWhite:1 alpha:0.28];
+        indexLabel.textAlignment = NSTextAlignmentRight;
+        indexLabel.text = [NSString stringWithFormat:@"%ld", (long)(index + 1)];
+        [rowView addSubview:indexLabel];
+
         UILabel *rowLabel = [[UILabel alloc] init];
         rowLabel.translatesAutoresizingMaskIntoConstraints = NO;
         rowLabel.numberOfLines = 0;
         rowLabel.font = rowFont;
         rowLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-        rowLabel.text = line;
+        rowLabel.text = message ?: line;
         [rowView addSubview:rowLabel];
 
         [NSLayoutConstraint activateConstraints:@[
+            [indexLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
+            [indexLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:logIndent],
+            [indexLabel.widthAnchor constraintEqualToConstant:indexColumnWidth],
+
             [rowLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
-            [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
             [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:rowLeadingInset],
             [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
         ]];
+
+        if (header.length > 0) {
+            UILabel *headerLabel = [[UILabel alloc] init];
+            headerLabel.translatesAutoresizingMaskIntoConstraints = NO;
+            headerLabel.numberOfLines = 0;
+            headerLabel.textAlignment = NSTextAlignmentRight;
+            headerLabel.font = headerFont;
+            headerLabel.textColor = [UIColor colorWithWhite:1 alpha:0.32];
+            headerLabel.text = header;
+            [rowView addSubview:headerLabel];
+
+            [NSLayoutConstraint activateConstraints:@[
+                [headerLabel.topAnchor constraintEqualToAnchor:rowLabel.bottomAnchor constant:3],
+                [headerLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:rowLabel.leadingAnchor],
+                [headerLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
+                [headerLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
+            ]];
+        } else {
+            [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6].active = YES;
+        }
 
         objc_setAssociatedObject(rowView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
 
