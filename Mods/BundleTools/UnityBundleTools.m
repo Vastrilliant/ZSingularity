@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <objc/runtime.h>
+#include <fcntl.h>
+#include <unistd.h>
 #import "lz4hc.h"
 
 #pragma mark - LZ4BlockDecoder
@@ -922,7 +924,25 @@ static BOOL ubc_detect_lzma(NSString *path, BOOL *outIsLZMA, UBCLZMAProperties *
     return ubc_target_platform_names()[@(platform)] ?: @"Unknown";
 }
 
+static BOOL ubc_path_has_unity_fs_signature(NSString *path) {
+    static const char kSig[] = "UnityFS";
+    const char *fsPath = path.fileSystemRepresentation;
+    if (!fsPath) return NO;
+    int fd = open(fsPath, O_RDONLY);
+    if (fd < 0) return NO;
+    uint8_t buf[sizeof(kSig)];
+    ssize_t n = read(fd, buf, sizeof(buf));
+    close(fd);
+    if (n < (ssize_t)sizeof(buf)) return NO;
+    return memcmp(buf, kSig, sizeof(buf)) == 0;
+}
+
 + (nullable UnityBundleArchive *)decompressedArchiveAtPath:(NSString *)path error:(NSError **)error {
+    if (!ubc_path_has_unity_fs_signature(path)) {
+        if (error) *error = [NSError errorWithDomain:UnityBundleCABErrorDomain code:UnityBundleCABErrorBadSignature userInfo:nil];
+        return nil;
+    }
+
     NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error];
     if (!fileData) {
         if (error && !*error) *error = [NSError errorWithDomain:UnityBundleCABErrorDomain code:UnityBundleCABErrorCantReadFile userInfo:nil];
@@ -1275,14 +1295,18 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
     NSFileManager *fm = NSFileManager.defaultManager;
 
     for (NSString *root in [self unityCacheSharedDirectories]) {
+        if (root.length > kUCLMaxPathLength) continue;
+        @try {
         NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
         NSString *relPath;
         while ((relPath = [walker nextObject])) {
             @autoreleasepool {
+                if (relPath.length > kUCLMaxPathLength) continue;
                 NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
                 if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
 
                 NSString *fullPath = [root stringByAppendingPathComponent:relPath];
+                if (fullPath.length > kUCLMaxPathLength) continue;
 
                 NSError *fileErr = nil;
                 NSString *fileCAB = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
@@ -1290,6 +1314,10 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
                     [matches addObject:fullPath];
                 }
             }
+        }
+        } @catch (NSException *exception) {
+            ZLog(@"[UnityCacheLocator] skipping root %@ after Foundation threw during enumeration: %@", root, exception);
+            continue;
         }
     }
 
