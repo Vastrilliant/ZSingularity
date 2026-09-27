@@ -11265,6 +11265,8 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
 #pragma mark Syslog full-screen viewer
 
+static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2;
+
 - (void)zs_buildSyslogFullScreenPanelIfNeeded {
     if (self.syslogFullScreenOverlay) return;
 
@@ -11351,7 +11353,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
     [NSLayoutConstraint activateConstraints:@[
         [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
-        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kPanelPadding / 2],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
@@ -11410,7 +11412,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat logIndent = 0;
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left;
     CGFloat indexColumnWidth = 22;
     CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
     CGFloat rowTrailingInset = 16 + overlaySafeInsets.right;

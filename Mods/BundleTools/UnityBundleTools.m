@@ -1449,15 +1449,6 @@ static NSSet<NSString *> *s_fmodNames = nil;
 static NSDictionary<NSString *, NSArray<NSString *> *> *s_localizeMap = nil;
 static BOOL s_hasIndex = NO;
 static const NSUInteger kZSFIMaxPathLength = 1024;
-// Hard ceilings on how much a single index pass is allowed to accumulate in memory.
-// Without these, a bloated UnityCache/Shared folder (or a pathological localization
-// tree) can grow the in-memory maps and the on-disk Index.json without bound. On
-// iOS that eventually means a single very large contiguous allocation (the JSON
-// buffer) that the allocator can't satisfy - malloc/vm_allocate fails and the
-// process aborts. Capping the totals keeps every pass, and the file it writes,
-// bounded regardless of how large the cache on disk has grown.
-static const NSUInteger kZSFIMaxTotalIndexedFiles = 100000;
-static const NSUInteger kZSFIMaxPathsPerCAB = 64;
 
 @implementation ZSFileIndex
 
@@ -1496,15 +1487,12 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
                     totalSize += size.unsignedLongLongValue;
                     NSTimeInterval modInterval = modified.timeIntervalSince1970;
                     if (modInterval > newestModified) newestModified = modInterval;
-
-                    if (fileCount >= kZSFIMaxTotalIndexedFiles) break;
                 }
             }
         } @catch (NSException *exception) {
             ZLog(@"[ZSFileIndex] skipping root %@ while fingerprinting after Foundation threw: %@", root, exception);
             continue;
         }
-        if (fileCount >= kZSFIMaxTotalIndexedFiles) break;
     }
 
     return @{
@@ -1523,22 +1511,14 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
     // later sort never has to touch the filesystem again (see below).
     NSMutableDictionary<NSString *, NSDate *> *mtimeByPath = [NSMutableDictionary dictionary];
     NSUInteger filesScanned = 0;
-    NSUInteger totalIndexed = 0;
-    BOOL truncated = NO;
 
     for (NSString *root in roots) {
-        if (truncated) break;
         if (root.length > kZSFIMaxPathLength) continue;
         @try {
             NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
             NSString *relPath;
             while ((relPath = [walker nextObject])) {
                 @autoreleasepool {
-                    if (totalIndexed >= kZSFIMaxTotalIndexedFiles) {
-                        truncated = YES;
-                        break;
-                    }
-
                     NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
                     if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
 
@@ -1554,14 +1534,9 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
                             bucket = [NSMutableArray array];
                             map[cab] = bucket;
                         }
-                        // Cap per-CAB so a single collided hash can't blow the
-                        // total budget on its own.
-                        if (bucket.count < kZSFIMaxPathsPerCAB) {
-                            [bucket addObject:fullPath];
-                            NSDate *modified = attrs[NSFileModificationDate];
-                            if (modified) mtimeByPath[fullPath] = modified;
-                            totalIndexed++;
-                        }
+                        [bucket addObject:fullPath];
+                        NSDate *modified = attrs[NSFileModificationDate];
+                        if (modified) mtimeByPath[fullPath] = modified;
                     }
                 }
             }
@@ -1585,11 +1560,6 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
         }];
     }
 
-    if (truncated) {
-        ZLog(@"[ZSFileIndex] CAB index capped at %lu indexed file(s) to bound memory use - some entries under UnityCache/Shared were left out of this pass",
-             (unsigned long)kZSFIMaxTotalIndexedFiles);
-    }
-
     ZLog(@"[ZSFileIndex] rebuilt CAB index: %lu file(s) scanned under UnityCache/Shared, %lu distinct CAB(s) found",
          (unsigned long)filesScanned, (unsigned long)map.count);
 
@@ -1611,11 +1581,8 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableDictionary<NSString *, NSArray<NSString *> *> *map = [NSMutableDictionary dictionary];
     NSUInteger totalFiles = 0;
-    BOOL truncated = NO;
 
     for (NSString *code in [LocalizationTransplant languageCodes]) {
-        if (truncated) { map[code] = @[]; continue; }
-
         NSString *languageDir = [LocalizationTransplant languageDirectoryForCode:code];
         BOOL isDirectory = NO;
         NSMutableArray<NSString *> *paths = [NSMutableArray array];
@@ -1625,10 +1592,6 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
                 NSString *relPath;
                 while ((relPath = [walker nextObject])) {
                     @autoreleasepool {
-                        if (totalFiles + paths.count >= kZSFIMaxTotalIndexedFiles) {
-                            truncated = YES;
-                            break;
-                        }
                         if (![walker.fileAttributes[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
                         if ([relPath.lastPathComponent hasPrefix:@"."]) continue;
                         [paths addObject:[code stringByAppendingPathComponent:relPath]];
@@ -1641,10 +1604,6 @@ static const NSUInteger kZSFIMaxPathsPerCAB = 64;
         [paths sortUsingSelector:@selector(compare:)];
         map[code] = paths;
         totalFiles += paths.count;
-    }
-
-    if (truncated) {
-        ZLog(@"[ZSFileIndex] localization index capped at %lu indexed file(s) to bound memory use", (unsigned long)kZSFIMaxTotalIndexedFiles);
     }
 
     ZLog(@"[ZSFileIndex] rebuilt localization index: %lu file(s) across %lu language folder(s)",
