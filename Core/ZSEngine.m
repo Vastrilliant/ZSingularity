@@ -819,7 +819,7 @@ static void zs_schedule_particle_apply(void) {
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
-@property (nonatomic, strong) CADisplayLink *fpsPollDisplayLink;
+@property (nonatomic, strong) NSTimer *fpsPollTimer;
 - (void)applyMenuFPS:(NSInteger)fps;
 - (void)applyCombatFPS:(NSInteger)fps;
 @end
@@ -849,9 +849,13 @@ static void zs_schedule_particle_apply(void) {
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
     }
 
-    if (!self.fpsPollDisplayLink) {
-        self.fpsPollDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(fpsPollTick)];
-        [self.fpsPollDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    if (!self.fpsPollTimer) {
+        self.fpsPollTimer = [NSTimer timerWithTimeInterval:1.0
+                                                      target:self
+                                                    selector:@selector(fpsPollTick)
+                                                    userInfo:nil
+                                                     repeats:YES];
+        [[NSRunLoop mainRunLoop] addTimer:self.fpsPollTimer forMode:NSRunLoopCommonModes];
     }
 
     return zs_set_application_target_fps((int32_t)self.targetFPS);
@@ -868,8 +872,6 @@ static void zs_schedule_particle_apply(void) {
         int32_t sceneState = 0;
         if (!ZSGlobalScene_Current(&sceneState)) return;
         BOOL isBattle = (sceneState == kSceneStateBattle);
-        if (isBattle && self.manualOverrideActiveCombat) return;
-        if (!isBattle && self.manualOverrideActiveMenu) return;
         expected = isBattle ? self.combatFPS : self.menuFPS;
     }
 
@@ -917,10 +919,8 @@ static void zs_schedule_particle_apply(void) {
     }
 
     if (isBattle) {
-        if (self.manualOverrideActiveCombat) return;
         [self applyTargetFPSIfNeeded:self.combatFPS];
     } else {
-        if (self.manualOverrideActiveMenu) return;
         [self applyTargetFPSIfNeeded:self.menuFPS];
     }
 }
@@ -989,7 +989,7 @@ static void zs_schedule_particle_apply(void) {
 
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
-    [self.fpsPollDisplayLink invalidate];
+    [self.fpsPollTimer invalidate];
 }
 
 @end
