@@ -5043,7 +5043,7 @@ static UIButton *zs_make_section_info_button(NSString *docKey, id target, SEL ac
     return button;
 }
 
-static UIView *zs_make_syslog_blacklist_card(UIView *enableRow, UIView *syslogRow, UILabel *blacklistHeader, UILabel *statusLabel, UIScrollView *entriesScroll) {
+static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blacklistHeader, UILabel *statusLabel, UIScrollView *entriesScroll) {
     UIView *card;
     UIView *host;
     if (zs_has_liquid_glass()) {
@@ -5072,7 +5072,6 @@ static UIView *zs_make_syslog_blacklist_card(UIView *enableRow, UIView *syslogRo
     separator.translatesAutoresizingMaskIntoConstraints = NO;
     separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
 
-    [host addSubview:enableRow];
     [host addSubview:syslogRow];
     [host addSubview:separator];
     [host addSubview:blacklistHeader];
@@ -5080,14 +5079,9 @@ static UIView *zs_make_syslog_blacklist_card(UIView *enableRow, UIView *syslogRo
     [host addSubview:entriesScroll];
 
     [NSLayoutConstraint activateConstraints:@[
-        [enableRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [enableRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [enableRow.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
-        [enableRow.heightAnchor constraintEqualToConstant:34],
-
         [syslogRow.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
         [syslogRow.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [syslogRow.topAnchor constraintEqualToAnchor:enableRow.bottomAnchor constant:10],
+        [syslogRow.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
         [syslogRow.heightAnchor constraintEqualToConstant:34],
 
         [separator.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
@@ -5819,10 +5813,46 @@ static const CGFloat kContentFadeHeight = 22;
     }];
 
     [self.pendingSectionBuilders addObject:^{
-    zs_add_section_header_with_docs(self.stack, @"Debug", self, @selector(docsInfoTapped:));
+    zs_add_section_header_with_docs(self.stack, @"Miscellaneous", self, @selector(docsInfoTapped:));
+
+    ZSRow *customGreetingRow = zs_make_custom_greeting_row(zs_custom_greeting_text(), self,
+                                                            @selector(zs_customGreetingTextButtonTapped:));
+    self.customGreetingTextButton = objc_getAssociatedObject(customGreetingRow, "zs_button");
+
+    ZSRow *uidRedactorRow = zs_make_switch_row(@"Hide user ID", UIDRedactor.isEnabled);
+    [uidRedactorRow.toggle addTarget:self action:@selector(uidRedactorChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
+    [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
+    [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
+
+    [self.stack addArrangedSubview:customGreetingRow];
+    [self.stack setCustomSpacing:8 afterView:customGreetingRow];
+    [self.stack addArrangedSubview:uidRedactorRow];
+    [self.stack setCustomSpacing:8 afterView:uidRedactorRow];
+    [self.stack addArrangedSubview:disableLiquidGlassRow];
+    [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
+    [self.stack addArrangedSubview:disableEnkephalinRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
+    }];
+
+    [self.pendingSectionBuilders addObject:^{
+    NSUInteger developerViewsStart = self.stack.arrangedSubviews.count;
+    zs_add_section_header(self.stack, @"Developer", self);
+
+    ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
+    [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [dumpIL2CPPMethodsButton addTarget:self action:@selector(dumpIL2CPPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
 
     ZSRow *syslogEnableRow = zs_make_full_width_glass_button_row(@"Enable system logs",
-                                                                  [UIColor colorWithWhite:1 alpha:0.88]);
+                                                                  [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     UIButton *syslogButton = objc_getAssociatedObject(syslogEnableRow, "zs_button");
     self.syslogButton = syslogButton;
 
@@ -5830,9 +5860,17 @@ static const CGFloat kContentFadeHeight = 22;
 
     UILongPressGestureRecognizer *syslogHold =
         [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSyslogButtonLongPress:)];
-    syslogHold.minimumPressDuration = 0;
+    syslogHold.minimumPressDuration = 1.0;
     syslogHold.cancelsTouchesInView = NO;
     [syslogButton addGestureRecognizer:syslogHold];
+
+    UIView *developerActionsCard = zs_make_grouped_action_card(@[
+        dumpIL2CPPMethodsButton,
+        librarySymlinkButton,
+        syslogEnableRow,
+    ]);
+    developerActionsCard.layer.borderWidth = 1;
+    developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
     self.syslogBlacklistField = [[UITextField alloc] init];
     self.syslogBlacklistField.font = zs_mono_font(11, UIFontWeightRegular);
@@ -5881,68 +5919,20 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self zs_rebuildSyslogBlacklistEntries];
 
-    UIView *syslogBlacklistCard = zs_make_syslog_blacklist_card(syslogEnableRow,
-                                                                 syslogRow,
+    UIView *syslogBlacklistCard = zs_make_syslog_blacklist_card(syslogRow,
                                                                  blacklistHeader,
                                                                  self.syslogBlacklistStatusLabel,
                                                                  blacklistEntriesScroll);
+
+    [self.stack addArrangedSubview:overrideTutorialRow];
+    [self.stack setCustomSpacing:8 afterView:overrideTutorialRow];
+    [self.stack addArrangedSubview:developerActionsCard];
+    [self.stack setCustomSpacing:8 afterView:developerActionsCard];
     [self.stack addArrangedSubview:syslogBlacklistCard];
     [self.stack setCustomSpacing:kSectionSpacing afterView:syslogBlacklistCard];
 
     self.syslogTabEnabled = NO;
     [self zs_renderSyslogBuffer];
-    }];
-
-    [self.pendingSectionBuilders addObject:^{
-    zs_add_section_header_with_docs(self.stack, @"Miscellaneous", self, @selector(docsInfoTapped:));
-
-    ZSRow *customGreetingRow = zs_make_custom_greeting_row(zs_custom_greeting_text(), self,
-                                                            @selector(zs_customGreetingTextButtonTapped:));
-    self.customGreetingTextButton = objc_getAssociatedObject(customGreetingRow, "zs_button");
-
-    ZSRow *uidRedactorRow = zs_make_switch_row(@"Hide user ID", UIDRedactor.isEnabled);
-    [uidRedactorRow.toggle addTarget:self action:@selector(uidRedactorChanged:) forControlEvents:UIControlEventValueChanged];
-
-    ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
-    [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
-
-    ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
-    [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
-
-    [self.stack addArrangedSubview:customGreetingRow];
-    [self.stack setCustomSpacing:8 afterView:customGreetingRow];
-    [self.stack addArrangedSubview:uidRedactorRow];
-    [self.stack setCustomSpacing:8 afterView:uidRedactorRow];
-    [self.stack addArrangedSubview:disableLiquidGlassRow];
-    [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
-    [self.stack addArrangedSubview:disableEnkephalinRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
-    }];
-
-    [self.pendingSectionBuilders addObject:^{
-    NSUInteger developerViewsStart = self.stack.arrangedSubviews.count;
-    zs_add_section_header(self.stack, @"Developer", self);
-
-    ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
-    [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
-
-    UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [dumpIL2CPPMethodsButton addTarget:self action:@selector(dumpIL2CPPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIView *developerActionsCard = zs_make_grouped_action_card(@[
-        dumpIL2CPPMethodsButton,
-        librarySymlinkButton,
-    ]);
-    developerActionsCard.layer.borderWidth = 1;
-    developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-
-    [self.stack addArrangedSubview:overrideTutorialRow];
-    [self.stack setCustomSpacing:8 afterView:overrideTutorialRow];
-    [self.stack addArrangedSubview:developerActionsCard];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:developerActionsCard];
 
     NSArray<UIView *> *arrangedViews = self.stack.arrangedSubviews;
     self.developerSectionViews = [arrangedViews subarrayWithRange:NSMakeRange(developerViewsStart, arrangedViews.count - developerViewsStart)];
@@ -11227,7 +11217,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     self.syslogDebugModeEnabled = YES;
 
     [self.syslogButton setTitle:@"Disable system logs" forState:UIControlStateNormal];
-    [self.syslogButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.95] forState:UIControlStateNormal];
+    [self.syslogButton setTitleColor:[UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
 
     self.syslogTabEnabled = YES;
 
@@ -11253,7 +11243,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_resetSyslogDebugMode {
     self.syslogDebugModeEnabled = NO;
     [self.syslogButton setTitle:@"Enable system logs" forState:UIControlStateNormal];
-    [self.syslogButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.88] forState:UIControlStateNormal];
+    [self.syslogButton setTitleColor:[UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0] forState:UIControlStateNormal];
 
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -11333,18 +11323,16 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     if (!unityView) return;
 
     UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
-    overlay.backgroundColor = UIColor.clearColor;
-    overlay.opaque = NO;
+    overlay.backgroundColor = [UIColor colorWithWhite:0.04 alpha:1.0];
+    overlay.opaque = YES;
     overlay.hidden = YES;
     overlay.clipsToBounds = YES;
-    overlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
+    overlay.layer.cornerRadius = 0;
     overlay.layer.cornerCurve = kCACornerCurveContinuous;
+    overlay.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
     overlay.userInteractionEnabled = YES;
     [unityView addSubview:overlay];
     zs_force_dark(overlay);
-    if (self.contentOverlay) {
-        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
-    }
     self.syslogFullScreenOverlay = overlay;
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
@@ -11413,7 +11401,7 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:exportButton.trailingAnchor constant:10],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
-        [searchContainer.widthAnchor constraintEqualToConstant:120],
+        [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
         [scrollView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
@@ -11476,8 +11464,8 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
         [NSLayoutConstraint activateConstraints:@[
             [rowLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
             [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
-            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:16],
-            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-16],
+            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:28],
+            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-28],
         ]];
 
         objc_setAssociatedObject(rowView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
@@ -11532,7 +11520,8 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
 
 - (void)zs_showSyslogCopiedToast {
     UIView *overlay = self.syslogFullScreenOverlay;
-    if (!overlay) return;
+    UIView *unityView = zs_ui_host_view();
+    if (!overlay || !unityView) return;
 
     UIView *toast = self.syslogCopyToastView;
     if (!toast) {
@@ -11560,8 +11549,8 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
             [label.leadingAnchor constraintEqualToAnchor:toastGlass.contentView.leadingAnchor constant:16],
             [label.trailingAnchor constraintEqualToAnchor:toastGlass.contentView.trailingAnchor constant:-16],
 
-            [toastGlass.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
-            [toastGlass.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor constant:-16],
+            [toastGlass.centerXAnchor constraintEqualToAnchor:unityView.centerXAnchor],
+            [toastGlass.bottomAnchor constraintEqualToAnchor:unityView.safeAreaLayoutGuide.bottomAnchor constant:-16],
         ]];
 
         self.syslogCopyToastView = toastGlass;
@@ -12291,6 +12280,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^changes)(void) = ^{
         if (docsVisible) {
+            self.contentOverlay.hidden = self.syslogFullScreenOpen;
             self.docsContentOverlay.hidden = self.syslogFullScreenOpen;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = !self.syslogFullScreenOpen;
             self.docsPanelSeparator.hidden = NO;
@@ -12340,8 +12330,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
-        if (self.syslogFullScreenOverlay && docsPanelElement) {
-            self.syslogFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+        if (self.syslogFullScreenOverlay) {
+            self.syslogFullScreenOverlay.frame = self.syslogFullScreenOpen ? unityView.bounds : [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+            self.syslogFullScreenOverlay.layer.cornerRadius = 0;
         }
 
         [self zs_updateSliderGlassVisibility];
@@ -12349,6 +12340,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (!docsVisible) {
+            self.contentOverlay.hidden = NO;
             self.docsContentOverlay.hidden = YES;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;

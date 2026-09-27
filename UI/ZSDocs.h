@@ -74,7 +74,6 @@ static NSDictionary<NSString *, NSString *> *zs_docs_section_files(void) {
             @"Anti-Aliasing": @"Anti-Aliasing.md",
             @"Post FX": @"PostFX.md",
             @"Particles": @"Particles.md",
-            @"Debug": @"Debug.md",
             @"Miscellaneous": @"Miscellaneous.md",
             @"Mods": @"Mods.md",
             @"Auth": @"Auth.md",
