@@ -12279,6 +12279,12 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     UIView *handleElement = self.handleGlass ?: self.handle;
     UIView *docsPanelElement = self.docsPanelGlass ?: self.docsPanel;
 
+    CGFloat docsX = self.syslogFullScreenOpen ? 0 : kHandleWidth;
+    CGFloat docsSpanWidth = docsW + (self.syslogFullScreenOpen ? kHandleWidth : 0);
+    CACornerMask docsCornerMask = self.syslogFullScreenOpen
+        ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
+        : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
+
     void (^changes)(void) = ^{
         if (docsVisible) {
             self.docsContentOverlay.hidden = self.syslogFullScreenOpen;
@@ -12295,11 +12301,15 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           kHandleHeight);
         handleElement.hidden = self.syslogFullScreenOpen;
 
-        CGRect docsFrameLocal = CGRectMake(kHandleWidth, 0, docsW, height);
+        CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
         if (docsPanelElement) {
             CGFloat glassOverlap = docsW > 0 ? kZSDocsPanelGlassFillOverlap : 0;
-            docsPanelElement.frame = CGRectMake(kHandleWidth, 0, docsW + glassOverlap, height);
+            docsPanelElement.frame = CGRectMake(docsX, 0, docsSpanWidth + glassOverlap, height);
+            docsPanelElement.clipsToBounds = YES;
+            docsPanelElement.layer.cornerRadius = kPanelCornerRadiusMinimum;
+            docsPanelElement.layer.cornerCurve = kCACornerCurveContinuous;
+            docsPanelElement.layer.maskedCorners = docsCornerMask;
         }
 
         panelElement.frame = CGRectMake(kHandleWidth + docsW, 0, panelW, height);
@@ -12329,12 +12339,13 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.docsContentOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
             self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
+            self.docsContentOverlay.layer.maskedCorners = docsCornerMask;
         }
         if (self.syslogFullScreenOverlay) {
-            self.syslogFullScreenOverlay.frame = self.syslogFullScreenOpen
-                ? unityView.bounds
-                : [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            self.syslogFullScreenOverlay.layer.cornerRadius = self.syslogFullScreenOpen ? 0 : kPanelCornerRadiusMinimum;
+            self.syslogFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+            self.syslogFullScreenOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
+            self.syslogFullScreenOverlay.layer.cornerCurve = kCACornerCurveContinuous;
+            self.syslogFullScreenOverlay.layer.maskedCorners = docsCornerMask;
         }
 
         [self zs_updateSliderGlassVisibility];
