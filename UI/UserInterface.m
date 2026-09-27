@@ -4802,6 +4802,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.panelOpen = NO;
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
+    self.syslogFullScreenOpen = NO;
 
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
@@ -4831,6 +4832,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     BOOL docsOverlayVisible = self.docsContentOverlay && !self.docsContentOverlay.hidden;
     CGRect docsContentOverlayOffscreenFrame = docsOverlayVisible ? CGRectOffset(self.docsContentOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
 
+    BOOL syslogOverlayVisible = self.syslogFullScreenOverlay && !self.syslogFullScreenOverlay.hidden;
+    CGRect syslogOverlayOffscreenFrame = syslogOverlayVisible ? CGRectOffset(self.syslogFullScreenOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
+
     UIView *handleElement = self.handleGlass ?: self.handle;
     CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
                                               handleElement.frame.origin.y,
@@ -4847,6 +4851,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         weakSelf.glassContainer.frame = offscreenFrame;
         weakSelf.contentOverlay.frame = contentOverlayOffscreenFrame;
         if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayOffscreenFrame;
+        if (syslogOverlayVisible) weakSelf.syslogFullScreenOverlay.frame = syslogOverlayOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
         [weakSelf teardownPanelState];
@@ -7538,6 +7543,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     if (!self.panelOpen || !key) return;
 
     self.docsActiveKey = key;
+    self.syslogFullScreenOpen = NO;
     self.docsTitleLabel.text = [key uppercaseString];
     [self zs_setDocsHeaderChevronVisible:NO];
     [self zs_setDocsLanguageButtonVisible:YES];
@@ -7570,15 +7576,14 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
         }
     });
 
-    if (self.docsPanelOpen) {
-        return;
-    }
-
+    BOOL wasOpen = self.docsPanelOpen;
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];
-    [UIView animateWithDuration:0.2 animations:^{
-        self.chevron.text = @"\u2715";
-    }];
+    if (!wasOpen) {
+        [UIView animateWithDuration:0.2 animations:^{
+            self.chevron.text = @"\u2715";
+        }];
+    }
 }
 
 - (void)closeDocsPanel {
@@ -7590,6 +7595,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
 
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
+    self.syslogFullScreenOpen = NO;
     [self positionPanelAnimated:YES];
     [UIView animateWithDuration:0.2 animations:^{
         self.chevron.text = @"\u2039";
@@ -11451,12 +11457,19 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
 
-    UIView *overlay = [[UIView alloc] initWithFrame:unityView.bounds];
-    overlay.backgroundColor = [UIColor colorWithWhite:0.04 alpha:0.985];
-    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
     overlay.hidden = YES;
     overlay.clipsToBounds = YES;
+    overlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
+    overlay.layer.cornerCurve = kCACornerCurveContinuous;
+    overlay.userInteractionEnabled = YES;
+    [unityView addSubview:overlay];
     zs_force_dark(overlay);
+    if (self.contentOverlay) {
+        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
+    }
     self.syslogFullScreenOverlay = overlay;
 
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -11512,15 +11525,14 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     [scrollView addSubview:rowsStack];
     self.syslogFullScreenRowsStack = rowsStack;
 
-    static const CGFloat kZSSyslogFullScreenPadding = 16;
     [NSLayoutConstraint activateConstraints:@[
-        [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kZSSyslogFullScreenPadding],
-        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenPadding],
+        [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kPanelPadding],
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
         [copyButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [copyButton.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kZSSyslogFullScreenPadding],
+        [copyButton.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
         [copyButton.heightAnchor constraintEqualToConstant:30],
 
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
@@ -11539,8 +11551,6 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
         [rowsStack.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
         [rowsStack.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor],
     ]];
-
-    [unityView addSubview:overlay];
 }
 
 - (NSArray<NSString *> *)zs_syslogFullScreenFilteredLines {
@@ -11655,58 +11665,33 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
 }
 
 - (void)zs_expandSyslogPanelTapped {
+    if (!self.panelOpen) return;
+
     [self zs_buildSyslogFullScreenPanelIfNeeded];
-    if (!self.syslogFullScreenOverlay || self.syslogFullScreenOpen) return;
+    if (!self.syslogFullScreenOverlay) return;
 
-    UIView *unityView = zs_ui_host_view();
-    if (unityView) {
-        self.syslogFullScreenOverlay.frame = unityView.bounds;
-        [unityView bringSubviewToFront:self.syslogFullScreenOverlay];
-    }
-
+    self.docsActiveKey = nil;
+    self.syslogFullScreenOpen = YES;
     [self zs_renderSyslogFullScreenRows];
 
-    self.syslogFullScreenOverlay.hidden = NO;
-    self.syslogFullScreenOverlay.alpha = 0;
-    self.syslogFullScreenOverlay.transform =
-        CGAffineTransformMakeTranslation(self.syslogFullScreenOverlay.bounds.size.width * 0.06, 0);
-    self.syslogFullScreenOpen = YES;
-
-    __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:0.28
-                          delay:0
-         usingSpringWithDamping:0.85
-          initialSpringVelocity:0.3
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        weakSelf.syslogFullScreenOverlay.alpha = 1;
-        weakSelf.syslogFullScreenOverlay.transform = CGAffineTransformIdentity;
-    } completion:nil];
+    BOOL wasOpen = self.docsPanelOpen;
+    self.docsPanelOpen = YES;
+    [self positionPanelAnimated:YES];
+    if (!wasOpen) {
+        [UIView animateWithDuration:0.2 animations:^{
+            self.chevron.text = @"\u2715";
+        }];
+    }
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 }
 
 - (void)zs_closeSyslogFullScreenPanelTapped {
-    if (!self.syslogFullScreenOverlay || !self.syslogFullScreenOpen) return;
+    if (!self.syslogFullScreenOpen) return;
 
     [self.syslogSearchField resignFirstResponder];
-    self.syslogFullScreenOpen = NO;
-
-    CGAffineTransform endTransform =
-        CGAffineTransformMakeTranslation(self.syslogFullScreenOverlay.bounds.size.width * 0.06, 0);
-
-    __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:0.22
-                          delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        weakSelf.syslogFullScreenOverlay.alpha = 0;
-        weakSelf.syslogFullScreenOverlay.transform = endTransform;
-    } completion:^(BOOL finished) {
-        weakSelf.syslogFullScreenOverlay.hidden = YES;
-        weakSelf.syslogFullScreenOverlay.transform = CGAffineTransformIdentity;
-    }];
+    [self closeDocsPanel];
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
@@ -12239,6 +12224,7 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
 
     if (self.docsPanel) {
         [unityView bringSubviewToFront:self.docsContentOverlay];
+        if (self.syslogFullScreenOverlay) [unityView bringSubviewToFront:self.syslogFullScreenOverlay];
         if (self.contentOverlay) [unityView bringSubviewToFront:self.contentOverlay];
     }
 
@@ -12260,10 +12246,6 @@ static NSString * const kZSHardcodedSyslogBlacklistTerm = @"stencil";
     [self installStaticContentFadeMask];
     [self zs_updateSliderGlassVisibility];
     [self layoutDocsPanelForWindow:unityView];
-
-    if (self.syslogFullScreenOverlay && self.syslogFullScreenOpen) {
-        self.syslogFullScreenOverlay.frame = unityView.bounds;
-    }
 }
 
 #pragma mark Scroll-linked slider glass
@@ -12374,7 +12356,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^changes)(void) = ^{
         if (docsVisible) {
-            self.docsContentOverlay.hidden = NO;
+            self.docsContentOverlay.hidden = self.syslogFullScreenOpen;
+            if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = !self.syslogFullScreenOpen;
             self.docsPanelSeparator.hidden = NO;
         }
 
@@ -12421,6 +12404,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
+        if (self.syslogFullScreenOverlay && docsPanelElement) {
+            self.syslogFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+        }
 
         [self zs_updateSliderGlassVisibility];
     };
@@ -12428,6 +12414,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (!docsVisible) {
             self.docsContentOverlay.hidden = YES;
+            if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;
         }
     };
