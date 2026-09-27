@@ -7868,6 +7868,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
 #pragma mark Developer (Keep Alive)
 
+static BOOL zs_keep_alive_background_mode_declared(void) {
+    NSArray *modes = [NSBundle mainBundle].infoDictionary[@"UIBackgroundModes"];
+    return [modes isKindOfClass:[NSArray class]] && [modes containsObject:@"location"];
+}
+
 - (void)toggleKeepAliveTapped {
     self.keepAliveEnabled = !self.keepAliveEnabled;
 
@@ -7878,8 +7883,13 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         }
         self.keepAliveLocationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers;
         self.keepAliveLocationManager.distanceFilter = kCLDistanceFilterNone;
-        self.keepAliveLocationManager.allowsBackgroundLocationUpdates = YES;
         self.keepAliveLocationManager.pausesLocationUpdatesAutomatically = NO;
+
+        BOOL canBackground = zs_keep_alive_background_mode_declared();
+        self.keepAliveLocationManager.allowsBackgroundLocationUpdates = canBackground;
+        if (!canBackground) {
+            ZLog(@"[UserInterface] Keep Alive: running bundle doesn't declare UIBackgroundModes location - foreground-only");
+        }
 
         CLAuthorizationStatus status = self.keepAliveLocationManager.authorizationStatus;
         if (status == kCLAuthorizationStatusNotDetermined) {
