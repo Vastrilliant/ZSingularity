@@ -4230,7 +4230,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSTimer *postFXReapplyTimer;
 @property (nonatomic, strong) NSTimer *saveDebounceTimer;
 @property (nonatomic, assign) BOOL syslogTabEnabled;
-@property (nonatomic, strong) NSMutableArray<NSString *> *syslogLines;
+@property (nonatomic, strong) NSMutableArray<NSString *> *syslogChannelLines;
+@property (nonatomic, strong) NSMutableArray<NSString *> *debugChannelLines;
 @property (nonatomic, strong) UITextField *syslogBlacklistField;
 @property (nonatomic, strong) UILabel *syslogBlacklistStatusLabel;
 @property (nonatomic, strong) UIStackView *syslogBlacklistEntriesStack;
@@ -4395,6 +4396,24 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     ZLog(@"[UserInterface] installing gesture-based panel opener");
     self.installed = YES;
+
+    self.syslogChannelLines = [NSMutableArray array];
+    self.debugChannelLines = [NSMutableArray array];
+    self.syslogBlacklist = [NSMutableOrderedSet orderedSet];
+
+    zs_ensure_settings_loaded_from_disk();
+    for (NSString *term in g_syslogBlacklist) {
+        [self.syslogBlacklist addObject:term];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [ZSyslogController sharedController].lineHandler = ^(NSString *line) {
+        [weakSelf appendSyslogLine:line];
+    };
+    BOOL syslogCaptureStarted = [[ZSyslogController sharedController] start];
+    if (!syslogCaptureStarted) {
+        [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
+    }
 
     [unityView setMultipleTouchEnabled:YES];
     unityView.exclusiveTouch = NO;
@@ -4851,8 +4870,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.doctorInstallPendingDoctoredURL = nil;
     self.doctorInstallPendingEntryPath = nil;
     self.doctorInstallPendingFolderName = nil;
-
-    [ZSyslogController sharedController].lineHandler = nil;
 
     [self destroyPanelHierarchy];
 }
@@ -5479,17 +5496,7 @@ static const CGFloat kContentFadeHeight = 22;
         [self.glassContainerContent sendSubviewToBack:self.handle];
     }
 
-    self.syslogLines = [NSMutableArray array];
-    self.syslogBlacklist = [NSMutableOrderedSet orderedSet];
-
     __weak typeof(self) weakSelf = self;
-    [ZSyslogController sharedController].lineHandler = ^(NSString *line) {
-        [weakSelf appendSyslogLine:line];
-    };
-    BOOL syslogCaptureStarted = [[ZSyslogController sharedController] start];
-    if (!syslogCaptureStarted) {
-        [self appendSyslogLine:@"[syslog] Unable to start stdout/stderr capture"];
-    }
 
     self.scrollViewport = [[UIView alloc] init];
     self.scrollViewport.translatesAutoresizingMaskIntoConstraints = NO;
@@ -11339,26 +11346,24 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
     if (!line.length) return;
     if ([self zs_syslogLineIsBlacklisted:line]) return;
 
-    [self.syslogLines addObject:line];
-    static const NSUInteger kMaxSyslogLines = 80;
-    if (self.syslogLines.count > kMaxSyslogLines) {
-        NSUInteger removeCount = self.syslogLines.count - kMaxSyslogLines;
-        [self.syslogLines removeObjectsInRange:NSMakeRange(0, removeCount)];
+    if (!self.syslogChannelLines) self.syslogChannelLines = [NSMutableArray array];
+    if (!self.debugChannelLines) self.debugChannelLines = [NSMutableArray array];
+
+    BOOL isZLogLine = [line containsString:kZLogTag];
+    NSMutableArray<NSString *> *targetBuffer = isZLogLine ? self.debugChannelLines : self.syslogChannelLines;
+
+    [targetBuffer addObject:line];
+    static const NSUInteger kMaxSyslogLines = 500;
+    if (targetBuffer.count > kMaxSyslogLines) {
+        NSUInteger removeCount = targetBuffer.count - kMaxSyslogLines;
+        [targetBuffer removeObjectsInRange:NSMakeRange(0, removeCount)];
     }
 
     [self zs_renderSyslogBuffer];
 }
 
 - (NSArray<NSString *> *)zs_syslogDisplayLines {
-
-    NSMutableArray<NSString *> *filtered = [NSMutableArray array];
-    for (NSString *line in self.syslogLines) {
-        BOOL isZLogLine = [line containsString:kZLogTag];
-        if (self.syslogDebugModeEnabled ? isZLogLine : !isZLogLine) {
-            [filtered addObject:line];
-        }
-    }
-    return filtered;
+    return self.syslogDebugModeEnabled ? (self.debugChannelLines ?: @[]) : (self.syslogChannelLines ?: @[]);
 }
 
 - (void)zs_renderSyslogBuffer {
@@ -12256,13 +12261,21 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
 }
 
 - (void)reapplySyslogBlacklistFilter {
-    if (self.syslogLines.count == 0) return;
-    NSIndexSet *toRemove = [self.syslogLines indexesOfObjectsPassingTest:^BOOL(NSString *line, NSUInteger idx, BOOL *stop) {
-        return [self zs_syslogLineIsBlacklisted:line];
-    }];
-    if (toRemove.count == 0) return;
-    [self.syslogLines removeObjectsAtIndexes:toRemove];
-    [self zs_renderSyslogBuffer];
+    NSArray<NSMutableArray<NSString *> *> *buffers = @[
+        self.syslogChannelLines ?: [NSMutableArray array],
+        self.debugChannelLines ?: [NSMutableArray array],
+    ];
+    BOOL changed = NO;
+    for (NSMutableArray<NSString *> *buffer in buffers) {
+        if (buffer.count == 0) continue;
+        NSIndexSet *toRemove = [buffer indexesOfObjectsPassingTest:^BOOL(NSString *line, NSUInteger idx, BOOL *stop) {
+            return [self zs_syslogLineIsBlacklisted:line];
+        }];
+        if (toRemove.count == 0) continue;
+        [buffer removeObjectsAtIndexes:toRemove];
+        changed = YES;
+    }
+    if (changed) [self zs_renderSyslogBuffer];
 }
 
 #pragma mark Pull tab
