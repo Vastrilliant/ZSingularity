@@ -1892,6 +1892,10 @@ void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageC
     });
 }
 
+typedef struct __SecTask *SecTaskRef;
+extern SecTaskRef SecTaskCreateFromSelf(CFAllocatorRef allocator);
+extern CFTypeRef SecTaskCopyValueForEntitlement(SecTaskRef task, CFStringRef entitlement, CFErrorRef *error);
+
 static BOOL zs_process_has_entitlement(NSString *entitlementKey) {
     if (entitlementKey.length == 0) return NO;
 
