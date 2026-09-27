@@ -6,6 +6,23 @@
 
 UIView *zs_unity_view(void);
 
+#pragma mark - Global Scene State
+
+typedef NS_ENUM(int32_t, ZSGlobalSceneState) {
+    ZSGlobalSceneStateLogin = 0,
+    ZSGlobalSceneStateBattle = 1,
+    ZSGlobalSceneStateMain = 2,
+    ZSGlobalSceneStateStory = 3,
+    ZSGlobalSceneStateDungeon = 4,
+    ZSGlobalSceneStateMirrorDungeon = 5,
+    ZSGlobalSceneStateRailwayDungeon = 6,
+    ZSGlobalSceneStateStoryMirrorDungeon = 7,
+    ZSGlobalSceneStateProjectGS = 8,
+    ZSGlobalSceneStateRpg = 9,
+};
+
+BOOL ZSGlobalScene_Current(int32_t * _Nonnull outState);
+
 #pragma mark - FPS120Controller
 
 @interface FPS120Controller : NSObject
@@ -346,6 +363,8 @@ typedef struct {
     int64_t systemActiveBytes;
     int64_t systemWiredBytes;
     const char * _Nonnull pressureLabel;
+    BOOL hasIncreasedMemoryLimitEntitlement;
+    BOOL hasExtendedVirtualAddressingEntitlement;
 } ZSMemorySystemStats;
 
 ZSMemorySystemStats zs_collect_memory_system_stats(void);

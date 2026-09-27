@@ -184,16 +184,17 @@ static void PMDidComplete(id self,
 
     if (handled) {
         NSString *matchedSuffix = PMMatchedSuffixForTask(task);
-        BOOL allPatched = NO;
         @synchronized ([PatchManifestNetwork class]) {
             if (matchedSuffix) [gPatchedSuffixes addObject:matchedSuffix];
-            allPatched = gPatchedSuffixes.count >= PMTargetPathSuffixes().count;
         }
-        if (allPatched) {
-            ZLog(@"[PatchManifestNetwork] every manifest patched - deactivating for the rest of this session");
+
+        int32_t sceneState = 0;
+        BOOL sceneKnown = ZSGlobalScene_Current(&sceneState);
+        if (sceneKnown && sceneState != ZSGlobalSceneStateLogin) {
+            ZLog(@"[PatchManifestNetwork] patched %@ and past the login screen (scene=%d) - deactivating", matchedSuffix, sceneState);
             [PatchManifestNetwork uninstall];
         } else {
-            ZLog(@"[PatchManifestNetwork] patched %@ - staying active for the remaining manifests", matchedSuffix);
+            ZLog(@"[PatchManifestNetwork] patched %@ and still on the login screen - staying active", matchedSuffix);
         }
     }
 }

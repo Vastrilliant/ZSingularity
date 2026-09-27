@@ -7806,7 +7806,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSString *systemWiredText = stats.systemWiredBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemWiredBytes] : @"Unknown";
     NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
     NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
+    NSString *increasedMemoryLimitText = stats.hasIncreasedMemoryLimitEntitlement ? @"Yes" : @"No";
+    NSString *extendedVirtualAddressingText = stats.hasExtendedVirtualAddressingEntitlement ? @"Yes" : @"No";
 
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"kernel.increased-memory-limit", increasedMemoryLimitText)];
+    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"kernel.extended-virtual-addressing", extendedVirtualAddressingText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory used", residentText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Peak memory used", peakText)];
     [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Available memory", availableText)];

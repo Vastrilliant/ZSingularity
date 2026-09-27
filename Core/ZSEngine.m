@@ -11,6 +11,7 @@
 #include <stdint.h>
 #import <mach/mach.h>
 #import <os/proc.h>
+#import <Security/Security.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
 
@@ -18,7 +19,7 @@
 
 static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
-static BOOL ZSGlobalScene_Current(int32_t *outState);
+BOOL ZSGlobalScene_Current(int32_t *outState);
 static const int32_t kZSFontSceneStateMain = 2;
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
@@ -818,7 +819,7 @@ static void zs_schedule_particle_apply(void) {
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
-@property (nonatomic, strong) NSTimer *fpsPollTimer;
+@property (nonatomic, strong) CADisplayLink *fpsPollDisplayLink;
 - (void)applyMenuFPS:(NSInteger)fps;
 - (void)applyCombatFPS:(NSInteger)fps;
 @end
@@ -848,13 +849,9 @@ static void zs_schedule_particle_apply(void) {
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
     }
 
-    if (!self.fpsPollTimer) {
-        self.fpsPollTimer = [NSTimer timerWithTimeInterval:1.0
-                                                      target:self
-                                                    selector:@selector(fpsPollTick)
-                                                    userInfo:nil
-                                                     repeats:YES];
-        [[NSRunLoop mainRunLoop] addTimer:self.fpsPollTimer forMode:NSRunLoopCommonModes];
+    if (!self.fpsPollDisplayLink) {
+        self.fpsPollDisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(fpsPollTick)];
+        [self.fpsPollDisplayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     }
 
     return zs_set_application_target_fps((int32_t)self.targetFPS);
@@ -992,7 +989,7 @@ static void zs_schedule_particle_apply(void) {
 
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
-    [self.fpsPollTimer invalidate];
+    [self.fpsPollDisplayLink invalidate];
 }
 
 @end
@@ -1895,6 +1892,27 @@ void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageC
     });
 }
 
+static BOOL zs_process_has_entitlement(NSString *entitlementKey) {
+    if (entitlementKey.length == 0) return NO;
+
+    SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (!task) return NO;
+
+    CFTypeRef value = SecTaskCopyValueForEntitlement(task, (__bridge CFStringRef)entitlementKey, NULL);
+    CFRelease(task);
+    if (!value) return NO;
+
+    BOOL hasEntitlement = NO;
+    if (CFGetTypeID(value) == CFBooleanGetTypeID()) {
+        hasEntitlement = CFBooleanGetValue((CFBooleanRef)value);
+    } else {
+        hasEntitlement = YES;
+    }
+
+    CFRelease(value);
+    return hasEntitlement;
+}
+
 int64_t zs_current_process_resident_memory_bytes(void) {
     task_vm_info_data_t info;
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
@@ -1947,6 +1965,9 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
     } else {
         stats.pressureLabel = "Normal";
     }
+
+    stats.hasIncreasedMemoryLimitEntitlement = zs_process_has_entitlement(@"com.apple.developer.kernel.increased-memory-limit");
+    stats.hasExtendedVirtualAddressingEntitlement = zs_process_has_entitlement(@"com.apple.developer.kernel.extended-virtual-addressing");
 
     return stats;
 }
@@ -2586,23 +2607,10 @@ void zs_clear_guide_portrait_cache(void) {
 
 #pragma mark - Global Scene State
 
-typedef NS_ENUM(int32_t, ZSGlobalSceneState) {
-    ZSGlobalSceneStateLogin = 0,
-    ZSGlobalSceneStateBattle = 1,
-    ZSGlobalSceneStateMain = 2,
-    ZSGlobalSceneStateStory = 3,
-    ZSGlobalSceneStateDungeon = 4,
-    ZSGlobalSceneStateMirrorDungeon = 5,
-    ZSGlobalSceneStateRailwayDungeon = 6,
-    ZSGlobalSceneStateStoryMirrorDungeon = 7,
-    ZSGlobalSceneStateProjectGS = 8,
-    ZSGlobalSceneStateRpg = 9,
-};
-
 static void *gZSGlobalGameManagerClass;
 static void *gZSGlobalSceneStateField;
 
-static BOOL ZSGlobalScene_Current(int32_t *outState) {
+BOOL ZSGlobalScene_Current(int32_t *outState) {
     if (!gZSGlobalGameManagerClass) {
         gZSGlobalGameManagerClass = [IL2CppBridge classNamed:"GlobalGameManager" inNamespace:"" assemblyContains:"Assembly-CSharp"];
         if (!gZSGlobalGameManagerClass) return NO;
