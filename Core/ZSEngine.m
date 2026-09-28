@@ -1783,6 +1783,8 @@ void *zs_array_object_at(void *array, NSUInteger index) {
 @property (nonatomic, assign) NSUInteger readableMeshCount;
 @property (nonatomic, assign) double scanMilliseconds;
 @property (nonatomic, assign) CFTimeInterval scannedAt;
+@property (nonatomic, assign) NSUInteger pageIndex;
+@property (nonatomic, assign) BOOL hasNextPage;
 @end
 
 @implementation ZSAssetScanResult
@@ -1833,11 +1835,22 @@ static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[]
     {"UnityEngine", "AssetBundle", "AssetBundleModule", "Loaded Asset Bundles", NO, ZSAssetFamilyGeneric},
 };
 
-static const NSUInteger kZSTopAssetCount = 20;
+static const NSUInteger kZSTopAssetsPageSize = 20;
 static const NSUInteger kZSFootprintMaxRows = 22;
-static const NSUInteger kZSUnityMaxRows = 16;
+static const NSUInteger kZSUnityMaxRows = 18;
 static const NSUInteger kZSCleanFileMaxRows = 10;
 static const CFTimeInterval kZSAssetScanMinInterval = 3.0;
+static const NSUInteger kZSMinFoldedItems = 3;
+
+static NSUInteger g_topAssetsPage = 0;
+
+void zs_set_memory_top_assets_page(NSUInteger page) {
+    g_topAssetsPage = page;
+}
+
+NSUInteger zs_memory_top_assets_page(void) {
+    return g_topAssetsPage;
+}
 
 static BOOL mt_get_instance_bool(void *instance, const char *getter, BOOL *outValue) {
     if (!instance || !outValue) return NO;
@@ -1899,29 +1912,26 @@ static NSArray<ZSMemoryUsageCategory *> *zs_fold_memory_rows(NSArray<ZSMemoryUsa
     if (total <= 0) return sortedRows;
 
     NSMutableArray<ZSMemoryUsageCategory *> *kept = [NSMutableArray new];
-    ZSMemoryUsageCategory *other = nil;
-    NSUInteger otherItems = 0;
+    NSMutableArray<ZSMemoryUsageCategory *> *folded = [NSMutableArray new];
 
     for (NSUInteger i = 0; i < sortedRows.count; i++) {
         ZSMemoryUsageCategory *row = sortedRows[i];
         BOOL keep = i < maxRows && (double)row.totalBytes >= (double)total * minFraction;
-        if (keep) {
-            [kept addObject:row];
-            continue;
-        }
-        if (!other) other = [ZSMemoryUsageCategory new];
+        [(keep ? kept : folded) addObject:row];
+    }
+
+    if (folded.count < kZSMinFoldedItems) return sortedRows;
+
+    ZSMemoryUsageCategory *other = [ZSMemoryUsageCategory new];
+    for (ZSMemoryUsageCategory *row in folded) {
         other.totalBytes += row.totalBytes;
         other.residentBytes += row.residentBytes;
         other.compressedBytes += row.compressedBytes;
         other.objectCount += row.objectCount;
-        otherItems++;
     }
-
-    if (other) {
-        other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)otherItems];
-        if (describeResidency) other.detail = zs_memory_residency_detail(other);
-        [kept addObject:other];
-    }
+    other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)folded.count];
+    if (describeResidency) other.detail = zs_memory_residency_detail(other);
+    [kept addObject:other];
     return kept;
 }
 
@@ -2027,7 +2037,7 @@ static const char *const kZSVMTagNames[256] = {
 };
 
 static NSString *zs_vm_anonymous_name(uint32_t tag) {
-    if (tag == 0) return @"Untagged anonymous (Unity / IL2CPP heaps)";
+    if (tag == 0) return @"Untagged anonymous (IL2CPP Heap)";
     if (tag < 256 && kZSVMTagNames[tag]) return [NSString stringWithUTF8String:kZSVMTagNames[tag]];
     if (tag >= 240 && tag <= 255) return [NSString stringWithFormat:@"Application-specific (tag %u)", tag];
     return [NSString stringWithFormat:@"VM tag %u", tag];
@@ -2265,19 +2275,30 @@ static NSString *zs_asset_detail_string(void *obj, const ZSMemoryUsageCategoryDe
     return [parts componentsJoinedByString:@" · "];
 }
 
-static void zs_top_assets_consider(NSMutableArray<ZSMemoryUsageCategory *> *top,
+typedef struct {
+    void *obj;
+    int64_t size;
+    const ZSMemoryUsageCategoryDescriptor *descriptor;
+} ZSTopAssetCandidate;
+
+static void zs_top_assets_consider(ZSTopAssetCandidate *top,
+                                   NSUInteger *count,
+                                   NSUInteger capacity,
                                    void *obj,
                                    int64_t size,
                                    const ZSMemoryUsageCategoryDescriptor *descriptor) {
-    if (top.count >= kZSTopAssetCount && size <= top.lastObject.totalBytes) return;
+    if (capacity == 0) return;
+    if (*count >= capacity && size <= top[*count - 1].size) return;
 
-    NSString *name = mt_get_instance_string(obj, "get_name");
-    ZSMemoryUsageCategory *row = zs_make_memory_row(name.length > 0 ? name : @"(unnamed)", size, zs_asset_detail_string(obj, descriptor));
-
-    NSUInteger index = top.count;
-    while (index > 0 && top[index - 1].totalBytes < size) index--;
-    [top insertObject:row atIndex:index];
-    if (top.count > kZSTopAssetCount) [top removeLastObject];
+    NSUInteger index = *count < capacity ? *count : capacity - 1;
+    while (index > 0 && top[index - 1].size < size) {
+        top[index] = top[index - 1];
+        index--;
+    }
+    top[index].obj = obj;
+    top[index].size = size;
+    top[index].descriptor = descriptor;
+    if (*count < capacity) (*count)++;
 }
 
 static ZSAssetScanResult *zs_scan_loaded_assets(void) {
@@ -2288,6 +2309,12 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
     result.objectCounts = [NSMutableArray new];
 
     NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
+
+    NSUInteger requestedPage = g_topAssetsPage;
+    NSUInteger candidateCapacity = (requestedPage + 1) * kZSTopAssetsPageSize;
+    ZSTopAssetCandidate *candidates = calloc(candidateCapacity, sizeof(ZSTopAssetCandidate));
+    NSUInteger candidateCount = 0;
+    NSUInteger totalAssets = 0;
 
     for (NSUInteger d = 0; d < descriptorCount; d++) {
         const ZSMemoryUsageCategoryDescriptor *descriptor = &kZSMemoryUsageCategoryDescriptors[d];
@@ -2331,7 +2358,8 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
                 }
             }
 
-            zs_top_assets_consider(result.topAssets, obj, size, descriptor);
+            totalAssets++;
+            if (candidates) zs_top_assets_consider(candidates, &candidateCount, candidateCapacity, obj, size, descriptor);
         }
 
         if (categoryTotal <= 0) continue;
@@ -2343,6 +2371,24 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
         [result.assetCategories addObject:category];
         result.assetTrackedBytes += categoryTotal;
     }
+
+    NSUInteger lastPage = totalAssets > 0 ? (totalAssets - 1) / kZSTopAssetsPageSize : 0;
+    NSUInteger page = MIN(requestedPage, lastPage);
+    g_topAssetsPage = page;
+
+    NSUInteger pageStart = page * kZSTopAssetsPageSize;
+    NSUInteger pageEnd = MIN(candidateCount, pageStart + kZSTopAssetsPageSize);
+    for (NSUInteger i = pageStart; i < pageEnd; i++) {
+        ZSTopAssetCandidate candidate = candidates[i];
+        NSString *name = mt_get_instance_string(candidate.obj, "get_name");
+        [result.topAssets addObject:zs_make_memory_row(name.length > 0 ? name : @"(unnamed)",
+                                                       candidate.size,
+                                                       zs_asset_detail_string(candidate.obj, candidate.descriptor))];
+    }
+    free(candidates);
+
+    result.pageIndex = page;
+    result.hasNextPage = totalAssets > (page + 1) * kZSTopAssetsPageSize;
 
     [result.objectCounts sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
         if (a.objectCount == b.objectCount) return NSOrderedSame;
@@ -2358,7 +2404,7 @@ static ZSAssetScanResult *g_cachedAssetScan;
 
 static ZSAssetScanResult *zs_cached_asset_scan(void) {
     CFTimeInterval now = CACurrentMediaTime();
-    if (g_cachedAssetScan && now - g_cachedAssetScan.scannedAt < kZSAssetScanMinInterval) return g_cachedAssetScan;
+    if (g_cachedAssetScan && g_cachedAssetScan.pageIndex == g_topAssetsPage && now - g_cachedAssetScan.scannedAt < kZSAssetScanMinInterval) return g_cachedAssetScan;
     g_cachedAssetScan = zs_scan_loaded_assets();
     return g_cachedAssetScan;
 }
@@ -2431,10 +2477,14 @@ static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const Z
 }
 
 static ZSMemoryUsageGroup *zs_build_top_assets_group(ZSAssetScanResult *scan) {
-    return zs_make_memory_group(@"Heaviest loaded assets",
-                                @"Individual objects by Profiler runtime size",
-                                NO,
-                                scan.topAssets);
+    ZSMemoryUsageGroup *group = zs_make_memory_group(@"Heaviest loaded assets",
+                                                     @"Individual objects by Profiler runtime size",
+                                                     NO,
+                                                     scan.topAssets);
+    group.pagingEnabled = YES;
+    group.pageIndex = scan.pageIndex;
+    group.hasNextPage = scan.hasNextPage;
+    return group;
 }
 
 static ZSMemoryUsageGroup *zs_build_diagnostics_group(ZSAssetScanResult *scan,
