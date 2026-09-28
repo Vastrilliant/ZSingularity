@@ -1785,6 +1785,7 @@ void *zs_array_object_at(void *array, NSUInteger index) {
 @property (nonatomic, assign) CFTimeInterval scannedAt;
 @property (nonatomic, assign) NSUInteger pageIndex;
 @property (nonatomic, assign) BOOL hasNextPage;
+@property (nonatomic, assign) int64_t estimatedGpuTextureBytes;
 @end
 
 @implementation ZSAssetScanResult
@@ -2278,6 +2279,112 @@ static NSString *zs_asset_detail_string(void *obj, const ZSMemoryUsageCategoryDe
 }
 
 typedef struct {
+    const void *width;
+    const void *height;
+    const void *mipCount;
+    const void *format;
+    const void *streaming;
+    const void *loadedMip;
+    const void *depth;
+    const void *cubemapCount;
+} ZSTextureMethods;
+
+static BOOL zs_invoke_int32(const void *method, void *obj, int32_t *out) {
+    if (!method || !obj || !out) return NO;
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:obj args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *out = *(int32_t *)((uint8_t *)boxed + 0x10);
+    return YES;
+}
+
+static BOOL zs_invoke_bool(const void *method, void *obj, BOOL *out) {
+    if (!method || !obj || !out) return NO;
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:obj args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *out = (*(uint8_t *)((uint8_t *)boxed + 0x10)) != 0;
+    return YES;
+}
+
+static BOOL zs_texture_format_layout(int32_t format, int32_t *blockW, int32_t *blockH, int32_t *blockBytes, int32_t *minW, int32_t *minH) {
+    *blockW = 1; *blockH = 1; *minW = 1; *minH = 1;
+    switch (format) {
+        case 1: case 63: *blockBytes = 1; return YES;
+        case 2: case 7: case 9: case 13: case 15: case 21: case 62: *blockBytes = 2; return YES;
+        case 3: *blockBytes = 3; return YES;
+        case 4: case 5: case 14: case 16: case 18: case 22: case 72: *blockBytes = 4; return YES;
+        case 73: *blockBytes = 6; return YES;
+        case 17: case 19: case 74: *blockBytes = 8; return YES;
+        case 20: *blockBytes = 16; return YES;
+        case 10: case 26: case 28: case 34: case 41: case 42: case 45: case 46: case 64:
+            *blockW = 4; *blockH = 4; *blockBytes = 8; return YES;
+        case 12: case 24: case 25: case 27: case 29: case 43: case 44: case 47: case 65:
+            *blockW = 4; *blockH = 4; *blockBytes = 16; return YES;
+        case 30: case 31:
+            *blockW = 8; *blockH = 4; *blockBytes = 8; *minW = 16; *minH = 8; return YES;
+        case 32: case 33:
+            *blockW = 4; *blockH = 4; *blockBytes = 8; *minW = 8; *minH = 8; return YES;
+        case 48: case 54: case 66: *blockW = 4; *blockH = 4; *blockBytes = 16; return YES;
+        case 49: case 55: case 67: *blockW = 5; *blockH = 5; *blockBytes = 16; return YES;
+        case 50: case 56: case 68: *blockW = 6; *blockH = 6; *blockBytes = 16; return YES;
+        case 51: case 57: case 69: *blockW = 8; *blockH = 8; *blockBytes = 16; return YES;
+        case 52: case 58: case 70: *blockW = 10; *blockH = 10; *blockBytes = 16; return YES;
+        case 53: case 59: case 71: *blockW = 12; *blockH = 12; *blockBytes = 16; return YES;
+        default: return NO;
+    }
+}
+
+static int64_t zs_estimate_texture_bytes(void *obj, const ZSMemoryUsageCategoryDescriptor *descriptor, const ZSTextureMethods *m) {
+    int32_t width = 0, height = 0, format = 0, mips = 1;
+    if (!zs_invoke_int32(m->width, obj, &width) || !zs_invoke_int32(m->height, obj, &height)) return 0;
+    if (width <= 0 || height <= 0) return 0;
+    if (!zs_invoke_int32(m->format, obj, &format)) return 0;
+
+    int32_t blockW, blockH, blockBytes, minW, minH;
+    if (!zs_texture_format_layout(format, &blockW, &blockH, &blockBytes, &minW, &minH)) return 0;
+
+    if (!zs_invoke_int32(m->mipCount, obj, &mips) || mips < 1) mips = 1;
+
+    int32_t firstLevel = 0;
+    BOOL streaming = NO;
+    if (zs_invoke_bool(m->streaming, obj, &streaming) && streaming) {
+        int32_t loaded = 0;
+        if (zs_invoke_int32(m->loadedMip, obj, &loaded) && loaded > 0 && loaded < mips) firstLevel = loaded;
+    }
+
+    int32_t layers = 1;
+    BOOL volumeTexture = NO;
+    const char *klassName = descriptor->klassName;
+    if (strcmp(klassName, "Cubemap") == 0) {
+        layers = 6;
+    } else if (strcmp(klassName, "Texture2DArray") == 0) {
+        int32_t depth = 0;
+        if (zs_invoke_int32(m->depth, obj, &depth) && depth > 0) layers = depth;
+    } else if (strcmp(klassName, "Texture3D") == 0) {
+        int32_t depth = 0;
+        if (zs_invoke_int32(m->depth, obj, &depth) && depth > 0) layers = depth;
+        volumeTexture = YES;
+    } else if (strcmp(klassName, "CubemapArray") == 0) {
+        int32_t count = 0;
+        if (zs_invoke_int32(m->cubemapCount, obj, &count) && count > 0) layers = count * 6;
+    }
+
+    int64_t total = 0;
+    for (int32_t level = firstLevel; level < mips; level++) {
+        int64_t w = MAX((int64_t)1, (int64_t)(width >> level));
+        int64_t h = MAX((int64_t)1, (int64_t)(height >> level));
+        w = MAX(w, (int64_t)minW);
+        h = MAX(h, (int64_t)minH);
+        int64_t blocksX = (w + blockW - 1) / blockW;
+        int64_t blocksY = (h + blockH - 1) / blockH;
+        int64_t slices = volumeTexture ? MAX((int64_t)1, (int64_t)(layers >> level)) : layers;
+        total += blocksX * blocksY * (int64_t)blockBytes * slices;
+    }
+    return total;
+}
+
+typedef struct {
     void *obj;
     int64_t size;
     const ZSMemoryUsageCategoryDescriptor *descriptor;
@@ -2337,12 +2444,36 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
         int64_t categoryTotal = 0;
         NSUInteger liveCount = 0;
 
+        BOOL estimatesTexture = descriptor->family == ZSAssetFamilyTexture;
+        ZSTextureMethods textureMethods;
+        memset(&textureMethods, 0, sizeof(textureMethods));
+        if (estimatesTexture) {
+            textureMethods.width = mt_method(klass, "get_width", 0);
+            textureMethods.height = mt_method(klass, "get_height", 0);
+            textureMethods.mipCount = mt_method(klass, "get_mipmapCount", 0);
+            textureMethods.format = mt_method(klass, "get_format", 0);
+            textureMethods.streaming = mt_method(klass, "get_streamingMipmaps", 0);
+            textureMethods.loadedMip = mt_method(klass, "get_loadedMipmapLevel", 0);
+            textureMethods.depth = mt_method(klass, "get_depth", 0);
+            textureMethods.cubemapCount = mt_method(klass, "get_cubemapCount", 0);
+        }
+
         for (NSUInteger i = 0; i < count; i++) {
             void *obj = zs_array_object_at(array, i);
             if (!obj) continue;
 
             int64_t size = 0;
-            if (!mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size) || size <= 0) continue;
+            BOOL gotProfilerSize = mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size);
+            if (!gotProfilerSize) size = 0;
+
+            if (estimatesTexture) {
+                int64_t estimated = zs_estimate_texture_bytes(obj, descriptor, &textureMethods);
+                if (estimated > size) {
+                    result.estimatedGpuTextureBytes += estimated - size;
+                    size = estimated;
+                }
+            }
+            if (size <= 0) continue;
 
             categoryTotal += size;
             liveCount++;
@@ -2454,8 +2585,11 @@ static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const Z
     }
 
     if (facts->hasGfx && facts->gfx > 0) {
-        [rows addObject:zs_make_memory_row(@"Graphics driver (Unity)", facts->gfx, @"Metal buffers and textures Unity reports to the driver")];
-        accounted += facts->gfx;
+        int64_t gfxRemainder = MAX(facts->gfx - scan.estimatedGpuTextureBytes, (int64_t)0);
+        if (gfxRemainder > 0) {
+            [rows addObject:zs_make_memory_row(@"Graphics driver (Unity)", gfxRemainder, @"Metal allocations not attributed to loaded textures")];
+            accounted += gfxRemainder;
+        }
     }
 
     if (facts->hasAllocated) {
