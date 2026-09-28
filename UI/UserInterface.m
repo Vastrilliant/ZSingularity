@@ -11389,7 +11389,7 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
 #pragma mark Syslog full-screen viewer
 
-static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding;
+static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.1;
 
 - (void)zs_buildSyslogFullScreenPanelIfNeeded {
     if (self.syslogFullScreenOverlay) return;
