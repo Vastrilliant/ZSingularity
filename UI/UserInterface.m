@@ -13003,19 +13003,28 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 
         UIView *element = [strongSelf zs_makePinnedTabElementForKey:key];
         if (!element) return;
-        CGFloat handleY = [strongSelf zs_handleRestingY];
-        CGRect slot = [strongSelf zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:[strongSelf zs_handleLocalX]];
 
-        element.alpha = 0;
-        [UIView animateWithDuration:0.5
-                              delay:0
-             usingSpringWithDamping:0.72
-              initialSpringVelocity:0.5
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                         animations:^{
-            element.frame = slot;
-            element.alpha = 1;
-        } completion:nil];
+        UIView *icon = [element viewWithTag:kZSPinnedIconTag];
+        icon.alpha = 0;
+        [strongSelf.glassContainerContent layoutIfNeeded];
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) innerSelf = weakSelf;
+            if (!innerSelf || !innerSelf.panelOpen || innerSelf.pinnedTabElements[key] != element) return;
+            NSUInteger slotIdx = [[innerSelf zs_pinnedKeys] indexOfObject:key];
+            if (slotIdx == NSNotFound) return;
+            CGRect slot = [innerSelf zs_pinnedSlotFrameAtIndex:slotIdx handleY:[innerSelf zs_handleRestingY] localX:[innerSelf zs_handleLocalX]];
+
+            [UIView animateWithDuration:0.5
+                                  delay:0
+                 usingSpringWithDamping:0.72
+                  initialSpringVelocity:0.5
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:^{
+                element.frame = slot;
+                icon.alpha = 1;
+            } completion:nil];
+        });
     };
 
     if (delay > 0) {
@@ -13047,7 +13056,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
         element.frame = origin;
-        element.alpha = 0;
+        [element viewWithTag:kZSPinnedIconTag].alpha = 0;
         [weakSelf zs_layoutPinnedTabsWithHandleY:handleY localX:localX visible:YES];
     } completion:^(BOOL finished) {
         [element removeFromSuperview];
