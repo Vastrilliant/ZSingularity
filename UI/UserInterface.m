@@ -12812,6 +12812,7 @@ static NSString * const kZSPinnedActionsSettingsKey = @"keys";
 
 static const CGFloat kZSPinnedTabHeight = 48;
 static const CGFloat kZSPinnedTabGap = 4;
+static const NSInteger kZSPinnedIconTag = 0x5A50;
 static const CGFloat kZSPinMenuWidth = 224;
 static const CGFloat kZSPinMenuHeaderTop = 10;
 static const CGFloat kZSPinMenuHeaderHeight = 28;
@@ -12935,6 +12936,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     icon.contentMode = UIViewContentModeCenter;
     icon.frame = content.bounds;
     icon.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    icon.tag = kZSPinnedIconTag;
     [content addSubview:icon];
 
     content.userInteractionEnabled = YES;
@@ -12982,6 +12984,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         if (!element) continue;
         element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:x];
         element.userInteractionEnabled = visible;
+        [element viewWithTag:kZSPinnedIconTag].alpha = visible ? 1 : 0;
     }
 }
 
@@ -13003,6 +13006,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         CGFloat handleY = [strongSelf zs_handleRestingY];
         CGRect slot = [strongSelf zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:[strongSelf zs_handleLocalX]];
 
+        element.alpha = 0;
         [UIView animateWithDuration:0.5
                               delay:0
              usingSpringWithDamping:0.72
@@ -13010,6 +13014,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
                             options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                          animations:^{
             element.frame = slot;
+            element.alpha = 1;
         } completion:nil];
     };
 
@@ -13042,6 +13047,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
         element.frame = origin;
+        element.alpha = 0;
         [weakSelf zs_layoutPinnedTabsWithHandleY:handleY localX:localX visible:YES];
     } completion:^(BOOL finished) {
         [element removeFromSuperview];
@@ -13480,6 +13486,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           kHandleWidth,
                                           kHandleHeight);
         handleElement.userInteractionEnabled = !fullScreenOpen;
+        self.chevron.alpha = fullScreenOpen ? 0 : 1;
         [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 localX:handleLocalX visible:!fullScreenOpen];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
