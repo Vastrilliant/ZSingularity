@@ -4657,6 +4657,14 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieTrackLayer;
 @property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
 
+@property (nonatomic, strong) NSMutableArray<NSString *> *pinnedActionKeys;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
+@property (nonatomic, strong) UIView *pinMenuScrim;
+@property (nonatomic, strong) UIView *pinMenuView;
+@property (nonatomic, strong) UIView *pinMenuContent;
+@property (nonatomic, assign) BOOL pinMenuOpen;
+@property (nonatomic, assign) BOOL pinMenuTransitioning;
+
 + (instancetype)shared;
 - (void)installIfNeeded;
 - (void)zs_bootstrapSyslogCaptureIfNeeded;
@@ -5044,6 +5052,13 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                       handleRestingFrame.size.width,
                                       handleRestingFrame.size.height);
 
+    NSMutableDictionary<NSString *, NSValue *> *pinnedRestingFrames = [NSMutableDictionary dictionary];
+    for (NSString *pinKey in self.pinnedTabElements) {
+        UIView *pinnedElement = self.pinnedTabElements[pinKey];
+        pinnedRestingFrames[pinKey] = [NSValue valueWithCGRect:pinnedElement.frame];
+        pinnedElement.frame = CGRectOffset(pinnedElement.frame, kHandleWidth, 0);
+    }
+
     self.glassContainer.frame = CGRectMake(unityView.bounds.size.width,
                                             restingFrame.origin.y,
                                             restingFrame.size.width,
@@ -5070,6 +5085,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         weakSelf.contentOverlay.frame = contentOverlayRestingFrame;
         if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayRestingFrame;
         handleElement.frame = handleRestingFrame;
+        for (NSString *pinKey in pinnedRestingFrames) {
+            weakSelf.pinnedTabElements[pinKey].frame = pinnedRestingFrames[pinKey].CGRectValue;
+        }
     } completion:^(BOOL finished) {
         [weakSelf zs_pollAllActiveDoctorEntriesImmediately];
     }];
@@ -5091,6 +5109,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
+    [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
 
     if (self.zsFloatingField) [self zs_commitFloatingFieldSaving:NO];
 
@@ -5129,6 +5148,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                                               handleElement.frame.size.width,
                                               handleElement.frame.size.height);
 
+    NSMutableDictionary<NSString *, NSValue *> *pinnedRetractedFrames = [NSMutableDictionary dictionary];
+    for (NSString *pinKey in self.pinnedTabElements) {
+        pinnedRetractedFrames[pinKey] = [NSValue valueWithCGRect:CGRectOffset(self.pinnedTabElements[pinKey].frame, kHandleWidth, 0)];
+    }
+
     __weak typeof(self) weakSelf = self;
     [UIView animateWithDuration:0.28
                           delay:0
@@ -5136,6 +5160,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
           initialSpringVelocity:0.3
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
+        for (NSString *pinKey in pinnedRetractedFrames) {
+            weakSelf.pinnedTabElements[pinKey].frame = pinnedRetractedFrames[pinKey].CGRectValue;
+        }
         weakSelf.glassContainer.frame = offscreenFrame;
         weakSelf.contentOverlay.frame = contentOverlayOffscreenFrame;
         if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayOffscreenFrame;
@@ -5199,6 +5226,14 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [self.glassContainer removeFromSuperview];
     [self.contentOverlay removeFromSuperview];
     [self.docsContentOverlay removeFromSuperview];
+
+    [self.pinMenuScrim removeFromSuperview];
+    self.pinMenuScrim = nil;
+    self.pinMenuView = nil;
+    self.pinMenuContent = nil;
+    self.pinMenuOpen = NO;
+    self.pinMenuTransitioning = NO;
+    self.pinnedTabElements = nil;
 
     self.glassContainer = nil;
     self.panelGlass = nil;
@@ -5807,6 +5842,14 @@ static const CGFloat kContentFadeHeight = 22;
     UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_closeButtonTapped)];
     [self.handle addGestureRecognizer:tap];
     self.handle.userInteractionEnabled = YES;
+
+    UILongPressGestureRecognizer *pinHold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleHeld:)];
+    pinHold.minimumPressDuration = 0.5;
+    pinHold.allowableMovement = 14;
+    [self.handle addGestureRecognizer:pinHold];
+    [tap requireGestureRecognizerToFail:pinHold];
+
+    [self zs_buildPinnedTabsFromStore];
 
     [self buildDocsPanel:unityView];
 
@@ -12747,6 +12790,451 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (changed) [self zs_renderSyslogBuffer];
 }
 
+#pragma mark Pinned actions
+
+static NSString * const kZSPinKeyMemory = @"memory";
+static NSString * const kZSPinKeySyslog = @"syslog";
+static NSString * const kZSPinnedActionsSettingsSection = @"pinnedActions";
+static NSString * const kZSPinnedActionsSettingsKey = @"keys";
+
+static const CGFloat kZSPinnedTabHeight = 48;
+static const CGFloat kZSPinnedTabGap = 6;
+static const CGFloat kZSPinMenuWidth = 224;
+static const CGFloat kZSPinMenuHeaderTop = 10;
+static const CGFloat kZSPinMenuHeaderHeight = 28;
+static const CGFloat kZSPinMenuHeaderGap = 6;
+static const CGFloat kZSPinMenuRowHeight = 36;
+static const CGFloat kZSPinMenuBottomPadding = 8;
+static const CGFloat kZSPinMenuCornerRadius = 20;
+
+static NSArray<NSDictionary<NSString *, NSString *> *> *zs_pin_action_catalog(void) {
+    return @[
+        @{@"key": kZSPinKeyMemory, @"title": @"Memory analysis", @"symbol": @"memorychip"},
+        @{@"key": kZSPinKeySyslog, @"title": @"Console log", @"symbol": @"terminal"},
+    ];
+}
+
+static NSDictionary<NSString *, NSString *> *zs_pin_action_for_key(NSString *key) {
+    for (NSDictionary<NSString *, NSString *> *action in zs_pin_action_catalog()) {
+        if ([action[@"key"] isEqualToString:key]) return action;
+    }
+    return nil;
+}
+
+static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight weight) {
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize weight:weight == UIFontWeightSemibold ? UIImageSymbolWeightSemibold : UIImageSymbolWeightMedium];
+    return [UIImage systemImageNamed:name withConfiguration:config];
+}
+
+- (NSMutableArray<NSString *> *)zs_pinnedKeys {
+    if (!self.pinnedActionKeys) {
+        NSMutableArray<NSString *> *keys = [NSMutableArray array];
+        id stored = zs_settings_section(kZSPinnedActionsSettingsSection)[kZSPinnedActionsSettingsKey];
+        if ([stored isKindOfClass:[NSArray class]]) {
+            for (id entry in (NSArray *)stored) {
+                if ([entry isKindOfClass:[NSString class]] && zs_pin_action_for_key(entry) && ![keys containsObject:entry]) {
+                    [keys addObject:entry];
+                }
+            }
+        }
+        self.pinnedActionKeys = keys;
+    }
+    return self.pinnedActionKeys;
+}
+
+- (void)zs_persistPinnedKeys {
+    zs_write_settings_section(kZSPinnedActionsSettingsSection, @{kZSPinnedActionsSettingsKey: [[self zs_pinnedKeys] copy]});
+}
+
+- (CGRect)zs_pinnedSlotFrameAtIndex:(NSUInteger)index handleY:(CGFloat)handleY {
+    CGFloat y = handleY - kZSPinnedTabGap - kZSPinnedTabHeight - (CGFloat)index * (kZSPinnedTabHeight + kZSPinnedTabGap);
+    return CGRectMake(0, y, kHandleWidth, kZSPinnedTabHeight);
+}
+
+- (CGRect)zs_pinnedOriginFrameForHandleY:(CGFloat)handleY {
+    return CGRectMake(0, handleY + (kHandleHeight - kZSPinnedTabHeight) * 0.5, kHandleWidth, kZSPinnedTabHeight);
+}
+
+- (CGFloat)zs_handleRestingY {
+    return (CGRectGetHeight(self.glassContainer.bounds) - kHandleHeight) * 0.5;
+}
+
+- (UIView *)zs_makePinnedTabElementForKey:(NSString *)key {
+    NSDictionary<NSString *, NSString *> *action = zs_pin_action_for_key(key);
+    if (!action || !self.glassContainerContent) return nil;
+
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    UIView *element = nil;
+    UIView *content = nil;
+
+    if (zs_has_liquid_glass()) {
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
+        glass.userInteractionEnabled = YES;
+        zs_configure_glass_corners(glass, kHandleCornerRadius, NO);
+        element = glass;
+        content = glass.contentView;
+    } else {
+        UIView *tab = [[UIView alloc] init];
+        tab.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+        tab.layer.cornerRadius = kHandleCornerRadius;
+        tab.layer.cornerCurve = kCACornerCurveContinuous;
+        tab.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+        element = tab;
+        content = tab;
+    }
+
+    element.frame = [self zs_pinnedOriginFrameForHandleY:[self zs_handleRestingY]];
+    [self.glassContainerContent insertSubview:element belowSubview:handleElement];
+
+    UIImageView *icon = [[UIImageView alloc] initWithImage:zs_pin_symbol(action[@"symbol"], 13, UIFontWeightMedium)];
+    icon.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    icon.contentMode = UIViewContentModeCenter;
+    icon.frame = content.bounds;
+    icon.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [content addSubview:icon];
+
+    content.userInteractionEnabled = YES;
+    content.isAccessibilityElement = YES;
+    content.accessibilityLabel = action[@"title"];
+    content.accessibilityTraits = UIAccessibilityTraitButton;
+
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_pinnedTabTapped:)];
+    objc_setAssociatedObject(tap, "zs_pinKey", key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [content addGestureRecognizer:tap];
+
+    if (!self.pinnedTabElements) self.pinnedTabElements = [NSMutableDictionary dictionary];
+    self.pinnedTabElements[key] = element;
+    return element;
+}
+
+- (void)zs_buildPinnedTabsFromStore {
+    self.pinnedTabElements = [NSMutableDictionary dictionary];
+    for (NSString *key in [self zs_pinnedKeys]) {
+        [self zs_makePinnedTabElementForKey:key];
+    }
+}
+
+- (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY hidden:(BOOL)hidden {
+    NSArray<NSString *> *keys = self.pinnedActionKeys;
+    for (NSUInteger idx = 0; idx < keys.count; idx++) {
+        UIView *element = self.pinnedTabElements[keys[idx]];
+        if (!element) continue;
+        element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY];
+        element.hidden = hidden;
+    }
+}
+
+- (void)zs_addPinnedKey:(NSString *)key delay:(NSTimeInterval)delay {
+    NSMutableArray<NSString *> *keys = [self zs_pinnedKeys];
+    if ([keys containsObject:key] || !zs_pin_action_for_key(key)) return;
+    [keys addObject:key];
+    [self zs_persistPinnedKeys];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t emerge = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.glassContainerContent || !strongSelf.panelOpen) return;
+        NSUInteger idx = [[strongSelf zs_pinnedKeys] indexOfObject:key];
+        if (idx == NSNotFound || strongSelf.pinnedTabElements[key]) return;
+
+        UIView *element = [strongSelf zs_makePinnedTabElementForKey:key];
+        if (!element) return;
+        CGFloat handleY = [strongSelf zs_handleRestingY];
+        CGRect slot = [strongSelf zs_pinnedSlotFrameAtIndex:idx handleY:handleY];
+        BOOL hidden = strongSelf.syslogFullScreenOpen || strongSelf.memoryFullScreenOpen;
+        element.hidden = hidden;
+
+        [UIView animateWithDuration:0.5
+                              delay:0
+             usingSpringWithDamping:0.72
+              initialSpringVelocity:0.5
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            element.frame = slot;
+        } completion:nil];
+    };
+
+    if (delay > 0) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), emerge);
+    } else {
+        emerge();
+    }
+}
+
+- (void)zs_removePinnedKey:(NSString *)key delay:(NSTimeInterval)delay {
+    NSMutableArray<NSString *> *keys = [self zs_pinnedKeys];
+    NSUInteger idx = [keys indexOfObject:key];
+    if (idx == NSNotFound) return;
+
+    UIView *element = self.pinnedTabElements[key];
+    [keys removeObjectAtIndex:idx];
+    [self.pinnedTabElements removeObjectForKey:key];
+    [self zs_persistPinnedKeys];
+    if (!element) return;
+
+    __weak typeof(self) weakSelf = self;
+    CGFloat handleY = [self zs_handleRestingY];
+    CGRect origin = [self zs_pinnedOriginFrameForHandleY:handleY];
+    [UIView animateWithDuration:0.38
+                          delay:delay
+         usingSpringWithDamping:0.9
+          initialSpringVelocity:0.2
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        element.alpha = 1;
+        element.frame = origin;
+        [weakSelf zs_layoutPinnedTabsWithHandleY:handleY hidden:NO];
+    } completion:^(BOOL finished) {
+        [element removeFromSuperview];
+    }];
+}
+
+- (void)zs_pinnedTabTapped:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateRecognized) return;
+    if (self.pinMenuOpen) return;
+    NSString *key = objc_getAssociatedObject(gesture, "zs_pinKey");
+    if ([key isEqualToString:kZSPinKeyMemory]) {
+        [self memoryUsageAnalyzeTapped:nil];
+    } else if ([key isEqualToString:kZSPinKeySyslog]) {
+        self.syslogTabEnabled = self.syslogFullScreenOpen;
+        [self toggleSyslogTapped];
+    }
+}
+
+- (void)zs_handleHeld:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    [self zs_presentPinMenu];
+}
+
+- (CGRect)zs_handleFrameInHost:(UIView *)unityView {
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    return [handleElement.superview convertRect:handleElement.frame toView:unityView];
+}
+
+- (void)zs_presentPinMenu {
+    if (self.pinMenuOpen || self.pinMenuTransitioning) return;
+    if (!self.panelOpen || !self.glassContainer) return;
+    if (self.syslogFullScreenOpen || self.memoryFullScreenOpen) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    NSArray<NSDictionary<NSString *, NSString *> *> *catalog = zs_pin_action_catalog();
+    NSArray<NSString *> *pinned = [self zs_pinnedKeys];
+    UIView *handleElement = self.handleGlass ?: self.handle;
+
+    CGFloat menuHeight = kZSPinMenuHeaderTop + kZSPinMenuHeaderHeight + kZSPinMenuHeaderGap
+                       + kZSPinMenuRowHeight * catalog.count + kZSPinMenuBottomPadding;
+    CGRect collapsed = [self zs_handleFrameInHost:unityView];
+    UIEdgeInsets insets = unityView.safeAreaInsets;
+    CGFloat expandedY = CGRectGetMidY(collapsed) - menuHeight * 0.5;
+    expandedY = MAX(insets.top + 8, MIN(expandedY, unityView.bounds.size.height - insets.bottom - 8 - menuHeight));
+    CGRect expanded = CGRectMake(CGRectGetMaxX(collapsed) - kZSPinMenuWidth, expandedY, kZSPinMenuWidth, menuHeight);
+
+    UIView *scrim = [[UIView alloc] initWithFrame:unityView.bounds];
+    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scrim.backgroundColor = UIColor.clearColor;
+    UITapGestureRecognizer *scrimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_pinMenuDismissTapped)];
+    [scrim addGestureRecognizer:scrimTap];
+    [unityView addSubview:scrim];
+
+    UIView *menu = nil;
+    UIView *content = nil;
+    BOOL glass = zs_has_liquid_glass();
+    if (glass) {
+        UIVisualEffectView *effectView = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
+        effectView.userInteractionEnabled = YES;
+        zs_configure_glass_corners(effectView, kHandleCornerRadius, NO);
+        menu = effectView;
+        content = effectView.contentView;
+    } else {
+        UIView *plain = [[UIView alloc] init];
+        plain.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+        plain.layer.cornerRadius = kHandleCornerRadius;
+        plain.layer.cornerCurve = kCACornerCurveContinuous;
+        plain.clipsToBounds = YES;
+        menu = plain;
+        content = plain;
+    }
+    menu.frame = collapsed;
+    zs_force_dark(menu);
+    [scrim addSubview:menu];
+
+    UIView *menuContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kZSPinMenuWidth, menuHeight)];
+    menuContent.alpha = 0;
+    [content addSubview:menuContent];
+
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [closeButton setImage:zs_pin_symbol(@"xmark", 13, UIFontWeightSemibold) forState:UIControlStateNormal];
+    closeButton.tintColor = [UIColor colorWithWhite:1 alpha:0.78];
+    closeButton.frame = CGRectMake(10, kZSPinMenuHeaderTop, 28, kZSPinMenuHeaderHeight);
+    closeButton.accessibilityLabel = @"Close";
+    [closeButton addTarget:self action:@selector(zs_pinMenuDismissTapped) forControlEvents:UIControlEventTouchUpInside];
+    [menuContent addSubview:closeButton];
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(44, kZSPinMenuHeaderTop, kZSPinMenuWidth - 56, kZSPinMenuHeaderHeight)];
+    title.text = @"Pin an action";
+    title.textColor = [UIColor colorWithWhite:1 alpha:0.92];
+    title.font = zs_mono_font(13, UIFontWeightSemibold);
+    [menuContent addSubview:title];
+
+    CGFloat rowY = kZSPinMenuHeaderTop + kZSPinMenuHeaderHeight + kZSPinMenuHeaderGap;
+    for (NSDictionary<NSString *, NSString *> *action in catalog) {
+        BOOL isPinned = [pinned containsObject:action[@"key"]];
+
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.frame = CGRectMake(0, rowY, kZSPinMenuWidth, kZSPinMenuRowHeight);
+        objc_setAssociatedObject(row, "zs_pinKey", action[@"key"], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [row addTarget:self action:@selector(zs_pinMenuRowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        row.accessibilityLabel = action[@"title"];
+        row.accessibilityValue = isPinned ? @"Pinned" : @"Not pinned";
+
+        UIImageView *actionIcon = [[UIImageView alloc] initWithImage:zs_pin_symbol(action[@"symbol"], 14, UIFontWeightMedium)];
+        actionIcon.tintColor = [UIColor colorWithWhite:1 alpha:0.7];
+        actionIcon.contentMode = UIViewContentModeCenter;
+        actionIcon.frame = CGRectMake(12, 0, 24, kZSPinMenuRowHeight);
+        actionIcon.userInteractionEnabled = NO;
+        [row addSubview:actionIcon];
+
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(44, 0, kZSPinMenuWidth - 44 - 48, kZSPinMenuRowHeight)];
+        label.text = action[@"title"];
+        label.textColor = [UIColor colorWithWhite:1 alpha:0.92];
+        label.font = zs_mono_font(12, UIFontWeightRegular);
+        label.adjustsFontSizeToFitWidth = YES;
+        label.minimumScaleFactor = 0.8;
+        label.userInteractionEnabled = NO;
+        [row addSubview:label];
+
+        UIImageView *pinIcon = [[UIImageView alloc] initWithImage:zs_pin_symbol(isPinned ? @"pin.fill" : @"pin", 14, UIFontWeightMedium)];
+        pinIcon.tintColor = isPinned ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.7];
+        pinIcon.contentMode = UIViewContentModeCenter;
+        pinIcon.frame = CGRectMake(kZSPinMenuWidth - 44, 0, 32, kZSPinMenuRowHeight);
+        pinIcon.userInteractionEnabled = NO;
+        [row addSubview:pinIcon];
+
+        [menuContent addSubview:row];
+        rowY += kZSPinMenuRowHeight;
+    }
+
+    self.pinMenuScrim = scrim;
+    self.pinMenuView = menu;
+    self.pinMenuContent = menuContent;
+    self.pinMenuOpen = YES;
+    self.pinMenuTransitioning = YES;
+
+    handleElement.alpha = 0;
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.46
+                          delay:0
+         usingSpringWithDamping:0.8
+          initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        menu.frame = expanded;
+        if (glass) {
+            zs_configure_glass_corners(menu, kZSPinMenuCornerRadius, NO);
+        } else {
+            menu.layer.cornerRadius = kZSPinMenuCornerRadius;
+        }
+        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 0;
+    } completion:^(BOOL finished) {
+        weakSelf.pinMenuTransitioning = NO;
+    }];
+
+    [UIView animateWithDuration:0.24
+                          delay:0.16
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        menuContent.alpha = 1;
+    } completion:nil];
+}
+
+- (void)zs_pinMenuDismissTapped {
+    [self zs_dismissPinMenuAnimated:YES delay:0 completion:nil];
+}
+
+- (void)zs_dismissPinMenuAnimated:(BOOL)animated delay:(NSTimeInterval)delay completion:(dispatch_block_t)completion {
+    UIView *scrim = self.pinMenuScrim;
+    UIView *menu = self.pinMenuView;
+    UIView *menuContent = self.pinMenuContent;
+    if (!self.pinMenuOpen || !scrim || !menu) {
+        if (completion) completion();
+        return;
+    }
+
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    UIView *unityView = zs_ui_host_view();
+    BOOL glass = zs_has_liquid_glass();
+
+    self.pinMenuOpen = NO;
+    self.pinMenuScrim = nil;
+    self.pinMenuView = nil;
+    self.pinMenuContent = nil;
+    self.pinMenuTransitioning = NO;
+
+    __weak typeof(self) weakSelf = self;
+    void (^finish)(void) = ^{
+        handleElement.alpha = 1;
+        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
+        [scrim removeFromSuperview];
+        if (completion) completion();
+    };
+
+    if (!animated || !unityView || !handleElement.superview) {
+        finish();
+        return;
+    }
+
+    scrim.userInteractionEnabled = NO;
+    CGRect collapsed = [self zs_handleFrameInHost:unityView];
+
+    [UIView animateWithDuration:0.14
+                          delay:delay
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        menuContent.alpha = 0;
+    } completion:nil];
+
+    [UIView animateWithDuration:0.4
+                          delay:delay
+         usingSpringWithDamping:0.86
+          initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        menu.frame = collapsed;
+        if (glass) {
+            zs_configure_glass_corners(menu, kHandleCornerRadius, NO);
+        } else {
+            menu.layer.cornerRadius = kHandleCornerRadius;
+        }
+        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
+    } completion:^(BOOL finished) {
+        finish();
+    }];
+}
+
+- (void)zs_pinMenuRowTapped:(UIButton *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "zs_pinKey");
+    if (!key) return;
+
+    BOOL alreadyPinned = [[self zs_pinnedKeys] containsObject:key];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+
+    [self zs_dismissPinMenuAnimated:YES delay:0 completion:nil];
+
+    if (alreadyPinned) {
+        [self zs_removePinnedKey:key delay:0.12];
+    } else {
+        [self zs_addPinnedKey:key delay:0.2];
+    }
+}
+
 #pragma mark Pull tab
 
 - (void)layoutPanelForWindow:(UIView *)unityView {
@@ -12871,6 +13359,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 - (void)deviceOrientationChanged {
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
+    [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
     [self zs_layoutTutorialForWindow:unityView];
     if (!self.panel) return;
     [self layoutPanelForWindow:unityView];
@@ -12904,6 +13393,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
         : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
 
+    if (fullScreenOpen && self.pinMenuOpen) {
+        [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
+    }
+
     void (^changes)(void) = ^{
         if (docsVisible) {
             self.docsContentOverlay.hidden = fullScreenOpen;
@@ -12920,6 +13413,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           kHandleWidth,
                                           kHandleHeight);
         handleElement.hidden = fullScreenOpen;
+        [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 hidden:fullScreenOpen];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
