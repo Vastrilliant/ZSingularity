@@ -13763,9 +13763,17 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
+    if (leftCornersFlatChanged) {
+        [UIView performWithoutAnimation:^{
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            applyPanelCorners();
+            [CATransaction commit];
+        }];
+    }
+
     if (!animated) {
         changes();
-        if (leftCornersFlatChanged) applyPanelCorners();
         applyIconAlpha();
         completion(YES);
     } else {
@@ -13787,26 +13795,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                              animations:changes
                              completion:completion];
-        }
-
-        if (leftCornersFlatChanged) {
-            void (^applyCornersInstantly)(void) = ^{
-                [UIView performWithoutAnimation:^{
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    applyPanelCorners();
-                    [CATransaction commit];
-                }];
-            };
-            if (docsVisible) {
-                applyCornersInstantly();
-            } else {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(mainDuration * 0.55 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    if (self.docsPanelOpen) return;
-                    applyCornersInstantly();
-                });
-            }
         }
 
         [UIView animateWithDuration:kZSPullTabIconFadeDuration
