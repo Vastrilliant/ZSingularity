@@ -2775,7 +2775,9 @@ static const CGFloat kZSMemoryLegendColumnGap = 18;
 static const CGFloat kZSMemoryMinInnerWidth = 200;
 static const CGFloat kZSMemoryMaxNameWidth = 260;
 static const CGFloat kZSMemoryMaxDetailWidth = 380;
-static const CGFloat kZSMemoryPagedColumnWidth = 1700;
+static const CGFloat kZSMemoryPagedColumnWidthFraction = 0.9;
+
+static NSMutableDictionary<NSString *, NSNumber *> *g_memorySubtitleShrinkState;
 
 static CGFloat zs_memory_text_width(NSString *text, UIFont *font) {
     if (text.length == 0) return 0;
@@ -2828,6 +2830,11 @@ static UIView *zs_build_memory_column(NSString *title,
     UIFont *titleFont = zs_mono_font(12, UIFontWeightSemibold);
     UIFont *subtitleFont = zs_mono_font(9, UIFontWeightRegular);
     CGFloat titleWidth = MIN(zs_memory_text_width(title, titleFont), 340);
+    CGFloat subtitleNaturalWidth = zs_memory_text_width(subtitle, subtitleFont);
+    if (!g_memorySubtitleShrinkState) g_memorySubtitleShrinkState = [NSMutableDictionary new];
+    NSString *shrinkStateKey = title ?: @"";
+    BOOL previouslyShrunk = [g_memorySubtitleShrinkState[shrinkStateKey] boolValue];
+    __block BOOL shrinkSubtitle = NO;
 
     __block CGFloat fontSize = compactStats ? 11 : 10;
     __block BOOL twoLine = NO;
@@ -2870,7 +2877,8 @@ static UIView *zs_build_memory_column(NSString *title,
         if (fixedColumnWidth > 0) innerWidth = fixedColumnWidth - kZSMemoryColumnPadding * 2;
 
         titleHeight = zs_memory_wrapped_size(title, titleFont, innerWidth - headerTrailingReserve).height;
-        subtitleHeight = zs_memory_wrapped_size(subtitle, subtitleFont, innerWidth).height;
+        shrinkSubtitle = subtitleNaturalWidth > 0 && subtitleNaturalWidth / innerWidth <= (previouslyShrunk ? 1.4 : 1.2);
+        subtitleHeight = shrinkSubtitle ? ceil(subtitleFont.lineHeight) : zs_memory_wrapped_size(subtitle, subtitleFont, innerWidth).height;
         headerHeight = titleHeight + (subtitleHeight > 0 ? 3 + subtitleHeight : 0);
         regionHeight = usableHeight - headerHeight - kZSMemoryHeaderGap;
     };
@@ -2911,6 +2919,8 @@ static UIView *zs_build_memory_column(NSString *title,
         measure();
     }
 
+    g_memorySubtitleShrinkState[shrinkStateKey] = @(shrinkSubtitle);
+
     CGFloat availableRowHeight = MAX(floor(regionHeight / (CGFloat)rowsPerColumn), 1);
     CGFloat rowHeight = twoLine ? MIN(availableRowHeight, 38) : MIN(availableRowHeight, compactStats ? 24 : 22);
 
@@ -2929,8 +2939,9 @@ static UIView *zs_build_memory_column(NSString *title,
 
     if (subtitleHeight > 0) {
         UILabel *subtitleLabel = zs_memory_make_label(subtitle, subtitleFont, [UIColor colorWithWhite:1 alpha:0.5], NSTextAlignmentLeft);
-        subtitleLabel.numberOfLines = 0;
-        subtitleLabel.adjustsFontSizeToFitWidth = NO;
+        subtitleLabel.numberOfLines = shrinkSubtitle ? 1 : 0;
+        subtitleLabel.adjustsFontSizeToFitWidth = shrinkSubtitle;
+        subtitleLabel.minimumScaleFactor = 0.65;
         subtitleLabel.frame = CGRectMake(left, top + titleHeight + 3, innerWidth, subtitleHeight);
         [column addSubview:subtitleLabel];
     }
@@ -3030,7 +3041,7 @@ static UIButton *zs_memory_make_page_button(NSString *symbolName, BOOL enabled, 
     return button;
 }
 
-static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat height, void (^onPageChange)(NSInteger delta)) {
+static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat height, CGFloat pagedColumnWidth, void (^onPageChange)(NSInteger delta)) {
     if (group.categories.count == 0) return nil;
 
     int64_t grandTotal = 0;
@@ -3070,7 +3081,7 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat h
     BOOL showsPaging = group.pagingEnabled && onPageChange != nil;
     CGFloat controlsWidth = kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
     CGFloat reserve = showsPaging ? controlsWidth + 10 : 0;
-    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, showsPaging ? kZSMemoryPagedColumnWidth : 0, height);
+    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, showsPaging ? pagedColumnWidth : 0, height);
     if (!column || !showsPaging) return column;
 
     CGFloat titleLineHeight = ceil(zs_mono_font(12, UIFontWeightSemibold).lineHeight);
@@ -4644,7 +4655,6 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *memoryRefreshPieView;
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieLayer;
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieTrackLayer;
-@property (nonatomic, assign) BOOL memoryRefreshPieInverted;
 @property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
 
 + (instancetype)shared;
@@ -11909,6 +11919,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_endMemoryAnalysis {
     [self.memoryRefreshPieLayer removeAllAnimations];
+    [self.memoryRefreshPieTrackLayer removeAllAnimations];
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
     self.memoryFullScreenOpen = NO;
@@ -12056,30 +12067,45 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic impactOccurred];
 }
 
-- (void)zs_restartMemoryRefreshPieAdvancing:(BOOL)advance {
+- (void)zs_startMemoryRefreshPie {
     CAShapeLayer *layer = self.memoryRefreshPieLayer;
     CAShapeLayer *track = self.memoryRefreshPieTrackLayer;
     if (!layer || !track) return;
-    if (advance) self.memoryRefreshPieInverted = !self.memoryRefreshPieInverted;
 
     UIColor *white = UIColor.whiteColor;
     UIColor *grey = [UIColor colorWithWhite:0.22 alpha:1];
-    BOOL inverted = self.memoryRefreshPieInverted;
 
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    layer.strokeColor = (inverted ? grey : white).CGColor;
-    track.fillColor = (inverted ? white : grey).CGColor;
-    layer.strokeEnd = 1;
-    [CATransaction commit];
+    [layer removeAllAnimations];
+    [track removeAllAnimations];
 
-    [layer removeAnimationForKey:@"zsRefreshPie"];
-    CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
-    animation.fromValue = @0;
-    animation.toValue = @1;
-    animation.duration = 2.0;
-    animation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-    [layer addAnimation:animation forKey:@"zsRefreshPie"];
+    CFTimeInterval begin = [layer convertTime:CACurrentMediaTime() fromLayer:nil];
+
+    CABasicAnimation *sweep = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
+    sweep.fromValue = @0;
+    sweep.toValue = @1;
+    sweep.duration = 2.0;
+    sweep.repeatCount = HUGE_VALF;
+    sweep.beginTime = begin;
+    sweep.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
+    [layer addAnimation:sweep forKey:@"zsPieSweep"];
+
+    CAKeyframeAnimation *sweepColor = [CAKeyframeAnimation animationWithKeyPath:@"strokeColor"];
+    sweepColor.values = @[(id)white.CGColor, (id)grey.CGColor];
+    sweepColor.keyTimes = @[@0, @0.5];
+    sweepColor.calculationMode = kCAAnimationDiscrete;
+    sweepColor.duration = 4.0;
+    sweepColor.repeatCount = HUGE_VALF;
+    sweepColor.beginTime = begin;
+    [layer addAnimation:sweepColor forKey:@"zsPieSweepColor"];
+
+    CAKeyframeAnimation *trackColor = [CAKeyframeAnimation animationWithKeyPath:@"fillColor"];
+    trackColor.values = @[(id)grey.CGColor, (id)white.CGColor];
+    trackColor.keyTimes = @[@0, @0.5];
+    trackColor.calculationMode = kCAAnimationDiscrete;
+    trackColor.duration = 4.0;
+    trackColor.repeatCount = HUGE_VALF;
+    trackColor.beginTime = begin;
+    [track addAnimation:trackColor forKey:@"zsPieTrackColor"];
 }
 
 - (void)zs_changeMemoryTopAssetsPageBy:(NSInteger)delta {
@@ -12095,13 +12121,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_startMemoryUsageAutoRefresh {
     [self.memoryUsageRefreshTimer invalidate];
-    self.memoryRefreshPieInverted = NO;
-    [self zs_restartMemoryRefreshPieAdvancing:NO];
+    [self zs_startMemoryRefreshPie];
     [self zs_runMemoryUsageScan];
 
     __weak typeof(self) weakSelf = self;
     NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
-        [weakSelf zs_restartMemoryRefreshPieAdvancing:YES];
         [weakSelf zs_runMemoryUsageScan];
     }];
     self.memoryUsageRefreshTimer = timer;
@@ -12142,6 +12166,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, 0, height);
     if (statsColumn) [columns addObject:statsColumn];
 
+    CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
+    CGFloat pagedColumnWidth = floor(panelWidth * kZSMemoryPagedColumnWidthFraction);
+
     __weak typeof(self) weakSelf = self;
     void (^onPageChange)(NSInteger) = ^(NSInteger delta) {
         [weakSelf zs_changeMemoryTopAssetsPageBy:delta];
@@ -12149,7 +12176,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     NSUInteger groupColumnCount = 0;
     for (ZSMemoryUsageGroup *group in groups) {
-        UIView *groupColumn = zs_build_memory_group_column(group, height, onPageChange);
+        UIView *groupColumn = zs_build_memory_group_column(group, height, pagedColumnWidth, onPageChange);
         if (!groupColumn) continue;
         [columns addObject:groupColumn];
         groupColumnCount++;
