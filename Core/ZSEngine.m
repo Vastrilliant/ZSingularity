@@ -9,6 +9,8 @@
 #import <pthread.h>
 #import <math.h>
 #include <stdint.h>
+#include <dlfcn.h>
+#include <unistd.h>
 #import <mach/mach.h>
 #import <os/proc.h>
 #import <Security/Security.h>
@@ -1767,186 +1769,766 @@ void *zs_array_object_at(void *array, NSUInteger index) {
 @implementation ZSMemoryUsageCategory
 @end
 
+@implementation ZSMemoryUsageGroup
+@end
+
+@interface ZSAssetScanResult : NSObject
+@property (nonatomic, strong) NSMutableArray<ZSMemoryUsageCategory *> *assetCategories;
+@property (nonatomic, strong) NSMutableArray<ZSMemoryUsageCategory *> *topAssets;
+@property (nonatomic, strong) NSMutableArray<ZSMemoryUsageCategory *> *objectCounts;
+@property (nonatomic, assign) int64_t assetTrackedBytes;
+@property (nonatomic, assign) int64_t readableTextureBytes;
+@property (nonatomic, assign) NSUInteger readableTextureCount;
+@property (nonatomic, assign) int64_t readableMeshBytes;
+@property (nonatomic, assign) NSUInteger readableMeshCount;
+@property (nonatomic, assign) double scanMilliseconds;
+@property (nonatomic, assign) CFTimeInterval scannedAt;
+@end
+
+@implementation ZSAssetScanResult
+@end
+
+typedef NS_ENUM(uint8_t, ZSAssetFamily) {
+    ZSAssetFamilyGeneric = 0,
+    ZSAssetFamilyTexture = 1,
+    ZSAssetFamilyRenderTexture = 2,
+    ZSAssetFamilyMesh = 3,
+};
+
 typedef struct {
     const char *ns;
     const char *klassName;
     const char *assembly;
     const char *displayName;
+    BOOL tracked;
+    ZSAssetFamily family;
 } ZSMemoryUsageCategoryDescriptor;
 
 static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[] = {
-    {"UnityEngine", "Texture2D", "CoreModule", "Textures"},
-    {"UnityEngine", "Cubemap", "CoreModule", "Cubemaps"},
-    {"UnityEngine", "Texture2DArray", "CoreModule", "Texture Arrays"},
-    {"UnityEngine", "Texture3D", "CoreModule", "3D Textures"},
-    {"UnityEngine", "RenderTexture", "CoreModule", "Render Textures"},
-    {"UnityEngine", "Mesh", "CoreModule", "Meshes"},
-    {"UnityEngine", "Material", "CoreModule", "Materials"},
-    {"UnityEngine", "Shader", "CoreModule", "Shaders"},
-    {"UnityEngine", "AudioClip", "AudioModule", "Audio Clips"},
-    {"UnityEngine", "AnimationClip", "AnimationModule", "Animation Clips"},
-    {"UnityEngine", "Sprite", "CoreModule", "Sprites"},
-    {"UnityEngine", "Font", "TextRenderingModule", "Fonts"},
+    {"UnityEngine", "Texture2D", "CoreModule", "Textures", YES, ZSAssetFamilyTexture},
+    {"UnityEngine", "Cubemap", "CoreModule", "Cubemaps", YES, ZSAssetFamilyTexture},
+    {"UnityEngine", "Texture2DArray", "CoreModule", "Texture Arrays", YES, ZSAssetFamilyTexture},
+    {"UnityEngine", "Texture3D", "CoreModule", "3D Textures", YES, ZSAssetFamilyTexture},
+    {"UnityEngine", "CubemapArray", "CoreModule", "Cubemap Arrays", YES, ZSAssetFamilyTexture},
+    {"UnityEngine", "RenderTexture", "CoreModule", "Render Textures", YES, ZSAssetFamilyRenderTexture},
+    {"UnityEngine", "Mesh", "CoreModule", "Meshes", YES, ZSAssetFamilyMesh},
+    {"UnityEngine", "Material", "CoreModule", "Materials", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Shader", "CoreModule", "Shaders", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "ComputeShader", "CoreModule", "Compute Shaders", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "TextAsset", "CoreModule", "Text Assets", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "AudioClip", "AudioModule", "Audio Clips", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "AnimationClip", "AnimationModule", "Animation Clips", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Sprite", "CoreModule", "Sprites", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Font", "TextRenderingModule", "Fonts", YES, ZSAssetFamilyGeneric},
+    {"TMPro", "TMP_FontAsset", "Unity.TextMeshPro", "TMP Font Assets", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine.Video", "VideoClip", "VideoModule", "Video Clips", YES, ZSAssetFamilyGeneric},
+    {"UnityEngine", "GameObject", "CoreModule", "GameObjects", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "ScriptableObject", "CoreModule", "ScriptableObjects", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Renderer", "CoreModule", "Renderers", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "ParticleSystem", "ParticleSystemModule", "Particle Systems", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Animator", "AnimationModule", "Animators", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Canvas", "UIModule", "Canvases", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "Camera", "CoreModule", "Cameras", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "AudioSource", "AudioModule", "Audio Sources", NO, ZSAssetFamilyGeneric},
+    {"UnityEngine", "AssetBundle", "AssetBundleModule", "Loaded Asset Bundles", NO, ZSAssetFamilyGeneric},
 };
 
-static void zs_append_subsystem_memory_categories(NSMutableArray<ZSMemoryUsageCategory *> *results, int64_t assetTrackedBytes) {
-    int64_t totalAllocated = 0;
-    int64_t totalReserved = 0;
-    int64_t totalUnusedReserved = 0;
-    int64_t monoUsed = 0;
-    int64_t monoHeap = 0;
-    int64_t graphicsDriverBytes = 0;
-    int64_t tempAllocatorBytes = 0;
+static const NSUInteger kZSTopAssetCount = 20;
+static const NSUInteger kZSFootprintMaxRows = 22;
+static const NSUInteger kZSUnityMaxRows = 16;
+static const NSUInteger kZSCleanFileMaxRows = 10;
+static const CFTimeInterval kZSAssetScanMinInterval = 3.0;
 
-    BOOL hasTotalAllocated = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalAllocatedMemoryLong", &totalAllocated);
-    BOOL hasTotalReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalReservedMemoryLong", &totalReserved);
-    BOOL hasUnusedReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalUnusedReservedMemoryLong", &totalUnusedReserved);
-    BOOL hasMonoUsed = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoUsedSizeLong", &monoUsed);
-    BOOL hasMonoHeap = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoHeapSizeLong", &monoHeap);
-    BOOL hasGraphicsDriver = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetAllocatedMemoryForGraphicsDriver", &graphicsDriverBytes);
-    BOOL hasTempAllocator = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTempAllocatorSize", &tempAllocatorBytes);
-
-    if (hasMonoUsed && monoUsed > 0) {
-        ZSMemoryUsageCategory *managedUsed = [ZSMemoryUsageCategory new];
-        managedUsed.name = @"Managed Heap";
-        managedUsed.totalBytes = monoUsed;
-        [results addObject:managedUsed];
-    }
-
-    if (hasMonoHeap && hasMonoUsed) {
-        int64_t monoFree = monoHeap - monoUsed;
-        if (monoFree > 0) {
-            ZSMemoryUsageCategory *managedFree = [ZSMemoryUsageCategory new];
-            managedFree.name = @"Managed Heap (reserved)";
-            managedFree.totalBytes = monoFree;
-            [results addObject:managedFree];
-        }
-    }
-
-    if (hasGraphicsDriver && graphicsDriverBytes > 0) {
-        ZSMemoryUsageCategory *gfx = [ZSMemoryUsageCategory new];
-        gfx.name = @"Graphics driver (Unity)";
-        gfx.totalBytes = graphicsDriverBytes;
-        [results addObject:gfx];
-    }
-
-    if (hasTempAllocator && tempAllocatorBytes > 0) {
-        ZSMemoryUsageCategory *temp = [ZSMemoryUsageCategory new];
-        temp.name = @"Temp allocator";
-        temp.totalBytes = tempAllocatorBytes;
-        [results addObject:temp];
-    }
-
-    if (hasTotalAllocated && totalAllocated > 0) {
-        int64_t accountedFor = assetTrackedBytes
-            + (hasMonoUsed ? monoUsed : 0)
-            + (hasGraphicsDriver ? graphicsDriverBytes : 0)
-            + (hasTempAllocator ? tempAllocatorBytes : 0);
-        int64_t nativeEngine = totalAllocated - accountedFor;
-        if (nativeEngine > 0) {
-            ZSMemoryUsageCategory *native = [ZSMemoryUsageCategory new];
-            native.name = @"Engine";
-            native.totalBytes = nativeEngine;
-            [results addObject:native];
-        }
-    }
-
-    if (hasUnusedReserved && totalUnusedReserved > 0) {
-        ZSMemoryUsageCategory *reserved = [ZSMemoryUsageCategory new];
-        reserved.name = @"Reserved (unused)";
-        reserved.totalBytes = totalUnusedReserved;
-        [results addObject:reserved];
-    }
-
-    int64_t residentBytes = zs_current_process_resident_memory_bytes();
-    int64_t engineFootprint = hasTotalReserved ? totalReserved : totalAllocated;
-    int64_t systemOverhead = (residentBytes > 0 && engineFootprint > 0) ? (residentBytes - engineFootprint) : 0;
-    if (systemOverhead <= 0) return;
-
-    task_vm_info_data_t info;
-    mach_msg_type_number_t infoCount = TASK_VM_INFO_COUNT;
-    int64_t internalBytes = 0, externalBytes = 0, compressedBytes = 0, purgeableBytes = 0, deviceBytes = 0;
-    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &infoCount) == KERN_SUCCESS) {
-        internalBytes = (int64_t)info.internal;
-        externalBytes = (int64_t)info.external;
-        compressedBytes = (int64_t)info.compressed;
-        purgeableBytes = (int64_t)info.purgeable_volatile_resident;
-        deviceBytes = (int64_t)info.device;
-    }
-
-    int64_t rawSum = internalBytes + externalBytes + compressedBytes + purgeableBytes + deviceBytes;
-    if (rawSum <= 0) {
-        ZSMemoryUsageCategory *overhead = [ZSMemoryUsageCategory new];
-        overhead.name = @"iOS";
-        overhead.totalBytes = systemOverhead;
-        [results addObject:overhead];
-        return;
-    }
-
-    NSString *overheadNames[5] = { @"Graphics (IOSurface)", @"Compressed", @"Frameworks", @"Purgeable / caches", @"iOS" };
-    int64_t overheadRawValues[5] = { deviceBytes, compressedBytes, externalBytes, purgeableBytes, internalBytes };
-    for (int i = 0; i < 5; i++) {
-        if (overheadRawValues[i] <= 0) continue;
-        int64_t scaled = (int64_t)llround((double)overheadRawValues[i] * (double)systemOverhead / (double)rawSum);
-        if (scaled <= 0) continue;
-        ZSMemoryUsageCategory *part = [ZSMemoryUsageCategory new];
-        part.name = overheadNames[i];
-        part.totalBytes = scaled;
-        [results addObject:part];
-    }
+static BOOL mt_get_instance_bool(void *instance, const char *getter, BOOL *outValue) {
+    if (!instance || !outValue) return NO;
+    const void *method = mt_method([IL2CppBridge classOfInstance:instance], getter, 0);
+    if (!method) return NO;
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:instance args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *outValue = (*(uint8_t *)((uint8_t *)boxed + 0x10)) != 0;
+    return YES;
 }
 
-static NSArray<ZSMemoryUsageCategory *> *zs_scan_memory_usage_breakdown_sync(void) {
-    NSMutableArray<ZSMemoryUsageCategory *> *results = [NSMutableArray new];
+static NSString *mt_get_instance_string(void *instance, const char *getter) {
+    if (!instance) return nil;
+    const void *method = mt_method([IL2CppBridge classOfInstance:instance], getter, 0);
+    if (!method) return nil;
+    void *exc = NULL;
+    void *str = [IL2CppBridge invokeMethod:method onInstance:instance args:NULL outException:&exc];
+    if (exc || !str) return nil;
+    return [IL2CppBridge nsStringFromIl2CppString:str];
+}
+
+static NSString *zs_memory_bytes_string(int64_t bytes) {
+    return [NSByteCountFormatter stringFromByteCount:(long long)MAX(bytes, (int64_t)0) countStyle:NSByteCountFormatterCountStyleMemory];
+}
+
+static ZSMemoryUsageCategory *zs_make_memory_row(NSString *name, int64_t bytes, NSString *detail) {
+    ZSMemoryUsageCategory *row = [ZSMemoryUsageCategory new];
+    row.name = name;
+    row.totalBytes = bytes;
+    row.detail = detail;
+    return row;
+}
+
+static ZSMemoryUsageGroup *zs_make_memory_group(NSString *title, NSString *subtitle, BOOL showsChart, NSArray<ZSMemoryUsageCategory *> *categories) {
+    ZSMemoryUsageGroup *group = [ZSMemoryUsageGroup new];
+    group.title = title;
+    group.subtitle = subtitle;
+    group.showsChart = showsChart;
+    group.categories = categories;
+    return group;
+}
+
+static NSString *zs_memory_residency_detail(ZSMemoryUsageCategory *row) {
+    if (row.totalBytes <= 0) return nil;
+    double compressedShare = (double)row.compressedBytes / (double)row.totalBytes * 100.0;
+    if (row.objectCount > 0) {
+        return [NSString stringWithFormat:@"%.0f%% compressed · %lu regions", compressedShare, (unsigned long)row.objectCount];
+    }
+    return [NSString stringWithFormat:@"%.0f%% compressed", compressedShare];
+}
+
+static NSArray<ZSMemoryUsageCategory *> *zs_fold_memory_rows(NSArray<ZSMemoryUsageCategory *> *sortedRows,
+                                                             NSUInteger maxRows,
+                                                             double minFraction,
+                                                             BOOL describeResidency) {
+    int64_t total = 0;
+    for (ZSMemoryUsageCategory *row in sortedRows) total += row.totalBytes;
+    if (total <= 0) return sortedRows;
+
+    NSMutableArray<ZSMemoryUsageCategory *> *kept = [NSMutableArray new];
+    ZSMemoryUsageCategory *other = nil;
+    NSUInteger otherItems = 0;
+
+    for (NSUInteger i = 0; i < sortedRows.count; i++) {
+        ZSMemoryUsageCategory *row = sortedRows[i];
+        BOOL keep = i < maxRows && (double)row.totalBytes >= (double)total * minFraction;
+        if (keep) {
+            [kept addObject:row];
+            continue;
+        }
+        if (!other) other = [ZSMemoryUsageCategory new];
+        other.totalBytes += row.totalBytes;
+        other.residentBytes += row.residentBytes;
+        other.compressedBytes += row.compressedBytes;
+        other.objectCount += row.objectCount;
+        otherItems++;
+    }
+
+    if (other) {
+        other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)otherItems];
+        if (describeResidency) other.detail = zs_memory_residency_detail(other);
+        [kept addObject:other];
+    }
+    return kept;
+}
+
+static void zs_sort_memory_rows_descending(NSMutableArray<ZSMemoryUsageCategory *> *rows) {
+    [rows sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
+        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
+    }];
+}
+
+typedef struct {
+    int64_t dirtyTotal;
+    int64_t swappedTotal;
+    int64_t untaggedDirty;
+    int64_t untaggedSwapped;
+    int64_t virtualTotal;
+    int64_t regionCount;
+    double milliseconds;
+} ZSVMWalkTotals;
+
+static const char *const kZSVMTagNames[256] = {
+    [1] = "Malloc (system)",
+    [2] = "Malloc small",
+    [3] = "Malloc large",
+    [4] = "Malloc huge",
+    [5] = "sbrk heap",
+    [6] = "realloc",
+    [7] = "Malloc tiny",
+    [8] = "Malloc large (reusable)",
+    [9] = "Malloc large (reused)",
+    [10] = "Analysis tool",
+    [11] = "Malloc nano",
+    [12] = "Malloc medium",
+    [13] = "Malloc guarded",
+    [20] = "Mach messages",
+    [21] = "IOKit",
+    [30] = "Thread stacks",
+    [31] = "Guard pages",
+    [32] = "Shared pmap",
+    [33] = "dylib data",
+    [34] = "ObjC dispatchers",
+    [35] = "Unshared pmap",
+    [40] = "UIKit / AppKit",
+    [41] = "Foundation",
+    [42] = "CoreGraphics",
+    [43] = "Core services",
+    [45] = "Core Data",
+    [46] = "Core Data object IDs",
+    [50] = "ATS fonts",
+    [51] = "Core Animation (LayerKit)",
+    [52] = "CG image",
+    [54] = "CoreGraphics data",
+    [55] = "CoreGraphics shared",
+    [56] = "CoreGraphics framebuffers",
+    [57] = "CoreGraphics backing stores",
+    [58] = "CoreGraphics xalloc",
+    [60] = "dyld",
+    [61] = "dyld malloc",
+    [62] = "SQLite",
+    [63] = "JavaScriptCore",
+    [64] = "JIT executable",
+    [65] = "JIT register file",
+    [66] = "GLSL",
+    [67] = "OpenCL",
+    [68] = "Core Image",
+    [69] = "WebCore purgeable buffers",
+    [70] = "ImageIO",
+    [71] = "Core profile",
+    [72] = "assetsd",
+    [73] = "os_alloc_once",
+    [74] = "libdispatch",
+    [75] = "Accelerate",
+    [76] = "CoreUI",
+    [77] = "CoreUI file",
+    [78] = "Genealogy",
+    [79] = "Raw camera",
+    [80] = "Corpse info",
+    [81] = "ASL",
+    [82] = "Swift runtime",
+    [83] = "Swift metadata",
+    [84] = "DHMM",
+    [86] = "SceneKit",
+    [87] = "Skywalk",
+    [88] = "IOSurface (GPU shared)",
+    [89] = "libnetwork",
+    [90] = "Audio",
+    [91] = "Video bitstream",
+    [92] = "CoreMedia XPC",
+    [93] = "CoreMedia RPC",
+    [94] = "CoreMedia memory pool",
+    [95] = "CoreMedia read cache",
+    [96] = "CoreMedia crabs",
+    [97] = "QuickLook thumbnails",
+    [98] = "Accounts",
+    [99] = "Sanitizer",
+    [100] = "IOAccelerator (GPU)",
+    [101] = "CoreMedia regwarp",
+    [102] = "EAR decoder",
+    [103] = "CoreUI cached image data",
+    [104] = "ColorSync",
+    [105] = "BTInfo",
+    [106] = "CoreMedia HLS",
+};
+
+static NSString *zs_vm_anonymous_name(uint32_t tag) {
+    if (tag == 0) return @"Untagged anonymous (Unity / IL2CPP heaps)";
+    if (tag < 256 && kZSVMTagNames[tag]) return [NSString stringWithUTF8String:kZSVMTagNames[tag]];
+    if (tag >= 240 && tag <= 255) return [NSString stringWithFormat:@"Application-specific (tag %u)", tag];
+    return [NSString stringWithFormat:@"VM tag %u", tag];
+}
+
+static BOOL zs_vm_path_is_system(NSString *path) {
+    return [path hasPrefix:@"/System/"] ||
+           [path hasPrefix:@"/usr/lib/"] ||
+           [path hasPrefix:@"/Library/Apple/"] ||
+           [path containsString:@"dyld_shared_cache"];
+}
+
+static ZSMemoryUsageCategory *zs_vm_bucket(NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *table, NSString *name) {
+    ZSMemoryUsageCategory *bucket = table[name];
+    if (!bucket) {
+        bucket = [ZSMemoryUsageCategory new];
+        bucket.name = name;
+        table[name] = bucket;
+    }
+    return bucket;
+}
+
+static NSMutableDictionary<NSNumber *, NSString *> *g_vmFileLabelCache;
+
+static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners,
+                               NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles,
+                               ZSVMWalkTotals *totals) {
+    typedef int (*ZSRegionFilenameFn)(int, uint64_t, void *, uint32_t);
+    static ZSRegionFilenameFn regionFilename;
+    static dispatch_once_t regionFilenameOnce;
+    dispatch_once(&regionFilenameOnce, ^{
+        regionFilename = (ZSRegionFilenameFn)dlsym(RTLD_DEFAULT, "proc_regionfilename");
+    });
+
+    CFTimeInterval started = CACurrentMediaTime();
+    memset(totals, 0, sizeof(*totals));
+    if (!g_vmFileLabelCache) g_vmFileLabelCache = [NSMutableDictionary new];
+    if (g_vmFileLabelCache.count > 4096) [g_vmFileLabelCache removeAllObjects];
+
+    const int64_t pageSize = (int64_t)vm_page_size;
+    const int pid = (int)getpid();
+    char pathBuffer[1024];
+    vm_address_t address = 0;
+    natural_t depth = 0;
+
+    for (;;) {
+        vm_size_t size = 0;
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), &address, &size, &depth, (vm_region_recurse_info_t)&info, &infoCount);
+        if (kr != KERN_SUCCESS || size == 0) break;
+        if (info.is_submap) {
+            depth++;
+            continue;
+        }
+
+        totals->regionCount++;
+        totals->virtualTotal += (int64_t)size;
+
+        int64_t reusable = (int64_t)info.pages_reusable * pageSize;
+        int64_t dirty = (int64_t)info.pages_dirtied * pageSize - reusable;
+        if (dirty < 0) dirty = 0;
+        int64_t swapped = (int64_t)info.pages_swapped_out * pageSize;
+        int64_t resident = (int64_t)info.pages_resident * pageSize;
+        int64_t footprintBytes = dirty + swapped;
+        BOOL fileBacked = info.external_pager != 0;
+
+        totals->dirtyTotal += dirty;
+        totals->swappedTotal += swapped;
+
+        if (!fileBacked) {
+            if (info.user_tag == 0) {
+                totals->untaggedDirty += dirty;
+                totals->untaggedSwapped += swapped;
+            }
+            if (footprintBytes > 0) {
+                ZSMemoryUsageCategory *bucket = zs_vm_bucket(owners, zs_vm_anonymous_name(info.user_tag));
+                bucket.totalBytes += footprintBytes;
+                bucket.residentBytes += dirty;
+                bucket.compressedBytes += swapped;
+                bucket.objectCount++;
+            }
+            address += size;
+            continue;
+        }
+
+        if (footprintBytes <= 0 && resident <= 0) {
+            address += size;
+            continue;
+        }
+
+        NSString *systemLabelOwners = @"System libraries (dirty data)";
+        NSString *systemLabelClean = @"System libraries (shared cache)";
+        NSString *ownerLabel = nil;
+        NSString *cleanLabel = nil;
+
+        Dl_info dl;
+        memset(&dl, 0, sizeof(dl));
+        if (dladdr((const void *)address, &dl) && dl.dli_fname) {
+            NSString *fullPath = [NSString stringWithUTF8String:dl.dli_fname];
+            if (fullPath.length > 0) {
+                if (zs_vm_path_is_system(fullPath)) {
+                    ownerLabel = systemLabelOwners;
+                    cleanLabel = systemLabelClean;
+                } else {
+                    NSString *base = fullPath.lastPathComponent;
+                    ownerLabel = [@"Image: " stringByAppendingString:base];
+                    cleanLabel = ownerLabel;
+                }
+            }
+        }
+
+        if (!ownerLabel) {
+            NSNumber *objectKey = @(info.object_id);
+            NSString *cached = g_vmFileLabelCache[objectKey];
+            if (!cached) {
+                NSString *resolved = @"Mapped file (unnamed)";
+                if (regionFilename) {
+                    pathBuffer[0] = '\0';
+                    int length = regionFilename(pid, (uint64_t)address, pathBuffer, (uint32_t)sizeof(pathBuffer));
+                    if (length > 0 && pathBuffer[0] != '\0') {
+                        NSString *fullPath = [NSString stringWithUTF8String:pathBuffer];
+                        if (fullPath.length > 0) {
+                            resolved = zs_vm_path_is_system(fullPath)
+                                ? @"System files"
+                                : [@"File: " stringByAppendingString:fullPath.lastPathComponent];
+                        }
+                    }
+                }
+                g_vmFileLabelCache[objectKey] = resolved;
+                cached = resolved;
+            }
+            ownerLabel = cached;
+            cleanLabel = cached;
+        }
+
+        if (footprintBytes > 0) {
+            ZSMemoryUsageCategory *bucket = zs_vm_bucket(owners, ownerLabel);
+            bucket.totalBytes += footprintBytes;
+            bucket.residentBytes += dirty;
+            bucket.compressedBytes += swapped;
+            bucket.objectCount++;
+        }
+
+        int64_t cleanBytes = resident - dirty;
+        if (cleanBytes > 0) {
+            ZSMemoryUsageCategory *bucket = zs_vm_bucket(cleanFiles, cleanLabel);
+            bucket.totalBytes += cleanBytes;
+            bucket.objectCount++;
+        }
+
+        address += size;
+    }
+
+    totals->milliseconds = (CACurrentMediaTime() - started) * 1000.0;
+}
+
+typedef struct {
+    BOOL hasAllocated;
+    BOOL hasReserved;
+    BOOL hasMono;
+    BOOL hasGfx;
+    BOOL hasGC;
+    int64_t allocated;
+    int64_t reserved;
+    int64_t mono;
+    int64_t gfx;
+    int64_t gcHeap;
+    int64_t gcUsed;
+} ZSUnityMemoryFacts;
+
+static ZSUnityMemoryFacts zs_collect_unity_memory_facts(void) {
+    typedef uint64_t (*ZSGCSizeFn)(void);
+    static ZSGCSizeFn gcHeapSize;
+    static ZSGCSizeFn gcUsedSize;
+    static dispatch_once_t gcOnce;
+    dispatch_once(&gcOnce, ^{
+        gcHeapSize = (ZSGCSizeFn)dlsym(RTLD_DEFAULT, "il2cpp_gc_get_heap_size");
+        gcUsedSize = (ZSGCSizeFn)dlsym(RTLD_DEFAULT, "il2cpp_gc_get_used_size");
+    });
+
+    ZSUnityMemoryFacts facts;
+    memset(&facts, 0, sizeof(facts));
+    facts.hasAllocated = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalAllocatedMemoryLong", &facts.allocated);
+    facts.hasReserved = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetTotalReservedMemoryLong", &facts.reserved);
+    facts.hasMono = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetMonoUsedSizeLong", &facts.mono);
+    facts.hasGfx = mt_call_static_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetAllocatedMemoryForGraphicsDriver", &facts.gfx);
+    if (gcHeapSize && gcUsedSize) {
+        facts.gcHeap = (int64_t)gcHeapSize();
+        facts.gcUsed = (int64_t)gcUsedSize();
+        facts.hasGC = facts.gcHeap > 0 && facts.gcUsed > 0;
+    }
+    return facts;
+}
+
+static NSString *zs_asset_detail_string(void *obj, const ZSMemoryUsageCategoryDescriptor *descriptor) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:[NSString stringWithUTF8String:descriptor->klassName]];
+    int32_t width = 0, height = 0, value = 0;
+    BOOL flag = NO;
+
+    switch (descriptor->family) {
+        case ZSAssetFamilyTexture:
+            if (mt_get_instance_int(obj, "get_width", &width) && mt_get_instance_int(obj, "get_height", &height)) {
+                [parts addObject:[NSString stringWithFormat:@"%d×%d", width, height]];
+            }
+            if (mt_get_instance_int(obj, "get_mipmapCount", &value) && value > 1) {
+                [parts addObject:[NSString stringWithFormat:@"%d mips", value]];
+            }
+            if (mt_get_instance_bool(obj, "get_isReadable", &flag) && flag) {
+                [parts addObject:@"readable (CPU copy)"];
+            }
+            break;
+        case ZSAssetFamilyRenderTexture:
+            if (mt_get_instance_int(obj, "get_width", &width) && mt_get_instance_int(obj, "get_height", &height)) {
+                [parts addObject:[NSString stringWithFormat:@"%d×%d", width, height]];
+            }
+            if (mt_get_instance_int(obj, "get_depth", &value) && value > 0) {
+                [parts addObject:[NSString stringWithFormat:@"depth %d", value]];
+            }
+            if (mt_get_instance_int(obj, "get_antiAliasing", &value) && value > 1) {
+                [parts addObject:[NSString stringWithFormat:@"%dx MSAA", value]];
+            }
+            break;
+        case ZSAssetFamilyMesh:
+            if (mt_get_instance_int(obj, "get_vertexCount", &value)) {
+                [parts addObject:[NSString stringWithFormat:@"%d verts", value]];
+            }
+            if (mt_get_instance_bool(obj, "get_isReadable", &flag) && flag) {
+                [parts addObject:@"readable (CPU copy)"];
+            }
+            break;
+        default:
+            break;
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
+static void zs_top_assets_consider(NSMutableArray<ZSMemoryUsageCategory *> *top,
+                                   void *obj,
+                                   int64_t size,
+                                   const ZSMemoryUsageCategoryDescriptor *descriptor) {
+    if (top.count >= kZSTopAssetCount && size <= top.lastObject.totalBytes) return;
+
+    NSString *name = mt_get_instance_string(obj, "get_name");
+    ZSMemoryUsageCategory *row = zs_make_memory_row(name.length > 0 ? name : @"(unnamed)", size, zs_asset_detail_string(obj, descriptor));
+
+    NSUInteger index = top.count;
+    while (index > 0 && top[index - 1].totalBytes < size) index--;
+    [top insertObject:row atIndex:index];
+    if (top.count > kZSTopAssetCount) [top removeLastObject];
+}
+
+static ZSAssetScanResult *zs_scan_loaded_assets(void) {
+    CFTimeInterval started = CACurrentMediaTime();
+    ZSAssetScanResult *result = [ZSAssetScanResult new];
+    result.assetCategories = [NSMutableArray new];
+    result.topAssets = [NSMutableArray new];
+    result.objectCounts = [NSMutableArray new];
+
     NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
 
     for (NSUInteger d = 0; d < descriptorCount; d++) {
-        ZSMemoryUsageCategoryDescriptor descriptor = kZSMemoryUsageCategoryDescriptors[d];
-        void *klass = mt_class(descriptor.ns, descriptor.klassName, descriptor.assembly);
+        const ZSMemoryUsageCategoryDescriptor *descriptor = &kZSMemoryUsageCategoryDescriptors[d];
+        void *klass = mt_class(descriptor->ns, descriptor->klassName, descriptor->assembly);
         if (!klass) continue;
 
         NSUInteger count = 0;
         void *array = zs_resources_find_all_for_class(klass, &count);
         if (!array || count == 0) continue;
 
+        if (!descriptor->tracked) {
+            ZSMemoryUsageCategory *countRow = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName], 0, nil);
+            countRow.objectCount = count;
+            [result.objectCounts addObject:countRow];
+            continue;
+        }
+
         int64_t categoryTotal = 0;
         NSUInteger liveCount = 0;
+
         for (NSUInteger i = 0; i < count; i++) {
             void *obj = zs_array_object_at(array, i);
             if (!obj) continue;
+
             int64_t size = 0;
-            if (mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size) && size > 0) {
-                categoryTotal += size;
-                liveCount++;
+            if (!mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size) || size <= 0) continue;
+
+            categoryTotal += size;
+            liveCount++;
+
+            if (descriptor->family == ZSAssetFamilyTexture || descriptor->family == ZSAssetFamilyMesh) {
+                BOOL readable = NO;
+                if (mt_get_instance_bool(obj, "get_isReadable", &readable) && readable) {
+                    if (descriptor->family == ZSAssetFamilyTexture) {
+                        result.readableTextureBytes += size;
+                        result.readableTextureCount++;
+                    } else {
+                        result.readableMeshBytes += size;
+                        result.readableMeshCount++;
+                    }
+                }
             }
+
+            zs_top_assets_consider(result.topAssets, obj, size, descriptor);
         }
 
         if (categoryTotal <= 0) continue;
 
-        ZSMemoryUsageCategory *category = [ZSMemoryUsageCategory new];
-        category.name = [NSString stringWithUTF8String:descriptor.displayName];
-        category.totalBytes = categoryTotal;
+        ZSMemoryUsageCategory *category = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName],
+                                                             categoryTotal,
+                                                             [NSString stringWithFormat:@"%lu objects", (unsigned long)liveCount]);
         category.objectCount = liveCount;
-        [results addObject:category];
+        [result.assetCategories addObject:category];
+        result.assetTrackedBytes += categoryTotal;
     }
 
-    int64_t assetTrackedBytes = 0;
-    for (ZSMemoryUsageCategory *category in results) assetTrackedBytes += category.totalBytes;
-    zs_append_subsystem_memory_categories(results, assetTrackedBytes);
-
-    [results sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
-        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
-        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
+    [result.objectCounts sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.objectCount == b.objectCount) return NSOrderedSame;
+        return a.objectCount > b.objectCount ? NSOrderedAscending : NSOrderedDescending;
     }];
 
-    return results;
+    result.scannedAt = CACurrentMediaTime();
+    result.scanMilliseconds = (result.scannedAt - started) * 1000.0;
+    return result;
 }
 
-void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageCategory *> *categories)) {
+static ZSAssetScanResult *g_cachedAssetScan;
+
+static ZSAssetScanResult *zs_cached_asset_scan(void) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (g_cachedAssetScan && now - g_cachedAssetScan.scannedAt < kZSAssetScanMinInterval) return g_cachedAssetScan;
+    g_cachedAssetScan = zs_scan_loaded_assets();
+    return g_cachedAssetScan;
+}
+
+static ZSMemoryUsageGroup *zs_build_footprint_group(NSDictionary<NSString *, ZSMemoryUsageCategory *> *owners,
+                                                    const ZSVMWalkTotals *totals,
+                                                    int64_t footprint) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [owners.allValues mutableCopy];
+    int64_t regionSum = totals->dirtyTotal + totals->swappedTotal;
+
+    for (ZSMemoryUsageCategory *row in rows) row.detail = zs_memory_residency_detail(row);
+
+    int64_t unaccounted = footprint - regionSum;
+    if (unaccounted > (int64_t)4 * 1024 * 1024) {
+        ZSMemoryUsageCategory *kernel = zs_make_memory_row(@"Kernel-accounted (no VM region)",
+                                                          unaccounted,
+                                                          @"Ledger pages the VM map does not expose (graphics / IOKit)");
+        [rows addObject:kernel];
+    }
+
+    zs_sort_memory_rows_descending(rows);
+    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSFootprintMaxRows, 0.004, YES);
+
+    NSString *subtitle = [NSString stringWithFormat:@"Footprint %@ · dirty %@ · compressed %@ · %lld regions",
+                          zs_memory_bytes_string(footprint),
+                          zs_memory_bytes_string(totals->dirtyTotal),
+                          zs_memory_bytes_string(totals->swappedTotal),
+                          (long long)totals->regionCount];
+    return zs_make_memory_group(@"Process footprint by owner", subtitle, YES, folded);
+}
+
+static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const ZSUnityMemoryFacts *facts) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [scan.assetCategories mutableCopy];
+    int64_t accounted = scan.assetTrackedBytes;
+
+    if (facts->hasMono && facts->mono > 0) {
+        NSString *detail = @"Live C# objects on the IL2CPP GC heap";
+        if (facts->hasGC) {
+            int64_t slack = MAX(facts->gcHeap - facts->gcUsed, (int64_t)0);
+            detail = [NSString stringWithFormat:@"GC heap %@ committed · %@ slack",
+                      zs_memory_bytes_string(facts->gcHeap), zs_memory_bytes_string(slack)];
+        }
+        [rows addObject:zs_make_memory_row(@"Managed heap (used)", facts->mono, detail)];
+        accounted += facts->mono;
+    }
+
+    if (facts->hasGfx && facts->gfx > 0) {
+        [rows addObject:zs_make_memory_row(@"Graphics driver (Unity)", facts->gfx, @"Metal buffers and textures Unity reports to the driver")];
+        accounted += facts->gfx;
+    }
+
+    if (facts->hasAllocated) {
+        int64_t engine = facts->allocated - accounted;
+        if (engine > 0) {
+            [rows addObject:zs_make_memory_row(@"Engine (uncategorized native)",
+                                               engine,
+                                               @"Allocated − tracked assets − managed − graphics driver")];
+        }
+    }
+
+    zs_sort_memory_rows_descending(rows);
+    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSUnityMaxRows, 0.004, NO);
+
+    NSString *subtitle = @"Logical sizes reported by Unity, not physical pages";
+    if (facts->hasAllocated && facts->hasReserved) {
+        subtitle = [NSString stringWithFormat:@"Allocated %@ · reserved %@ · logical sizes reported by Unity",
+                    zs_memory_bytes_string(facts->allocated), zs_memory_bytes_string(facts->reserved)];
+    }
+    return zs_make_memory_group(@"Unity allocations by subsystem", subtitle, YES, folded);
+}
+
+static ZSMemoryUsageGroup *zs_build_top_assets_group(ZSAssetScanResult *scan) {
+    return zs_make_memory_group(@"Heaviest loaded assets",
+                                @"Individual objects by Profiler runtime size",
+                                NO,
+                                scan.topAssets);
+}
+
+static ZSMemoryUsageGroup *zs_build_diagnostics_group(ZSAssetScanResult *scan,
+                                                      const ZSUnityMemoryFacts *facts,
+                                                      const ZSVMWalkTotals *totals) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [NSMutableArray new];
+
+    int64_t untagged = totals->untaggedDirty + totals->untaggedSwapped;
+    if (untagged > 0) {
+        ZSMemoryUsageCategory *row = zs_make_memory_row(@"Untagged anonymous (physical)",
+                                                        untagged,
+                                                        [NSString stringWithFormat:@"dirty %@ · compressed %@ · compare with Unity reserved + GC heap",
+                                                         zs_memory_bytes_string(totals->untaggedDirty),
+                                                         zs_memory_bytes_string(totals->untaggedSwapped)]);
+        [rows addObject:row];
+    }
+
+    if (facts->hasReserved && facts->reserved > 0) {
+        [rows addObject:zs_make_memory_row(@"Unity total reserved (logical)", facts->reserved, @"Memory Unity's allocators hold from the OS")];
+    }
+    if (facts->hasAllocated && facts->allocated > 0) {
+        [rows addObject:zs_make_memory_row(@"Unity total allocated (logical)", facts->allocated, @"Memory currently handed out to the engine")];
+    }
+    if (facts->hasReserved && facts->hasAllocated && facts->reserved > facts->allocated) {
+        [rows addObject:zs_make_memory_row(@"Unity allocator slack", facts->reserved - facts->allocated, @"Reserved but unused; may overlap GC slack")];
+    }
+    if (facts->hasGC) {
+        [rows addObject:zs_make_memory_row(@"GC heap committed", facts->gcHeap, [NSString stringWithFormat:@"%@ used", zs_memory_bytes_string(facts->gcUsed)])];
+        if (facts->gcHeap > facts->gcUsed) {
+            [rows addObject:zs_make_memory_row(@"GC heap slack", facts->gcHeap - facts->gcUsed, @"Committed to the GC but holding no live objects")];
+        }
+    }
+
+    if (scan.readableTextureCount > 0) {
+        [rows addObject:zs_make_memory_row(@"Readable textures",
+                                           scan.readableTextureBytes,
+                                           [NSString stringWithFormat:@"%lu textures keeping a CPU copy", (unsigned long)scan.readableTextureCount])];
+    }
+    if (scan.readableMeshCount > 0) {
+        [rows addObject:zs_make_memory_row(@"Readable meshes",
+                                           scan.readableMeshBytes,
+                                           [NSString stringWithFormat:@"%lu meshes keeping a CPU copy", (unsigned long)scan.readableMeshCount])];
+    }
+
+    [rows addObject:zs_make_memory_row(@"Analyzer cost",
+                                       0,
+                                       [NSString stringWithFormat:@"asset scan %.0f ms every %.0f s · VM walk %.1f ms",
+                                        scan.scanMilliseconds, kZSAssetScanMinInterval, totals->milliseconds])];
+
+    return zs_make_memory_group(@"Reservations & diagnostics", @"Not additive: several rows describe the same memory from different angles", NO, rows);
+}
+
+static ZSMemoryUsageGroup *zs_build_object_counts_group(ZSAssetScanResult *scan) {
+    return zs_make_memory_group(@"Live object counts", @"Objects currently loaded by the engine", NO, scan.objectCounts);
+}
+
+static ZSMemoryUsageGroup *zs_build_clean_files_group(NSDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [cleanFiles.allValues mutableCopy];
+    zs_sort_memory_rows_descending(rows);
+    if (rows.count > kZSCleanFileMaxRows) [rows removeObjectsInRange:NSMakeRange(kZSCleanFileMaxRows, rows.count - kZSCleanFileMaxRows)];
+    for (ZSMemoryUsageCategory *row in rows) {
+        row.detail = [NSString stringWithFormat:@"%lu regions", (unsigned long)row.objectCount];
+    }
+    return zs_make_memory_group(@"Clean file-backed pages",
+                                @"Resident but reclaimable, so not counted toward the memory limit",
+                                NO,
+                                rows);
+}
+
+static NSArray<ZSMemoryUsageGroup *> *zs_scan_memory_usage_breakdown_sync(void) {
+    NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles = [NSMutableDictionary new];
+    ZSVMWalkTotals totals;
+    zs_walk_vm_regions(owners, cleanFiles, &totals);
+
+    int64_t footprint = zs_current_process_resident_memory_bytes();
+    ZSUnityMemoryFacts facts = zs_collect_unity_memory_facts();
+    ZSAssetScanResult *scan = zs_cached_asset_scan();
+
+    NSMutableArray<ZSMemoryUsageGroup *> *groups = [NSMutableArray new];
+    [groups addObject:zs_build_footprint_group(owners, &totals, footprint)];
+    [groups addObject:zs_build_unity_group(scan, &facts)];
+    [groups addObject:zs_build_top_assets_group(scan)];
+    [groups addObject:zs_build_diagnostics_group(scan, &facts, &totals)];
+    [groups addObject:zs_build_object_counts_group(scan)];
+    [groups addObject:zs_build_clean_files_group(cleanFiles)];
+    return groups;
+}
+
+void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageGroup *> *groups)) {
     if (!completion) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
-            NSArray<ZSMemoryUsageCategory *> *results = zs_scan_memory_usage_breakdown_sync();
+            NSArray<ZSMemoryUsageGroup *> *results = zs_scan_memory_usage_breakdown_sync();
             completion(results);
         }
     });
@@ -1995,6 +2577,10 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
         stats.residentBytes = (int64_t)info.phys_footprint;
         stats.peakResidentBytes = (int64_t)info.resident_size_peak;
         stats.compressedBytes = (int64_t)info.compressed;
+        stats.internalBytes = (int64_t)info.internal;
+        stats.externalBytes = (int64_t)info.external;
+        stats.reusableBytes = (int64_t)info.reusable;
+        stats.virtualBytes = (int64_t)info.virtual_size;
     }
 
     stats.deviceTotalBytes = (int64_t)NSProcessInfo.processInfo.physicalMemory;

@@ -348,9 +348,19 @@ int32_t zs_last_observed_memory_usage_tier(void);
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, assign) int64_t totalBytes;
 @property (nonatomic, assign) NSUInteger objectCount;
+@property (nonatomic, assign) int64_t residentBytes;
+@property (nonatomic, assign) int64_t compressedBytes;
+@property (nonatomic, copy, nullable) NSString *detail;
 @end
 
-void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageCategory *> * _Nonnull categories));
+@interface ZSMemoryUsageGroup : NSObject
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy, nullable) NSString *subtitle;
+@property (nonatomic, assign) BOOL showsChart;
+@property (nonatomic, copy) NSArray<ZSMemoryUsageCategory *> *categories;
+@end
+
+void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageGroup *> * _Nonnull groups));
 int64_t zs_current_process_resident_memory_bytes(void);
 
 typedef struct {
@@ -359,6 +369,10 @@ typedef struct {
     int64_t availableBytes;
     int64_t memoryLimitApproxBytes;
     int64_t compressedBytes;
+    int64_t internalBytes;
+    int64_t externalBytes;
+    int64_t reusableBytes;
+    int64_t virtualBytes;
     int64_t deviceTotalBytes;
     int64_t systemFreeBytes;
     int64_t systemActiveBytes;
