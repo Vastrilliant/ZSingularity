@@ -5868,9 +5868,7 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self buildDocsPanel:unityView];
 
-    if (!zs_has_liquid_glass()) {
-        [self.glassContainerContent sendSubviewToBack:self.handle];
-    }
+    [self zs_restackPinChrome];
 
     __weak typeof(self) weakSelf = self;
 
@@ -12910,7 +12908,6 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     NSDictionary<NSString *, NSString *> *action = zs_pin_action_for_key(key);
     if (!action || !self.glassContainerContent) return nil;
 
-    UIView *handleElement = self.handleGlass ?: self.handle;
     UIView *element = nil;
     UIView *content = nil;
 
@@ -12931,7 +12928,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     }
 
     element.frame = [self zs_pinnedOriginFrameForHandleY:[self zs_handleRestingY] localX:[self zs_handleLocalX]];
-    [self.glassContainerContent insertSubview:element belowSubview:handleElement];
+    [self.glassContainerContent addSubview:element];
 
     UIImageView *icon = [[UIImageView alloc] initWithImage:zs_pin_symbol(action[@"symbol"], 13, UIFontWeightMedium)];
     icon.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
@@ -12951,7 +12948,24 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 
     if (!self.pinnedTabElements) self.pinnedTabElements = [NSMutableDictionary dictionary];
     self.pinnedTabElements[key] = element;
+    [self zs_restackPinChrome];
     return element;
+}
+
+- (void)zs_restackPinChrome {
+    UIView *container = self.glassContainerContent;
+    if (!container) return;
+
+    UIView *panelElement = self.panelGlass ?: self.panel;
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    UIView *docsElement = self.docsPanelGlass ?: self.docsPanel;
+
+    if (panelElement.superview == container) [container sendSubviewToBack:panelElement];
+    if (handleElement.superview == container) [container sendSubviewToBack:handleElement];
+    for (UIView *tab in self.pinnedTabElements.allValues) {
+        if (tab.superview == container) [container sendSubviewToBack:tab];
+    }
+    if (docsElement.superview == container) [container sendSubviewToBack:docsElement];
 }
 
 - (void)zs_buildPinnedTabsFromStore {
@@ -13460,7 +13474,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
-        CGFloat handleLocalX = fullScreenOpen ? chromeWidth : 0;
+        CGFloat handleLocalX = fullScreenOpen ? (kHandleWidth + docsW) : 0;
         handleElement.frame = CGRectMake(handleLocalX,
                                           (height - kHandleHeight) * 0.5,
                                           kHandleWidth,
