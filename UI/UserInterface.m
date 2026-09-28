@@ -13654,6 +13654,17 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
     };
 
+    static const NSTimeInterval kCornerAnimationDuration = 0.3;
+    static const NSTimeInterval kCornerRestoreDelay = 0.3;
+
+    void (^animatePanelCorners)(void) = ^{
+        [UIView animateWithDuration:kCornerAnimationDuration
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:applyPanelCorners
+                         completion:nil];
+    };
+
     void (^changes)(void) = ^{
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
@@ -13717,6 +13728,13 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (self.docsPanelOpen) return;
         [self zs_finishExtendedPanelClose];
+        if (leftCornersFlatChanged && !docsVisible && animated) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kCornerRestoreDelay * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (self.docsPanelOpen) return;
+                animatePanelCorners();
+            });
+        }
     };
 
     UIView *separator = self.docsPanelSeparator;
@@ -13764,12 +13782,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
     if (leftCornersFlatChanged) {
-        [UIView performWithoutAnimation:^{
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
+        if (!animated) {
             applyPanelCorners();
-            [CATransaction commit];
-        }];
+        } else if (docsVisible) {
+            animatePanelCorners();
+        }
     }
 
     if (!animated) {
@@ -13790,8 +13807,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         } else {
             [UIView animateWithDuration:mainDuration
                                   delay:0
-                 usingSpringWithDamping:0.85
-                  initialSpringVelocity:0.3
+                 usingSpringWithDamping:docsVisible ? 0.85 : 1.0
+                  initialSpringVelocity:docsVisible ? 0.3 : 0
                                 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                              animations:changes
                              completion:completion];
