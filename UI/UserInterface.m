@@ -2775,7 +2775,7 @@ static const CGFloat kZSMemoryLegendColumnGap = 18;
 static const CGFloat kZSMemoryMinInnerWidth = 200;
 static const CGFloat kZSMemoryMaxNameWidth = 260;
 static const CGFloat kZSMemoryMaxDetailWidth = 380;
-static const CGFloat kZSMemoryPagedColumnWidthFraction = 0.9;
+static const CGFloat kZSMemoryPagedColumnWidthFraction = 0.98;
 
 static NSMutableDictionary<NSString *, NSNumber *> *g_memorySubtitleShrinkState;
 
@@ -12090,18 +12090,18 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [layer addAnimation:sweep forKey:@"zsPieSweep"];
 
     CAKeyframeAnimation *sweepColor = [CAKeyframeAnimation animationWithKeyPath:@"strokeColor"];
-    sweepColor.values = @[(id)white.CGColor, (id)grey.CGColor];
-    sweepColor.keyTimes = @[@0, @0.5];
-    sweepColor.calculationMode = kCAAnimationDiscrete;
+    sweepColor.values = @[(id)white.CGColor, (id)white.CGColor, (id)grey.CGColor, (id)grey.CGColor];
+    sweepColor.keyTimes = @[@0, @0.4999, @0.5, @1];
+    sweepColor.calculationMode = kCAAnimationLinear;
     sweepColor.duration = 4.0;
     sweepColor.repeatCount = HUGE_VALF;
     sweepColor.beginTime = begin;
     [layer addAnimation:sweepColor forKey:@"zsPieSweepColor"];
 
     CAKeyframeAnimation *trackColor = [CAKeyframeAnimation animationWithKeyPath:@"fillColor"];
-    trackColor.values = @[(id)grey.CGColor, (id)white.CGColor];
-    trackColor.keyTimes = @[@0, @0.5];
-    trackColor.calculationMode = kCAAnimationDiscrete;
+    trackColor.values = @[(id)grey.CGColor, (id)grey.CGColor, (id)white.CGColor, (id)white.CGColor];
+    trackColor.keyTimes = @[@0, @0.4999, @0.5, @1];
+    trackColor.calculationMode = kCAAnimationLinear;
     trackColor.duration = 4.0;
     trackColor.repeatCount = HUGE_VALF;
     trackColor.beginTime = begin;
