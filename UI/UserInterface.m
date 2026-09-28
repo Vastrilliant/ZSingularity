@@ -4660,8 +4660,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSMutableArray<NSString *> *pinnedActionKeys;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
 @property (nonatomic, strong) UIView *pinMenuScrim;
-@property (nonatomic, strong) UIView *pinMenuView;
 @property (nonatomic, strong) UIView *pinMenuContent;
+@property (nonatomic, assign) CGFloat pinMenuExtraWidth;
 @property (nonatomic, assign) BOOL pinMenuOpen;
 @property (nonatomic, assign) BOOL pinMenuTransitioning;
 
@@ -4690,6 +4690,17 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
+}
+@end
+
+@interface ZSPinScrimView : UIView
+@property (nonatomic, assign) CGRect passthroughRect;
+@end
+
+@implementation ZSPinScrimView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (CGRectContainsPoint(self.passthroughRect, point)) return nil;
+    return [super hitTest:point withEvent:event];
 }
 @end
 
@@ -5229,10 +5240,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     [self.pinMenuScrim removeFromSuperview];
     self.pinMenuScrim = nil;
-    self.pinMenuView = nil;
     self.pinMenuContent = nil;
     self.pinMenuOpen = NO;
     self.pinMenuTransitioning = NO;
+    self.pinMenuExtraWidth = 0;
     self.pinnedTabElements = nil;
 
     self.glassContainer = nil;
@@ -5349,6 +5360,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 }
 
 - (void)zs_closeButtonTapped {
+    if (self.pinMenuOpen) {
+        [self zs_dismissPinMenuAnimated:YES delay:0 completion:nil];
+        return;
+    }
     if (self.docsPanelOpen) {
         [self closeDocsPanel];
         return;
@@ -12798,7 +12813,7 @@ static NSString * const kZSPinnedActionsSettingsSection = @"pinnedActions";
 static NSString * const kZSPinnedActionsSettingsKey = @"keys";
 
 static const CGFloat kZSPinnedTabHeight = 48;
-static const CGFloat kZSPinnedTabGap = 6;
+static const CGFloat kZSPinnedTabGap = 4;
 static const CGFloat kZSPinMenuWidth = 224;
 static const CGFloat kZSPinMenuHeaderTop = 10;
 static const CGFloat kZSPinMenuHeaderHeight = 28;
@@ -12826,6 +12841,40 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     return [UIImage systemImageNamed:name withConfiguration:config];
 }
 
+static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadius) {
+    if (!view || !zs_has_liquid_glass()) return;
+
+    Class radiusClass = NSClassFromString(@"UICornerRadius");
+    Class configClass = NSClassFromString(@"UICornerConfiguration");
+    SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
+    SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
+    SEL splitSelector = NSSelectorFromString(@"configurationWithUniformTopRadius:uniformBottomRadius:");
+    SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
+
+    if (!radiusClass || !configClass ||
+        ![radiusClass respondsToSelector:fixedSelector] ||
+        ![view respondsToSelector:setConfiguration]) {
+        zs_configure_glass_corners(view, bottomRadius, NO);
+        return;
+    }
+
+    id flat = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, 0);
+    id round = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, bottomRadius);
+    id configuration = nil;
+
+    if ([configClass respondsToSelector:fourCornerSelector]) {
+        configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, flat, flat, round, round);
+    } else if ([configClass respondsToSelector:splitSelector]) {
+        configuration = ((id (*)(id, SEL, id, id))objc_msgSend)(configClass, splitSelector, flat, round);
+    }
+
+    if (!configuration) {
+        zs_configure_glass_corners(view, bottomRadius, NO);
+        return;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
+}
+
 - (NSMutableArray<NSString *> *)zs_pinnedKeys {
     if (!self.pinnedActionKeys) {
         NSMutableArray<NSString *> *keys = [NSMutableArray array];
@@ -12846,17 +12895,21 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     zs_write_settings_section(kZSPinnedActionsSettingsSection, @{kZSPinnedActionsSettingsKey: [[self zs_pinnedKeys] copy]});
 }
 
-- (CGRect)zs_pinnedSlotFrameAtIndex:(NSUInteger)index handleY:(CGFloat)handleY {
+- (CGRect)zs_pinnedSlotFrameAtIndex:(NSUInteger)index handleY:(CGFloat)handleY localX:(CGFloat)x {
     CGFloat y = handleY - kZSPinnedTabGap - kZSPinnedTabHeight - (CGFloat)index * (kZSPinnedTabHeight + kZSPinnedTabGap);
-    return CGRectMake(0, y, kHandleWidth, kZSPinnedTabHeight);
+    return CGRectMake(x, y, kHandleWidth, kZSPinnedTabHeight);
 }
 
-- (CGRect)zs_pinnedOriginFrameForHandleY:(CGFloat)handleY {
-    return CGRectMake(0, handleY + (kHandleHeight - kZSPinnedTabHeight) * 0.5, kHandleWidth, kZSPinnedTabHeight);
+- (CGRect)zs_pinnedOriginFrameForHandleY:(CGFloat)handleY localX:(CGFloat)x {
+    return CGRectMake(x, handleY + (kHandleHeight - kZSPinnedTabHeight) * 0.5, kHandleWidth, kZSPinnedTabHeight);
 }
 
 - (CGFloat)zs_handleRestingY {
     return (CGRectGetHeight(self.glassContainer.bounds) - kHandleHeight) * 0.5;
+}
+
+- (CGFloat)zs_handleLocalX {
+    return (self.handleGlass ?: self.handle).frame.origin.x;
 }
 
 - (UIView *)zs_makePinnedTabElementForKey:(NSString *)key {
@@ -12883,7 +12936,7 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
         content = tab;
     }
 
-    element.frame = [self zs_pinnedOriginFrameForHandleY:[self zs_handleRestingY]];
+    element.frame = [self zs_pinnedOriginFrameForHandleY:[self zs_handleRestingY] localX:[self zs_handleLocalX]];
     [self.glassContainerContent insertSubview:element belowSubview:handleElement];
 
     UIImageView *icon = [[UIImageView alloc] initWithImage:zs_pin_symbol(action[@"symbol"], 13, UIFontWeightMedium)];
@@ -12914,13 +12967,14 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     }
 }
 
-- (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY hidden:(BOOL)hidden {
+- (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY localX:(CGFloat)x visible:(BOOL)visible {
     NSArray<NSString *> *keys = self.pinnedActionKeys;
     for (NSUInteger idx = 0; idx < keys.count; idx++) {
         UIView *element = self.pinnedTabElements[keys[idx]];
         if (!element) continue;
-        element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY];
-        element.hidden = hidden;
+        element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:x];
+        element.alpha = visible ? 1 : 0;
+        element.userInteractionEnabled = visible;
     }
 }
 
@@ -12940,9 +12994,7 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
         UIView *element = [strongSelf zs_makePinnedTabElementForKey:key];
         if (!element) return;
         CGFloat handleY = [strongSelf zs_handleRestingY];
-        CGRect slot = [strongSelf zs_pinnedSlotFrameAtIndex:idx handleY:handleY];
-        BOOL hidden = strongSelf.syslogFullScreenOpen || strongSelf.memoryFullScreenOpen;
-        element.hidden = hidden;
+        CGRect slot = [strongSelf zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:[strongSelf zs_handleLocalX]];
 
         [UIView animateWithDuration:0.5
                               delay:0
@@ -12974,7 +13026,8 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
 
     __weak typeof(self) weakSelf = self;
     CGFloat handleY = [self zs_handleRestingY];
-    CGRect origin = [self zs_pinnedOriginFrameForHandleY:handleY];
+    CGFloat localX = [self zs_handleLocalX];
+    CGRect origin = [self zs_pinnedOriginFrameForHandleY:handleY localX:localX];
     [UIView animateWithDuration:0.38
                           delay:delay
          usingSpringWithDamping:0.9
@@ -12983,7 +13036,7 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
                      animations:^{
         element.alpha = 1;
         element.frame = origin;
-        [weakSelf zs_layoutPinnedTabsWithHandleY:handleY hidden:NO];
+        [weakSelf zs_layoutPinnedTabsWithHandleY:handleY localX:localX visible:YES];
     } completion:^(BOOL finished) {
         [element removeFromSuperview];
     }];
@@ -13006,15 +13059,19 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     [self zs_presentPinMenu];
 }
 
-- (CGRect)zs_handleFrameInHost:(UIView *)unityView {
-    UIView *handleElement = self.handleGlass ?: self.handle;
-    return [handleElement.superview convertRect:handleElement.frame toView:unityView];
+- (void)zs_shiftPinContainerByExtraWidth:(CGFloat)extra {
+    if (extra == 0 || !self.glassContainer || !self.glassContainerContent) return;
+    CGRect container = self.glassContainer.frame;
+    self.glassContainer.frame = CGRectMake(container.origin.x - extra, container.origin.y, container.size.width + extra, container.size.height);
+    for (UIView *view in self.glassContainerContent.subviews) {
+        view.frame = CGRectOffset(view.frame, extra, 0);
+    }
 }
 
 - (void)zs_presentPinMenu {
     if (self.pinMenuOpen || self.pinMenuTransitioning) return;
-    if (!self.panelOpen || !self.glassContainer) return;
-    if (self.syslogFullScreenOpen || self.memoryFullScreenOpen) return;
+    if (!self.panelOpen || !self.glassContainer || !self.glassContainerContent) return;
+    if (self.docsPanelOpen || self.syslogFullScreenOpen || self.memoryFullScreenOpen) return;
 
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
@@ -13022,47 +13079,33 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     NSArray<NSDictionary<NSString *, NSString *> *> *catalog = zs_pin_action_catalog();
     NSArray<NSString *> *pinned = [self zs_pinnedKeys];
     UIView *handleElement = self.handleGlass ?: self.handle;
+    BOOL glass = zs_has_liquid_glass();
 
     CGFloat menuHeight = kZSPinMenuHeaderTop + kZSPinMenuHeaderHeight + kZSPinMenuHeaderGap
                        + kZSPinMenuRowHeight * catalog.count + kZSPinMenuBottomPadding;
-    CGRect collapsed = [self zs_handleFrameInHost:unityView];
-    UIEdgeInsets insets = unityView.safeAreaInsets;
-    CGFloat expandedY = CGRectGetMidY(collapsed) - menuHeight * 0.5;
-    expandedY = MAX(insets.top + 8, MIN(expandedY, unityView.bounds.size.height - insets.bottom - 8 - menuHeight));
-    CGRect expanded = CGRectMake(CGRectGetMaxX(collapsed) - kZSPinMenuWidth, expandedY, kZSPinMenuWidth, menuHeight);
+    CGFloat extra = kZSPinMenuWidth - kHandleWidth;
 
-    UIView *scrim = [[UIView alloc] initWithFrame:unityView.bounds];
+    [self zs_shiftPinContainerByExtraWidth:extra];
+    self.pinMenuExtraWidth = extra;
+
+    CGFloat containerHeight = CGRectGetHeight(self.glassContainer.bounds);
+    UIEdgeInsets insets = unityView.safeAreaInsets;
+    CGFloat midY = CGRectGetMidY(handleElement.frame);
+    CGFloat expandedY = midY - menuHeight * 0.5;
+    expandedY = MAX(insets.top + 8, MIN(expandedY, containerHeight - insets.bottom - 8 - menuHeight));
+    CGRect expanded = CGRectMake(0, expandedY, kZSPinMenuWidth, menuHeight);
+
+    ZSPinScrimView *scrim = [[ZSPinScrimView alloc] initWithFrame:unityView.bounds];
     scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     scrim.backgroundColor = UIColor.clearColor;
+    scrim.passthroughRect = [self.glassContainerContent convertRect:expanded toView:unityView];
     UITapGestureRecognizer *scrimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_pinMenuDismissTapped)];
     [scrim addGestureRecognizer:scrimTap];
     [unityView addSubview:scrim];
 
-    UIView *menu = nil;
-    UIView *content = nil;
-    BOOL glass = zs_has_liquid_glass();
-    if (glass) {
-        UIVisualEffectView *effectView = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        effectView.userInteractionEnabled = YES;
-        zs_configure_glass_corners(effectView, kHandleCornerRadius, NO);
-        menu = effectView;
-        content = effectView.contentView;
-    } else {
-        UIView *plain = [[UIView alloc] init];
-        plain.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
-        plain.layer.cornerRadius = kHandleCornerRadius;
-        plain.layer.cornerCurve = kCACornerCurveContinuous;
-        plain.clipsToBounds = YES;
-        menu = plain;
-        content = plain;
-    }
-    menu.frame = collapsed;
-    zs_force_dark(menu);
-    [scrim addSubview:menu];
-
     UIView *menuContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kZSPinMenuWidth, menuHeight)];
     menuContent.alpha = 0;
-    [content addSubview:menuContent];
+    [self.handle addSubview:menuContent];
 
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [closeButton setImage:zs_pin_symbol(@"xmark", 13, UIFontWeightSemibold) forState:UIControlStateNormal];
@@ -13117,12 +13160,11 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     }
 
     self.pinMenuScrim = scrim;
-    self.pinMenuView = menu;
     self.pinMenuContent = menuContent;
     self.pinMenuOpen = YES;
     self.pinMenuTransitioning = YES;
 
-    handleElement.alpha = 0;
+    self.handle.clipsToBounds = YES;
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
     [haptic impactOccurred];
@@ -13134,12 +13176,14 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
           initialSpringVelocity:0.5
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
-        menu.frame = expanded;
+        handleElement.frame = expanded;
         if (glass) {
-            zs_configure_glass_corners(menu, kZSPinMenuCornerRadius, NO);
+            zs_configure_glass_corners_flat_top(handleElement, kZSPinMenuCornerRadius);
         } else {
-            menu.layer.cornerRadius = kZSPinMenuCornerRadius;
+            weakSelf.handle.layer.maskedCorners = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+            weakSelf.handle.layer.cornerRadius = kZSPinMenuCornerRadius;
         }
+        weakSelf.chevron.alpha = 0;
         for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 0;
     } completion:^(BOOL finished) {
         weakSelf.pinMenuTransitioning = NO;
@@ -13158,39 +13202,57 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
 }
 
 - (void)zs_dismissPinMenuAnimated:(BOOL)animated delay:(NSTimeInterval)delay completion:(dispatch_block_t)completion {
-    UIView *scrim = self.pinMenuScrim;
-    UIView *menu = self.pinMenuView;
-    UIView *menuContent = self.pinMenuContent;
-    if (!self.pinMenuOpen || !scrim || !menu) {
+    if (!self.pinMenuOpen) {
         if (completion) completion();
         return;
     }
 
+    UIView *scrim = self.pinMenuScrim;
+    UIView *menuContent = self.pinMenuContent;
     UIView *handleElement = self.handleGlass ?: self.handle;
-    UIView *unityView = zs_ui_host_view();
     BOOL glass = zs_has_liquid_glass();
+    CGFloat extra = self.pinMenuExtraWidth;
+    CGRect collapsed = CGRectMake(extra, [self zs_handleRestingY], kHandleWidth, kHandleHeight);
 
     self.pinMenuOpen = NO;
     self.pinMenuScrim = nil;
-    self.pinMenuView = nil;
     self.pinMenuContent = nil;
     self.pinMenuTransitioning = NO;
 
     __weak typeof(self) weakSelf = self;
+    void (^applyCollapsedStyle)(void) = ^{
+        if (glass) {
+            zs_configure_glass_corners(handleElement, kHandleCornerRadius, NO);
+        } else {
+            weakSelf.handle.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+            weakSelf.handle.layer.cornerRadius = kHandleCornerRadius;
+        }
+    };
+
     void (^finish)(void) = ^{
-        handleElement.alpha = 1;
-        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
+        [UIView performWithoutAnimation:^{
+            handleElement.frame = CGRectMake(extra, CGRectGetMinY(handleElement.frame) + (CGRectGetHeight(handleElement.frame) - kHandleHeight) * 0.5, kHandleWidth, kHandleHeight);
+            [weakSelf zs_shiftPinContainerByExtraWidth:-extra];
+            weakSelf.pinMenuExtraWidth = 0;
+            weakSelf.handle.clipsToBounds = NO;
+            weakSelf.chevron.alpha = 1;
+            for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
+            [menuContent removeFromSuperview];
+        }];
         [scrim removeFromSuperview];
         if (completion) completion();
     };
 
-    if (!animated || !unityView || !handleElement.superview) {
+    if (!animated) {
+        [UIView performWithoutAnimation:^{
+            handleElement.frame = collapsed;
+            applyCollapsedStyle();
+        }];
         finish();
         return;
     }
 
     scrim.userInteractionEnabled = NO;
-    CGRect collapsed = [self zs_handleFrameInHost:unityView];
 
     [UIView animateWithDuration:0.14
                           delay:delay
@@ -13205,12 +13267,9 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
           initialSpringVelocity:0.3
                         options:UIViewAnimationOptionBeginFromCurrentState
                      animations:^{
-        menu.frame = collapsed;
-        if (glass) {
-            zs_configure_glass_corners(menu, kHandleCornerRadius, NO);
-        } else {
-            menu.layer.cornerRadius = kHandleCornerRadius;
-        }
+        handleElement.frame = collapsed;
+        applyCollapsedStyle();
+        weakSelf.chevron.alpha = 1;
         for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
     } completion:^(BOOL finished) {
         finish();
@@ -13231,7 +13290,7 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     if (alreadyPinned) {
         [self zs_removePinnedKey:key delay:0.12];
     } else {
-        [self zs_addPinnedKey:key delay:0.2];
+        [self zs_addPinnedKey:key delay:0.3];
     }
 }
 
@@ -13393,7 +13452,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
         : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
 
-    if (fullScreenOpen && self.pinMenuOpen) {
+    if (self.pinMenuOpen) {
         [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
     }
 
@@ -13408,12 +13467,14 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
-        handleElement.frame = CGRectMake(0,
+        CGFloat handleLocalX = fullScreenOpen ? docsW : 0;
+        handleElement.frame = CGRectMake(handleLocalX,
                                           (height - kHandleHeight) * 0.5,
                                           kHandleWidth,
                                           kHandleHeight);
-        handleElement.hidden = fullScreenOpen;
-        [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 hidden:fullScreenOpen];
+        handleElement.alpha = fullScreenOpen ? 0 : 1;
+        handleElement.userInteractionEnabled = !fullScreenOpen;
+        [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 localX:handleLocalX visible:!fullScreenOpen];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
