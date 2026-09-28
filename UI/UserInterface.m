@@ -5798,7 +5798,7 @@ static const CGFloat kHandleCornerRadius = 10;
 static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
 static const NSTimeInterval kZSFullScreenPanelDuration = 0.434;
-static const NSTimeInterval kZSPullTabIconFadeDuration = 0.31;
+static const NSTimeInterval kZSPullTabIconFadeDuration = 0.155;
 static const NSTimeInterval kZSExtendedContentFadeDuration = 0.18;
 static const CGFloat kContentFadeHeight = 22;
 
@@ -13655,7 +13655,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     };
 
     static const NSTimeInterval kCornerAnimationDuration = 0.3;
-    static const NSTimeInterval kCornerRestoreDelay = 0.3;
+    static const NSTimeInterval kCornerRestoreDelay = 0.1;
 
     void (^animatePanelCorners)(void) = ^{
         [UIView animateWithDuration:kCornerAnimationDuration
