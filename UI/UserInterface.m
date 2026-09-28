@@ -4785,6 +4785,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
+    [self zs_syncSyslogButtonState];
 
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
@@ -5782,18 +5783,14 @@ static const CGFloat kContentFadeHeight = 22;
 
     [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Mods", self, @selector(docsInfoTapped:));
-    ZSRow *modsRow = zs_make_button_pair_row(
-        @"Load Mods", [UIColor colorWithRed:0.55 green:0.42 blue:1.0 alpha:1.0],
-        @"Restore Originals", [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0]);
-    UIButton *loadModsButton = objc_getAssociatedObject(modsRow, "zs_button_left");
+    UIButton *loadModsButton = zs_make_grouped_action_button(@"Load Mods", [UIColor colorWithRed:0.55 green:0.42 blue:1.0 alpha:1.0]);
     [loadModsButton addTarget:self action:@selector(loadModsTapped) forControlEvents:UIControlEventTouchUpInside];
-    UIButton *restoreOriginalsButton = objc_getAssociatedObject(modsRow, "zs_button_right");
 
-    zs_attach_tap_to_confirm(restoreOriginalsButton, self,
-        @"Restore Originals?", @"Every modded file will be restored to the game's original files.", @"Restore", YES, ^{
-        [weakSelf restoreOriginalsTapped];
-    });
-    [self.stack addArrangedSubview:modsRow];
+    UIView *modsActionsCard = zs_make_grouped_action_card(@[loadModsButton]);
+    modsActionsCard.layer.borderWidth = 1;
+    modsActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+    [self.stack addArrangedSubview:modsActionsCard];
+    [self.stack setCustomSpacing:8 afterView:modsActionsCard];
 
     self.modsLibraryExpandedFolders = [NSMutableSet set];
     self.modsLibraryExpandedInfoEntries = [NSMutableSet set];
@@ -5839,12 +5836,15 @@ static const CGFloat kContentFadeHeight = 22;
     [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
 
     UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [dumpIL2CPPMethodsButton addTarget:self action:@selector(dumpIL2CPPMethodsTapped) forControlEvents:UIControlEventTouchUpInside];
+    zs_attach_tap_to_confirm(dumpIL2CPPMethodsButton, self,
+        @"Dump IL2CPP Methods?", @"This enumerates every loaded assembly, class, method, field, and property and writes the dump to Documents. It may take a while.", @"Dump", NO, ^{
+        [weakSelf dumpIL2CPPMethodsTapped];
+    });
 
     UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    UIButton *syslogButton = zs_make_grouped_action_button(@"Enable system logs", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    UIButton *syslogButton = zs_make_grouped_action_button(@"Show system logs", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     self.syslogButton = syslogButton;
 
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -7443,6 +7443,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
 
     self.docsActiveKey = key;
     self.syslogFullScreenOpen = NO;
+    [self zs_syncSyslogButtonState];
     self.docsTitleLabel.text = [key uppercaseString];
     [self zs_setDocsHeaderChevronVisible:NO];
     [self zs_setDocsLanguageButtonVisible:YES];
@@ -7495,6 +7496,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
+    [self zs_syncSyslogButtonState];
     [self positionPanelAnimated:YES];
     [UIView animateWithDuration:0.2 animations:^{
         self.chevron.text = @"\u2039";
@@ -11190,12 +11192,12 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     self.syslogTabEnabled = !self.syslogTabEnabled;
 
     if (self.syslogTabEnabled) {
-        [self.syslogButton setTitle:@"Disable system logs" forState:UIControlStateNormal];
+        [self.syslogButton setTitle:@"Hide system logs" forState:UIControlStateNormal];
         [self zs_renderSyslogBuffer];
         [self zs_openSyslogFullScreenPanel];
         ZLog(@"[UserInterface] syslog console opened");
     } else {
-        [self.syslogButton setTitle:@"Enable system logs" forState:UIControlStateNormal];
+        [self.syslogButton setTitle:@"Show system logs" forState:UIControlStateNormal];
         if (self.syslogFullScreenOpen) {
             [self closeDocsPanel];
         }
@@ -11205,6 +11207,12 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     UIImpactFeedbackGenerator *haptic =
         [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+}
+
+- (void)zs_syncSyslogButtonState {
+    self.syslogTabEnabled = self.syslogFullScreenOpen;
+    [self.syslogButton setTitle:self.syslogFullScreenOpen ? @"Hide system logs" : @"Show system logs"
+                       forState:UIControlStateNormal];
 }
 
 - (void)zs_toggleSyslogChannelTapped {
@@ -11540,10 +11548,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left;
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left * 0.1;
     CGFloat indexColumnWidth = 22;
     CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
-    CGFloat rowTrailingInset = 16 + overlaySafeInsets.right;
+    CGFloat rowTrailingInset = 16 + overlaySafeInsets.right * 0.1;
 
     UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
         ?: [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
