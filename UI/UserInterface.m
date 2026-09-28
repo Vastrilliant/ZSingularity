@@ -400,6 +400,44 @@ static void zs_configure_glass_corners(UIView *view, CGFloat radius, BOOL concen
                                            configuration);
 }
 
+static void zs_configure_glass_corners_sides(UIView *view, CGFloat radius, BOOL concentric, BOOL roundLeft, BOOL roundRight) {
+    if (!view || !zs_has_liquid_glass()) return;
+
+    Class radiusClass = NSClassFromString(@"UICornerRadius");
+    Class configClass = NSClassFromString(@"UICornerConfiguration");
+    SEL roundSelector = concentric
+        ? NSSelectorFromString(@"containerConcentricRadiusWithMinimum:")
+        : NSSelectorFromString(@"fixedRadius:");
+    SEL flatSelector = NSSelectorFromString(@"fixedRadius:");
+    SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
+    SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
+
+    if (!radiusClass || !configClass ||
+        ![radiusClass respondsToSelector:roundSelector] ||
+        ![radiusClass respondsToSelector:flatSelector] ||
+        ![configClass respondsToSelector:fourCornerSelector] ||
+        ![view respondsToSelector:setConfiguration]) {
+        zs_configure_glass_corners(view, radius, concentric);
+        return;
+    }
+
+    id round = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, roundSelector, radius);
+    id flat = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, flatSelector, 0);
+    if (!round || !flat) {
+        zs_configure_glass_corners(view, radius, concentric);
+        return;
+    }
+
+    id left = roundLeft ? round : flat;
+    id right = roundRight ? round : flat;
+    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, left, right, left, right);
+    if (!configuration) {
+        zs_configure_glass_corners(view, radius, concentric);
+        return;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
+}
+
 static NSHashTable<UIVisualEffectView *> *zs_suspendable_glass_registry(void) {
     static NSHashTable<UIVisualEffectView *> *table;
     static dispatch_once_t once;
@@ -4497,6 +4535,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
 @property (nonatomic, strong) UIView *docsPanel;
 @property (nonatomic, strong) UIView *docsContentOverlay;
+@property (nonatomic, strong) UIView *extendedContentClip;
+@property (nonatomic, assign) BOOL panelLeftCornersFlat;
 @property (nonatomic, strong) UIView *docsPanelSeparator;
 @property (nonatomic, strong) UIScrollView *docsScrollView;
 @property (nonatomic, strong) UILabel *docsTitleLabel;
@@ -5054,10 +5094,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     CGRect contentOverlayRestingFrame = self.contentOverlay.frame;
     self.contentOverlay.frame = CGRectOffset(contentOverlayRestingFrame, offscreenDeltaX, 0);
 
-    BOOL docsOverlayVisible = self.docsContentOverlay && !self.docsContentOverlay.hidden;
-    CGRect docsContentOverlayRestingFrame = docsOverlayVisible ? self.docsContentOverlay.frame : CGRectZero;
-    if (docsOverlayVisible) {
-        self.docsContentOverlay.frame = CGRectOffset(docsContentOverlayRestingFrame, offscreenDeltaX, 0);
+    BOOL extendedVisible = self.extendedContentClip && !self.extendedContentClip.hidden;
+    CGRect extendedRestingFrame = extendedVisible ? self.extendedContentClip.frame : CGRectZero;
+    if (extendedVisible) {
+        self.extendedContentClip.frame = CGRectOffset(extendedRestingFrame, offscreenDeltaX, 0);
     }
 
     UIView *handleElement = self.handleGlass ?: self.handle;
@@ -5098,7 +5138,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
                      animations:^{
         weakSelf.glassContainer.frame = restingFrame;
         weakSelf.contentOverlay.frame = contentOverlayRestingFrame;
-        if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayRestingFrame;
+        if (extendedVisible) weakSelf.extendedContentClip.frame = extendedRestingFrame;
         handleElement.frame = handleRestingFrame;
         for (NSString *pinKey in pinnedRestingFrames) {
             weakSelf.pinnedTabElements[pinKey].frame = pinnedRestingFrames[pinKey].CGRectValue;
@@ -5148,14 +5188,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     CGRect contentOverlayOffscreenFrame = CGRectOffset(self.contentOverlay.frame, offscreenDeltaX, 0);
 
-    BOOL docsOverlayVisible = self.docsContentOverlay && !self.docsContentOverlay.hidden;
-    CGRect docsContentOverlayOffscreenFrame = docsOverlayVisible ? CGRectOffset(self.docsContentOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
-
-    BOOL syslogOverlayVisible = self.syslogFullScreenOverlay && !self.syslogFullScreenOverlay.hidden;
-    CGRect syslogOverlayOffscreenFrame = syslogOverlayVisible ? CGRectOffset(self.syslogFullScreenOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
-
-    BOOL memoryOverlayVisible = self.memoryFullScreenOverlay && !self.memoryFullScreenOverlay.hidden;
-    CGRect memoryOverlayOffscreenFrame = memoryOverlayVisible ? CGRectOffset(self.memoryFullScreenOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
+    BOOL extendedVisible = self.extendedContentClip && !self.extendedContentClip.hidden;
+    CGRect extendedOffscreenFrame = extendedVisible ? CGRectOffset(self.extendedContentClip.frame, offscreenDeltaX, 0) : CGRectZero;
 
     UIView *handleElement = self.handleGlass ?: self.handle;
     CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
@@ -5180,9 +5214,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         }
         weakSelf.glassContainer.frame = offscreenFrame;
         weakSelf.contentOverlay.frame = contentOverlayOffscreenFrame;
-        if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayOffscreenFrame;
-        if (syslogOverlayVisible) weakSelf.syslogFullScreenOverlay.frame = syslogOverlayOffscreenFrame;
-        if (memoryOverlayVisible) weakSelf.memoryFullScreenOverlay.frame = memoryOverlayOffscreenFrame;
+        if (extendedVisible) weakSelf.extendedContentClip.frame = extendedOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
         [weakSelf teardownPanelState];
@@ -5241,6 +5273,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [self.glassContainer removeFromSuperview];
     [self.contentOverlay removeFromSuperview];
     [self.docsContentOverlay removeFromSuperview];
+    [self.extendedContentClip removeFromSuperview];
+    self.extendedContentClip = nil;
+    self.panelLeftCornersFlat = NO;
 
     [self.pinMenuScrim removeFromSuperview];
     self.pinMenuScrim = nil;
@@ -5759,11 +5794,12 @@ static void zs_add_section_header_with_docs(UIStackView *stack, NSString *title,
 static const CGFloat kHandleWidth = 27;
 static const CGFloat kHandleHeight = 72;
 static const CGFloat kPanelCornerRadiusMinimum = 20;
-static const CGFloat kZSDocsPanelGlassFillOverlap = kPanelCornerRadiusMinimum + 6;
 static const CGFloat kHandleCornerRadius = 10;
 static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
-static const NSTimeInterval kZSFullScreenPanelDuration = 0.62;
+static const NSTimeInterval kZSFullScreenPanelDuration = 0.434;
+static const NSTimeInterval kZSPullTabIconFadeDuration = 0.31;
+static const NSTimeInterval kZSExtendedContentFadeDuration = 0.18;
 static const CGFloat kContentFadeHeight = 22;
 
 - (void)buildPanel:(UIView *)unityView {
@@ -5875,6 +5911,8 @@ static const CGFloat kContentFadeHeight = 22;
     [self zs_buildPinnedTabsFromStore];
 
     [self buildDocsPanel:unityView];
+    [self zs_buildSyslogFullScreenPanelIfNeeded];
+    [self zs_buildMemoryFullScreenPanelIfNeeded];
 
     [self zs_restackPinChrome];
 
@@ -7313,7 +7351,7 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
     if (zs_has_liquid_glass()) {
         self.docsPanelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
         self.docsPanelGlass.userInteractionEnabled = YES;
-        zs_configure_glass_corners(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES);
+        zs_configure_glass_corners_sides(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES, YES, NO);
         [self.glassContainerContent addSubview:self.docsPanelGlass];
         [self.glassContainerContent sendSubviewToBack:self.docsPanelGlass];
         self.docsPanel = self.docsPanelGlass.contentView;
@@ -7322,6 +7360,7 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
         self.docsPanel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
         self.docsPanel.layer.cornerRadius = kPanelCornerRadiusMinimum;
         self.docsPanel.layer.cornerCurve = kCACornerCurveContinuous;
+        self.docsPanel.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
         self.docsPanel.clipsToBounds = YES;
         [self.glassContainerContent addSubview:self.docsPanel];
         [self.glassContainerContent sendSubviewToBack:self.docsPanel];
@@ -7329,19 +7368,27 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
     self.docsPanel.backgroundColor = self.docsPanelGlass ? UIColor.clearColor : self.docsPanel.backgroundColor;
     self.docsPanel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
+    self.extendedContentClip = [[UIView alloc] initWithFrame:CGRectZero];
+    self.extendedContentClip.backgroundColor = UIColor.clearColor;
+    self.extendedContentClip.opaque = NO;
+    self.extendedContentClip.clipsToBounds = YES;
+    self.extendedContentClip.layer.cornerRadius = kPanelCornerRadiusMinimum;
+    self.extendedContentClip.layer.cornerCurve = kCACornerCurveContinuous;
+    self.extendedContentClip.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
+    self.extendedContentClip.userInteractionEnabled = YES;
+    self.extendedContentClip.hidden = YES;
+    [unityView addSubview:self.extendedContentClip];
+    if (self.contentOverlay) {
+        [unityView insertSubview:self.extendedContentClip belowSubview:self.contentOverlay];
+    }
+
     self.docsContentOverlay = [[UIView alloc] initWithFrame:CGRectZero];
     self.docsContentOverlay.backgroundColor = UIColor.clearColor;
     self.docsContentOverlay.opaque = NO;
-    self.docsContentOverlay.clipsToBounds = YES;
-    self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
-    self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
     self.docsContentOverlay.userInteractionEnabled = YES;
     self.docsContentOverlay.hidden = YES;
-    [unityView addSubview:self.docsContentOverlay];
+    [self.extendedContentClip addSubview:self.docsContentOverlay];
     zs_force_dark(self.docsContentOverlay);
-    if (self.contentOverlay) {
-        [unityView insertSubview:self.docsContentOverlay belowSubview:self.contentOverlay];
-    }
 
     self.docsPanelSeparator = [[UIView alloc] init];
     self.docsPanelSeparator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
@@ -11547,23 +11594,15 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_buildSyslogFullScreenPanelIfNeeded {
     if (self.syslogFullScreenOverlay) return;
-
-    UIView *unityView = zs_ui_host_view();
-    if (!unityView) return;
+    if (!self.extendedContentClip) return;
 
     UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
     overlay.backgroundColor = UIColor.clearColor;
     overlay.opaque = NO;
     overlay.hidden = YES;
-    overlay.clipsToBounds = YES;
-    overlay.layer.cornerRadius = 0;
-    overlay.layer.cornerCurve = kCACornerCurveContinuous;
     overlay.userInteractionEnabled = YES;
-    [unityView addSubview:overlay];
+    [self.extendedContentClip addSubview:overlay];
     zs_force_dark(overlay);
-    if (self.contentOverlay) {
-        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
-    }
     self.syslogFullScreenOverlay = overlay;
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
@@ -11913,25 +11952,21 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_endMemoryAnalysis];
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = YES;
-    [self zs_renderSyslogFullScreenRows];
-    [self zs_updateSyslogInfoLabel];
     [self zs_startSyslogInfoRefresh];
 
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];
 
+    [self.syslogFullScreenOverlay layoutIfNeeded];
+    [self zs_updateSyslogInfoLabel];
+    [self zs_renderSyslogFullScreenRows];
+    [self zs_scrollSyslogFullScreenToBottom];
+
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || !strongSelf.syslogFullScreenOpen) return;
-        [strongSelf zs_renderSyslogFullScreenRows];
         [strongSelf zs_scrollSyslogFullScreenToBottom];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kZSFullScreenPanelDuration + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            typeof(self) innerSelf = weakSelf;
-            if (!innerSelf || !innerSelf.syslogFullScreenOpen) return;
-            [innerSelf zs_renderSyslogFullScreenRows];
-            [innerSelf zs_scrollSyslogFullScreenToBottom];
-        });
     });
 }
 
@@ -11992,23 +12027,15 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_buildMemoryFullScreenPanelIfNeeded {
     if (self.memoryFullScreenOverlay) return;
-
-    UIView *unityView = zs_ui_host_view();
-    if (!unityView) return;
+    if (!self.extendedContentClip) return;
 
     UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
     overlay.backgroundColor = UIColor.clearColor;
     overlay.opaque = NO;
     overlay.hidden = YES;
-    overlay.clipsToBounds = YES;
-    overlay.layer.cornerRadius = 0;
-    overlay.layer.cornerCurve = kCACornerCurveContinuous;
     overlay.userInteractionEnabled = YES;
-    [unityView addSubview:overlay];
+    [self.extendedContentClip addSubview:overlay];
     zs_force_dark(overlay);
-    if (self.contentOverlay) {
-        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
-    }
     self.memoryFullScreenOverlay = overlay;
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
@@ -12120,12 +12147,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];
 
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kZSFullScreenPanelDuration + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf || !strongSelf.memoryFullScreenOpen) return;
-        [strongSelf zs_startMemoryUsageAutoRefresh];
-    });
+    [self zs_renderMemoryColumnsWithStats:zs_collect_memory_system_stats() groups:@[]];
+    self.memoryFullScreenStatusLabel.text = @"Scanning…";
+    [self zs_startMemoryUsageAutoRefresh];
 }
 
 - (void)zs_closeMemoryFullScreenPanelTapped {
@@ -13062,13 +13086,17 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 }
 
 - (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY localX:(CGFloat)x visible:(BOOL)visible {
+    [self zs_layoutPinnedTabsWithHandleY:handleY localX:x visible:visible updateIcons:YES];
+}
+
+- (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY localX:(CGFloat)x visible:(BOOL)visible updateIcons:(BOOL)updateIcons {
     NSArray<NSString *> *keys = self.pinnedActionKeys;
     for (NSUInteger idx = 0; idx < keys.count; idx++) {
         UIView *element = self.pinnedTabElements[keys[idx]];
         if (!element) continue;
         element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:x];
         element.userInteractionEnabled = visible;
-        [element viewWithTag:kZSPinnedIconTag].alpha = visible ? 1 : 0;
+        if (updateIcons) [element viewWithTag:kZSPinnedIconTag].alpha = visible ? 1 : 0;
     }
 }
 
@@ -13433,10 +13461,8 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         [self.contentOverlay layoutIfNeeded];
     }
 
-    if (self.docsPanel) {
-        [unityView bringSubviewToFront:self.docsContentOverlay];
-        if (self.syslogFullScreenOverlay) [unityView bringSubviewToFront:self.syslogFullScreenOverlay];
-        if (self.memoryFullScreenOverlay) [unityView bringSubviewToFront:self.memoryFullScreenOverlay];
+    if (self.extendedContentClip) {
+        [unityView bringSubviewToFront:self.extendedContentClip];
         if (self.contentOverlay) [unityView bringSubviewToFront:self.contentOverlay];
     }
 
@@ -13560,6 +13586,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
     BOOL fullScreenChanged = fullScreenOpen != self.panelFullScreenLayoutActive;
     self.panelFullScreenLayoutActive = fullScreenOpen;
+    BOOL leftCornersFlatChanged = docsVisible != self.panelLeftCornersFlat;
+    self.panelLeftCornersFlat = docsVisible;
     CGFloat docsW = 0;
     if (docsVisible) {
         docsW = fullScreenOpen
@@ -13574,10 +13602,14 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     UIView *panelElement = self.panelGlass ?: self.panel;
     UIView *handleElement = self.handleGlass ?: self.handle;
     UIView *docsPanelElement = self.docsPanelGlass ?: self.docsPanel;
+    UIView *clip = self.extendedContentClip;
+    BOOL glass = zs_has_liquid_glass();
 
     CGFloat docsX = fullScreenOpen ? 0 : kHandleWidth;
     CGFloat docsSpanWidth = docsW + (fullScreenOpen ? kHandleWidth : 0);
-    CACornerMask docsCornerMask = fullScreenOpen
+    BOOL roundDocsLeft = !fullScreenOpen;
+    CACornerMask docsCornerMask = roundDocsLeft ? (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner) : 0;
+    CACornerMask contentOverlayCornerMask = docsVisible
         ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
         : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
 
@@ -13585,14 +13617,44 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
     }
 
-    void (^changes)(void) = ^{
-        if (docsVisible) {
-            self.docsContentOverlay.hidden = fullScreenOpen;
-            if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = !self.syslogFullScreenOpen;
-            if (self.memoryFullScreenOverlay) self.memoryFullScreenOverlay.hidden = !self.memoryFullScreenOpen;
+    if (docsVisible && clip) {
+        [UIView performWithoutAnimation:^{
+            [clip.layer removeAnimationForKey:@"opacity"];
+            clip.alpha = 1;
+            clip.hidden = NO;
             self.docsPanelSeparator.hidden = NO;
-        }
 
+            CGRect overlayFrame = CGRectMake(0, 0, docsSpanWidth, height);
+            void (^prepareOverlay)(UIView *, BOOL) = ^(UIView *overlay, BOOL visible) {
+                if (!overlay) return;
+                overlay.frame = overlayFrame;
+                overlay.hidden = !visible;
+                if (visible) [overlay layoutIfNeeded];
+            };
+            prepareOverlay(self.docsContentOverlay, !fullScreenOpen);
+            prepareOverlay(self.syslogFullScreenOverlay, self.syslogFullScreenOpen);
+            prepareOverlay(self.memoryFullScreenOverlay, self.memoryFullScreenOpen);
+        }];
+    }
+
+    void (^applyPanelCorners)(void) = ^{
+        if (self.panelGlass) {
+            zs_configure_glass_corners_sides(self.panelGlass, kPanelCornerRadiusMinimum, YES, !docsVisible, YES);
+        }
+        if (self.contentOverlay) {
+            self.contentOverlay.layer.maskedCorners = contentOverlayCornerMask;
+        }
+    };
+
+    void (^applyIconAlpha)(void) = ^{
+        CGFloat alpha = fullScreenOpen ? 0 : 1;
+        self.chevron.alpha = alpha;
+        for (UIView *tab in self.pinnedTabElements.allValues) {
+            [tab viewWithTag:kZSPinnedIconTag].alpha = alpha;
+        }
+    };
+
+    void (^changes)(void) = ^{
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
@@ -13603,18 +13665,20 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           kHandleWidth,
                                           kHandleHeight);
         handleElement.userInteractionEnabled = !fullScreenOpen;
-        self.chevron.alpha = fullScreenOpen ? 0 : 1;
-        [self zs_layoutPinnedTabsWithHandleY:handleRestingY localX:handleLocalX visible:!fullScreenOpen];
+        [self zs_layoutPinnedTabsWithHandleY:handleRestingY localX:handleLocalX visible:!fullScreenOpen updateIcons:NO];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
         if (docsPanelElement) {
-            CGFloat glassOverlap = docsW > 0 ? kZSDocsPanelGlassFillOverlap : 0;
-            docsPanelElement.frame = CGRectMake(docsX, 0, docsSpanWidth + glassOverlap, height);
-            docsPanelElement.clipsToBounds = YES;
-            docsPanelElement.layer.cornerRadius = kPanelCornerRadiusMinimum;
-            docsPanelElement.layer.cornerCurve = kCACornerCurveContinuous;
-            docsPanelElement.layer.maskedCorners = docsCornerMask;
+            docsPanelElement.frame = docsFrameLocal;
+            if (glass) {
+                zs_configure_glass_corners_sides(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES, roundDocsLeft, NO);
+            } else {
+                docsPanelElement.clipsToBounds = YES;
+                docsPanelElement.layer.cornerRadius = kPanelCornerRadiusMinimum;
+                docsPanelElement.layer.cornerCurve = kCACornerCurveContinuous;
+                docsPanelElement.layer.maskedCorners = docsCornerMask;
+            }
         }
 
         panelElement.frame = CGRectMake(kHandleWidth + docsW, 0, panelW, height);
@@ -13640,51 +13704,108 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.contentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
-        if (self.docsContentOverlay && docsPanelElement) {
-            self.docsContentOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            self.docsContentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
-            self.docsContentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
-            self.docsContentOverlay.layer.maskedCorners = docsCornerMask;
-        }
-        if (self.syslogFullScreenOverlay) {
-            self.syslogFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            self.syslogFullScreenOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
-            self.syslogFullScreenOverlay.layer.cornerCurve = kCACornerCurveContinuous;
-            self.syslogFullScreenOverlay.layer.maskedCorners = docsCornerMask;
-        }
-        if (self.memoryFullScreenOverlay) {
-            self.memoryFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            self.memoryFullScreenOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
-            self.memoryFullScreenOverlay.layer.cornerCurve = kCACornerCurveContinuous;
-            self.memoryFullScreenOverlay.layer.maskedCorners = docsCornerMask;
+        if (clip && docsPanelElement) {
+            clip.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+            clip.layer.cornerRadius = kPanelCornerRadiusMinimum;
+            clip.layer.cornerCurve = kCACornerCurveContinuous;
+            clip.layer.maskedCorners = docsCornerMask;
         }
 
         [self zs_updateSliderGlassVisibility];
     };
 
     void (^completion)(BOOL) = ^(BOOL finished) {
-        if (!docsVisible) {
-            self.docsContentOverlay.hidden = YES;
-            if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = YES;
-            if (self.memoryFullScreenOverlay) self.memoryFullScreenOverlay.hidden = YES;
-            self.docsPanelSeparator.hidden = YES;
-        }
+        if (self.docsPanelOpen) return;
+        self.docsPanelSeparator.hidden = YES;
+        [self zs_finishExtendedPanelClose];
     };
+
+    NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
     if (!animated) {
         changes();
+        if (leftCornersFlatChanged) applyPanelCorners();
+        applyIconAlpha();
         completion(YES);
     } else {
-        [UIView animateWithDuration:fullScreenChanged ? kZSFullScreenPanelDuration : 0.28
+        if (fullScreenChanged) {
+            UICubicTimingParameters *timing = [[UICubicTimingParameters alloc] initWithControlPoint1:CGPointMake(0.16, 1.0)
+                                                                                       controlPoint2:CGPointMake(0.3, 1.0)];
+            UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:mainDuration
+                                                                                timingParameters:timing];
+            [animator addAnimations:changes];
+            [animator addCompletion:^(UIViewAnimatingPosition finalPosition) {
+                completion(finalPosition == UIViewAnimatingPositionEnd);
+            }];
+            [animator startAnimation];
+        } else {
+            [UIView animateWithDuration:mainDuration
+                                  delay:0
+                 usingSpringWithDamping:0.85
+                  initialSpringVelocity:0.3
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                             animations:changes
+                             completion:completion];
+        }
+
+        if (leftCornersFlatChanged) {
+            BOOL flatten = docsVisible;
+            UIViewAnimationOptions cornerCurve = flatten ? UIViewAnimationOptionCurveEaseOut : UIViewAnimationOptionCurveEaseIn;
+            [UIView animateWithDuration:mainDuration * 0.45
+                                  delay:flatten ? 0 : mainDuration * 0.55
+                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | cornerCurve
+                             animations:applyPanelCorners
+                             completion:nil];
+        }
+
+        [UIView animateWithDuration:kZSPullTabIconFadeDuration
                               delay:0
-             usingSpringWithDamping:fullScreenChanged ? 1.0 : 0.85
-              initialSpringVelocity:fullScreenChanged ? 0 : 0.3
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                         animations:changes
-                         completion:completion];
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:applyIconAlpha
+                         completion:nil];
     }
 
     [self startPostFXReapply];
+}
+
+- (void)zs_finishExtendedPanelClose {
+    UIView *clip = self.extendedContentClip;
+    if (!clip || clip.hidden || self.docsPanelOpen) return;
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:kZSExtendedContentFadeDuration
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        clip.alpha = 0;
+    } completion:^(BOOL finished) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !finished) return;
+        if (strongSelf.docsPanelOpen || strongSelf.extendedContentClip != clip) return;
+        [strongSelf zs_tearDownExtendedPanelContents];
+    }];
+}
+
+- (void)zs_tearDownExtendedPanelContents {
+    UIView *clip = self.extendedContentClip;
+    if (!clip) return;
+
+    clip.hidden = YES;
+    clip.alpha = 1;
+    self.docsContentOverlay.hidden = YES;
+    self.syslogFullScreenOverlay.hidden = YES;
+    self.memoryFullScreenOverlay.hidden = YES;
+
+    for (UIView *row in [self.syslogFullScreenRowsStack.arrangedSubviews copy]) {
+        [self.syslogFullScreenRowsStack removeArrangedSubview:row];
+        [row removeFromSuperview];
+    }
+    self.syslogFullScreenScrollView.contentOffset = CGPointZero;
+
+    [self.memoryFullScreenContentView removeFromSuperview];
+    self.memoryFullScreenContentView = nil;
+    self.memoryFullScreenScrollView.contentOffset = CGPointZero;
+    self.memoryFullScreenStatusLabel.text = @"Scanning…";
 }
 
 #pragma mark Post FX continuous reapply
