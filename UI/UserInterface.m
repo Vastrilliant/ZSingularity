@@ -4659,6 +4659,9 @@ static UIView *zs_make_title_block(void) {
 
 @property (nonatomic, strong) NSMutableArray<NSString *> *pinnedActionKeys;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
+@property (nonatomic, assign) CGFloat pinClusterOffsetY;
+@property (nonatomic, assign) BOOL pinRecenterPending;
+@property (nonatomic, assign) NSUInteger pinRecenterToken;
 @property (nonatomic, strong) UIView *pinMenuScrim;
 @property (nonatomic, strong) UIView *pinMenuContent;
 @property (nonatomic, assign) CGFloat pinMenuExtraWidth;
@@ -5245,6 +5248,8 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.pinMenuTransitioning = NO;
     self.pinMenuExtraWidth = 0;
     self.pinnedTabElements = nil;
+    self.pinRecenterPending = NO;
+    self.pinRecenterToken = self.pinRecenterToken + 1;
 
     self.glassContainer = nil;
     self.panelGlass = nil;
@@ -12813,6 +12818,8 @@ static NSString * const kZSPinnedActionsSettingsKey = @"keys";
 static const CGFloat kZSPinnedTabHeight = 48;
 static const CGFloat kZSPinnedTabGap = 4;
 static const NSInteger kZSPinnedIconTag = 0x5A50;
+static const NSInteger kZSPinMenuPinIconTag = 0x5A51;
+static const NSTimeInterval kZSPinRecenterDelay = 0.5;
 static const CGFloat kZSPinMenuWidth = 224;
 static const CGFloat kZSPinMenuHeaderTop = 10;
 static const CGFloat kZSPinMenuHeaderHeight = 28;
@@ -12898,7 +12905,72 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 }
 
 - (CGFloat)zs_handleRestingY {
-    return (CGRectGetHeight(self.glassContainer.bounds) - kHandleHeight) * 0.5;
+    return (CGRectGetHeight(self.glassContainer.bounds) - kHandleHeight) * 0.5 + self.pinClusterOffsetY;
+}
+
+- (CGFloat)zs_centeredClusterOffset {
+    return (CGFloat)[self zs_pinnedKeys].count * (kZSPinnedTabHeight + kZSPinnedTabGap) * 0.5;
+}
+
+- (CGRect)zs_pinAnchorFrame {
+    return (self.handleGlass ?: self.handle).frame;
+}
+
+- (CGFloat)zs_pinAnchorX {
+    return CGRectGetMaxX([self zs_pinAnchorFrame]) - kHandleWidth;
+}
+
+- (CGFloat)zs_pinAnchorY {
+    return [self zs_pinAnchorFrame].origin.y;
+}
+
+- (CGRect)zs_pinnedOriginFrameForAnchor {
+    CGRect anchor = [self zs_pinAnchorFrame];
+    return CGRectMake([self zs_pinAnchorX], CGRectGetMidY(anchor) - kZSPinnedTabHeight * 0.5, kHandleWidth, kZSPinnedTabHeight);
+}
+
+- (void)zs_applyPinClusterLayout {
+    UIView *handleElement = self.handleGlass ?: self.handle;
+    if (!handleElement || !self.glassContainer) return;
+    CGFloat y = [self zs_handleRestingY];
+    CGRect frame = handleElement.frame;
+    handleElement.frame = CGRectMake(frame.origin.x, y, frame.size.width, frame.size.height);
+    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
+    [self zs_layoutPinnedTabsWithHandleY:y localX:frame.origin.x visible:!fullScreenOpen];
+}
+
+- (void)zs_schedulePinClusterRecenter {
+    if (!self.pinRecenterPending) return;
+    self.pinRecenterToken = self.pinRecenterToken + 1;
+    NSUInteger token = self.pinRecenterToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSPinRecenterDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf.pinRecenterToken != token) return;
+        [strongSelf zs_recenterPinCluster];
+    });
+}
+
+- (void)zs_recenterPinCluster {
+    if (self.pinMenuOpen || !self.panelOpen || !self.glassContainer) return;
+    self.pinRecenterPending = NO;
+
+    CGFloat target = [self zs_centeredClusterOffset];
+    if (fabs(target - self.pinClusterOffsetY) < 0.5) {
+        self.pinClusterOffsetY = target;
+        return;
+    }
+    self.pinClusterOffsetY = target;
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.45
+                          delay:0
+         usingSpringWithDamping:0.88
+          initialSpringVelocity:0.2
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        [weakSelf zs_applyPinClusterLayout];
+    } completion:nil];
 }
 
 - (CGFloat)zs_handleLocalX {
@@ -12928,7 +13000,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         content = tab;
     }
 
-    element.frame = [self zs_pinnedOriginFrameForHandleY:[self zs_handleRestingY] localX:[self zs_handleLocalX]];
+    element.frame = [self zs_pinnedOriginFrameForAnchor];
     [self.glassContainerContent addSubview:element];
 
     UIImageView *icon = [[UIImageView alloc] initWithImage:zs_pin_symbol(action[@"symbol"], 13, UIFontWeightMedium)];
@@ -12971,6 +13043,9 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 }
 
 - (void)zs_buildPinnedTabsFromStore {
+    self.pinClusterOffsetY = [self zs_centeredClusterOffset];
+    self.pinRecenterPending = NO;
+    self.pinRecenterToken = self.pinRecenterToken + 1;
     self.pinnedTabElements = [NSMutableDictionary dictionary];
     for (NSString *key in [self zs_pinnedKeys]) {
         [self zs_makePinnedTabElementForKey:key];
@@ -12993,6 +13068,8 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     if ([keys containsObject:key] || !zs_pin_action_for_key(key)) return;
     [keys addObject:key];
     [self zs_persistPinnedKeys];
+    self.pinRecenterPending = YES;
+    if (!self.pinMenuOpen) [self zs_schedulePinClusterRecenter];
 
     __weak typeof(self) weakSelf = self;
     dispatch_block_t emerge = ^{
@@ -13013,7 +13090,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
             if (!innerSelf || !innerSelf.panelOpen || innerSelf.pinnedTabElements[key] != element) return;
             NSUInteger slotIdx = [[innerSelf zs_pinnedKeys] indexOfObject:key];
             if (slotIdx == NSNotFound) return;
-            CGRect slot = [innerSelf zs_pinnedSlotFrameAtIndex:slotIdx handleY:[innerSelf zs_handleRestingY] localX:[innerSelf zs_handleLocalX]];
+            CGRect slot = [innerSelf zs_pinnedSlotFrameAtIndex:slotIdx handleY:[innerSelf zs_pinAnchorY] localX:[innerSelf zs_pinAnchorX]];
 
             [UIView animateWithDuration:0.5
                                   delay:0
@@ -13043,12 +13120,14 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     [keys removeObjectAtIndex:idx];
     [self.pinnedTabElements removeObjectForKey:key];
     [self zs_persistPinnedKeys];
+    self.pinRecenterPending = YES;
+    if (!self.pinMenuOpen) [self zs_schedulePinClusterRecenter];
     if (!element) return;
 
     __weak typeof(self) weakSelf = self;
-    CGFloat handleY = [self zs_handleRestingY];
-    CGFloat localX = [self zs_handleLocalX];
-    CGRect origin = [self zs_pinnedOriginFrameForHandleY:handleY localX:localX];
+    CGFloat handleY = [self zs_pinAnchorY];
+    CGFloat localX = [self zs_pinAnchorX];
+    CGRect origin = [self zs_pinnedOriginFrameForAnchor];
     [UIView animateWithDuration:0.38
                           delay:delay
          usingSpringWithDamping:0.9
@@ -13093,6 +13172,8 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     if (self.pinMenuOpen || self.pinMenuTransitioning) return;
     if (!self.panelOpen || !self.glassContainer || !self.glassContainerContent) return;
     if (self.docsPanelOpen || self.syslogFullScreenOpen || self.memoryFullScreenOpen) return;
+
+    self.pinRecenterToken = self.pinRecenterToken + 1;
 
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
@@ -13173,6 +13254,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         pinIcon.tintColor = isPinned ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.7];
         pinIcon.contentMode = UIViewContentModeCenter;
         pinIcon.frame = CGRectMake(kZSPinMenuWidth - 44, 0, 32, kZSPinMenuRowHeight);
+        pinIcon.tag = kZSPinMenuPinIconTag;
         pinIcon.userInteractionEnabled = NO;
         [row addSubview:pinIcon];
 
@@ -13270,9 +13352,18 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
             [weakSelf zs_layoutPinnedTabsWithHandleY:collapsed.origin.y localX:extra visible:YES];
         }];
         finish();
+        if (weakSelf.pinRecenterPending) {
+            weakSelf.pinRecenterPending = NO;
+            weakSelf.pinRecenterToken = weakSelf.pinRecenterToken + 1;
+            weakSelf.pinClusterOffsetY = [weakSelf zs_centeredClusterOffset];
+            [UIView performWithoutAnimation:^{
+                [weakSelf zs_applyPinClusterLayout];
+            }];
+        }
         return;
     }
 
+    [self zs_schedulePinClusterRecenter];
     scrim.userInteractionEnabled = NO;
 
     [UIView animateWithDuration:0.14
@@ -13306,14 +13397,19 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
-    __weak typeof(self) weakSelf = self;
-    [self zs_dismissPinMenuAnimated:YES delay:0 completion:^{
-        if (alreadyPinned) {
-            [weakSelf zs_removePinnedKey:key delay:0];
-        } else {
-            [weakSelf zs_addPinnedKey:key delay:0];
-        }
-    }];
+    if (alreadyPinned) {
+        [self zs_removePinnedKey:key delay:0];
+    } else {
+        [self zs_addPinnedKey:key delay:0];
+    }
+
+    BOOL nowPinned = !alreadyPinned;
+    sender.accessibilityValue = nowPinned ? @"Pinned" : @"Not pinned";
+    UIImageView *pinIcon = (UIImageView *)[sender viewWithTag:kZSPinMenuPinIconTag];
+    if ([pinIcon isKindOfClass:[UIImageView class]]) {
+        pinIcon.image = zs_pin_symbol(nowPinned ? @"pin.fill" : @"pin", 14, UIFontWeightMedium);
+        pinIcon.tintColor = nowPinned ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.7];
+    }
 }
 
 #pragma mark Pull tab
@@ -13490,13 +13586,14 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         self.glassContainer.frame = dockFrame;
 
         CGFloat handleLocalX = fullScreenOpen ? (kHandleWidth + docsW) : 0;
+        CGFloat handleRestingY = (height - kHandleHeight) * 0.5 + self.pinClusterOffsetY;
         handleElement.frame = CGRectMake(handleLocalX,
-                                          (height - kHandleHeight) * 0.5,
+                                          handleRestingY,
                                           kHandleWidth,
                                           kHandleHeight);
         handleElement.userInteractionEnabled = !fullScreenOpen;
         self.chevron.alpha = fullScreenOpen ? 0 : 1;
-        [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 localX:handleLocalX visible:!fullScreenOpen];
+        [self zs_layoutPinnedTabsWithHandleY:handleRestingY localX:handleLocalX visible:!fullScreenOpen];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
