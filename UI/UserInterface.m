@@ -4321,6 +4321,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UILabel *syslogInfoLabel;
 @property (nonatomic, strong) NSTimer *syslogInfoRefreshTimer;
 @property (nonatomic, strong) UIScrollView *syslogFullScreenScrollView;
+@property (nonatomic, strong) NSLayoutConstraint *syslogCloseButtonLeadingConstraint;
 @property (nonatomic, strong) UIStackView *syslogFullScreenRowsStack;
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
 @property (nonatomic, strong) UIView *syslogCopyToastView;
@@ -4951,6 +4952,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogChannelToggleButton = nil;
     self.syslogInfoLabel = nil;
     self.syslogFullScreenScrollView = nil;
+    self.syslogCloseButtonLeadingConstraint = nil;
     self.syslogFullScreenRowsStack = nil;
     self.syslogCopyToastView = nil;
 
@@ -11471,7 +11473,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
     scrollView.backgroundColor = UIColor.clearColor;
     scrollView.showsVerticalScrollIndicator = YES;
     scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    scrollView.alwaysBounceVertical = YES;
+    scrollView.alwaysBounceVertical = NO;
+    scrollView.bounces = NO;
     [overlay addSubview:scrollView];
     self.syslogFullScreenScrollView = scrollView;
 
@@ -11482,9 +11485,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
     [scrollView addSubview:rowsStack];
     self.syslogFullScreenRowsStack = rowsStack;
 
+    self.syslogCloseButtonLeadingConstraint = [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset];
+
     [NSLayoutConstraint activateConstraints:@[
         [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
-        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        self.syslogCloseButtonLeadingConstraint,
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
@@ -11548,10 +11553,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
         ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
-    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left * 0.1;
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left * 0.15;
+    self.syslogCloseButtonLeadingConstraint.constant = logIndent;
     CGFloat indexColumnWidth = 22;
     CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
-    CGFloat rowTrailingInset = 16 + overlaySafeInsets.right * 0.1;
+    CGFloat rowTrailingInset = 16 + overlaySafeInsets.right * 0.15;
 
     UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
         ?: [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
@@ -11758,6 +11764,31 @@ static const CGFloat kZSSyslogFullScreenLeftInset = (kPanelPadding / 2.0) * 1.2 
 
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.syslogFullScreenOpen) return;
+        [strongSelf zs_renderSyslogFullScreenRows];
+        [strongSelf zs_scrollSyslogFullScreenToBottom];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) innerSelf = weakSelf;
+            if (!innerSelf || !innerSelf.syslogFullScreenOpen) return;
+            [innerSelf zs_renderSyslogFullScreenRows];
+            [innerSelf zs_scrollSyslogFullScreenToBottom];
+        });
+    });
+}
+
+- (void)zs_scrollSyslogFullScreenToBottom {
+    UIScrollView *scrollView = self.syslogFullScreenScrollView;
+    if (!scrollView) return;
+    [self.syslogFullScreenOverlay layoutIfNeeded];
+    [scrollView layoutIfNeeded];
+    CGFloat bottomInset = scrollView.adjustedContentInset.bottom;
+    CGFloat y = scrollView.contentSize.height - scrollView.bounds.size.height + bottomInset;
+    y = MAX(y, -scrollView.adjustedContentInset.top);
+    [scrollView setContentOffset:CGPointMake(0, y) animated:NO];
 }
 
 - (void)zs_closeSyslogFullScreenPanelTapped {
