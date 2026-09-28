@@ -4661,6 +4661,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
 @property (nonatomic, assign) CGFloat pinClusterOffsetY;
 @property (nonatomic, assign) BOOL pinRecenterPending;
+@property (nonatomic, assign) BOOL panelFullScreenLayoutActive;
 @property (nonatomic, assign) NSUInteger pinRecenterToken;
 @property (nonatomic, strong) UIView *pinMenuScrim;
 @property (nonatomic, strong) UIView *pinMenuContent;
@@ -5250,6 +5251,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.pinnedTabElements = nil;
     self.pinRecenterPending = NO;
     self.pinRecenterToken = self.pinRecenterToken + 1;
+    self.panelFullScreenLayoutActive = NO;
 
     self.glassContainer = nil;
     self.panelGlass = nil;
@@ -5761,6 +5763,7 @@ static const CGFloat kZSDocsPanelGlassFillOverlap = kPanelCornerRadiusMinimum + 
 static const CGFloat kHandleCornerRadius = 10;
 static const CGFloat kGlassMergeSpacing = 16;
 static const CGFloat kZSSyslogConsoleHeight = 180;
+static const NSTimeInterval kZSFullScreenPanelDuration = 0.62;
 static const CGFloat kContentFadeHeight = 22;
 
 - (void)buildPanel:(UIView *)unityView {
@@ -11923,7 +11926,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         if (!strongSelf || !strongSelf.syslogFullScreenOpen) return;
         [strongSelf zs_renderSyslogFullScreenRows];
         [strongSelf zs_scrollSyslogFullScreenToBottom];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kZSFullScreenPanelDuration + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             typeof(self) innerSelf = weakSelf;
             if (!innerSelf || !innerSelf.syslogFullScreenOpen) return;
             [innerSelf zs_renderSyslogFullScreenRows];
@@ -12116,7 +12119,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:YES];
-    [self zs_startMemoryUsageAutoRefresh];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((kZSFullScreenPanelDuration + 0.02) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.memoryFullScreenOpen) return;
+        [strongSelf zs_startMemoryUsageAutoRefresh];
+    });
 }
 
 - (void)zs_closeMemoryFullScreenPanelTapped {
@@ -13549,6 +13558,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     CGFloat panelW = self.panelWidth > 0 ? self.panelWidth : kPanelWidth;
     BOOL docsVisible = self.docsPanelOpen && self.docsPanel != nil;
     BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
+    BOOL fullScreenChanged = fullScreenOpen != self.panelFullScreenLayoutActive;
+    self.panelFullScreenLayoutActive = fullScreenOpen;
     CGFloat docsW = 0;
     if (docsVisible) {
         docsW = fullScreenOpen
@@ -13664,10 +13675,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         changes();
         completion(YES);
     } else {
-        [UIView animateWithDuration:0.28
+        [UIView animateWithDuration:fullScreenChanged ? kZSFullScreenPanelDuration : 0.28
                               delay:0
-             usingSpringWithDamping:0.85
-              initialSpringVelocity:0.3
+             usingSpringWithDamping:fullScreenChanged ? 1.0 : 0.85
+              initialSpringVelocity:fullScreenChanged ? 0 : 0.3
                             options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                          animations:changes
                          completion:completion];
