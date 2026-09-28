@@ -12841,35 +12841,29 @@ static UIImage *zs_pin_symbol(NSString *name, CGFloat pointSize, UIFontWeight we
     return [UIImage systemImageNamed:name withConfiguration:config];
 }
 
-static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadius) {
+static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadius) {
     if (!view || !zs_has_liquid_glass()) return;
 
     Class radiusClass = NSClassFromString(@"UICornerRadius");
     Class configClass = NSClassFromString(@"UICornerConfiguration");
     SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
     SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
-    SEL splitSelector = NSSelectorFromString(@"configurationWithUniformTopRadius:uniformBottomRadius:");
     SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
 
     if (!radiusClass || !configClass ||
         ![radiusClass respondsToSelector:fixedSelector] ||
+        ![configClass respondsToSelector:fourCornerSelector] ||
         ![view respondsToSelector:setConfiguration]) {
-        zs_configure_glass_corners(view, bottomRadius, NO);
+        zs_configure_glass_corners(view, leftRadius, NO);
         return;
     }
 
     id flat = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, 0);
-    id round = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, bottomRadius);
-    id configuration = nil;
-
-    if ([configClass respondsToSelector:fourCornerSelector]) {
-        configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, flat, flat, round, round);
-    } else if ([configClass respondsToSelector:splitSelector]) {
-        configuration = ((id (*)(id, SEL, id, id))objc_msgSend)(configClass, splitSelector, flat, round);
-    }
+    id round = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, leftRadius);
+    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, round, flat, round, flat);
 
     if (!configuration) {
-        zs_configure_glass_corners(view, bottomRadius, NO);
+        zs_configure_glass_corners(view, leftRadius, NO);
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
@@ -12973,7 +12967,6 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
         UIView *element = self.pinnedTabElements[keys[idx]];
         if (!element) continue;
         element.frame = [self zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:x];
-        element.alpha = visible ? 1 : 0;
         element.userInteractionEnabled = visible;
     }
 }
@@ -13034,7 +13027,6 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
           initialSpringVelocity:0.2
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
                      animations:^{
-        element.alpha = 1;
         element.frame = origin;
         [weakSelf zs_layoutPinnedTabsWithHandleY:handleY localX:localX visible:YES];
     } completion:^(BOOL finished) {
@@ -13178,13 +13170,13 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
                      animations:^{
         handleElement.frame = expanded;
         if (glass) {
-            zs_configure_glass_corners_flat_top(handleElement, kZSPinMenuCornerRadius);
+            zs_configure_glass_corners_flat_right(handleElement, kZSPinMenuCornerRadius);
         } else {
-            weakSelf.handle.layer.maskedCorners = kCALayerMinXMaxYCorner | kCALayerMaxXMaxYCorner;
+            weakSelf.handle.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
             weakSelf.handle.layer.cornerRadius = kZSPinMenuCornerRadius;
         }
         weakSelf.chevron.alpha = 0;
-        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 0;
+        [weakSelf zs_layoutPinnedTabsWithHandleY:expanded.origin.y localX:extra visible:YES];
     } completion:^(BOOL finished) {
         weakSelf.pinMenuTransitioning = NO;
     }];
@@ -13236,7 +13228,6 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
             weakSelf.pinMenuExtraWidth = 0;
             weakSelf.handle.clipsToBounds = NO;
             weakSelf.chevron.alpha = 1;
-            for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
             [menuContent removeFromSuperview];
         }];
         [scrim removeFromSuperview];
@@ -13247,6 +13238,7 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
         [UIView performWithoutAnimation:^{
             handleElement.frame = collapsed;
             applyCollapsedStyle();
+            [weakSelf zs_layoutPinnedTabsWithHandleY:collapsed.origin.y localX:extra visible:YES];
         }];
         finish();
         return;
@@ -13270,7 +13262,7 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
         handleElement.frame = collapsed;
         applyCollapsedStyle();
         weakSelf.chevron.alpha = 1;
-        for (UIView *tab in weakSelf.pinnedTabElements.allValues) tab.alpha = 1;
+        [weakSelf zs_layoutPinnedTabsWithHandleY:collapsed.origin.y localX:extra visible:YES];
     } completion:^(BOOL finished) {
         finish();
     }];
@@ -13285,13 +13277,14 @@ static void zs_configure_glass_corners_flat_top(UIView *view, CGFloat bottomRadi
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
-    [self zs_dismissPinMenuAnimated:YES delay:0 completion:nil];
-
-    if (alreadyPinned) {
-        [self zs_removePinnedKey:key delay:0.12];
-    } else {
-        [self zs_addPinnedKey:key delay:0.3];
-    }
+    __weak typeof(self) weakSelf = self;
+    [self zs_dismissPinMenuAnimated:YES delay:0 completion:^{
+        if (alreadyPinned) {
+            [weakSelf zs_removePinnedKey:key delay:0];
+        } else {
+            [weakSelf zs_addPinnedKey:key delay:0];
+        }
+    }];
 }
 
 #pragma mark Pull tab
@@ -13467,12 +13460,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
-        CGFloat handleLocalX = fullScreenOpen ? docsW : 0;
+        CGFloat handleLocalX = fullScreenOpen ? chromeWidth : 0;
         handleElement.frame = CGRectMake(handleLocalX,
                                           (height - kHandleHeight) * 0.5,
                                           kHandleWidth,
                                           kHandleHeight);
-        handleElement.alpha = fullScreenOpen ? 0 : 1;
         handleElement.userInteractionEnabled = !fullScreenOpen;
         [self zs_layoutPinnedTabsWithHandleY:(height - kHandleHeight) * 0.5 localX:handleLocalX visible:!fullScreenOpen];
 
