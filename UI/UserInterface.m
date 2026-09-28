@@ -7394,6 +7394,7 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
     self.docsPanelSeparator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
     self.docsPanelSeparator.userInteractionEnabled = NO;
     self.docsPanelSeparator.hidden = YES;
+    self.docsPanelSeparator.alpha = 0;
     [self.glassContainerContent addSubview:self.docsPanelSeparator];
 
     self.docsTitleLabel = [[UILabel alloc] init];
@@ -13622,7 +13623,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             [clip.layer removeAnimationForKey:@"opacity"];
             clip.alpha = 1;
             clip.hidden = NO;
-            self.docsPanelSeparator.hidden = NO;
 
             CGRect overlayFrame = CGRectMake(0, 0, docsSpanWidth, height);
             void (^prepareOverlay)(UIView *, BOOL) = ^(UIView *overlay, BOOL visible) {
@@ -13716,9 +13716,50 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (self.docsPanelOpen) return;
-        self.docsPanelSeparator.hidden = YES;
         [self zs_finishExtendedPanelClose];
     };
+
+    UIView *separator = self.docsPanelSeparator;
+    if (separator) {
+        static const NSTimeInterval kSeparatorFadeInDuration = 0.25;
+        static const NSTimeInterval kSeparatorFadeOutDuration = 0.16;
+        if (docsVisible) {
+            BOOL needsFadeIn = separator.hidden || separator.alpha < 1;
+            if (separator.hidden) {
+                [separator.layer removeAllAnimations];
+                separator.alpha = 0;
+                separator.hidden = NO;
+            }
+            if (needsFadeIn) {
+                if (animated) {
+                    [UIView animateWithDuration:kSeparatorFadeInDuration
+                                          delay:0
+                                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
+                                     animations:^{
+                        separator.alpha = 1;
+                    } completion:nil];
+                } else {
+                    [separator.layer removeAllAnimations];
+                    separator.alpha = 1;
+                }
+            }
+        } else if (!separator.hidden) {
+            if (animated) {
+                [UIView animateWithDuration:kSeparatorFadeOutDuration
+                                      delay:0
+                                    options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseIn
+                                 animations:^{
+                    separator.alpha = 0;
+                } completion:^(BOOL finished) {
+                    if (!self.docsPanelOpen && separator.alpha == 0) separator.hidden = YES;
+                }];
+            } else {
+                [separator.layer removeAllAnimations];
+                separator.alpha = 0;
+                separator.hidden = YES;
+            }
+        }
+    }
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
@@ -13749,13 +13790,23 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
 
         if (leftCornersFlatChanged) {
-            BOOL flatten = docsVisible;
-            UIViewAnimationOptions cornerCurve = flatten ? UIViewAnimationOptionCurveEaseOut : UIViewAnimationOptionCurveEaseIn;
-            [UIView animateWithDuration:mainDuration * 0.45
-                                  delay:flatten ? 0 : mainDuration * 0.55
-                                options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | cornerCurve
-                             animations:applyPanelCorners
-                             completion:nil];
+            void (^applyCornersInstantly)(void) = ^{
+                [UIView performWithoutAnimation:^{
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    applyPanelCorners();
+                    [CATransaction commit];
+                }];
+            };
+            if (docsVisible) {
+                applyCornersInstantly();
+            } else {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(mainDuration * 0.55 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    if (self.docsPanelOpen) return;
+                    applyCornersInstantly();
+                });
+            }
         }
 
         [UIView animateWithDuration:kZSPullTabIconFadeDuration
