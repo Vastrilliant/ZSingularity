@@ -1067,7 +1067,9 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
 
     if (_fractions.count == 0 || self.bounds.size.width <= 0 || self.bounds.size.height <= 0) return;
 
-    NSArray<NSNumber *> *segmentCounts = [self zs_segmentCountsForFractions:_fractions total:kZSPillarSegmentCount];
+    NSInteger targetSegmentCount = (NSInteger)floor((self.bounds.size.height + kZSPillarSegmentGap) / 5.0);
+    NSInteger totalSegments = MAX(24, MIN((NSInteger)kZSPillarSegmentCount, targetSegmentCount));
+    NSArray<NSNumber *> *segmentCounts = [self zs_segmentCountsForFractions:_fractions total:totalSegments];
 
     NSMutableArray<UIColor *> *segmentColors = [NSMutableArray new];
     for (NSUInteger i = 0; i < segmentCounts.count; i++) {
@@ -2722,39 +2724,6 @@ static UIView *zs_make_grouped_action_card(NSArray<UIView *> *rows) {
     return card;
 }
 
-static UIView *zs_make_glass_container_card(UIView *contentView, UIEdgeInsets insets) {
-    UIView *card;
-    UIView *contentHost;
-    if (zs_has_liquid_glass()) {
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        glass.translatesAutoresizingMaskIntoConstraints = NO;
-        zs_configure_glass_corners(glass, kZSGroupedCardCornerRadius, NO);
-        zs_register_suspendable_glass(glass);
-        card = glass;
-        contentHost = glass.contentView;
-    } else {
-        UIView *plain = [[UIView alloc] init];
-        plain.translatesAutoresizingMaskIntoConstraints = NO;
-        plain.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1];
-        plain.layer.cornerRadius = kZSGroupedCardCornerRadius;
-        plain.layer.cornerCurve = kCACornerCurveContinuous;
-        plain.clipsToBounds = YES;
-        card = plain;
-        contentHost = plain;
-    }
-
-    contentView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentHost addSubview:contentView];
-    [NSLayoutConstraint activateConstraints:@[
-        [contentView.topAnchor constraintEqualToAnchor:contentHost.topAnchor constant:insets.top],
-        [contentView.bottomAnchor constraintEqualToAnchor:contentHost.bottomAnchor constant:-insets.bottom],
-        [contentView.leadingAnchor constraintEqualToAnchor:contentHost.leadingAnchor constant:insets.left],
-        [contentView.trailingAnchor constraintEqualToAnchor:contentHost.trailingAnchor constant:-insets.right],
-    ]];
-
-    return card;
-}
-
 static NSArray<UIColor *> *zs_memory_chart_palette(void) {
     return @[
         [UIColor colorWithRed:0.09 green:0.24 blue:0.58 alpha:1.0],
@@ -2783,110 +2752,351 @@ static UIColor *zs_memory_color_for_index(NSUInteger index, BOOL isOther) {
     return [UIColor colorWithHue:hue saturation:0.68 brightness:brightness alpha:1.0];
 }
 
-static UIView *zs_make_memory_group_header(NSString *title, NSString *subtitle) {
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = title;
-    titleLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
-    titleLabel.font = zs_mono_font(12, UIFontWeightSemibold);
-    titleLabel.numberOfLines = 0;
+@interface ZSMemoryColumnRow : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *detail;
+@property (nonatomic, copy) NSString *value;
+@property (nonatomic, strong) UIColor *color;
+@end
 
-    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[titleLabel]];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 3;
+@implementation ZSMemoryColumnRow
+@end
 
-    if (subtitle.length > 0) {
-        UILabel *subtitleLabel = [[UILabel alloc] init];
-        subtitleLabel.text = subtitle;
-        subtitleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
-        subtitleLabel.font = zs_mono_font(10, UIFontWeightRegular);
-        subtitleLabel.numberOfLines = 0;
-        [stack addArrangedSubview:subtitleLabel];
+static const CGFloat kZSMemoryColumnPadding = 14;
+static const CGFloat kZSMemoryColumnVerticalInset = 6;
+static const CGFloat kZSMemoryHeaderGap = 10;
+static const CGFloat kZSMemoryPillarWidth = 28;
+static const CGFloat kZSMemoryPillarGap = 12;
+static const CGFloat kZSMemorySwatchSize = 8;
+static const CGFloat kZSMemorySwatchGap = 6;
+static const CGFloat kZSMemoryTwoLineThreshold = 27;
+static const CGFloat kZSMemoryMinRowHeight = 13;
+static const CGFloat kZSMemoryLegendColumnGap = 18;
+static const CGFloat kZSMemoryMinInnerWidth = 200;
+static const CGFloat kZSMemoryMaxNameWidth = 260;
+static const CGFloat kZSMemoryMaxDetailWidth = 380;
+
+static CGFloat zs_memory_text_width(NSString *text, UIFont *font) {
+    if (text.length == 0) return 0;
+    return ceil([text sizeWithAttributes:@{NSFontAttributeName: font}].width);
+}
+
+static CGFloat zs_memory_clamp(CGFloat value, CGFloat low, CGFloat high) {
+    return MAX(low, MIN(high, value));
+}
+
+static CGSize zs_memory_wrapped_size(NSString *text, UIFont *font, CGFloat width) {
+    if (text.length == 0) return CGSizeZero;
+    CGRect rect = [text boundingRectWithSize:CGSizeMake(width, CGFLOAT_MAX)
+                                     options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                  attributes:@{NSFontAttributeName: font}
+                                     context:nil];
+    return CGSizeMake(ceil(rect.size.width), ceil(rect.size.height));
+}
+
+static UILabel *zs_memory_make_label(NSString *text, UIFont *font, UIColor *color, NSTextAlignment alignment) {
+    UILabel *label = [[UILabel alloc] init];
+    label.text = text;
+    label.font = font;
+    label.textColor = color;
+    label.textAlignment = alignment;
+    label.numberOfLines = 1;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.adjustsFontSizeToFitWidth = YES;
+    label.minimumScaleFactor = 0.7;
+    return label;
+}
+
+static UIView *zs_build_memory_column(NSString *title,
+                                      NSString *subtitle,
+                                      NSArray<ZSMemoryColumnRow *> *rows,
+                                      NSArray<NSNumber *> *fractions,
+                                      BOOL compactStats,
+                                      CGFloat height) {
+    NSUInteger count = rows.count;
+    if (count == 0 || height <= 0) return nil;
+
+    BOOL hasPillar = fractions.count == count;
+    BOOL showsSwatch = !compactStats;
+    CGFloat swatchWidth = showsSwatch ? (kZSMemorySwatchSize + kZSMemorySwatchGap) : 0;
+    CGFloat pillarExtra = hasPillar ? (kZSMemoryPillarWidth + kZSMemoryPillarGap) : 0;
+    CGFloat usableHeight = height - kZSMemoryColumnVerticalInset * 2;
+
+    UIFont *titleFont = zs_mono_font(12, UIFontWeightSemibold);
+    UIFont *subtitleFont = zs_mono_font(9, UIFontWeightRegular);
+    CGFloat titleWidth = MIN(zs_memory_text_width(title, titleFont), 340);
+
+    __block CGFloat fontSize = compactStats ? 11 : 10;
+    __block BOOL twoLine = NO;
+    __block NSUInteger legendColumns = 1;
+    __block CGFloat nameWidth = 0;
+    __block CGFloat detailWidth = 0;
+    __block CGFloat valueWidth = 0;
+    __block CGFloat innerWidth = 0;
+    __block CGFloat titleHeight = 0;
+    __block CGFloat subtitleHeight = 0;
+    __block CGFloat headerHeight = 0;
+    __block CGFloat regionHeight = 0;
+    BOOL lockedSingleLine = NO;
+
+    void (^measure)(void) = ^{
+        UIFont *nameFont = zs_mono_font(fontSize, compactStats ? UIFontWeightRegular : UIFontWeightMedium);
+        UIFont *valueFont = zs_mono_font(fontSize, UIFontWeightMedium);
+        UIFont *detailFont = zs_mono_font(MAX(fontSize - 1, 7), UIFontWeightRegular);
+
+        nameWidth = 0;
+        detailWidth = 0;
+        valueWidth = 0;
+        for (ZSMemoryColumnRow *row in rows) {
+            nameWidth = MAX(nameWidth, zs_memory_text_width(row.name, nameFont));
+            detailWidth = MAX(detailWidth, zs_memory_text_width(row.detail, detailFont));
+            valueWidth = MAX(valueWidth, zs_memory_text_width(row.value, valueFont));
+        }
+        nameWidth = MIN(nameWidth, kZSMemoryMaxNameWidth);
+        detailWidth = MIN(detailWidth, kZSMemoryMaxDetailWidth);
+
+        CGFloat rowsWidth;
+        if (twoLine) {
+            CGFloat lineOneWidth = swatchWidth + nameWidth + (valueWidth > 0 ? 12 + valueWidth : 0);
+            rowsWidth = MAX(lineOneWidth, swatchWidth + detailWidth);
+        } else {
+            rowsWidth = swatchWidth + nameWidth + (detailWidth > 0 ? 10 + detailWidth : 0) + (valueWidth > 0 ? 14 + valueWidth : 0);
+        }
+        CGFloat legendWidth = rowsWidth * (CGFloat)legendColumns + kZSMemoryLegendColumnGap * (CGFloat)(legendColumns - 1);
+        innerWidth = MAX(MAX(pillarExtra + legendWidth, titleWidth), kZSMemoryMinInnerWidth);
+
+        titleHeight = zs_memory_wrapped_size(title, titleFont, innerWidth).height;
+        subtitleHeight = zs_memory_wrapped_size(subtitle, subtitleFont, innerWidth).height;
+        headerHeight = titleHeight + (subtitleHeight > 0 ? 3 + subtitleHeight : 0);
+        regionHeight = usableHeight - headerHeight - kZSMemoryHeaderGap;
+    };
+
+    for (NSInteger pass = 0; pass < 5; pass++) {
+        measure();
+
+        NSUInteger nextLegendColumns = legendColumns;
+        if (!compactStats) {
+            while (nextLegendColumns < 3) {
+                NSUInteger perColumn = (count + nextLegendColumns - 1) / nextLegendColumns;
+                if (floor(regionHeight / (CGFloat)perColumn) >= kZSMemoryMinRowHeight) break;
+                nextLegendColumns++;
+            }
+        }
+        NSUInteger rowsPerColumn = (count + nextLegendColumns - 1) / nextLegendColumns;
+        CGFloat availableRow = floor(regionHeight / (CGFloat)rowsPerColumn);
+
+        BOOL nextTwoLine = !compactStats && !lockedSingleLine && nextLegendColumns == 1 && availableRow >= kZSMemoryTwoLineThreshold;
+        if (twoLine && !nextTwoLine) lockedSingleLine = YES;
+
+        CGFloat nextFontSize;
+        if (compactStats) nextFontSize = zs_memory_clamp(availableRow - 6, 8, 11);
+        else if (nextTwoLine) nextFontSize = 11;
+        else nextFontSize = zs_memory_clamp(availableRow - 4, 7, 10);
+
+        BOOL stable = (nextTwoLine == twoLine) && (nextLegendColumns == legendColumns) && fabs(nextFontSize - fontSize) < 0.3;
+        twoLine = nextTwoLine;
+        legendColumns = nextLegendColumns;
+        fontSize = nextFontSize;
+        if (stable) break;
     }
-    return stack;
+
+    measure();
+    NSUInteger rowsPerColumn = (count + legendColumns - 1) / legendColumns;
+    if (twoLine && floor(regionHeight / (CGFloat)rowsPerColumn) < 24) {
+        twoLine = NO;
+        measure();
+    }
+
+    CGFloat availableRowHeight = MAX(floor(regionHeight / (CGFloat)rowsPerColumn), 1);
+    CGFloat rowHeight = twoLine ? MIN(availableRowHeight, 38) : MIN(availableRowHeight, compactStats ? 24 : 22);
+
+    CGFloat columnWidth = innerWidth + kZSMemoryColumnPadding * 2;
+    UIView *column = [[UIView alloc] initWithFrame:CGRectMake(0, 0, columnWidth, height)];
+    column.backgroundColor = UIColor.clearColor;
+
+    CGFloat left = kZSMemoryColumnPadding;
+    CGFloat top = kZSMemoryColumnVerticalInset;
+
+    UILabel *titleLabel = zs_memory_make_label(title, titleFont, [UIColor colorWithWhite:0.96 alpha:1], NSTextAlignmentLeft);
+    titleLabel.numberOfLines = 0;
+    titleLabel.adjustsFontSizeToFitWidth = NO;
+    titleLabel.frame = CGRectMake(left, top, innerWidth, titleHeight);
+    [column addSubview:titleLabel];
+
+    if (subtitleHeight > 0) {
+        UILabel *subtitleLabel = zs_memory_make_label(subtitle, subtitleFont, [UIColor colorWithWhite:1 alpha:0.5], NSTextAlignmentLeft);
+        subtitleLabel.numberOfLines = 0;
+        subtitleLabel.adjustsFontSizeToFitWidth = NO;
+        subtitleLabel.frame = CGRectMake(left, top + titleHeight + 3, innerWidth, subtitleHeight);
+        [column addSubview:subtitleLabel];
+    }
+
+    CGFloat regionTop = top + headerHeight + kZSMemoryHeaderGap;
+
+    if (hasPillar) {
+        ZSPillarChartView *pillar = [[ZSPillarChartView alloc] initWithFrame:CGRectMake(left, regionTop, kZSMemoryPillarWidth, regionHeight)];
+        NSMutableArray<UIColor *> *pillarColors = [NSMutableArray arrayWithCapacity:count];
+        for (ZSMemoryColumnRow *row in rows) [pillarColors addObject:row.color ?: UIColor.grayColor];
+        [column addSubview:pillar];
+        [pillar setSegmentsWithFractions:fractions colors:pillarColors];
+    }
+
+    UIFont *nameFont = zs_mono_font(fontSize, compactStats ? UIFontWeightRegular : UIFontWeightMedium);
+    UIFont *valueFont = zs_mono_font(fontSize, UIFontWeightMedium);
+    UIFont *detailFont = zs_mono_font(MAX(fontSize - 1, 7), UIFontWeightRegular);
+    UIColor *nameColor = compactStats ? [UIColor colorWithWhite:1 alpha:0.5] : [UIColor colorWithWhite:0.92 alpha:1];
+    UIColor *valueColor = [UIColor colorWithWhite:0.92 alpha:1];
+    UIColor *detailColor = [UIColor colorWithWhite:1 alpha:0.5];
+
+    CGFloat legendLeft = left + pillarExtra;
+    CGFloat legendWidth = (innerWidth - pillarExtra - kZSMemoryLegendColumnGap * (CGFloat)(legendColumns - 1)) / (CGFloat)legendColumns;
+    CGFloat lineOneBox = ceil(nameFont.lineHeight) + 2;
+    CGFloat detailLineHeight = ceil(detailFont.lineHeight);
+    CGFloat twoLineBlockHeight = lineOneBox + detailLineHeight;
+
+    for (NSUInteger i = 0; i < count; i++) {
+        ZSMemoryColumnRow *row = rows[i];
+        NSUInteger legendIndex = i / rowsPerColumn;
+        NSUInteger rowIndex = i % rowsPerColumn;
+
+        CGFloat rowsLeft = legendLeft + (legendWidth + kZSMemoryLegendColumnGap) * (CGFloat)legendIndex;
+        CGFloat rightEdge = rowsLeft + legendWidth;
+        CGFloat nameX = rowsLeft + swatchWidth;
+        CGFloat valueX = rightEdge - valueWidth;
+
+        CGFloat rowY = regionTop + rowHeight * (CGFloat)rowIndex;
+        CGFloat lineY = twoLine ? rowY + floor((rowHeight - twoLineBlockHeight) / 2.0) : rowY;
+        CGFloat lineH = twoLine ? lineOneBox : rowHeight;
+
+        if (showsSwatch) {
+            UIView *swatch = [[UIView alloc] initWithFrame:CGRectMake(rowsLeft, lineY + floor((lineH - kZSMemorySwatchSize) / 2.0), kZSMemorySwatchSize, kZSMemorySwatchSize)];
+            swatch.backgroundColor = row.color ?: UIColor.grayColor;
+            swatch.layer.cornerRadius = 2.5;
+            swatch.layer.cornerCurve = kCACornerCurveContinuous;
+            [column addSubview:swatch];
+        }
+
+        if (valueWidth > 0 && row.value.length > 0) {
+            UILabel *valueLabel = zs_memory_make_label(row.value, valueFont, valueColor, NSTextAlignmentRight);
+            valueLabel.adjustsFontSizeToFitWidth = NO;
+            valueLabel.frame = CGRectMake(valueX, lineY, valueWidth, lineH);
+            [column addSubview:valueLabel];
+        }
+
+        if (twoLine) {
+            CGFloat nameMax = (valueWidth > 0 ? valueX - 12 : rightEdge) - nameX;
+            UILabel *nameLabel = zs_memory_make_label(row.name, nameFont, nameColor, NSTextAlignmentLeft);
+            nameLabel.frame = CGRectMake(nameX, lineY, MAX(nameMax, 40), lineH);
+            [column addSubview:nameLabel];
+
+            if (row.detail.length > 0) {
+                UILabel *detailLabel = zs_memory_make_label(row.detail, detailFont, detailColor, NSTextAlignmentLeft);
+                detailLabel.frame = CGRectMake(nameX, lineY + lineH, rightEdge - nameX, detailLineHeight);
+                [column addSubview:detailLabel];
+            }
+        } else {
+            UILabel *nameLabel = zs_memory_make_label(row.name, nameFont, nameColor, NSTextAlignmentLeft);
+            nameLabel.frame = CGRectMake(nameX, rowY, nameWidth, rowHeight);
+            [column addSubview:nameLabel];
+
+            if (detailWidth > 0 && row.detail.length > 0) {
+                UILabel *detailLabel = zs_memory_make_label(row.detail, detailFont, detailColor, NSTextAlignmentLeft);
+                detailLabel.frame = CGRectMake(nameX + nameWidth + 10, rowY, detailWidth, rowHeight);
+                [column addSubview:detailLabel];
+            }
+        }
+    }
+
+    return column;
 }
 
-static UIView *zs_make_memory_legend_row(NSString *title, NSString *detailText, UIColor *color) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
+static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat height) {
+    if (group.categories.count == 0) return nil;
 
-    UIView *swatch = [[UIView alloc] init];
-    swatch.translatesAutoresizingMaskIntoConstraints = NO;
-    swatch.backgroundColor = color;
-    swatch.layer.cornerRadius = 3;
-    swatch.layer.cornerCurve = kCACornerCurveContinuous;
-    [row addSubview:swatch];
+    int64_t grandTotal = 0;
+    for (ZSMemoryUsageCategory *category in group.categories) grandTotal += category.totalBytes;
+    if (group.showsChart && grandTotal <= 0) return nil;
 
-    UILabel *nameLabel = [[UILabel alloc] init];
-    nameLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    nameLabel.text = title;
-    nameLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-    nameLabel.font = zs_mono_font(11, UIFontWeightMedium);
-    nameLabel.numberOfLines = 1;
-    nameLabel.adjustsFontSizeToFitWidth = YES;
-    nameLabel.minimumScaleFactor = 0.8;
-    [row addSubview:nameLabel];
+    NSMutableArray<ZSMemoryColumnRow *> *rows = [NSMutableArray arrayWithCapacity:group.categories.count];
+    NSMutableArray<NSNumber *> *fractions = group.showsChart ? [NSMutableArray arrayWithCapacity:group.categories.count] : nil;
+    UIColor *listSwatchColor = [UIColor colorWithWhite:0.32 alpha:1.0];
 
-    UILabel *detailLabel = [[UILabel alloc] init];
-    detailLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    detailLabel.text = detailText;
-    detailLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
-    detailLabel.font = zs_mono_font(10, UIFontWeightRegular);
-    detailLabel.numberOfLines = 0;
-    [row addSubview:detailLabel];
+    for (NSUInteger i = 0; i < group.categories.count; i++) {
+        ZSMemoryUsageCategory *category = group.categories[i];
+        NSString *sizeText = [NSByteCountFormatter stringFromByteCount:(long long)category.totalBytes countStyle:NSByteCountFormatterCountStyleMemory];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [swatch.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [swatch.widthAnchor constraintEqualToConstant:10],
-        [swatch.heightAnchor constraintEqualToConstant:10],
-        [swatch.centerYAnchor constraintEqualToAnchor:nameLabel.centerYAnchor],
+        ZSMemoryColumnRow *row = [ZSMemoryColumnRow new];
+        row.name = category.name ?: @"";
+        row.detail = category.detail ?: @"";
 
-        [nameLabel.leadingAnchor constraintEqualToAnchor:swatch.trailingAnchor constant:7],
-        [nameLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [nameLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
+        if (group.showsChart) {
+            double fraction = (double)category.totalBytes / (double)grandTotal;
+            [fractions addObject:@(fraction)];
+            row.color = zs_memory_color_for_index(i, [category.name hasPrefix:@"Other ("]);
+            row.value = [NSString stringWithFormat:@"%.1f%% · %@", fraction * 100.0, sizeText];
+        } else {
+            row.color = listSwatchColor;
+            if (category.totalBytes > 0) {
+                row.value = sizeText;
+            } else if (category.objectCount > 0) {
+                row.value = [NSString stringWithFormat:@"%lu objects", (unsigned long)category.objectCount];
+            } else {
+                row.value = @"";
+            }
+        }
+        [rows addObject:row];
+    }
 
-        [detailLabel.leadingAnchor constraintEqualToAnchor:nameLabel.leadingAnchor],
-        [detailLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [detailLabel.topAnchor constraintEqualToAnchor:nameLabel.bottomAnchor constant:2],
-        [detailLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-    ]];
-
-    return row;
+    return zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, height);
 }
 
-static UIView *zs_make_memory_stat_row(NSString *title, NSString *value) {
-    UIView *row = [[UIView alloc] init];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
+static NSArray<ZSMemoryColumnRow *> *zs_memory_system_stat_rows(ZSMemorySystemStats stats) {
+    NSByteCountFormatter *formatter = [NSByteCountFormatter new];
+    formatter.countStyle = NSByteCountFormatterCountStyleMemory;
 
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    titleLabel.text = title;
-    titleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
-    titleLabel.font = zs_mono_font(11, UIFontWeightRegular);
-    titleLabel.numberOfLines = 1;
-    [row addSubview:titleLabel];
+    NSString *residentText = [formatter stringFromByteCount:(long long)MAX(0, stats.residentBytes)];
+    NSString *peakText = stats.peakResidentBytes > 0 ? [formatter stringFromByteCount:(long long)stats.peakResidentBytes] : @"Unknown";
+    NSString *availableText = stats.availableBytes > 0 ? [formatter stringFromByteCount:(long long)stats.availableBytes] : @"Unknown";
+    NSString *limitText = stats.memoryLimitApproxBytes > 0 ? [formatter stringFromByteCount:(long long)stats.memoryLimitApproxBytes] : @"Unknown";
+    NSString *compressedText = stats.compressedBytes > 0 ? [formatter stringFromByteCount:(long long)stats.compressedBytes] : @"None";
+    NSString *dirtyResidentText = stats.internalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.internalBytes] : @"Unknown";
+    NSString *cleanMappedText = stats.externalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.externalBytes] : @"None";
+    NSString *virtualText = stats.virtualBytes > 0 ? [formatter stringFromByteCount:(long long)stats.virtualBytes] : @"Unknown";
+    NSString *systemFreeText = stats.systemFreeBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemFreeBytes] : @"Unknown";
+    NSString *systemActiveText = stats.systemActiveBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemActiveBytes] : @"Unknown";
+    NSString *systemWiredText = stats.systemWiredBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemWiredBytes] : @"Unknown";
+    NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
+    NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
+    NSString *increasedMemoryLimitText = stats.hasIncreasedMemoryLimitEntitlement ? @"Yes" : @"No";
+    NSString *extendedVirtualAddressingText = stats.hasExtendedVirtualAddressingEntitlement ? @"Yes" : @"No";
 
-    UILabel *valueLabel = [[UILabel alloc] init];
-    valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    valueLabel.text = value;
-    valueLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-    valueLabel.font = zs_mono_font(11, UIFontWeightMedium);
-    valueLabel.numberOfLines = 1;
-    valueLabel.textAlignment = NSTextAlignmentRight;
-    [row addSubview:valueLabel];
+    NSArray<NSArray<NSString *> *> *pairs = @[
+        @[@"kernel.increased-memory-limit", increasedMemoryLimitText],
+        @[@"kernel.extended-virtual-addressing", extendedVirtualAddressingText],
+        @[@"Footprint (counts toward limit)", residentText],
+        @[@"Peak memory used", peakText],
+        @[@"Available memory", availableText],
+        @[@"Approx. memory limit", limitText],
+        @[@"Dirty resident (internal)", dirtyResidentText],
+        @[@"Compressed (dirty, swapped out)", compressedText],
+        @[@"Clean file-backed (external)", cleanMappedText],
+        @[@"Virtual address space", virtualText],
+        @[@"System free", systemFreeText],
+        @[@"System active", systemActiveText],
+        @[@"System wired", systemWiredText],
+        @[@"Device memory", deviceTotalText],
+        @[@"Memory pressure", pressureText],
+    ];
 
-    [NSLayoutConstraint activateConstraints:@[
-        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor],
-        [titleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor],
-        [titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8],
-        [valueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-    ]];
-
-    return row;
+    NSMutableArray<ZSMemoryColumnRow *> *rows = [NSMutableArray arrayWithCapacity:pairs.count];
+    for (NSArray<NSString *> *pair in pairs) {
+        ZSMemoryColumnRow *row = [ZSMemoryColumnRow new];
+        row.name = pair[0];
+        row.value = pair[1];
+        row.detail = @"";
+        [rows addObject:row];
+    }
+    return rows;
 }
 
 static UIVisualEffectView *zs_wrap_field_in_native_glass(UITextField *field, CGFloat cornerRadius) {
@@ -4380,12 +4590,13 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIStackView *browseFieldsContainer;
 
 @property (nonatomic, strong) UIButton *memoryUsageAnalyzeButton;
-@property (nonatomic, strong) UIStackView *memoryUsageSectionsStack;
-@property (nonatomic, strong) UILabel *memoryUsageStatusLabel;
-@property (nonatomic, strong) UIStackView *memoryUsageStatsStack;
-@property (nonatomic, strong) UIView *memoryUsageChartRow;
 @property (nonatomic, strong) NSTimer *memoryUsageRefreshTimer;
-@property (nonatomic, assign) BOOL memoryUsageAutoRefreshActive;
+@property (nonatomic, assign) BOOL memoryFullScreenOpen;
+@property (nonatomic, strong) UIView *memoryFullScreenOverlay;
+@property (nonatomic, strong) UIScrollView *memoryFullScreenScrollView;
+@property (nonatomic, strong) UIView *memoryFullScreenContentView;
+@property (nonatomic, strong) UILabel *memoryFullScreenStatusLabel;
+@property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
 
 + (instancetype)shared;
 - (void)installIfNeeded;
@@ -4820,9 +5031,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
-
-    [self.memoryUsageRefreshTimer invalidate];
-    self.memoryUsageRefreshTimer = nil;
+    [self zs_endMemoryAnalysis];
 
     if (self.zsFloatingField) [self zs_commitFloatingFieldSaving:NO];
 
@@ -4852,6 +5061,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     BOOL syslogOverlayVisible = self.syslogFullScreenOverlay && !self.syslogFullScreenOverlay.hidden;
     CGRect syslogOverlayOffscreenFrame = syslogOverlayVisible ? CGRectOffset(self.syslogFullScreenOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
 
+    BOOL memoryOverlayVisible = self.memoryFullScreenOverlay && !self.memoryFullScreenOverlay.hidden;
+    CGRect memoryOverlayOffscreenFrame = memoryOverlayVisible ? CGRectOffset(self.memoryFullScreenOverlay.frame, offscreenDeltaX, 0) : CGRectZero;
+
     UIView *handleElement = self.handleGlass ?: self.handle;
     CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
                                               handleElement.frame.origin.y,
@@ -4869,6 +5081,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
         weakSelf.contentOverlay.frame = contentOverlayOffscreenFrame;
         if (docsOverlayVisible) weakSelf.docsContentOverlay.frame = docsContentOverlayOffscreenFrame;
         if (syslogOverlayVisible) weakSelf.syslogFullScreenOverlay.frame = syslogOverlayOffscreenFrame;
+        if (memoryOverlayVisible) weakSelf.memoryFullScreenOverlay.frame = memoryOverlayOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
         [weakSelf teardownPanelState];
@@ -4895,6 +5108,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogFullScreenOpen = NO;
     [self.syslogInfoRefreshTimer invalidate];
     self.syslogInfoRefreshTimer = nil;
+    self.memoryFullScreenOpen = NO;
 
     for (NSTimer *timer in self.doctorPollTimers.allValues) {
         [timer invalidate];
@@ -5029,10 +5243,12 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.memoryUsageAnalyzeButton = nil;
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
-    self.memoryUsageSectionsStack = nil;
-    self.memoryUsageStatusLabel = nil;
-    self.memoryUsageStatsStack = nil;
-    self.memoryUsageChartRow = nil;
+    [self.memoryFullScreenOverlay removeFromSuperview];
+    self.memoryFullScreenOverlay = nil;
+    self.memoryFullScreenScrollView = nil;
+    self.memoryFullScreenContentView = nil;
+    self.memoryFullScreenStatusLabel = nil;
+    self.memoryCloseButtonLeadingConstraint = nil;
 }
 
 - (void)zs_closeButtonTapped {
@@ -5808,11 +6024,7 @@ static const CGFloat kContentFadeHeight = 22;
     memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
     [self.stack addArrangedSubview:memoryActionsCard];
-    [self.stack setCustomSpacing:12 afterView:memoryActionsCard];
-
-    UIView *memoryUsageCard = [self zs_buildMemoryUsageCard];
-    [self.stack addArrangedSubview:memoryUsageCard];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryUsageCard];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryActionsCard];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -7478,6 +7690,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     self.docsActiveKey = key;
     self.syslogFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
+    [self zs_endMemoryAnalysis];
     self.docsTitleLabel.text = [key uppercaseString];
     [self zs_setDocsHeaderChevronVisible:NO];
     [self zs_setDocsLanguageButtonVisible:YES];
@@ -7531,6 +7744,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
+    [self zs_endMemoryAnalysis];
     [self positionPanelAnimated:YES];
     [UIView animateWithDuration:0.2 animations:^{
         self.chevron.text = @"\u2039";
@@ -7669,265 +7883,6 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         UINotificationFeedbackGenerator *doneHaptic = [UINotificationFeedbackGenerator new];
         [doneHaptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     });
-}
-
-- (UIView *)zs_buildMemoryUsageCard {
-    UIStackView *sectionsStack = [[UIStackView alloc] init];
-    sectionsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    sectionsStack.axis = UILayoutConstraintAxisVertical;
-    sectionsStack.spacing = 22;
-    self.memoryUsageSectionsStack = sectionsStack;
-
-    UIView *chartRow = [[UIView alloc] init];
-    chartRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [chartRow addSubview:sectionsStack];
-    chartRow.hidden = YES;
-    self.memoryUsageChartRow = chartRow;
-
-    [NSLayoutConstraint activateConstraints:@[
-        [sectionsStack.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
-        [sectionsStack.trailingAnchor constraintEqualToAnchor:chartRow.trailingAnchor],
-        [sectionsStack.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
-        [sectionsStack.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
-    ]];
-
-    UILabel *statusLabel = zs_make_hint_label(@"Tap Analyze memory usage to scan subsystems and loaded assets.");
-    statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.memoryUsageStatusLabel = statusLabel;
-
-    UIStackView *statsStack = [[UIStackView alloc] init];
-    statsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    statsStack.axis = UILayoutConstraintAxisVertical;
-    statsStack.spacing = 6;
-    statsStack.hidden = YES;
-    self.memoryUsageStatsStack = statsStack;
-
-    UIStackView *contentStack = [[UIStackView alloc] init];
-    contentStack.translatesAutoresizingMaskIntoConstraints = NO;
-    contentStack.axis = UILayoutConstraintAxisVertical;
-    contentStack.spacing = 8;
-    [contentStack addArrangedSubview:statusLabel];
-    [contentStack addArrangedSubview:statsStack];
-    [contentStack addArrangedSubview:chartRow];
-    [contentStack setCustomSpacing:16 afterView:statsStack];
-
-    UIView *card = zs_make_glass_container_card(contentStack, UIEdgeInsetsMake(16, 16, 16, 16));
-    card.layer.borderWidth = 1;
-    card.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-
-    if (self.memoryUsageAutoRefreshActive) {
-        [self zs_startMemoryUsageAutoRefresh];
-    }
-
-    return card;
-}
-
-- (void)memoryUsageAnalyzeTapped:(UIButton *)sender {
-    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-    [tapHaptic impactOccurred];
-
-    if (self.memoryUsageRefreshTimer) {
-        [self zs_stopMemoryUsageAutoRefresh];
-        return;
-    }
-
-    [self zs_startMemoryUsageAutoRefresh];
-}
-
-- (void)zs_startMemoryUsageAutoRefresh {
-    self.memoryUsageAutoRefreshActive = YES;
-
-    [self.memoryUsageAnalyzeButton setTitle:@"Stop analysis" forState:UIControlStateNormal];
-    [self.memoryUsageAnalyzeButton setTitleColor:[UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0] forState:UIControlStateNormal];
-
-    [self zs_runMemoryUsageScan];
-
-    __weak typeof(self) weakSelf = self;
-    NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
-        [weakSelf zs_runMemoryUsageScan];
-    }];
-    self.memoryUsageRefreshTimer = timer;
-    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
-}
-
-- (void)zs_stopMemoryUsageAutoRefresh {
-    self.memoryUsageAutoRefreshActive = NO;
-
-    [self.memoryUsageRefreshTimer invalidate];
-    self.memoryUsageRefreshTimer = nil;
-
-    [self.memoryUsageAnalyzeButton setTitle:@"Analyze memory usage" forState:UIControlStateNormal];
-    [self.memoryUsageAnalyzeButton setTitleColor:zs_accent_green_color() forState:UIControlStateNormal];
-
-    self.memoryUsageStatsStack.hidden = YES;
-    self.memoryUsageChartRow.hidden = YES;
-    self.memoryUsageStatusLabel.hidden = NO;
-    self.memoryUsageStatusLabel.text = @"Tap Analyze memory usage to scan subsystems and loaded assets.";
-}
-
-- (void)zs_runMemoryUsageScan {
-    [self zs_applyMemorySystemStats:zs_collect_memory_system_stats()];
-
-    __weak typeof(self) weakSelf = self;
-    zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageGroup *> *groups) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (!strongSelf.memoryUsageRefreshTimer) return;
-        [strongSelf zs_applyMemoryUsageGroups:groups];
-    });
-}
-
-- (void)zs_applyMemorySystemStats:(ZSMemorySystemStats)stats {
-    for (UIView *row in self.memoryUsageStatsStack.arrangedSubviews.copy) {
-        [row removeFromSuperview];
-    }
-
-    NSByteCountFormatter *formatter = [NSByteCountFormatter new];
-    formatter.countStyle = NSByteCountFormatterCountStyleMemory;
-
-    NSString *residentText = [formatter stringFromByteCount:(long long)MAX(0, stats.residentBytes)];
-    NSString *peakText = stats.peakResidentBytes > 0 ? [formatter stringFromByteCount:(long long)stats.peakResidentBytes] : @"Unknown";
-    NSString *availableText = stats.availableBytes > 0 ? [formatter stringFromByteCount:(long long)stats.availableBytes] : @"Unknown";
-    NSString *limitText = stats.memoryLimitApproxBytes > 0 ? [formatter stringFromByteCount:(long long)stats.memoryLimitApproxBytes] : @"Unknown";
-    NSString *compressedText = stats.compressedBytes > 0 ? [formatter stringFromByteCount:(long long)stats.compressedBytes] : @"None";
-    NSString *dirtyResidentText = stats.internalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.internalBytes] : @"Unknown";
-    NSString *cleanMappedText = stats.externalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.externalBytes] : @"None";
-    NSString *virtualText = stats.virtualBytes > 0 ? [formatter stringFromByteCount:(long long)stats.virtualBytes] : @"Unknown";
-    NSString *systemFreeText = stats.systemFreeBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemFreeBytes] : @"Unknown";
-    NSString *systemActiveText = stats.systemActiveBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemActiveBytes] : @"Unknown";
-    NSString *systemWiredText = stats.systemWiredBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemWiredBytes] : @"Unknown";
-    NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
-    NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
-    NSString *increasedMemoryLimitText = stats.hasIncreasedMemoryLimitEntitlement ? @"Yes" : @"No";
-    NSString *extendedVirtualAddressingText = stats.hasExtendedVirtualAddressingEntitlement ? @"Yes" : @"No";
-
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"kernel.increased-memory-limit", increasedMemoryLimitText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"kernel.extended-virtual-addressing", extendedVirtualAddressingText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Footprint (counts toward limit)", residentText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Peak memory used", peakText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Available memory", availableText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Approx. memory limit", limitText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Dirty resident (internal)", dirtyResidentText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Compressed (dirty, swapped out)", compressedText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Clean file-backed (external)", cleanMappedText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Virtual address space", virtualText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System free", systemFreeText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System active", systemActiveText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"System wired", systemWiredText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Device memory", deviceTotalText)];
-    [self.memoryUsageStatsStack addArrangedSubview:zs_make_memory_stat_row(@"Memory pressure", pressureText)];
-
-    self.memoryUsageStatsStack.hidden = NO;
-}
-
-- (void)zs_applyMemoryUsageGroups:(NSArray<ZSMemoryUsageGroup *> *)groups {
-    NSMutableArray<UIView *> *sections = [NSMutableArray new];
-    for (ZSMemoryUsageGroup *group in groups) {
-        if (group.categories.count == 0) continue;
-        UIView *section = group.showsChart ? [self zs_buildMemoryChartSectionForGroup:group] : [self zs_buildMemoryListSectionForGroup:group];
-        if (section) [sections addObject:section];
-    }
-
-    if (sections.count == 0) {
-        self.memoryUsageStatusLabel.hidden = NO;
-        self.memoryUsageStatusLabel.text = @"No trackable memory usage found.";
-        self.memoryUsageChartRow.hidden = YES;
-        return;
-    }
-
-    for (UIView *existing in self.memoryUsageSectionsStack.arrangedSubviews.copy) {
-        [self.memoryUsageSectionsStack removeArrangedSubview:existing];
-        [existing removeFromSuperview];
-    }
-    for (UIView *section in sections) {
-        [self.memoryUsageSectionsStack addArrangedSubview:section];
-    }
-
-    self.memoryUsageStatusLabel.hidden = YES;
-    self.memoryUsageChartRow.hidden = NO;
-}
-
-- (UIView *)zs_buildMemoryChartSectionForGroup:(ZSMemoryUsageGroup *)group {
-    int64_t grandTotal = 0;
-    for (ZSMemoryUsageCategory *category in group.categories) grandTotal += category.totalBytes;
-    if (grandTotal <= 0) return nil;
-
-    ZSPillarChartView *pillarChart = [[ZSPillarChartView alloc] init];
-    pillarChart.translatesAutoresizingMaskIntoConstraints = NO;
-
-    UIStackView *legendStack = [[UIStackView alloc] init];
-    legendStack.translatesAutoresizingMaskIntoConstraints = NO;
-    legendStack.axis = UILayoutConstraintAxisVertical;
-    legendStack.spacing = 10;
-
-    NSMutableArray<NSNumber *> *fractions = [NSMutableArray new];
-    NSMutableArray<UIColor *> *colors = [NSMutableArray new];
-
-    for (NSUInteger i = 0; i < group.categories.count; i++) {
-        ZSMemoryUsageCategory *category = group.categories[i];
-        double fraction = (double)category.totalBytes / (double)grandTotal;
-        UIColor *color = zs_memory_color_for_index(i, [category.name hasPrefix:@"Other ("]);
-        [fractions addObject:@(fraction)];
-        [colors addObject:color];
-
-        NSString *sizeText = [NSByteCountFormatter stringFromByteCount:(long long)category.totalBytes countStyle:NSByteCountFormatterCountStyleMemory];
-        NSString *detailText = [NSString stringWithFormat:@"%.1f%% · %@", fraction * 100.0, sizeText];
-        if (category.detail.length > 0) detailText = [detailText stringByAppendingFormat:@" · %@", category.detail];
-        [legendStack addArrangedSubview:zs_make_memory_legend_row(category.name, detailText, color)];
-    }
-
-    [pillarChart setSegmentsWithFractions:fractions colors:colors];
-
-    UIView *chartRow = [[UIView alloc] init];
-    chartRow.translatesAutoresizingMaskIntoConstraints = NO;
-    [chartRow addSubview:pillarChart];
-    [chartRow addSubview:legendStack];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [pillarChart.leadingAnchor constraintEqualToAnchor:chartRow.leadingAnchor],
-        [pillarChart.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
-        [pillarChart.bottomAnchor constraintEqualToAnchor:chartRow.bottomAnchor],
-        [pillarChart.widthAnchor constraintEqualToConstant:68],
-        [pillarChart.heightAnchor constraintGreaterThanOrEqualToConstant:160],
-
-        [legendStack.leadingAnchor constraintEqualToAnchor:pillarChart.trailingAnchor constant:16],
-        [legendStack.trailingAnchor constraintEqualToAnchor:chartRow.trailingAnchor],
-        [legendStack.topAnchor constraintEqualToAnchor:chartRow.topAnchor],
-        [legendStack.bottomAnchor constraintLessThanOrEqualToAnchor:chartRow.bottomAnchor],
-    ]];
-
-    UIStackView *section = [[UIStackView alloc] initWithArrangedSubviews:@[zs_make_memory_group_header(group.title, group.subtitle), chartRow]];
-    section.translatesAutoresizingMaskIntoConstraints = NO;
-    section.axis = UILayoutConstraintAxisVertical;
-    section.spacing = 12;
-    return section;
-}
-
-- (UIView *)zs_buildMemoryListSectionForGroup:(ZSMemoryUsageGroup *)group {
-    UIStackView *rows = [[UIStackView alloc] init];
-    rows.translatesAutoresizingMaskIntoConstraints = NO;
-    rows.axis = UILayoutConstraintAxisVertical;
-    rows.spacing = 10;
-
-    UIColor *swatchColor = [UIColor colorWithWhite:0.32 alpha:1.0];
-    for (ZSMemoryUsageCategory *category in group.categories) {
-        NSString *detailText = category.detail ?: @"";
-        if (category.totalBytes > 0) {
-            NSString *sizeText = [NSByteCountFormatter stringFromByteCount:(long long)category.totalBytes countStyle:NSByteCountFormatterCountStyleMemory];
-            detailText = detailText.length > 0 ? [NSString stringWithFormat:@"%@ · %@", sizeText, detailText] : sizeText;
-        } else if (category.objectCount > 0 && detailText.length == 0) {
-            detailText = [NSString stringWithFormat:@"%lu objects", (unsigned long)category.objectCount];
-        } else if (category.objectCount > 0) {
-            detailText = [NSString stringWithFormat:@"%lu objects · %@", (unsigned long)category.objectCount, detailText];
-        }
-        [rows addArrangedSubview:zs_make_memory_legend_row(category.name, detailText, swatchColor)];
-    }
-
-    UIStackView *section = [[UIStackView alloc] initWithArrangedSubviews:@[zs_make_memory_group_header(group.title, group.subtitle), rows]];
-    section.translatesAutoresizingMaskIntoConstraints = NO;
-    section.axis = UILayoutConstraintAxisVertical;
-    section.spacing = 12;
-    return section;
 }
 
 - (void)dumpIL2CPPMethodsTapped {
@@ -11829,6 +11784,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_buildSyslogFullScreenPanelIfNeeded];
     if (!self.syslogFullScreenOverlay) return;
 
+    [self zs_endMemoryAnalysis];
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = YES;
     [self zs_renderSyslogFullScreenRows];
@@ -11872,6 +11828,251 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+}
+
+#pragma mark Memory full-screen viewer
+
+- (void)memoryUsageAnalyzeTapped:(UIButton *)sender {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+
+    if (self.memoryFullScreenOpen) {
+        if (self.docsPanelOpen) {
+            [self closeDocsPanel];
+        } else {
+            [self zs_endMemoryAnalysis];
+        }
+        return;
+    }
+
+    [self zs_openMemoryFullScreenPanel];
+}
+
+- (void)zs_syncMemoryButtonState {
+    BOOL active = self.memoryFullScreenOpen;
+    [self.memoryUsageAnalyzeButton setTitle:active ? @"Stop analysis" : @"Analyze memory usage" forState:UIControlStateNormal];
+    [self.memoryUsageAnalyzeButton setTitleColor:active ? [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0] : zs_accent_green_color()
+                                        forState:UIControlStateNormal];
+}
+
+- (void)zs_endMemoryAnalysis {
+    [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
+    self.memoryFullScreenOpen = NO;
+    [self zs_syncMemoryButtonState];
+}
+
+- (void)zs_buildMemoryFullScreenPanelIfNeeded {
+    if (self.memoryFullScreenOverlay) return;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
+    overlay.hidden = YES;
+    overlay.clipsToBounds = YES;
+    overlay.layer.cornerRadius = 0;
+    overlay.layer.cornerCurve = kCACornerCurveContinuous;
+    overlay.userInteractionEnabled = YES;
+    [unityView addSubview:overlay];
+    zs_force_dark(overlay);
+    if (self.contentOverlay) {
+        [unityView insertSubview:overlay belowSubview:self.contentOverlay];
+    }
+    self.memoryFullScreenOverlay = overlay;
+
+    UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    UIImage *closeImage = [UIImage systemImageNamed:@"xmark" withConfiguration:closeSymbolConfig];
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(closeButton, closeImage, [UIColor colorWithWhite:1 alpha:0.85]);
+    [closeButton addTarget:self action:@selector(zs_closeMemoryFullScreenPanelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:closeButton];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = @"Memory usage";
+    titleLabel.font = zs_mono_font(12, UIFontWeightSemibold);
+    titleLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
+    [overlay addSubview:titleLabel];
+
+    UILabel *statusLabel = [[UILabel alloc] init];
+    statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    statusLabel.text = @"Scanning…";
+    statusLabel.font = zs_mono_font(9, UIFontWeightRegular);
+    statusLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+    statusLabel.textAlignment = NSTextAlignmentRight;
+    [statusLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [overlay addSubview:statusLabel];
+    self.memoryFullScreenStatusLabel = statusLabel;
+
+    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    scrollView.backgroundColor = UIColor.clearColor;
+    scrollView.showsHorizontalScrollIndicator = YES;
+    scrollView.showsVerticalScrollIndicator = NO;
+    scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    scrollView.alwaysBounceVertical = NO;
+    scrollView.alwaysBounceHorizontal = YES;
+    scrollView.directionalLockEnabled = YES;
+    [overlay addSubview:scrollView];
+    self.memoryFullScreenScrollView = scrollView;
+
+    self.memoryCloseButtonLeadingConstraint = [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
+        self.memoryCloseButtonLeadingConstraint,
+        [closeButton.widthAnchor constraintEqualToConstant:30],
+        [closeButton.heightAnchor constraintEqualToConstant:30],
+
+        [titleLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:12],
+
+        [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [statusLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:10],
+        [statusLabel.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
+
+        [scrollView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [scrollView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
+    ]];
+}
+
+- (void)zs_openMemoryFullScreenPanel {
+    if (!self.panelOpen) return;
+    if (self.memoryFullScreenOpen) return;
+
+    [self zs_buildMemoryFullScreenPanelIfNeeded];
+    if (!self.memoryFullScreenOverlay) return;
+
+    if (self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:NO];
+    }
+    if (self.syslogFullScreenOpen) {
+        [self.syslogSearchField resignFirstResponder];
+        self.syslogFullScreenOpen = NO;
+        [self zs_syncSyslogButtonState];
+    }
+
+    self.docsActiveKey = nil;
+    self.memoryFullScreenOpen = YES;
+    [self zs_syncMemoryButtonState];
+    self.memoryFullScreenStatusLabel.text = @"Scanning…";
+
+    self.docsPanelOpen = YES;
+    [self positionPanelAnimated:YES];
+    [self zs_startMemoryUsageAutoRefresh];
+}
+
+- (void)zs_closeMemoryFullScreenPanelTapped {
+    if (!self.memoryFullScreenOpen) return;
+
+    [self closeDocsPanel];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_startMemoryUsageAutoRefresh {
+    [self.memoryUsageRefreshTimer invalidate];
+    [self zs_runMemoryUsageScan];
+
+    __weak typeof(self) weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf zs_runMemoryUsageScan];
+    }];
+    self.memoryUsageRefreshTimer = timer;
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)zs_runMemoryUsageScan {
+    ZSMemorySystemStats stats = zs_collect_memory_system_stats();
+
+    __weak typeof(self) weakSelf = self;
+    zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageGroup *> *groups) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.memoryFullScreenOpen) return;
+        [strongSelf zs_renderMemoryColumnsWithStats:stats groups:groups];
+    });
+}
+
+- (void)zs_renderMemoryColumnsWithStats:(ZSMemorySystemStats)stats groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
+    UIScrollView *scrollView = self.memoryFullScreenScrollView;
+    UIView *overlay = self.memoryFullScreenOverlay;
+    if (!scrollView || !overlay) return;
+    if (scrollView.isDragging || scrollView.isDecelerating) return;
+
+    [overlay layoutIfNeeded];
+
+    CGFloat height = scrollView.bounds.size.height;
+    if (height < 80) {
+        UIView *host = zs_ui_host_view();
+        UIEdgeInsets hostInsets = host.safeAreaInsets;
+        height = host.bounds.size.height - hostInsets.top - hostInsets.bottom - (kPanelPadding + 30 + 12);
+    }
+    if (height < 80) return;
+
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlay.safeAreaInsets.left * 0.15;
+    self.memoryCloseButtonLeadingConstraint.constant = logIndent;
+
+    NSMutableArray<UIView *> *columns = [NSMutableArray array];
+    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, height);
+    if (statsColumn) [columns addObject:statsColumn];
+
+    NSUInteger groupColumnCount = 0;
+    for (ZSMemoryUsageGroup *group in groups) {
+        UIView *groupColumn = zs_build_memory_group_column(group, height);
+        if (!groupColumn) continue;
+        [columns addObject:groupColumn];
+        groupColumnCount++;
+    }
+
+    self.memoryFullScreenStatusLabel.text = groupColumnCount > 0 ? @"Live · refreshes every 2 s" : @"No trackable memory usage found";
+
+    UIView *contentView = [[UIView alloc] init];
+    contentView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    CGFloat hairline = 1.0 / MAX(overlay.traitCollection.displayScale, 1.0);
+    CGFloat x = MAX(0, logIndent - kZSMemoryColumnPadding);
+    for (NSUInteger i = 0; i < columns.count; i++) {
+        UIView *column = columns[i];
+        CGRect frame = column.frame;
+        frame.origin = CGPointMake(x, 0);
+        column.frame = frame;
+        [contentView addSubview:column];
+        x += frame.size.width;
+
+        if (i + 1 < columns.count) {
+            UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(x, 0, hairline, height)];
+            separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+            separator.userInteractionEnabled = NO;
+            [contentView addSubview:separator];
+            x += 1;
+        }
+    }
+    x += kPanelPadding;
+
+    CGPoint previousOffset = scrollView.contentOffset;
+    [self.memoryFullScreenContentView removeFromSuperview];
+    [scrollView addSubview:contentView];
+    self.memoryFullScreenContentView = contentView;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [contentView.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
+        [contentView.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
+        [contentView.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
+        [contentView.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
+        [contentView.widthAnchor constraintEqualToConstant:x],
+        [contentView.heightAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.heightAnchor],
+    ]];
+
+    [scrollView layoutIfNeeded];
+    CGFloat maxOffsetX = MAX(0, scrollView.contentSize.width - scrollView.bounds.size.width);
+    scrollView.contentOffset = CGPointMake(MIN(previousOffset.x, maxOffsetX), 0);
 }
 
 #pragma mark Auth
@@ -12410,6 +12611,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (self.docsPanel) {
         [unityView bringSubviewToFront:self.docsContentOverlay];
         if (self.syslogFullScreenOverlay) [unityView bringSubviewToFront:self.syslogFullScreenOverlay];
+        if (self.memoryFullScreenOverlay) [unityView bringSubviewToFront:self.memoryFullScreenOverlay];
         if (self.contentOverlay) [unityView bringSubviewToFront:self.contentOverlay];
     }
 
@@ -12529,9 +12731,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     CGFloat panelW = self.panelWidth > 0 ? self.panelWidth : kPanelWidth;
     BOOL docsVisible = self.docsPanelOpen && self.docsPanel != nil;
+    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
     CGFloat docsW = 0;
     if (docsVisible) {
-        docsW = self.syslogFullScreenOpen
+        docsW = fullScreenOpen
             ? (unityView.bounds.size.width - kHandleWidth - panelW)
             : (self.docsPanelWidth > 0 ? self.docsPanelWidth : panelW);
     }
@@ -12544,16 +12747,17 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     UIView *handleElement = self.handleGlass ?: self.handle;
     UIView *docsPanelElement = self.docsPanelGlass ?: self.docsPanel;
 
-    CGFloat docsX = self.syslogFullScreenOpen ? 0 : kHandleWidth;
-    CGFloat docsSpanWidth = docsW + (self.syslogFullScreenOpen ? kHandleWidth : 0);
-    CACornerMask docsCornerMask = self.syslogFullScreenOpen
+    CGFloat docsX = fullScreenOpen ? 0 : kHandleWidth;
+    CGFloat docsSpanWidth = docsW + (fullScreenOpen ? kHandleWidth : 0);
+    CACornerMask docsCornerMask = fullScreenOpen
         ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
         : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
 
     void (^changes)(void) = ^{
         if (docsVisible) {
-            self.docsContentOverlay.hidden = self.syslogFullScreenOpen;
+            self.docsContentOverlay.hidden = fullScreenOpen;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = !self.syslogFullScreenOpen;
+            if (self.memoryFullScreenOverlay) self.memoryFullScreenOverlay.hidden = !self.memoryFullScreenOpen;
             self.docsPanelSeparator.hidden = NO;
         }
 
@@ -12564,7 +12768,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
                                           (height - kHandleHeight) * 0.5,
                                           kHandleWidth,
                                           kHandleHeight);
-        handleElement.hidden = self.syslogFullScreenOpen;
+        handleElement.hidden = fullScreenOpen;
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
@@ -12612,6 +12816,12 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             self.syslogFullScreenOverlay.layer.cornerCurve = kCACornerCurveContinuous;
             self.syslogFullScreenOverlay.layer.maskedCorners = docsCornerMask;
         }
+        if (self.memoryFullScreenOverlay) {
+            self.memoryFullScreenOverlay.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
+            self.memoryFullScreenOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
+            self.memoryFullScreenOverlay.layer.cornerCurve = kCACornerCurveContinuous;
+            self.memoryFullScreenOverlay.layer.maskedCorners = docsCornerMask;
+        }
 
         [self zs_updateSliderGlassVisibility];
     };
@@ -12620,6 +12830,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         if (!docsVisible) {
             self.docsContentOverlay.hidden = YES;
             if (self.syslogFullScreenOverlay) self.syslogFullScreenOverlay.hidden = YES;
+            if (self.memoryFullScreenOverlay) self.memoryFullScreenOverlay.hidden = YES;
             self.docsPanelSeparator.hidden = YES;
         }
     };
