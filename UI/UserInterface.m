@@ -2775,6 +2775,7 @@ static const CGFloat kZSMemoryLegendColumnGap = 18;
 static const CGFloat kZSMemoryMinInnerWidth = 200;
 static const CGFloat kZSMemoryMaxNameWidth = 260;
 static const CGFloat kZSMemoryMaxDetailWidth = 380;
+static const CGFloat kZSMemoryPagedColumnWidth = 1700;
 
 static CGFloat zs_memory_text_width(NSString *text, UIFont *font) {
     if (text.length == 0) return 0;
@@ -2813,6 +2814,7 @@ static UIView *zs_build_memory_column(NSString *title,
                                       NSArray<NSNumber *> *fractions,
                                       BOOL compactStats,
                                       CGFloat headerTrailingReserve,
+                                      CGFloat fixedColumnWidth,
                                       CGFloat height) {
     NSUInteger count = rows.count;
     if (count == 0 || height <= 0) return nil;
@@ -2865,6 +2867,7 @@ static UIView *zs_build_memory_column(NSString *title,
         }
         CGFloat legendWidth = rowsWidth * (CGFloat)legendColumns + kZSMemoryLegendColumnGap * (CGFloat)(legendColumns - 1);
         innerWidth = MAX(MAX(pillarExtra + legendWidth, titleWidth + headerTrailingReserve), kZSMemoryMinInnerWidth);
+        if (fixedColumnWidth > 0) innerWidth = fixedColumnWidth - kZSMemoryColumnPadding * 2;
 
         titleHeight = zs_memory_wrapped_size(title, titleFont, innerWidth - headerTrailingReserve).height;
         subtitleHeight = zs_memory_wrapped_size(subtitle, subtitleFont, innerWidth).height;
@@ -3067,7 +3070,7 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat h
     BOOL showsPaging = group.pagingEnabled && onPageChange != nil;
     CGFloat controlsWidth = kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
     CGFloat reserve = showsPaging ? controlsWidth + 10 : 0;
-    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, height);
+    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, showsPaging ? kZSMemoryPagedColumnWidth : 0, height);
     if (!column || !showsPaging) return column;
 
     CGFloat titleLineHeight = ceil(zs_mono_font(12, UIFontWeightSemibold).lineHeight);
@@ -4640,6 +4643,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UILabel *memoryFullScreenStatusLabel;
 @property (nonatomic, strong) UIView *memoryRefreshPieView;
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieLayer;
+@property (nonatomic, strong) CAShapeLayer *memoryRefreshPieTrackLayer;
+@property (nonatomic, assign) BOOL memoryRefreshPieInverted;
 @property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
 
 + (instancetype)shared;
@@ -5294,6 +5299,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.memoryFullScreenStatusLabel = nil;
     self.memoryRefreshPieView = nil;
     self.memoryRefreshPieLayer = nil;
+    self.memoryRefreshPieTrackLayer = nil;
     self.memoryCloseButtonLeadingConstraint = nil;
 }
 
@@ -11961,7 +11967,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CAShapeLayer *trackLayer = [CAShapeLayer layer];
     trackLayer.frame = CGRectMake(0, 0, 30, 30);
     trackLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(15, 15) radius:13 startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
-    trackLayer.fillColor = [UIColor colorWithWhite:1 alpha:0.16].CGColor;
+    trackLayer.fillColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
     [pieView.layer addSublayer:trackLayer];
     CAShapeLayer *pieLayer = [CAShapeLayer layer];
     pieLayer.frame = CGRectMake(0, 0, 30, 30);
@@ -11969,20 +11975,21 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     pieLayer.fillColor = UIColor.clearColor.CGColor;
     pieLayer.strokeColor = UIColor.whiteColor.CGColor;
     pieLayer.lineWidth = 13;
-    pieLayer.strokeEnd = 0;
+    pieLayer.strokeEnd = 1;
     [pieView.layer addSublayer:pieLayer];
     [overlay addSubview:pieView];
     self.memoryRefreshPieView = pieView;
     self.memoryRefreshPieLayer = pieLayer;
+    self.memoryRefreshPieTrackLayer = trackLayer;
 
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     scrollView.backgroundColor = UIColor.clearColor;
-    scrollView.showsHorizontalScrollIndicator = YES;
+    scrollView.showsHorizontalScrollIndicator = NO;
     scrollView.showsVerticalScrollIndicator = NO;
-    scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    scrollView.bounces = NO;
     scrollView.alwaysBounceVertical = NO;
-    scrollView.alwaysBounceHorizontal = YES;
+    scrollView.alwaysBounceHorizontal = NO;
     scrollView.directionalLockEnabled = YES;
     [overlay addSubview:scrollView];
     self.memoryFullScreenScrollView = scrollView;
@@ -12049,15 +12056,28 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic impactOccurred];
 }
 
-- (void)zs_restartMemoryRefreshPie {
+- (void)zs_restartMemoryRefreshPieAdvancing:(BOOL)advance {
     CAShapeLayer *layer = self.memoryRefreshPieLayer;
-    if (!layer) return;
+    CAShapeLayer *track = self.memoryRefreshPieTrackLayer;
+    if (!layer || !track) return;
+    if (advance) self.memoryRefreshPieInverted = !self.memoryRefreshPieInverted;
+
+    UIColor *white = UIColor.whiteColor;
+    UIColor *grey = [UIColor colorWithWhite:0.22 alpha:1];
+    BOOL inverted = self.memoryRefreshPieInverted;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.strokeColor = (inverted ? grey : white).CGColor;
+    track.fillColor = (inverted ? white : grey).CGColor;
+    layer.strokeEnd = 1;
+    [CATransaction commit];
+
     [layer removeAnimationForKey:@"zsRefreshPie"];
     CABasicAnimation *animation = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
     animation.fromValue = @0;
     animation.toValue = @1;
     animation.duration = 2.0;
-    animation.repeatCount = HUGE_VALF;
     animation.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
     [layer addAnimation:animation forKey:@"zsRefreshPie"];
 }
@@ -12070,17 +12090,18 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
-    [self zs_startMemoryUsageAutoRefresh];
+    [self zs_runMemoryUsageScan];
 }
 
 - (void)zs_startMemoryUsageAutoRefresh {
     [self.memoryUsageRefreshTimer invalidate];
-    [self zs_restartMemoryRefreshPie];
+    self.memoryRefreshPieInverted = NO;
+    [self zs_restartMemoryRefreshPieAdvancing:NO];
     [self zs_runMemoryUsageScan];
 
     __weak typeof(self) weakSelf = self;
     NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
-        [weakSelf zs_restartMemoryRefreshPie];
+        [weakSelf zs_restartMemoryRefreshPieAdvancing:YES];
         [weakSelf zs_runMemoryUsageScan];
     }];
     self.memoryUsageRefreshTimer = timer;
@@ -12118,7 +12139,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryCloseButtonLeadingConstraint.constant = logIndent;
 
     NSMutableArray<UIView *> *columns = [NSMutableArray array];
-    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, height);
+    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, 0, height);
     if (statsColumn) [columns addObject:statsColumn];
 
     __weak typeof(self) weakSelf = self;

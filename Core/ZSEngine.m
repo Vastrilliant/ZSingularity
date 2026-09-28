@@ -1837,10 +1837,9 @@ static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[]
 
 static const NSUInteger kZSTopAssetsPageSize = 20;
 static const NSUInteger kZSFootprintMaxRows = 22;
-static const NSUInteger kZSUnityMaxRows = 18;
+static const NSUInteger kZSUnityMaxRows = 16;
 static const NSUInteger kZSCleanFileMaxRows = 10;
 static const CFTimeInterval kZSAssetScanMinInterval = 3.0;
-static const NSUInteger kZSMinFoldedItems = 3;
 
 static NSUInteger g_topAssetsPage = 0;
 
@@ -1912,26 +1911,29 @@ static NSArray<ZSMemoryUsageCategory *> *zs_fold_memory_rows(NSArray<ZSMemoryUsa
     if (total <= 0) return sortedRows;
 
     NSMutableArray<ZSMemoryUsageCategory *> *kept = [NSMutableArray new];
-    NSMutableArray<ZSMemoryUsageCategory *> *folded = [NSMutableArray new];
+    ZSMemoryUsageCategory *other = nil;
+    NSUInteger otherItems = 0;
 
     for (NSUInteger i = 0; i < sortedRows.count; i++) {
         ZSMemoryUsageCategory *row = sortedRows[i];
         BOOL keep = i < maxRows && (double)row.totalBytes >= (double)total * minFraction;
-        [(keep ? kept : folded) addObject:row];
-    }
-
-    if (folded.count < kZSMinFoldedItems) return sortedRows;
-
-    ZSMemoryUsageCategory *other = [ZSMemoryUsageCategory new];
-    for (ZSMemoryUsageCategory *row in folded) {
+        if (keep) {
+            [kept addObject:row];
+            continue;
+        }
+        if (!other) other = [ZSMemoryUsageCategory new];
         other.totalBytes += row.totalBytes;
         other.residentBytes += row.residentBytes;
         other.compressedBytes += row.compressedBytes;
         other.objectCount += row.objectCount;
+        otherItems++;
     }
-    other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)folded.count];
-    if (describeResidency) other.detail = zs_memory_residency_detail(other);
-    [kept addObject:other];
+
+    if (other) {
+        other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)otherItems];
+        if (describeResidency) other.detail = zs_memory_residency_detail(other);
+        [kept addObject:other];
+    }
     return kept;
 }
 
