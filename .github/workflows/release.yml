@@ -120,6 +120,7 @@ jobs:
             -framework Foundation \
             -framework UIKit \
             -framework QuartzCore \
+            -framework Metal \
             -framework CoreText \
             -framework ImageIO \
             -framework UniformTypeIdentifiers \

@@ -5,6 +5,8 @@
 #import <CoreLocation/CoreLocation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <Metal/Metal.h>
+#import <os/lock.h>
 #import <string.h>
 #import "ZSEngine.h"
 #import "ZSDiagnostics.h"
@@ -4928,10 +4930,677 @@ static UIView *zs_make_title_block(void) {
 + (instancetype)shared;
 - (void)installIfNeeded;
 - (void)zs_bootstrapSyslogCaptureIfNeeded;
+- (void)zs_refreshMetalTabs;
+- (void)zs_metalTabActivatedForKey:(NSString *)key;
 @end
 
 static const NSTimeInterval kPostFXReapplyInterval = 1.0;
 static const NSTimeInterval kSaveDebounceInterval = 0.4;
+
+#pragma mark - Metal pull tabs
+
+static NSString * const kZSMTHandleKey = @"__handle";
+static const CGFloat kZSMTCornerRadius = 10;
+static const CGFloat kZSMTCellPoints = 24;
+static const int kZSMTMaxItems = 8;
+
+typedef struct {
+    float rect[4];
+    float radii[4];
+    float params[4];
+} ZSMTGPUItem;
+
+typedef struct {
+    float viewport[4];
+    float misc[4];
+    float quad[4];
+    float counts[4];
+    ZSMTGPUItem items[8];
+} ZSMTGPUScene;
+
+typedef struct {
+    float x, y, w, h;
+} ZSMTRect;
+
+static os_unfair_lock g_zsmtLock = OS_UNFAIR_LOCK_INIT;
+static ZSMTRect g_zsmtRects[8];
+static int g_zsmtCount;
+static float g_zsmtViewW;
+static float g_zsmtViewH;
+static BOOL g_zsmtVisible;
+static BOOL g_zsmtSnap;
+static BOOL g_zsmtGlass;
+static float g_zsmtPressTarget[8];
+static NSData *g_zsmtAtlasData;
+static int g_zsmtAtlasVersion;
+static int g_zsmtAtlasCellPx;
+static int g_zsmtAtlasCells;
+static id<MTLLibrary> g_zsmtLibrary;
+static id<MTLRenderPipelineState> g_zsmtPipeline;
+static MTLPixelFormat g_zsmtPipelineFormat;
+static __weak CAMetalLayer *g_zsmtLayer;
+
+static id<MTLTexture> r_zsmtAtlas;
+static int r_zsmtAtlasVersion = -1;
+static float r_zsmtMaster;
+static float r_zsmtPress[8];
+static CFTimeInterval r_zsmtLastTime;
+static CFTimeInterval r_zsmtLastResync;
+static MTLPixelFormat r_zsmtFailedFormat;
+
+static IMP g_zsmtOrigCommit;
+static IMP g_zsmtOrigPresent;
+static IMP g_zsmtOrigPresentAt;
+static IMP g_zsmtOrigPresentAfter;
+static const void *kZSMTPendingDrawableKey = &kZSMTPendingDrawableKey;
+
+static NSString * const kZSMTShaderSource =
+@"#include <metal_stdlib>\n"
+@"using namespace metal;\n"
+@"\n"
+@"struct ZSItem {\n"
+@"    float4 rect;\n"
+@"    float4 radii;\n"
+@"    float4 params;\n"
+@"};\n"
+@"\n"
+@"struct ZSScene {\n"
+@"    float4 viewport;\n"
+@"    float4 misc;\n"
+@"    float4 quad;\n"
+@"    float4 counts;\n"
+@"    ZSItem items[8];\n"
+@"};\n"
+@"\n"
+@"struct VOut {\n"
+@"    float4 position [[position]];\n"
+@"    float2 local;\n"
+@"};\n"
+@"\n"
+@"vertex VOut zs_tab_vertex(uint vid [[vertex_id]], constant ZSScene &scene [[buffer(0)]]) {\n"
+@"    float2 c = float2(float(vid & 1u), float((vid >> 1u) & 1u));\n"
+@"    float2 p = mix(scene.quad.xy, scene.quad.zw, c);\n"
+@"    VOut o;\n"
+@"    o.position = float4(p.x / scene.viewport.x * 2.0 - 1.0, 1.0 - p.y / scene.viewport.y * 2.0, 0.0, 1.0);\n"
+@"    o.local = p;\n"
+@"    return o;\n"
+@"}\n"
+@"\n"
+@"float zs_box(float2 p, float2 hs, float4 r) {\n"
+@"    float rad = p.x < 0.0 ? (p.y < 0.0 ? r.x : r.w) : (p.y < 0.0 ? r.y : r.z);\n"
+@"    float2 q = abs(p) - hs + rad;\n"
+@"    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - rad;\n"
+@"}\n"
+@"\n"
+@"float zs_smin(float a, float b, float k) {\n"
+@"    float h = max(k - abs(a - b), 0.0) / k;\n"
+@"    return min(a, b) - h * h * k * 0.25;\n"
+@"}\n"
+@"\n"
+@"float zs_union(float2 pos, constant ZSScene &scene) {\n"
+@"    int n = int(scene.counts.x);\n"
+@"    float k = max(scene.counts.y, 0.001);\n"
+@"    float d = 1000000.0;\n"
+@"    for (int i = 0; i < n; i++) {\n"
+@"        constant ZSItem &it = scene.items[i];\n"
+@"        float2 hs = it.rect.zw * 0.5;\n"
+@"        float s = zs_box(pos - (it.rect.xy + hs), hs, it.radii);\n"
+@"        d = (i == 0) ? s : zs_smin(d, s, k);\n"
+@"    }\n"
+@"    return d;\n"
+@"}\n"
+@"\n"
+@"fragment float4 zs_tab_fragment(VOut in [[stage_in]],\n"
+@"                                float4 dst [[color(0)]],\n"
+@"                                constant ZSScene &scene [[buffer(0)]],\n"
+@"                                texture2d<float> atlas [[texture(0)]]) {\n"
+@"    constexpr sampler smp(coord::normalized, filter::linear, address::clamp_to_edge);\n"
+@"    float px = scene.misc.y;\n"
+@"    float master = scene.misc.w;\n"
+@"    bool lin = scene.misc.z > 0.5;\n"
+@"    bool flatStyle = scene.counts.w > 0.5;\n"
+@"    float2 pos = in.local;\n"
+@"\n"
+@"    float sd = zs_union(pos, scene);\n"
+@"    float sh = zs_union(pos - float2(0.0, 2.0 * px), scene);\n"
+@"    float2 grad = float2(dfdx(sd), dfdy(sd));\n"
+@"\n"
+@"    float shadow = flatStyle ? 0.0 : exp(-max(sh, 0.0) / (5.0 * px)) * 0.30 * master;\n"
+@"    float cover = saturate(0.5 - sd) * master;\n"
+@"    if (cover <= 0.0 && shadow < 0.004) {\n"
+@"        return dst;\n"
+@"    }\n"
+@"\n"
+@"    int n = int(scene.counts.x);\n"
+@"    float cells = max(scene.counts.z, 1.0);\n"
+@"    float iconAcc = 0.0;\n"
+@"    float pressAcc = 0.0;\n"
+@"    for (int i = 0; i < n; i++) {\n"
+@"        constant ZSItem &it = scene.items[i];\n"
+@"        float2 hs = it.rect.zw * 0.5;\n"
+@"        float2 c = it.rect.xy + hs;\n"
+@"        float si = zs_box(pos - c, hs, it.radii);\n"
+@"        pressAcc = max(pressAcc, it.params.x * saturate(0.5 - si / (3.0 * px)));\n"
+@"        float2 ip = (pos - c) / (24.0 * px) + 0.5;\n"
+@"        if (ip.x >= 0.0 && ip.x <= 1.0 && ip.y >= 0.0 && ip.y <= 1.0) {\n"
+@"            float a = atlas.sample(smp, float2((it.params.y + ip.x) / cells, ip.y), level(0)).a;\n"
+@"            iconAcc = max(iconAcc, a * it.params.z);\n"
+@"        }\n"
+@"    }\n"
+@"\n"
+@"    float3 g = lin ? pow(max(dst.rgb, float3(0.0)), float3(1.0 / 2.2)) : dst.rgb;\n"
+@"    float3 result;\n"
+@"\n"
+@"    if (flatStyle) {\n"
+@"        float3 body = mix(g, float3(0.08), 0.94);\n"
+@"        body = mix(body, float3(1.0), iconAcc);\n"
+@"        result = mix(g, body, cover);\n"
+@"    } else {\n"
+@"        float3 base = g * (1.0 - shadow);\n"
+@"        float dist = max(-sd, 0.0);\n"
+@"        float luma = dot(g, float3(0.299, 0.587, 0.114));\n"
+@"        float3 body = mix(g, float3(luma), 0.5) * 0.5 + 0.055;\n"
+@"\n"
+@"        float2 nrm = grad / max(length(grad), 0.0001);\n"
+@"        float facing = dot(nrm, normalize(float2(-0.62, -0.78)));\n"
+@"        float lit = saturate(facing);\n"
+@"        float back = saturate(-facing);\n"
+@"        float spec = lit * lit + 0.55 * back * back;\n"
+@"        float edge = exp(-dist / (2.4 * px));\n"
+@"        float wide = exp(-dist / (7.0 * px));\n"
+@"        float rim = 1.0 - smoothstep(0.0, 1.3 * px, dist);\n"
+@"\n"
+@"        body += g * edge * 0.30;\n"
+@"        body += wide * lit * 0.06;\n"
+@"        body += edge * spec * 0.42;\n"
+@"        body += rim * (0.10 + 0.38 * spec);\n"
+@"        body += pressAcc * (0.10 + 0.14 * edge);\n"
+@"        body = mix(saturate(body), float3(1.0), iconAcc);\n"
+@"\n"
+@"        result = mix(base, body, cover);\n"
+@"    }\n"
+@"\n"
+@"    if (lin) {\n"
+@"        result = pow(max(result, float3(0.0)), float3(2.2));\n"
+@"    }\n"
+@"    return float4(result, dst.a);\n"
+@"}\n";
+
+static BOOL zs_mt_format_is_linear(MTLPixelFormat format) {
+    return format == MTLPixelFormatBGRA8Unorm_sRGB ||
+           format == MTLPixelFormatRGBA8Unorm_sRGB ||
+           format == MTLPixelFormatRGBA16Float;
+}
+
+static id<MTLRenderPipelineState> zs_mt_make_pipeline(id<MTLLibrary> library, MTLPixelFormat format) {
+    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"zs_tab_vertex"];
+    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"zs_tab_fragment"];
+    if (!vertexFunction || !fragmentFunction) return nil;
+    MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = vertexFunction;
+    descriptor.fragmentFunction = fragmentFunction;
+    descriptor.colorAttachments[0].pixelFormat = format;
+    descriptor.colorAttachments[0].blendingEnabled = NO;
+    NSError *error = nil;
+    id<MTLRenderPipelineState> state = [library.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!state) ZLog(@"[MetalTabs] pipeline creation failed: %@", error);
+    return state;
+}
+
+static void zs_mt_request_resync(void) {
+    CFTimeInterval now = CACurrentMediaTime();
+    if (now - r_zsmtLastResync < 0.5) return;
+    r_zsmtLastResync = now;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[UserInterface shared] zs_refreshMetalTabs];
+    });
+}
+
+static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
+    if (!g_zsmtVisible && r_zsmtMaster <= 0.0f) return;
+
+    CAMetalLayer *layer = g_zsmtLayer;
+    if (!layer || drawable.layer != layer) return;
+    id<MTLTexture> target = drawable.texture;
+    if (!target) return;
+
+    ZSMTRect rects[8];
+    float pressTarget[8];
+    int count;
+    float viewW, viewH;
+    BOOL visible, snap, glass;
+    NSData *atlasData;
+    int atlasVersion, atlasCellPx, atlasCells;
+    id<MTLLibrary> library;
+    id<MTLRenderPipelineState> pipeline = nil;
+
+    os_unfair_lock_lock(&g_zsmtLock);
+    count = g_zsmtCount;
+    memcpy(rects, g_zsmtRects, sizeof(rects));
+    memcpy(pressTarget, g_zsmtPressTarget, sizeof(pressTarget));
+    viewW = g_zsmtViewW;
+    viewH = g_zsmtViewH;
+    visible = g_zsmtVisible;
+    snap = g_zsmtSnap;
+    g_zsmtSnap = NO;
+    glass = g_zsmtGlass;
+    atlasData = g_zsmtAtlasData;
+    atlasVersion = g_zsmtAtlasVersion;
+    atlasCellPx = g_zsmtAtlasCellPx;
+    atlasCells = g_zsmtAtlasCells;
+    library = g_zsmtLibrary;
+    if (g_zsmtPipelineFormat == target.pixelFormat) pipeline = g_zsmtPipeline;
+    os_unfair_lock_unlock(&g_zsmtLock);
+
+    CFTimeInterval now = CACurrentMediaTime();
+    float dt = r_zsmtLastTime > 0 ? (float)MIN(MAX(now - r_zsmtLastTime, 0.0), 0.1) : 0.016f;
+    r_zsmtLastTime = now;
+
+    float masterTarget = (visible && count > 0) ? 1.0f : 0.0f;
+    if (snap && masterTarget > 0.0f) r_zsmtMaster = 1.0f;
+    float masterRate = masterTarget > r_zsmtMaster ? 18.0f : 28.0f;
+    r_zsmtMaster += (masterTarget - r_zsmtMaster) * (1.0f - expf(-dt * masterRate));
+    if (fabsf(masterTarget - r_zsmtMaster) < 0.004f) r_zsmtMaster = masterTarget;
+
+    float pressBlend = 1.0f - expf(-dt * 24.0f);
+    for (int i = 0; i < kZSMTMaxItems; i++) {
+        r_zsmtPress[i] += (pressTarget[i] - r_zsmtPress[i]) * pressBlend;
+        if (fabsf(pressTarget[i] - r_zsmtPress[i]) < 0.004f) r_zsmtPress[i] = pressTarget[i];
+    }
+
+    if (r_zsmtMaster <= 0.0f || count <= 0 || viewW <= 0 || viewH <= 0 || !library) return;
+
+    float sx = (float)target.width / viewW;
+    float sy = (float)target.height / viewH;
+    if (fabsf(sx - sy) / sx > 0.03f) {
+        zs_mt_request_resync();
+        return;
+    }
+
+    MTLPixelFormat format = target.pixelFormat;
+    if (!pipeline) {
+        if (r_zsmtFailedFormat == format) return;
+        pipeline = zs_mt_make_pipeline(library, format);
+        if (!pipeline) {
+            r_zsmtFailedFormat = format;
+            return;
+        }
+        os_unfair_lock_lock(&g_zsmtLock);
+        g_zsmtPipeline = pipeline;
+        g_zsmtPipelineFormat = format;
+        os_unfair_lock_unlock(&g_zsmtLock);
+    }
+
+    if (atlasData.length > 0 && atlasCellPx > 0 && atlasCells > 0 && (!r_zsmtAtlas || r_zsmtAtlasVersion != atlasVersion)) {
+        NSUInteger width = (NSUInteger)atlasCellPx * (NSUInteger)atlasCells;
+        NSUInteger height = (NSUInteger)atlasCellPx;
+        MTLTextureDescriptor *textureDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                                     width:width
+                                                                                                    height:height
+                                                                                                 mipmapped:NO];
+        textureDescriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> atlas = [commandBuffer.device newTextureWithDescriptor:textureDescriptor];
+        if (atlas && atlasData.length >= width * height * 4) {
+            [atlas replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:atlasData.bytes bytesPerRow:width * 4];
+            r_zsmtAtlas = atlas;
+            r_zsmtAtlasVersion = atlasVersion;
+        }
+    }
+    if (!r_zsmtAtlas) return;
+
+    ZSMTGPUScene scene;
+    memset(&scene, 0, sizeof(scene));
+    float px = sx;
+    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    for (int i = 0; i < count && i < kZSMTMaxItems; i++) {
+        float pr = r_zsmtPress[i];
+        float w = rects[i].w * (1.0f + 0.10f * pr);
+        float h = rects[i].h * (1.0f + 0.06f * pr);
+        float right = rects[i].x + rects[i].w;
+        float cy = rects[i].y + rects[i].h * 0.5f;
+        float x = right - w;
+        float y = cy - h * 0.5f;
+        float rx = x * sx, ry = y * sy, rw = w * sx, rh = h * sy;
+        float radius = MIN((float)kZSMTCornerRadius * px, rh * 0.5f);
+        scene.items[i].rect[0] = rx;
+        scene.items[i].rect[1] = ry;
+        scene.items[i].rect[2] = rw;
+        scene.items[i].rect[3] = rh;
+        scene.items[i].radii[0] = radius;
+        scene.items[i].radii[1] = 0;
+        scene.items[i].radii[2] = 0;
+        scene.items[i].radii[3] = radius;
+        scene.items[i].params[0] = pr;
+        scene.items[i].params[1] = (float)i;
+        scene.items[i].params[2] = i == 0 ? 0.66f : 0.85f;
+        minX = MIN(minX, rx);
+        minY = MIN(minY, ry);
+        maxX = MAX(maxX, rx + rw);
+        maxY = MAX(maxY, ry + rh);
+    }
+    float margin = 18.0f * px;
+    scene.viewport[0] = (float)target.width;
+    scene.viewport[1] = (float)target.height;
+    scene.misc[0] = margin;
+    scene.misc[1] = px;
+    scene.misc[2] = zs_mt_format_is_linear(format) ? 1.0f : 0.0f;
+    scene.misc[3] = r_zsmtMaster;
+    scene.quad[0] = minX - margin;
+    scene.quad[1] = minY - margin;
+    scene.quad[2] = maxX + margin;
+    scene.quad[3] = maxY + margin;
+    scene.counts[0] = (float)MIN(count, kZSMTMaxItems);
+    scene.counts[1] = 9.0f * px;
+    scene.counts[2] = (float)atlasCells;
+    scene.counts[3] = glass ? 0.0f : 1.0f;
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) return;
+    encoder.label = @"ZS Pull Tabs";
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setVertexBytes:&scene length:sizeof(scene) atIndex:0];
+    [encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
+    [encoder setFragmentTexture:r_zsmtAtlas atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [encoder endEncoding];
+}
+
+static void zs_mt_note_drawable(id commandBuffer, id drawable) {
+    if (drawable) objc_setAssociatedObject(commandBuffer, kZSMTPendingDrawableKey, drawable, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void zs_mt_hook_present(id self, SEL _cmd, id drawable) {
+    zs_mt_note_drawable(self, drawable);
+    ((void (*)(id, SEL, id))g_zsmtOrigPresent)(self, _cmd, drawable);
+}
+
+static void zs_mt_hook_present_at(id self, SEL _cmd, id drawable, CFTimeInterval time) {
+    zs_mt_note_drawable(self, drawable);
+    ((void (*)(id, SEL, id, CFTimeInterval))g_zsmtOrigPresentAt)(self, _cmd, drawable, time);
+}
+
+static void zs_mt_hook_present_after(id self, SEL _cmd, id drawable, CFTimeInterval duration) {
+    zs_mt_note_drawable(self, drawable);
+    ((void (*)(id, SEL, id, CFTimeInterval))g_zsmtOrigPresentAfter)(self, _cmd, drawable, duration);
+}
+
+static void zs_mt_hook_commit(id self, SEL _cmd) {
+    id drawable = objc_getAssociatedObject(self, kZSMTPendingDrawableKey);
+    if (drawable) {
+        objc_setAssociatedObject(self, kZSMTPendingDrawableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        zs_mt_encode(self, drawable);
+    }
+    ((void (*)(id, SEL))g_zsmtOrigCommit)(self, _cmd);
+}
+
+static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *originalOut) {
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return;
+    *originalOut = method_getImplementation(method);
+    class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
+}
+
+@interface ZSMetalTabs : NSObject
++ (instancetype)shared;
+- (void)ensureInstalled;
+- (BOOL)isVisible;
+- (void)setVisible:(BOOL)visible snap:(BOOL)snap;
+- (void)updateWithViewSize:(CGSize)size
+                     rects:(NSArray<NSValue *> *)rects
+                      keys:(NSArray<NSString *> *)keys
+                   symbols:(NSArray<NSString *> *)symbols
+                     glass:(BOOL)glass
+                   visible:(BOOL)visible
+                      snap:(BOOL)snap;
+- (BOOL)touchBegan:(UITouch *)touch inView:(UIView *)view;
+- (void)touchMoved:(UITouch *)touch inView:(UIView *)view;
+- (void)touchEnded:(UITouch *)touch inView:(UIView *)view cancelled:(BOOL)cancelled;
+@end
+
+@implementation ZSMetalTabs {
+    BOOL _installed;
+    NSInteger _installAttempts;
+    BOOL _visible;
+    NSArray<NSValue *> *_rects;
+    NSArray<NSString *> *_keys;
+    NSString *_atlasSignature;
+    int _atlasVersion;
+    __weak UITouch *_activeTouch;
+    NSInteger _activeIndex;
+}
+
++ (instancetype)shared {
+    static ZSMetalTabs *instance;
+    static dispatch_once_t token;
+    dispatch_once(&token, ^{
+        instance = [ZSMetalTabs new];
+        instance->_activeIndex = -1;
+    });
+    return instance;
+}
+
+- (void)ensureInstalled {
+    if (_installed) return;
+    UIView *view = zs_unity_view();
+    CAMetalLayer *layer = [view.layer isKindOfClass:[CAMetalLayer class]] ? (CAMetalLayer *)view.layer : nil;
+    id<MTLDevice> device = layer.device;
+    if (!layer || !device) {
+        if (++_installAttempts > 60) return;
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakSelf ensureInstalled];
+        });
+        return;
+    }
+
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLCommandBuffer> probe = [queue commandBuffer];
+    Class commandBufferClass = probe ? object_getClass(probe) : Nil;
+    [probe commit];
+    if (!commandBufferClass) return;
+
+    _installed = YES;
+    g_zsmtLayer = layer;
+
+    zs_mt_hook_method(commandBufferClass, @selector(presentDrawable:), (IMP)zs_mt_hook_present, &g_zsmtOrigPresent);
+    zs_mt_hook_method(commandBufferClass, @selector(presentDrawable:atTime:), (IMP)zs_mt_hook_present_at, &g_zsmtOrigPresentAt);
+    zs_mt_hook_method(commandBufferClass, @selector(presentDrawable:afterMinimumDuration:), (IMP)zs_mt_hook_present_after, &g_zsmtOrigPresentAfter);
+    zs_mt_hook_method(commandBufferClass, @selector(commit), (IMP)zs_mt_hook_commit, &g_zsmtOrigCommit);
+
+    MTLPixelFormat format = layer.pixelFormat;
+    MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
+    [device newLibraryWithSource:kZSMTShaderSource options:options completionHandler:^(id<MTLLibrary> library, NSError *error) {
+        if (!library) {
+            ZLog(@"[MetalTabs] shader compile failed: %@", error);
+            return;
+        }
+        id<MTLRenderPipelineState> pipeline = zs_mt_make_pipeline(library, format);
+        os_unfair_lock_lock(&g_zsmtLock);
+        g_zsmtLibrary = library;
+        if (pipeline) {
+            g_zsmtPipeline = pipeline;
+            g_zsmtPipelineFormat = format;
+        }
+        os_unfair_lock_unlock(&g_zsmtLock);
+    }];
+
+    ZLog(@"[MetalTabs] hooked %s", class_getName(commandBufferClass));
+}
+
+- (BOOL)isVisible {
+    return _visible;
+}
+
+- (void)setVisible:(BOOL)visible snap:(BOOL)snap {
+    _visible = visible;
+    os_unfair_lock_lock(&g_zsmtLock);
+    g_zsmtVisible = visible;
+    if (visible && snap) g_zsmtSnap = YES;
+    if (!visible) {
+        for (int i = 0; i < kZSMTMaxItems; i++) g_zsmtPressTarget[i] = 0;
+    }
+    os_unfair_lock_unlock(&g_zsmtLock);
+    if (!visible) {
+        _activeTouch = nil;
+        _activeIndex = -1;
+    }
+}
+
+- (NSData *)atlasDataForSymbols:(NSArray<NSString *> *)symbols cellPixels:(int *)cellPixels {
+    NSUInteger cells = symbols.count;
+    if (cells == 0) return nil;
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 4;
+    format.opaque = NO;
+    CGFloat cell = kZSMTCellPoints;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(cell * cells, cell) format:format];
+    UIImage *atlas = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        for (NSUInteger i = 0; i < cells; i++) {
+            CGFloat originX = cell * (CGFloat)i;
+            NSString *symbol = symbols[i];
+            if (symbol.length == 0) {
+                NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+                paragraph.alignment = NSTextAlignmentCenter;
+                NSDictionary *attributes = @{
+                    NSFontAttributeName: zs_mono_font(15, UIFontWeightLight),
+                    NSForegroundColorAttributeName: UIColor.whiteColor,
+                    NSParagraphStyleAttributeName: paragraph,
+                };
+                NSString *chevron = @"\u2039";
+                CGSize textSize = [chevron sizeWithAttributes:attributes];
+                [chevron drawInRect:CGRectMake(originX, (cell - textSize.height) * 0.5, cell, textSize.height) withAttributes:attributes];
+            } else {
+                UIImageSymbolConfiguration *configuration = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightMedium];
+                UIImage *image = [UIImage systemImageNamed:symbol withConfiguration:configuration];
+                image = [image imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
+                CGSize size = image.size;
+                [image drawInRect:CGRectMake(originX + (cell - size.width) * 0.5, (cell - size.height) * 0.5, size.width, size.height)];
+            }
+        }
+    }];
+
+    CGImageRef cgImage = atlas.CGImage;
+    if (!cgImage) return nil;
+    size_t width = CGImageGetWidth(cgImage);
+    size_t height = CGImageGetHeight(cgImage);
+    if (width == 0 || height == 0) return nil;
+    uint8_t *buffer = calloc(width * height * 4, 1);
+    if (!buffer) return nil;
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bitmap = CGBitmapContextCreate(buffer, width, height, 8, width * 4, colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+    if (!bitmap) {
+        free(buffer);
+        return nil;
+    }
+    CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), cgImage);
+    CGContextRelease(bitmap);
+    if (cellPixels) *cellPixels = (int)(width / cells);
+    return [NSData dataWithBytesNoCopy:buffer length:width * height * 4 freeWhenDone:YES];
+}
+
+- (void)updateWithViewSize:(CGSize)size
+                     rects:(NSArray<NSValue *> *)rects
+                      keys:(NSArray<NSString *> *)keys
+                   symbols:(NSArray<NSString *> *)symbols
+                     glass:(BOOL)glass
+                   visible:(BOOL)visible
+                      snap:(BOOL)snap {
+    NSUInteger count = MIN(rects.count, (NSUInteger)kZSMTMaxItems);
+    _rects = [rects subarrayWithRange:NSMakeRange(0, count)];
+    _keys = [keys subarrayWithRange:NSMakeRange(0, MIN(keys.count, count))];
+
+    NSString *signature = [symbols componentsJoinedByString:@"|"];
+    NSData *atlas = nil;
+    int cellPixels = 0;
+    BOOL rebuildAtlas = ![signature isEqualToString:_atlasSignature];
+    if (rebuildAtlas) {
+        atlas = [self atlasDataForSymbols:[symbols subarrayWithRange:NSMakeRange(0, MIN(symbols.count, count))] cellPixels:&cellPixels];
+        _atlasSignature = signature;
+        _atlasVersion++;
+    }
+
+    os_unfair_lock_lock(&g_zsmtLock);
+    g_zsmtCount = (int)count;
+    for (NSUInteger i = 0; i < count; i++) {
+        CGRect r = rects[i].CGRectValue;
+        g_zsmtRects[i] = (ZSMTRect){(float)r.origin.x, (float)r.origin.y, (float)r.size.width, (float)r.size.height};
+    }
+    g_zsmtViewW = (float)size.width;
+    g_zsmtViewH = (float)size.height;
+    g_zsmtGlass = glass;
+    if (rebuildAtlas) {
+        g_zsmtAtlasData = atlas;
+        g_zsmtAtlasVersion = _atlasVersion;
+        g_zsmtAtlasCellPx = cellPixels;
+        g_zsmtAtlasCells = (int)count;
+    }
+    os_unfair_lock_unlock(&g_zsmtLock);
+
+    [self setVisible:visible snap:snap];
+}
+
+- (NSInteger)hitIndexForPoint:(CGPoint)point slop:(CGSize)slop {
+    NSInteger best = -1;
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < _rects.count; i++) {
+        CGRect rect = CGRectInset(_rects[i].CGRectValue, -slop.width, -slop.height);
+        if (!CGRectContainsPoint(rect, point)) continue;
+        CGRect original = _rects[i].CGRectValue;
+        CGFloat distance = fabs(point.y - CGRectGetMidY(original));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = (NSInteger)i;
+        }
+    }
+    return best;
+}
+
+- (void)setPress:(float)value forIndex:(NSInteger)index {
+    if (index < 0 || index >= kZSMTMaxItems) return;
+    os_unfair_lock_lock(&g_zsmtLock);
+    g_zsmtPressTarget[index] = value;
+    os_unfair_lock_unlock(&g_zsmtLock);
+}
+
+- (BOOL)touchBegan:(UITouch *)touch inView:(UIView *)view {
+    if (!_visible || _activeTouch || _rects.count == 0) return NO;
+    NSInteger index = [self hitIndexForPoint:[touch locationInView:view] slop:CGSizeMake(8, 2)];
+    if (index < 0) return NO;
+    _activeTouch = touch;
+    _activeIndex = index;
+    [self setPress:1 forIndex:index];
+    return YES;
+}
+
+- (BOOL)touch:(UITouch *)touch isInsideIndex:(NSInteger)index inView:(UIView *)view {
+    if (index < 0 || index >= (NSInteger)_rects.count) return NO;
+    CGRect rect = CGRectInset(_rects[index].CGRectValue, -24, -24);
+    return CGRectContainsPoint(rect, [touch locationInView:view]);
+}
+
+- (void)touchMoved:(UITouch *)touch inView:(UIView *)view {
+    if (!_activeTouch || touch != _activeTouch) return;
+    [self setPress:[self touch:touch isInsideIndex:_activeIndex inView:view] ? 1 : 0 forIndex:_activeIndex];
+}
+
+- (void)touchEnded:(UITouch *)touch inView:(UIView *)view cancelled:(BOOL)cancelled {
+    if (!_activeTouch || touch != _activeTouch) return;
+    NSInteger index = _activeIndex;
+    BOOL inside = !cancelled && [self touch:touch isInsideIndex:index inView:view];
+    _activeTouch = nil;
+    _activeIndex = -1;
+    [self setPress:0 forIndex:index];
+    if (inside && index < (NSInteger)_keys.count) {
+        [[UserInterface shared] zs_metalTabActivatedForKey:_keys[index]];
+    }
+}
+
+@end
 
 @interface ZSPassthroughEffectView : UIVisualEffectView
 @end
@@ -4995,6 +5664,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
             SEL selector = selectors[i];
             BOOL isBegan = selector == @selector(touchesBegan:withEvent:);
             BOOL isTerminal = selector == @selector(touchesEnded:withEvent:) || selector == @selector(touchesCancelled:withEvent:);
+            BOOL isCancel = selector == @selector(touchesCancelled:withEvent:);
 
             Method method = class_getInstanceMethod(cls, selector);
             if (!method) continue;
@@ -5007,9 +5677,17 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
                     BOOL swallow;
                     if (isBegan) {
                         swallow = zs_touch_belongs_to_host_ui(touch, receiver);
+                        if (!swallow) swallow = [[ZSMetalTabs shared] touchBegan:touch inView:receiver];
                         if (swallow) [swallowed addObject:touch];
                     } else {
                         swallow = [swallowed containsObject:touch];
+                        if (swallow) {
+                            if (isTerminal) {
+                                [[ZSMetalTabs shared] touchEnded:touch inView:receiver cancelled:isCancel];
+                            } else {
+                                [[ZSMetalTabs shared] touchMoved:touch inView:receiver];
+                            }
+                        }
                         if (isTerminal && swallow) [swallowed removeObject:touch];
                     }
                     if (swallow) continue;
@@ -5077,6 +5755,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     zs_gif_tint_set_disabled(zs_enkephalin_disabled_by_user());
 
     [self zs_presentTutorialIfNeeded];
+    [self zs_refreshMetalTabs];
 
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -5343,6 +6022,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.tutorialOKButton = nil;
     self.tutorialGestureWarningLabel = nil;
     self.tutorialPresented = NO;
+    [self zs_refreshMetalTabs];
 
     [UIView animateWithDuration:0.18 animations:^{
         panel.alpha = 0;
@@ -5362,12 +6042,15 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
 
+    BOOL fromTabs = [[ZSMetalTabs shared] isVisible];
+    CGFloat tabInset = fromTabs ? kHandleWidth : 0;
     self.panelOpen = YES;
+    [[ZSMetalTabs shared] setVisible:NO snap:NO];
     [self buildPanel:unityView];
     zs_reapply_all_settings();
 
     CGRect restingFrame = self.glassContainer.frame;
-    CGFloat offscreenDeltaX = unityView.bounds.size.width - restingFrame.origin.x;
+    CGFloat offscreenDeltaX = unityView.bounds.size.width - tabInset - restingFrame.origin.x;
 
     CGRect contentOverlayRestingFrame = self.contentOverlay.frame;
     self.contentOverlay.frame = CGRectOffset(contentOverlayRestingFrame, offscreenDeltaX, 0);
@@ -5380,7 +6063,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 
     UIView *handleElement = self.handleGlass ?: self.handle;
     CGRect handleRestingFrame = handleElement.frame;
-    handleElement.frame = CGRectMake(handleRestingFrame.origin.x + kHandleWidth,
+    handleElement.frame = CGRectMake(handleRestingFrame.origin.x + (fromTabs ? 0 : kHandleWidth),
                                       handleRestingFrame.origin.y,
                                       handleRestingFrame.size.width,
                                       handleRestingFrame.size.height);
@@ -5389,10 +6072,10 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     for (NSString *pinKey in self.pinnedTabElements) {
         UIView *pinnedElement = self.pinnedTabElements[pinKey];
         pinnedRestingFrames[pinKey] = [NSValue valueWithCGRect:pinnedElement.frame];
-        pinnedElement.frame = CGRectOffset(pinnedElement.frame, kHandleWidth, 0);
+        pinnedElement.frame = CGRectOffset(pinnedElement.frame, fromTabs ? 0 : kHandleWidth, 0);
     }
 
-    self.glassContainer.frame = CGRectMake(unityView.bounds.size.width,
+    self.glassContainer.frame = CGRectMake(unityView.bounds.size.width - tabInset,
                                             restingFrame.origin.y,
                                             restingFrame.size.width,
                                             restingFrame.size.height);
@@ -5457,7 +6140,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
         return;
     }
 
-    CGRect offscreenFrame = CGRectMake(unityView.bounds.size.width,
+    UIView *closingHandle = self.handleGlass ?: self.handle;
+    BOOL landOnTabs = [self zs_metalTabsAvailableAfterClose] && closingHandle.frame.origin.x < 0.5;
+    CGFloat tabInset = landOnTabs ? kHandleWidth : 0;
+
+    CGRect offscreenFrame = CGRectMake(unityView.bounds.size.width - tabInset,
                                         self.glassContainer.frame.origin.y,
                                         self.glassContainer.frame.size.width,
                                         self.glassContainer.frame.size.height);
@@ -5470,14 +6157,14 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     CGRect extendedOffscreenFrame = extendedVisible ? CGRectOffset(self.extendedContentClip.frame, offscreenDeltaX, 0) : CGRectZero;
 
     UIView *handleElement = self.handleGlass ?: self.handle;
-    CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
+    CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + (landOnTabs ? 0 : kHandleWidth),
                                               handleElement.frame.origin.y,
                                               handleElement.frame.size.width,
                                               handleElement.frame.size.height);
 
     NSMutableDictionary<NSString *, NSValue *> *pinnedRetractedFrames = [NSMutableDictionary dictionary];
     for (NSString *pinKey in self.pinnedTabElements) {
-        pinnedRetractedFrames[pinKey] = [NSValue valueWithCGRect:CGRectOffset(self.pinnedTabElements[pinKey].frame, kHandleWidth, 0)];
+        pinnedRetractedFrames[pinKey] = [NSValue valueWithCGRect:CGRectOffset(self.pinnedTabElements[pinKey].frame, landOnTabs ? 0 : kHandleWidth, 0)];
     }
 
     __weak typeof(self) weakSelf = self;
@@ -5495,6 +6182,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
         if (extendedVisible) weakSelf.extendedContentClip.frame = extendedOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
+        [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:landOnTabs];
         [weakSelf teardownPanelState];
     }];
 }
@@ -14077,10 +14765,69 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     }];
 }
 
+- (BOOL)zs_metalTabsAvailableAfterClose {
+    return zs_ui_host_view() != nil && self.installed && !self.tutorialPresented && [self zs_pinnedKeys].count > 0;
+}
+
+- (void)zs_refreshMetalTabs {
+    [self zs_syncMetalTabsAllowingHierarchy:NO snap:NO];
+}
+
+- (void)zs_syncMetalTabsAllowingHierarchy:(BOOL)allowHierarchy snap:(BOOL)snap {
+    ZSMetalTabs *tabs = [ZSMetalTabs shared];
+    UIView *unityView = zs_ui_host_view();
+    NSArray<NSString *> *keys = [[self zs_pinnedKeys] copy];
+    BOOL show = unityView && self.installed && !self.panelOpen && (allowHierarchy || !self.glassContainer) && !self.tutorialPresented && keys.count > 0;
+    if (!show) {
+        [tabs setVisible:NO snap:NO];
+        return;
+    }
+    [tabs ensureInstalled];
+
+    CGSize size = unityView.bounds.size;
+    CGFloat tabX = size.width - kHandleWidth;
+    CGFloat handleY = (size.height - kHandleHeight) * 0.5 + (CGFloat)keys.count * (kZSPinnedTabHeight + kZSPinnedTabGap) * 0.5;
+    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithObject:[NSValue valueWithCGRect:CGRectMake(tabX, handleY, kHandleWidth, kHandleHeight)]];
+    NSMutableArray<NSString *> *itemKeys = [NSMutableArray arrayWithObject:kZSMTHandleKey];
+    NSMutableArray<NSString *> *symbols = [NSMutableArray arrayWithObject:@""];
+    for (NSUInteger idx = 0; idx < keys.count; idx++) {
+        NSDictionary<NSString *, NSString *> *action = zs_pin_action_for_key(keys[idx]);
+        if (!action) continue;
+        [rects addObject:[NSValue valueWithCGRect:[self zs_pinnedSlotFrameAtIndex:idx handleY:handleY localX:tabX]]];
+        [itemKeys addObject:keys[idx]];
+        [symbols addObject:action[@"symbol"] ?: @""];
+    }
+    [tabs updateWithViewSize:size rects:rects keys:itemKeys symbols:symbols glass:zs_has_liquid_glass() visible:YES snap:snap];
+}
+
+- (void)zs_metalTabActivatedForKey:(NSString *)key {
+    if (self.panelOpen || self.glassContainer || !key) return;
+    if ([key isEqualToString:kZSMTHandleKey]) {
+        [self openPanel];
+        return;
+    }
+    [self zs_performPinnedActionForKey:key];
+}
+
 - (void)zs_pinnedTabTapped:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) return;
     if (self.pinMenuOpen) return;
     NSString *key = objc_getAssociatedObject(gesture, "zs_pinKey");
+    [self zs_performPinnedActionForKey:key];
+}
+
+- (void)zs_performPinnedActionForKey:(NSString *)key {
+    if (!key) return;
+    BOOL needsPanel = [key isEqualToString:kZSPinKeyMemory] || [key isEqualToString:kZSPinKeySyslog];
+    if (needsPanel && !self.panelOpen) {
+        [self openPanel];
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (strongSelf && strongSelf.panelOpen) [strongSelf zs_performPinnedActionForKey:key];
+        });
+        return;
+    }
     if ([key isEqualToString:kZSPinKeyMemory]) {
         [self memoryUsageAnalyzeTapped:nil];
     } else if ([key isEqualToString:kZSPinKeySyslog]) {
@@ -14474,6 +15221,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 - (void)deviceOrientationChanged {
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
+    [self zs_refreshMetalTabs];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [weakSelf zs_refreshMetalTabs];
+    });
     [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
     [self zs_layoutTutorialForWindow:unityView];
     if (!self.panel) return;
