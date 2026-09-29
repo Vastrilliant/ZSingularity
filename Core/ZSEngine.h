@@ -372,6 +372,11 @@ void zs_set_memory_top_assets_kind_filter(NSString * _Nullable kind);
 NSString * _Nullable zs_memory_top_assets_kind_filter(void);
 
 void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageGroup *> * _Nonnull groups));
+
+#define ZS_MEMORY_SCAN_CYCLE_SECONDS 5.0
+
+void zs_memory_scan_reset(void);
+NSArray<ZSMemoryUsageGroup *> * _Nullable zs_memory_scan_step(NSUInteger * _Nullable unitsDoneOut);
 int64_t zs_current_process_resident_memory_bytes(void);
 
 typedef struct {

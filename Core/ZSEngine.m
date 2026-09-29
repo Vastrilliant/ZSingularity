@@ -1843,14 +1843,15 @@ static const NSUInteger kZSTopAssetsPageSize = 20;
 static const NSUInteger kZSFootprintMaxRows = 22;
 static const NSUInteger kZSUnityMaxRows = 16;
 static const NSUInteger kZSCleanFileMaxRows = 10;
-static const CFTimeInterval kZSAssetScanMinInterval = 3.0;
 
 static NSUInteger g_topAssetsPage = 0;
 static NSString *g_topAssetsKindFilter = nil;
 static NSUInteger g_topAssetsKnownLastPage = NSUIntegerMax;
-static ZSAssetScanResult *g_cachedAssetScan;
+@class ZSMemoryScanSession;
+static ZSMemoryScanSession *g_memoryScanSession;
 
 void zs_set_memory_top_assets_page(NSUInteger page) {
+    if (g_topAssetsPage != page) g_memoryScanSession = nil;
     g_topAssetsPage = page;
 }
 
@@ -1860,7 +1861,7 @@ void zs_set_memory_top_assets_kind_filter(NSString *kind) {
     g_topAssetsKindFilter = normalized;
     g_topAssetsPage = 0;
     g_topAssetsKnownLastPage = NSUIntegerMax;
-    g_cachedAssetScan = nil;
+    g_memoryScanSession = nil;
 }
 
 NSString *zs_memory_top_assets_kind_filter(void) {
@@ -1974,6 +1975,13 @@ typedef struct {
     double milliseconds;
 } ZSVMWalkTotals;
 
+typedef struct {
+    vm_address_t address;
+    natural_t depth;
+    BOOL started;
+    BOOL finished;
+} ZSVMWalkCursor;
+
 static const char *const kZSVMTagNames[256] = {
     [1] = "Malloc (system)",
     [2] = "Malloc small",
@@ -2086,7 +2094,9 @@ static NSMutableDictionary<NSNumber *, NSString *> *g_vmFileLabelCache;
 
 static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners,
                                NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles,
-                               ZSVMWalkTotals *totals) {
+                               ZSVMWalkTotals *totals,
+                               ZSVMWalkCursor *cursor,
+                               NSUInteger regionBudget) {
     typedef int (*ZSRegionFilenameFn)(int, uint64_t, void *, uint32_t);
     static ZSRegionFilenameFn regionFilename;
     static dispatch_once_t regionFilenameOnce;
@@ -2095,17 +2105,28 @@ static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCate
     });
 
     CFTimeInterval started = CACurrentMediaTime();
-    memset(totals, 0, sizeof(*totals));
     if (!g_vmFileLabelCache) g_vmFileLabelCache = [NSMutableDictionary new];
-    if (g_vmFileLabelCache.count > 4096) [g_vmFileLabelCache removeAllObjects];
+    if (!cursor->started) {
+        cursor->started = YES;
+        if (g_vmFileLabelCache.count > 4096) [g_vmFileLabelCache removeAllObjects];
+    }
 
     const int64_t pageSize = (int64_t)vm_page_size;
     const int pid = (int)getpid();
     char pathBuffer[1024];
-    vm_address_t address = 0;
-    natural_t depth = 0;
+    vm_address_t address = cursor->address;
+    natural_t depth = cursor->depth;
+    NSUInteger visited = 0;
 
     for (;;) {
+        if (regionBudget > 0 && visited >= regionBudget) {
+            cursor->address = address;
+            cursor->depth = depth;
+            totals->milliseconds += (CACurrentMediaTime() - started) * 1000.0;
+            return;
+        }
+        visited++;
+
         vm_size_t size = 0;
         vm_region_submap_info_data_64_t info;
         mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
@@ -2214,7 +2235,10 @@ static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCate
         address += size;
     }
 
-    totals->milliseconds = (CACurrentMediaTime() - started) * 1000.0;
+    cursor->address = address;
+    cursor->depth = depth;
+    cursor->finished = YES;
+    totals->milliseconds += (CACurrentMediaTime() - started) * 1000.0;
 }
 
 typedef struct {
@@ -2429,167 +2453,6 @@ static void zs_top_assets_consider(ZSTopAssetCandidate *top,
     if (*count < capacity) (*count)++;
 }
 
-static ZSAssetScanResult *zs_scan_loaded_assets(void) {
-    CFTimeInterval started = CACurrentMediaTime();
-    ZSAssetScanResult *result = [ZSAssetScanResult new];
-    result.assetCategories = [NSMutableArray new];
-    result.topAssets = [NSMutableArray new];
-    result.objectCounts = [NSMutableArray new];
-
-    NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
-
-    NSString *kindFilter = g_topAssetsKindFilter;
-    BOOL kindFilterMatched = kindFilter == nil;
-    result.kindFilter = kindFilter;
-    result.kindOptions = [NSMutableArray new];
-
-    NSUInteger requestedPage = g_topAssetsPage;
-    if (g_topAssetsKnownLastPage != NSUIntegerMax) requestedPage = MIN(requestedPage, g_topAssetsKnownLastPage);
-    NSUInteger candidateCapacity = (requestedPage + 1) * kZSTopAssetsPageSize;
-    ZSTopAssetCandidate *candidates = calloc(candidateCapacity, sizeof(ZSTopAssetCandidate));
-    NSUInteger candidateCount = 0;
-    NSUInteger totalAssets = 0;
-
-    for (NSUInteger d = 0; d < descriptorCount; d++) {
-        const ZSMemoryUsageCategoryDescriptor *descriptor = &kZSMemoryUsageCategoryDescriptors[d];
-        void *klass = mt_class(descriptor->ns, descriptor->klassName, descriptor->assembly);
-        if (!klass) continue;
-
-        NSUInteger count = 0;
-        void *array = zs_resources_find_all_for_class(klass, &count);
-        if (!array || count == 0) continue;
-
-        if (!descriptor->tracked) {
-            ZSMemoryUsageCategory *countRow = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName], 0, nil);
-            countRow.objectCount = count;
-            [result.objectCounts addObject:countRow];
-            continue;
-        }
-
-        int64_t categoryTotal = 0;
-        NSUInteger liveCount = 0;
-
-        NSString *kindName = [NSString stringWithUTF8String:descriptor->klassName];
-        BOOL kindMatchesFilter = kindFilter == nil || [kindFilter isEqualToString:kindName];
-
-        BOOL estimatesTexture = descriptor->family == ZSAssetFamilyTexture;
-        ZSTextureMethods textureMethods;
-        memset(&textureMethods, 0, sizeof(textureMethods));
-        if (estimatesTexture) {
-            textureMethods.width = mt_method(klass, "get_width", 0);
-            textureMethods.height = mt_method(klass, "get_height", 0);
-            textureMethods.mipCount = mt_method(klass, "get_mipmapCount", 0);
-            textureMethods.format = mt_method(klass, "get_format", 0);
-            textureMethods.streaming = mt_method(klass, "get_streamingMipmaps", 0);
-            textureMethods.loadedMip = mt_method(klass, "get_loadedMipmapLevel", 0);
-            textureMethods.depth = mt_method(klass, "get_depth", 0);
-            textureMethods.cubemapCount = mt_method(klass, "get_cubemapCount", 0);
-        }
-
-        for (NSUInteger i = 0; i < count; i++) {
-            void *obj = zs_array_object_at(array, i);
-            if (!obj) continue;
-
-            int64_t size = 0;
-            BOOL gotProfilerSize = mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size);
-            if (!gotProfilerSize) size = 0;
-
-            if (estimatesTexture) {
-                int64_t estimated = zs_estimate_texture_bytes(obj, descriptor, &textureMethods);
-                if (estimated > size) {
-                    result.estimatedGpuTextureBytes += estimated - size;
-                    size = estimated;
-                }
-            }
-            if (size <= 0) continue;
-
-            categoryTotal += size;
-            liveCount++;
-
-            if (descriptor->family == ZSAssetFamilyTexture || descriptor->family == ZSAssetFamilyMesh) {
-                BOOL readable = NO;
-                if (mt_get_instance_bool(obj, "get_isReadable", &readable) && readable) {
-                    if (descriptor->family == ZSAssetFamilyTexture) {
-                        result.readableTextureBytes += size;
-                        result.readableTextureCount++;
-                    } else {
-                        result.readableMeshBytes += size;
-                        result.readableMeshCount++;
-                    }
-                }
-            }
-
-            if (kindMatchesFilter) {
-                totalAssets++;
-                if (candidates) zs_top_assets_consider(candidates, &candidateCount, candidateCapacity, obj, size, descriptor);
-            }
-        }
-
-        if (categoryTotal <= 0) continue;
-
-        if (kindMatchesFilter) kindFilterMatched = YES;
-        ZSMemoryUsageCategory *kindRow = zs_make_memory_row(kindName, categoryTotal, nil);
-        kindRow.objectCount = liveCount;
-        [result.kindOptions addObject:kindRow];
-
-        ZSMemoryUsageCategory *category = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName],
-                                                             categoryTotal,
-                                                             [NSString stringWithFormat:@"%lu objects", (unsigned long)liveCount]);
-        category.objectCount = liveCount;
-        [result.assetCategories addObject:category];
-        result.assetTrackedBytes += categoryTotal;
-    }
-
-    if (!kindFilterMatched) {
-        free(candidates);
-        g_topAssetsKindFilter = nil;
-        g_topAssetsPage = 0;
-        g_topAssetsKnownLastPage = NSUIntegerMax;
-        return zs_scan_loaded_assets();
-    }
-
-    [result.kindOptions sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
-        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
-        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
-    }];
-
-    NSUInteger lastPage = totalAssets > 0 ? (totalAssets - 1) / kZSTopAssetsPageSize : 0;
-    NSUInteger page = MIN(requestedPage, lastPage);
-    g_topAssetsPage = page;
-    g_topAssetsKnownLastPage = lastPage;
-    result.pageCount = lastPage + 1;
-
-    NSUInteger pageStart = page * kZSTopAssetsPageSize;
-    NSUInteger pageEnd = MIN(candidateCount, pageStart + kZSTopAssetsPageSize);
-    for (NSUInteger i = pageStart; i < pageEnd; i++) {
-        ZSTopAssetCandidate candidate = candidates[i];
-        NSString *name = mt_get_instance_string(candidate.obj, "get_name");
-        [result.topAssets addObject:zs_make_memory_row(name.length > 0 ? name : @"(unnamed)",
-                                                       candidate.size,
-                                                       zs_asset_detail_string(candidate.obj, candidate.descriptor))];
-    }
-    free(candidates);
-
-    result.pageIndex = page;
-    result.hasNextPage = totalAssets > (page + 1) * kZSTopAssetsPageSize;
-
-    [result.objectCounts sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
-        if (a.objectCount == b.objectCount) return NSOrderedSame;
-        return a.objectCount > b.objectCount ? NSOrderedAscending : NSOrderedDescending;
-    }];
-
-    result.scannedAt = CACurrentMediaTime();
-    result.scanMilliseconds = (result.scannedAt - started) * 1000.0;
-    return result;
-}
-
-static ZSAssetScanResult *zs_cached_asset_scan(void) {
-    CFTimeInterval now = CACurrentMediaTime();
-    if (g_cachedAssetScan && g_cachedAssetScan.pageIndex == g_topAssetsPage && now - g_cachedAssetScan.scannedAt < kZSAssetScanMinInterval) return g_cachedAssetScan;
-    g_cachedAssetScan = zs_scan_loaded_assets();
-    return g_cachedAssetScan;
-}
-
 static ZSMemoryUsageGroup *zs_build_footprint_group(NSDictionary<NSString *, ZSMemoryUsageCategory *> *owners,
                                                     const ZSVMWalkTotals *totals,
                                                     int64_t footprint) {
@@ -2721,8 +2584,8 @@ static ZSMemoryUsageGroup *zs_build_diagnostics_group(ZSAssetScanResult *scan,
 
     [rows addObject:zs_make_memory_row(@"Analyzer cost",
                                        0,
-                                       [NSString stringWithFormat:@"asset scan %.0f ms every %.0f s · VM walk %.1f ms",
-                                        scan.scanMilliseconds, kZSAssetScanMinInterval, totals->milliseconds])];
+                                       [NSString stringWithFormat:@"full scan %.0f ms spread over %.0f s · VM walk %.1f ms",
+                                        scan.scanMilliseconds, (double)ZS_MEMORY_SCAN_CYCLE_SECONDS, totals->milliseconds])];
 
     return zs_make_memory_group(@"Reservations & diagnostics", @"Not additive: several rows describe the same memory from different angles", NO, rows);
 }
@@ -2744,23 +2607,322 @@ static ZSMemoryUsageGroup *zs_build_clean_files_group(NSDictionary<NSString *, Z
                                 rows);
 }
 
-static NSArray<ZSMemoryUsageGroup *> *zs_scan_memory_usage_breakdown_sync(void) {
-    NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners = [NSMutableDictionary new];
-    NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles = [NSMutableDictionary new];
-    ZSVMWalkTotals totals;
-    zs_walk_vm_regions(owners, cleanFiles, &totals);
+@interface ZSTopAssetEntry : NSObject
+@property (nonatomic, assign) int64_t size;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, copy) NSString *detail;
+@end
 
-    int64_t footprint = zs_current_process_resident_memory_bytes();
+@implementation ZSTopAssetEntry
+@end
+
+@interface ZSMemoryScanSession : NSObject
+@property (nonatomic, assign) BOOL unbounded;
+@property (nonatomic, assign) NSUInteger stage;
+@property (nonatomic, assign) NSUInteger descriptorIndex;
+@property (nonatomic, assign) NSUInteger objectCursor;
+@property (nonatomic, assign) NSUInteger unitsDone;
+@property (nonatomic, assign) double busyMilliseconds;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles;
+@property (nonatomic, assign) ZSVMWalkTotals totals;
+@property (nonatomic, assign) ZSVMWalkCursor vmCursor;
+@property (nonatomic, assign) int64_t footprint;
+@property (nonatomic, strong) ZSAssetScanResult *result;
+@property (nonatomic, strong) NSMutableArray<ZSTopAssetEntry *> *topEntries;
+@property (nonatomic, copy) NSString *kindFilter;
+@property (nonatomic, assign) BOOL kindFilterMatched;
+@property (nonatomic, assign) NSUInteger requestedPage;
+@property (nonatomic, assign) NSUInteger candidateCapacity;
+@property (nonatomic, assign) NSUInteger totalAssets;
+@property (nonatomic, assign) int64_t categoryTotal;
+@property (nonatomic, assign) NSUInteger liveCount;
+@end
+
+@implementation ZSMemoryScanSession
+@end
+
+static const NSUInteger kZSMemoryScanVMRegionsPerUnit = 400;
+static const NSUInteger kZSMemoryScanObjectsPerUnit = 150;
+
+static void zs_memory_scan_session_prepare(ZSMemoryScanSession *session, BOOL unbounded) {
+    session.unbounded = unbounded;
+    session.stage = 0;
+    session.descriptorIndex = 0;
+    session.objectCursor = 0;
+    session.busyMilliseconds = 0;
+    session.owners = [NSMutableDictionary new];
+    session.cleanFiles = [NSMutableDictionary new];
+
+    ZSVMWalkTotals totals;
+    memset(&totals, 0, sizeof(totals));
+    session.totals = totals;
+    ZSVMWalkCursor cursor;
+    memset(&cursor, 0, sizeof(cursor));
+    session.vmCursor = cursor;
+    session.footprint = 0;
+
+    ZSAssetScanResult *result = [ZSAssetScanResult new];
+    result.assetCategories = [NSMutableArray new];
+    result.topAssets = [NSMutableArray new];
+    result.objectCounts = [NSMutableArray new];
+    result.kindOptions = [NSMutableArray new];
+    result.kindFilter = g_topAssetsKindFilter;
+    session.result = result;
+    session.topEntries = [NSMutableArray new];
+
+    session.kindFilter = g_topAssetsKindFilter;
+    session.kindFilterMatched = g_topAssetsKindFilter == nil;
+    NSUInteger requestedPage = g_topAssetsPage;
+    if (g_topAssetsKnownLastPage != NSUIntegerMax) requestedPage = MIN(requestedPage, g_topAssetsKnownLastPage);
+    session.requestedPage = requestedPage;
+    session.candidateCapacity = (requestedPage + 1) * kZSTopAssetsPageSize;
+    session.totalAssets = 0;
+    session.categoryTotal = 0;
+    session.liveCount = 0;
+}
+
+static void zs_memory_scan_finish_descriptor(ZSMemoryScanSession *session, const ZSMemoryUsageCategoryDescriptor *descriptor) {
+    ZSAssetScanResult *result = session.result;
+    if (session.categoryTotal > 0) {
+        NSString *kindName = [NSString stringWithUTF8String:descriptor->klassName];
+        BOOL kindMatchesFilter = session.kindFilter == nil || [session.kindFilter isEqualToString:kindName];
+        if (kindMatchesFilter) session.kindFilterMatched = YES;
+
+        ZSMemoryUsageCategory *kindRow = zs_make_memory_row(kindName, session.categoryTotal, nil);
+        kindRow.objectCount = session.liveCount;
+        [result.kindOptions addObject:kindRow];
+
+        ZSMemoryUsageCategory *category = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName],
+                                                             session.categoryTotal,
+                                                             [NSString stringWithFormat:@"%lu objects", (unsigned long)session.liveCount]);
+        category.objectCount = session.liveCount;
+        [result.assetCategories addObject:category];
+        result.assetTrackedBytes += session.categoryTotal;
+    }
+    session.categoryTotal = 0;
+    session.liveCount = 0;
+    session.objectCursor = 0;
+    session.descriptorIndex++;
+}
+
+static void zs_memory_scan_merge_candidates(ZSMemoryScanSession *session, const ZSTopAssetCandidate *candidates, NSUInteger candidateCount) {
+    NSMutableArray<ZSTopAssetEntry *> *entries = session.topEntries;
+    NSUInteger capacity = session.candidateCapacity;
+    for (NSUInteger i = 0; i < candidateCount; i++) {
+        ZSTopAssetCandidate candidate = candidates[i];
+        if (entries.count >= capacity && candidate.size <= entries.lastObject.size) break;
+
+        ZSTopAssetEntry *entry = [ZSTopAssetEntry new];
+        entry.size = candidate.size;
+        NSString *name = mt_get_instance_string(candidate.obj, "get_name");
+        entry.name = name.length > 0 ? name : @"(unnamed)";
+        entry.detail = zs_asset_detail_string(candidate.obj, candidate.descriptor);
+
+        NSUInteger index = entries.count;
+        while (index > 0 && entries[index - 1].size < candidate.size) index--;
+        [entries insertObject:entry atIndex:index];
+        if (entries.count > capacity) [entries removeLastObject];
+    }
+}
+
+static void zs_memory_scan_process_assets(ZSMemoryScanSession *session) {
+    NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
+    if (session.descriptorIndex >= descriptorCount) {
+        session.stage = 2;
+        return;
+    }
+
+    const ZSMemoryUsageCategoryDescriptor *descriptor = &kZSMemoryUsageCategoryDescriptors[session.descriptorIndex];
+    void *klass = mt_class(descriptor->ns, descriptor->klassName, descriptor->assembly);
+    NSUInteger count = 0;
+    void *array = klass ? zs_resources_find_all_for_class(klass, &count) : NULL;
+
+    if (!array || count == 0) {
+        zs_memory_scan_finish_descriptor(session, descriptor);
+        return;
+    }
+
+    if (!descriptor->tracked) {
+        ZSMemoryUsageCategory *countRow = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName], 0, nil);
+        countRow.objectCount = count;
+        [session.result.objectCounts addObject:countRow];
+        zs_memory_scan_finish_descriptor(session, descriptor);
+        return;
+    }
+
+    NSUInteger start = session.objectCursor;
+    if (start >= count) {
+        zs_memory_scan_finish_descriptor(session, descriptor);
+        return;
+    }
+    NSUInteger end = session.unbounded ? count : MIN(count, start + kZSMemoryScanObjectsPerUnit);
+
+    ZSAssetScanResult *result = session.result;
+    NSString *kindName = [NSString stringWithUTF8String:descriptor->klassName];
+    BOOL kindMatchesFilter = session.kindFilter == nil || [session.kindFilter isEqualToString:kindName];
+
+    BOOL estimatesTexture = descriptor->family == ZSAssetFamilyTexture;
+    ZSTextureMethods textureMethods;
+    memset(&textureMethods, 0, sizeof(textureMethods));
+    if (estimatesTexture) {
+        textureMethods.width = mt_method(klass, "get_width", 0);
+        textureMethods.height = mt_method(klass, "get_height", 0);
+        textureMethods.mipCount = mt_method(klass, "get_mipmapCount", 0);
+        textureMethods.format = mt_method(klass, "get_format", 0);
+        textureMethods.streaming = mt_method(klass, "get_streamingMipmaps", 0);
+        textureMethods.loadedMip = mt_method(klass, "get_loadedMipmapLevel", 0);
+        textureMethods.depth = mt_method(klass, "get_depth", 0);
+        textureMethods.cubemapCount = mt_method(klass, "get_cubemapCount", 0);
+    }
+
+    ZSTopAssetCandidate *candidates = kindMatchesFilter ? calloc(session.candidateCapacity, sizeof(ZSTopAssetCandidate)) : NULL;
+    NSUInteger candidateCount = 0;
+
+    for (NSUInteger i = start; i < end; i++) {
+        void *obj = zs_array_object_at(array, i);
+        if (!obj) continue;
+
+        int64_t size = 0;
+        BOOL gotProfilerSize = mt_call_static_object_int64("UnityEngine.Profiling", "Profiler", "CoreModule", "GetRuntimeMemorySizeLong", obj, &size);
+        if (!gotProfilerSize) size = 0;
+
+        if (estimatesTexture) {
+            int64_t estimated = zs_estimate_texture_bytes(obj, descriptor, &textureMethods);
+            if (estimated > size) {
+                result.estimatedGpuTextureBytes += estimated - size;
+                size = estimated;
+            }
+        }
+        if (size <= 0) continue;
+
+        session.categoryTotal += size;
+        session.liveCount++;
+
+        if (descriptor->family == ZSAssetFamilyTexture || descriptor->family == ZSAssetFamilyMesh) {
+            BOOL readable = NO;
+            if (mt_get_instance_bool(obj, "get_isReadable", &readable) && readable) {
+                if (descriptor->family == ZSAssetFamilyTexture) {
+                    result.readableTextureBytes += size;
+                    result.readableTextureCount++;
+                } else {
+                    result.readableMeshBytes += size;
+                    result.readableMeshCount++;
+                }
+            }
+        }
+
+        if (kindMatchesFilter) {
+            session.totalAssets++;
+            if (candidates) zs_top_assets_consider(candidates, &candidateCount, session.candidateCapacity, obj, size, descriptor);
+        }
+    }
+
+    if (candidates) {
+        zs_memory_scan_merge_candidates(session, candidates, candidateCount);
+        free(candidates);
+    }
+
+    session.objectCursor = end;
+    if (end >= count) zs_memory_scan_finish_descriptor(session, descriptor);
+}
+
+static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_finalize(ZSMemoryScanSession *session) {
+    if (!session.kindFilterMatched) {
+        g_topAssetsKindFilter = nil;
+        g_topAssetsPage = 0;
+        g_topAssetsKnownLastPage = NSUIntegerMax;
+        zs_memory_scan_session_prepare(session, session.unbounded);
+        return nil;
+    }
+
+    ZSAssetScanResult *scan = session.result;
+
+    [scan.kindOptions sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
+        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    NSUInteger totalAssets = session.totalAssets;
+    NSUInteger lastPage = totalAssets > 0 ? (totalAssets - 1) / kZSTopAssetsPageSize : 0;
+    NSUInteger page = MIN(session.requestedPage, lastPage);
+    g_topAssetsPage = page;
+    g_topAssetsKnownLastPage = lastPage;
+    scan.pageCount = lastPage + 1;
+
+    NSUInteger pageStart = page * kZSTopAssetsPageSize;
+    NSUInteger pageEnd = MIN(session.topEntries.count, pageStart + kZSTopAssetsPageSize);
+    for (NSUInteger i = pageStart; i < pageEnd; i++) {
+        ZSTopAssetEntry *entry = session.topEntries[i];
+        [scan.topAssets addObject:zs_make_memory_row(entry.name, entry.size, entry.detail)];
+    }
+    scan.pageIndex = page;
+    scan.hasNextPage = totalAssets > (page + 1) * kZSTopAssetsPageSize;
+
+    [scan.objectCounts sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.objectCount == b.objectCount) return NSOrderedSame;
+        return a.objectCount > b.objectCount ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    scan.scannedAt = CACurrentMediaTime();
+    scan.scanMilliseconds = session.busyMilliseconds;
+
     ZSUnityMemoryFacts facts = zs_collect_unity_memory_facts();
-    ZSAssetScanResult *scan = zs_cached_asset_scan();
+    ZSVMWalkTotals totals = session.totals;
 
     NSMutableArray<ZSMemoryUsageGroup *> *groups = [NSMutableArray new];
-    [groups addObject:zs_build_footprint_group(owners, &totals, footprint)];
+    [groups addObject:zs_build_footprint_group(session.owners, &totals, session.footprint)];
     [groups addObject:zs_build_unity_group(scan, &facts)];
     [groups addObject:zs_build_top_assets_group(scan)];
     [groups addObject:zs_build_diagnostics_group(scan, &facts, &totals)];
     [groups addObject:zs_build_object_counts_group(scan)];
-    [groups addObject:zs_build_clean_files_group(cleanFiles)];
+    [groups addObject:zs_build_clean_files_group(session.cleanFiles)];
+    return groups;
+}
+
+static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_run_unit(ZSMemoryScanSession *session) {
+    CFTimeInterval started = CACurrentMediaTime();
+    NSArray<ZSMemoryUsageGroup *> *groups = nil;
+
+    if (session.stage == 0) {
+        ZSVMWalkTotals totals = session.totals;
+        ZSVMWalkCursor cursor = session.vmCursor;
+        zs_walk_vm_regions(session.owners, session.cleanFiles, &totals, &cursor, session.unbounded ? 0 : kZSMemoryScanVMRegionsPerUnit);
+        session.totals = totals;
+        session.vmCursor = cursor;
+        if (cursor.finished) {
+            session.footprint = zs_current_process_resident_memory_bytes();
+            session.stage = 1;
+        }
+    } else if (session.stage == 1) {
+        zs_memory_scan_process_assets(session);
+    } else {
+        groups = zs_memory_scan_finalize(session);
+    }
+
+    session.busyMilliseconds += (CACurrentMediaTime() - started) * 1000.0;
+    return groups;
+}
+
+void zs_memory_scan_reset(void) {
+    g_memoryScanSession = nil;
+}
+
+NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_step(NSUInteger *unitsDoneOut) {
+    if (!g_memoryScanSession) {
+        ZSMemoryScanSession *fresh = [ZSMemoryScanSession new];
+        zs_memory_scan_session_prepare(fresh, NO);
+        g_memoryScanSession = fresh;
+    }
+    ZSMemoryScanSession *session = g_memoryScanSession;
+
+    NSArray<ZSMemoryUsageGroup *> *groups = nil;
+    @autoreleasepool {
+        groups = zs_memory_scan_run_unit(session);
+    }
+    session.unitsDone++;
+    if (unitsDoneOut) *unitsDoneOut = session.unitsDone;
+    if (groups) g_memoryScanSession = nil;
     return groups;
 }
 
@@ -2768,7 +2930,11 @@ void zs_collect_memory_usage_breakdown(void (^completion)(NSArray<ZSMemoryUsageG
     if (!completion) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         @autoreleasepool {
-            NSArray<ZSMemoryUsageGroup *> *results = zs_scan_memory_usage_breakdown_sync();
+            ZSMemoryScanSession *session = [ZSMemoryScanSession new];
+            zs_memory_scan_session_prepare(session, YES);
+            NSArray<ZSMemoryUsageGroup *> *results = nil;
+            while (!results) results = zs_memory_scan_run_unit(session);
+            g_memoryScanSession = nil;
             completion(results);
         }
     });

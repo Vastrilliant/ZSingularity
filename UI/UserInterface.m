@@ -3258,6 +3258,100 @@ static NSArray<ZSMemoryColumnRow *> *zs_memory_system_stat_rows(ZSMemorySystemSt
     return rows;
 }
 
+static NSString *zs_memchart_display_value(ZSMemoryUsageGroup *group, ZSMemoryUsageCategory *category, int64_t grandTotal) {
+    NSString *sizeText = [NSByteCountFormatter stringFromByteCount:(long long)category.totalBytes countStyle:NSByteCountFormatterCountStyleMemory];
+    if (group.showsChart) {
+        double fraction = grandTotal > 0 ? (double)category.totalBytes / (double)grandTotal : 0;
+        return [NSString stringWithFormat:@"%.1f%% · %@", fraction * 100.0, sizeText];
+    }
+    if (category.totalBytes > 0) return sizeText;
+    if (category.objectCount > 0) return [NSString stringWithFormat:@"%lu objects", (unsigned long)category.objectCount];
+    return @"";
+}
+
+static NSDictionary *zs_memchart_export_document(ZSMemorySystemStats stats,
+                                                 NSArray<ZSMemoryColumnRow *> *systemRows,
+                                                 NSArray<ZSMemoryUsageGroup *> *groups,
+                                                 NSDate *date) {
+    NSISO8601DateFormatter *isoFormatter = [[NSISO8601DateFormatter alloc] init];
+
+    NSMutableArray<NSDictionary *> *systemEntries = [NSMutableArray arrayWithCapacity:systemRows.count];
+    for (ZSMemoryColumnRow *row in systemRows) {
+        [systemEntries addObject:@{@"name": row.name ?: @"", @"value": row.value ?: @""}];
+    }
+
+    NSDictionary *systemRaw = @{
+        @"footprintBytes": @(stats.residentBytes),
+        @"peakResidentBytes": @(stats.peakResidentBytes),
+        @"availableBytes": @(stats.availableBytes),
+        @"approxMemoryLimitBytes": @(stats.memoryLimitApproxBytes),
+        @"dirtyResidentBytes": @(stats.internalBytes),
+        @"compressedBytes": @(stats.compressedBytes),
+        @"cleanFileBackedBytes": @(stats.externalBytes),
+        @"reusableBytes": @(stats.reusableBytes),
+        @"virtualAddressSpaceBytes": @(stats.virtualBytes),
+        @"systemFreeBytes": @(stats.systemFreeBytes),
+        @"systemActiveBytes": @(stats.systemActiveBytes),
+        @"systemWiredBytes": @(stats.systemWiredBytes),
+        @"deviceMemoryBytes": @(stats.deviceTotalBytes),
+        @"memoryPressure": stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown",
+        @"increasedMemoryLimitEntitlement": @(stats.hasIncreasedMemoryLimitEntitlement),
+        @"extendedVirtualAddressingEntitlement": @(stats.hasExtendedVirtualAddressingEntitlement),
+    };
+
+    NSMutableArray<NSDictionary *> *groupEntries = [NSMutableArray arrayWithCapacity:groups.count];
+    for (ZSMemoryUsageGroup *group in groups) {
+        if (group.categories.count == 0) continue;
+
+        int64_t grandTotal = 0;
+        for (ZSMemoryUsageCategory *category in group.categories) grandTotal += category.totalBytes;
+        if (group.showsChart && grandTotal <= 0) continue;
+
+        NSMutableArray<NSDictionary *> *categoryEntries = [NSMutableArray arrayWithCapacity:group.categories.count];
+        for (ZSMemoryUsageCategory *category in group.categories) {
+            NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+            entry[@"name"] = category.name ?: @"";
+            entry[@"detail"] = category.detail ?: @"";
+            entry[@"value"] = zs_memchart_display_value(group, category, grandTotal);
+            entry[@"totalBytes"] = @(category.totalBytes);
+            entry[@"objectCount"] = @(category.objectCount);
+            if (group.showsChart) {
+                entry[@"percent"] = @(round((double)category.totalBytes / (double)grandTotal * 1000.0) / 10.0);
+            }
+            [categoryEntries addObject:entry];
+        }
+
+        NSMutableDictionary *groupEntry = [NSMutableDictionary dictionary];
+        groupEntry[@"title"] = group.title ?: @"";
+        groupEntry[@"subtitle"] = group.subtitle ?: @"";
+        groupEntry[@"categories"] = categoryEntries;
+
+        if (group.pagingEnabled) {
+            groupEntry[@"page"] = @(group.pageIndex + 1);
+            groupEntry[@"pageCount"] = @(group.pageCount);
+            groupEntry[@"hasNextPage"] = @(group.hasNextPage);
+            groupEntry[@"kindFilter"] = group.activeKind.length > 0 ? group.activeKind : @"All Kinds";
+
+            NSMutableArray<NSDictionary *> *kindEntries = [NSMutableArray arrayWithCapacity:group.kindOptions.count];
+            for (ZSMemoryUsageCategory *option in group.kindOptions) {
+                [kindEntries addObject:@{@"name": option.name ?: @"",
+                                         @"totalBytes": @(option.totalBytes),
+                                         @"objectCount": @(option.objectCount)}];
+            }
+            groupEntry[@"kindOptions"] = kindEntries;
+        }
+        [groupEntries addObject:groupEntry];
+    }
+
+    return @{
+        @"generatedAt": [isoFormatter stringFromDate:date],
+        @"refreshIntervalSeconds": @(ZS_MEMORY_SCAN_CYCLE_SECONDS),
+        @"system": systemEntries,
+        @"systemRaw": systemRaw,
+        @"groups": groupEntries,
+    };
+}
+
 static UIVisualEffectView *zs_wrap_field_in_native_glass(UITextField *field, CGFloat cornerRadius) {
     field.borderStyle = UITextBorderStyleNone;
     UIView *leftPadding = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 1)];
@@ -4768,6 +4862,23 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) NSUInteger memoryNumpadPageCount;
 @property (nonatomic, assign) NSUInteger memoryNumpadCurrentPage;
 @property (nonatomic, strong) UILabel *memoryNumpadDisplayLabel;
+@property (nonatomic, strong) UIButton *memoryExportButton;
+@property (nonatomic, assign) NSUInteger memoryCyclePhase;
+@property (nonatomic, assign) NSUInteger memoryCycleUnitsDone;
+@property (nonatomic, assign) NSUInteger memoryCycleUnitEstimate;
+@property (nonatomic, assign) CFTimeInterval memoryCycleStart;
+@property (nonatomic, assign) NSUInteger memoryBuildIndex;
+@property (nonatomic, assign) CGFloat memoryBuildHeight;
+@property (nonatomic, assign) CGFloat memoryBuildPagedWidth;
+@property (nonatomic, assign) BOOL memoryBuildSkipped;
+@property (nonatomic, assign) NSUInteger memoryBuildGroupColumnCount;
+@property (nonatomic, strong) NSArray<ZSMemoryUsageGroup *> *memoryPendingGroups;
+@property (nonatomic, strong) NSMutableArray<UIView *> *memoryPendingColumns;
+@property (nonatomic, assign) BOOL memoryHasSnapshot;
+@property (nonatomic, assign) ZSMemorySystemStats memorySnapshotStats;
+@property (nonatomic, strong) NSArray<ZSMemoryColumnRow *> *memorySnapshotSystemRows;
+@property (nonatomic, strong) NSArray<ZSMemoryUsageGroup *> *memorySnapshotGroups;
+@property (nonatomic, strong) NSDate *memorySnapshotDate;
 
 @property (nonatomic, strong) NSMutableArray<NSString *> *pinnedActionKeys;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
@@ -5522,6 +5633,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.browseFieldsContainer = nil;
 
     self.memoryUsageAnalyzeButton = nil;
+    [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
     [self.memoryFullScreenOverlay removeFromSuperview];
@@ -5537,6 +5649,14 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryRefreshPieLayer = nil;
     self.memoryRefreshPieTrackLayer = nil;
     self.memoryCloseButtonLeadingConstraint = nil;
+    self.memoryExportButton = nil;
+    self.memoryPendingGroups = nil;
+    self.memoryPendingColumns = nil;
+    self.memorySnapshotSystemRows = nil;
+    self.memorySnapshotGroups = nil;
+    self.memorySnapshotDate = nil;
+    self.memoryHasSnapshot = NO;
+    zs_memory_scan_reset();
 }
 
 - (void)zs_closeButtonTapped {
@@ -12161,12 +12281,22 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_endMemoryAnalysis {
+    [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [self zs_dismissMemoryPopupAnimated:NO];
     [self.memoryRefreshPieLayer removeAllAnimations];
     [self.memoryRefreshPieTrackLayer removeAllAnimations];
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
     self.memoryFullScreenOpen = NO;
+    self.memoryPendingGroups = nil;
+    self.memoryPendingColumns = nil;
+    self.memoryCyclePhase = 0;
+    self.memoryCycleUnitsDone = 0;
+    self.memorySnapshotSystemRows = nil;
+    self.memorySnapshotGroups = nil;
+    self.memorySnapshotDate = nil;
+    self.memoryHasSnapshot = NO;
+    zs_memory_scan_reset();
     [self zs_syncMemoryButtonState];
 }
 
@@ -12191,6 +12321,14 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [closeButton addTarget:self action:@selector(zs_closeMemoryFullScreenPanelTapped) forControlEvents:UIControlEventTouchUpInside];
     [overlay addSubview:closeButton];
 
+    UIImage *exportImage = [UIImage systemImageNamed:@"square.and.arrow.up" withConfiguration:closeSymbolConfig];
+    UIButton *exportButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    exportButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(exportButton, exportImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [exportButton addTarget:self action:@selector(zs_exportMemchartTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:exportButton];
+    self.memoryExportButton = exportButton;
+
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     titleLabel.text = @"Memchart";
@@ -12211,19 +12349,24 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIView *pieView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
     pieView.translatesAutoresizingMaskIntoConstraints = NO;
     pieView.userInteractionEnabled = NO;
+    UIView *pieDisc = [[UIView alloc] initWithFrame:CGRectMake(2, 2, 26, 26)];
+    pieDisc.userInteractionEnabled = NO;
+    pieDisc.layer.cornerRadius = 13;
+    pieDisc.layer.masksToBounds = YES;
+    [pieView addSubview:pieDisc];
     CAShapeLayer *trackLayer = [CAShapeLayer layer];
-    trackLayer.frame = CGRectMake(0, 0, 30, 30);
-    trackLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(15, 15) radius:13 startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
+    trackLayer.frame = CGRectMake(0, 0, 26, 26);
+    trackLayer.path = [UIBezierPath bezierPathWithRect:CGRectMake(0, 0, 26, 26)].CGPath;
     trackLayer.fillColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
-    [pieView.layer addSublayer:trackLayer];
+    [pieDisc.layer addSublayer:trackLayer];
     CAShapeLayer *pieLayer = [CAShapeLayer layer];
-    pieLayer.frame = CGRectMake(0, 0, 30, 30);
-    pieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(15, 15) radius:6.5 startAngle:-M_PI_2 endAngle:1.5 * M_PI clockwise:YES].CGPath;
+    pieLayer.frame = CGRectMake(0, 0, 26, 26);
+    pieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(13, 13) radius:7 startAngle:-M_PI_2 endAngle:1.5 * M_PI clockwise:YES].CGPath;
     pieLayer.fillColor = UIColor.clearColor.CGColor;
     pieLayer.strokeColor = UIColor.whiteColor.CGColor;
-    pieLayer.lineWidth = 13;
+    pieLayer.lineWidth = 14;
     pieLayer.strokeEnd = 1;
-    [pieView.layer addSublayer:pieLayer];
+    [pieDisc.layer addSublayer:pieLayer];
     [overlay addSubview:pieView];
     self.memoryRefreshPieView = pieView;
     self.memoryRefreshPieLayer = pieLayer;
@@ -12249,8 +12392,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [closeButton.widthAnchor constraintEqualToConstant:30],
         [closeButton.heightAnchor constraintEqualToConstant:30],
 
+        [exportButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [exportButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:10],
+        [exportButton.widthAnchor constraintEqualToConstant:30],
+        [exportButton.heightAnchor constraintEqualToConstant:30],
+
         [titleLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [titleLabel.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:12],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:exportButton.trailingAnchor constant:12],
 
         [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [statusLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:10],
@@ -12286,6 +12434,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.docsActiveKey = nil;
     self.memoryFullScreenOpen = YES;
+    self.memoryHasSnapshot = NO;
     [self zs_syncMemoryButtonState];
     self.memoryFullScreenStatusLabel.text = @"Scanning…";
 
@@ -12322,7 +12471,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CABasicAnimation *sweep = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
     sweep.fromValue = @0;
     sweep.toValue = @1;
-    sweep.duration = 2.0;
+    sweep.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS;
     sweep.repeatCount = HUGE_VALF;
     sweep.beginTime = begin;
     sweep.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
@@ -12332,7 +12481,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     sweepColor.values = @[(id)white.CGColor, (id)white.CGColor, (id)grey.CGColor, (id)grey.CGColor];
     sweepColor.keyTimes = @[@0, @0.4999, @0.5, @1];
     sweepColor.calculationMode = kCAAnimationLinear;
-    sweepColor.duration = 4.0;
+    sweepColor.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS * 2.0;
     sweepColor.repeatCount = HUGE_VALF;
     sweepColor.beginTime = begin;
     [layer addAnimation:sweepColor forKey:@"zsPieSweepColor"];
@@ -12341,7 +12490,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     trackColor.values = @[(id)grey.CGColor, (id)grey.CGColor, (id)white.CGColor, (id)white.CGColor];
     trackColor.keyTimes = @[@0, @0.4999, @0.5, @1];
     trackColor.calculationMode = kCAAnimationLinear;
-    trackColor.duration = 4.0;
+    trackColor.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS * 2.0;
     trackColor.repeatCount = HUGE_VALF;
     trackColor.beginTime = begin;
     [track addAnimation:trackColor forKey:@"zsPieTrackColor"];
@@ -12662,34 +12811,156 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_startMemoryUsageAutoRefresh {
     [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
+    self.memoryCycleUnitEstimate = 30;
+    self.memoryCycleUnitsDone = 0;
+    self.memoryCyclePhase = 0;
+    [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(zs_memoryAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [self zs_startMemoryRefreshPie];
     [self zs_runMemoryUsageScan];
+}
+
+- (void)zs_memoryAppDidBecomeActive {
+    if (!self.memoryFullScreenOpen) return;
+    [self zs_restartMemoryCycle];
+}
+
+- (void)zs_storeMemorySnapshotWithStats:(ZSMemorySystemStats)stats
+                                   rows:(NSArray<ZSMemoryColumnRow *> *)rows
+                                 groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
+    self.memorySnapshotStats = stats;
+    self.memorySnapshotSystemRows = rows;
+    self.memorySnapshotGroups = groups;
+    self.memorySnapshotDate = [NSDate date];
+    self.memoryHasSnapshot = YES;
+}
+
+- (void)zs_restartMemoryCycle {
+    zs_memory_scan_reset();
+    self.memoryCyclePhase = 0;
+    self.memoryCycleUnitsDone = 0;
+    self.memoryPendingGroups = nil;
+    self.memoryPendingColumns = nil;
+    self.memoryCycleStart = CACurrentMediaTime();
+    [self zs_startMemoryRefreshPie];
+    [self zs_scheduleNextMemoryStep];
+}
+
+- (NSTimeInterval)zs_memoryNextStepDelay {
+    NSTimeInterval now = CACurrentMediaTime();
+    NSTimeInterval cycleEnd = self.memoryCycleStart + ZS_MEMORY_SCAN_CYCLE_SECONDS;
+    NSTimeInterval base = MAX(now, self.memoryCycleStart);
+    NSUInteger planned = MAX(self.memoryCycleUnitEstimate, self.memoryCycleUnitsDone + 2);
+    NSUInteger remaining = planned - self.memoryCycleUnitsDone;
+    NSTimeInterval interval = MAX(cycleEnd - base, 0.0) / (NSTimeInterval)remaining;
+    return (base - now) + MAX(interval, 0.02);
+}
+
+- (void)zs_scheduleNextMemoryStep {
+    [self.memoryUsageRefreshTimer invalidate];
+    self.memoryUsageRefreshTimer = nil;
+    if (!self.memoryFullScreenOpen) return;
 
     __weak typeof(self) weakSelf = self;
-    NSTimer *timer = [NSTimer timerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
-        [weakSelf zs_runMemoryUsageScan];
+    NSTimer *timer = [NSTimer timerWithTimeInterval:[self zs_memoryNextStepDelay] repeats:NO block:^(NSTimer *timer) {
+        [weakSelf zs_memoryPacedStep];
     }];
     self.memoryUsageRefreshTimer = timer;
     [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
 }
 
-- (void)zs_runMemoryUsageScan {
-    ZSMemorySystemStats stats = zs_collect_memory_system_stats();
+- (void)zs_memoryPacedStep {
+    self.memoryUsageRefreshTimer = nil;
+    if (!self.memoryFullScreenOpen) return;
 
+    BOOL cycleDone = NO;
+    if (self.memoryCyclePhase == 0) {
+        NSArray<ZSMemoryUsageGroup *> *groups = zs_memory_scan_step(NULL);
+        if (groups) {
+            self.memoryPendingGroups = groups;
+            self.memoryPendingColumns = [NSMutableArray array];
+            self.memoryBuildIndex = 0;
+            self.memoryBuildGroupColumnCount = 0;
+            self.memoryBuildSkipped = NO;
+            self.memoryCyclePhase = 1;
+        }
+    } else if (self.memoryCyclePhase == 1) {
+        [self zs_buildNextPendingMemoryColumn];
+    } else {
+        [self zs_commitPendingMemoryColumns];
+        cycleDone = YES;
+    }
+
+    self.memoryCycleUnitsDone++;
+    if (cycleDone) [self zs_finishMemoryCycle];
+    [self zs_scheduleNextMemoryStep];
+}
+
+- (void)zs_finishMemoryCycle {
+    self.memoryCycleUnitEstimate = MAX(self.memoryCycleUnitsDone, (NSUInteger)8);
+
+    NSTimeInterval now = CACurrentMediaTime();
+    NSTimeInterval cycleEnd = self.memoryCycleStart + ZS_MEMORY_SCAN_CYCLE_SECONDS;
+    BOOL overran = now - cycleEnd > 1.0;
+    self.memoryCycleStart = overran ? now : cycleEnd;
+
+    self.memoryCycleUnitsDone = 0;
+    self.memoryCyclePhase = 0;
+    self.memoryPendingGroups = nil;
+    self.memoryPendingColumns = nil;
+    if (overran) [self zs_startMemoryRefreshPie];
+}
+
+- (void)zs_buildNextPendingMemoryColumn {
+    NSArray<ZSMemoryUsageGroup *> *groups = self.memoryPendingGroups;
+    NSUInteger index = self.memoryBuildIndex;
+
+    if (index == 0) {
+        ZSMemorySystemStats stats = zs_collect_memory_system_stats();
+        NSArray<ZSMemoryColumnRow *> *rows = zs_memory_system_stat_rows(stats);
+        [self zs_storeMemorySnapshotWithStats:stats rows:rows groups:groups];
+
+        self.memoryBuildSkipped = ![self zs_prepareMemoryBuildMetrics];
+        if (!self.memoryBuildSkipped) {
+            UIView *systemColumn = zs_build_memory_column(@"System", nil, rows, nil, YES, 0, 0, self.memoryBuildHeight);
+            if (systemColumn) [self.memoryPendingColumns addObject:systemColumn];
+        }
+    } else if (!self.memoryBuildSkipped && index - 1 < groups.count) {
+        UIView *column = [self zs_memoryColumnForGroup:groups[index - 1] height:self.memoryBuildHeight pagedWidth:self.memoryBuildPagedWidth];
+        if (column) {
+            [self.memoryPendingColumns addObject:column];
+            self.memoryBuildGroupColumnCount++;
+        }
+    }
+
+    self.memoryBuildIndex = index + 1;
+    if (self.memoryBuildIndex > groups.count) self.memoryCyclePhase = 2;
+}
+
+- (void)zs_commitPendingMemoryColumns {
+    if (self.memoryBuildSkipped || self.memoryPendingColumns.count == 0) return;
+    [self zs_installMemoryColumns:self.memoryPendingColumns height:self.memoryBuildHeight groupColumnCount:self.memoryBuildGroupColumnCount];
+}
+
+- (void)zs_runMemoryUsageScan {
     __weak typeof(self) weakSelf = self;
     zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageGroup *> *groups) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || !strongSelf.memoryFullScreenOpen) return;
+        ZSMemorySystemStats stats = zs_collect_memory_system_stats();
+        [strongSelf zs_storeMemorySnapshotWithStats:stats rows:zs_memory_system_stat_rows(stats) groups:groups];
         [strongSelf zs_renderMemoryColumnsWithStats:stats groups:groups];
+        [strongSelf zs_restartMemoryCycle];
     });
 }
 
-- (void)zs_renderMemoryColumnsWithStats:(ZSMemorySystemStats)stats groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
+- (BOOL)zs_prepareMemoryBuildMetrics {
     UIScrollView *scrollView = self.memoryFullScreenScrollView;
     UIView *overlay = self.memoryFullScreenOverlay;
-    if (!scrollView || !overlay) return;
-    if (self.memoryPopupScrim) return;
-    if (scrollView.isDragging || scrollView.isDecelerating) return;
+    if (!scrollView || !overlay) return NO;
+    if (self.memoryPopupScrim) return NO;
+    if (scrollView.isDragging || scrollView.isDecelerating) return NO;
 
     [overlay layoutIfNeeded];
 
@@ -12699,36 +12970,58 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         UIEdgeInsets hostInsets = host.safeAreaInsets;
         height = host.bounds.size.height - hostInsets.top - hostInsets.bottom - (kPanelPadding + 30 + 12);
     }
-    if (height < 80) return;
+    if (height < 80) return NO;
 
-    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlay.safeAreaInsets.left * 0.15;
-    self.memoryCloseButtonLeadingConstraint.constant = logIndent;
+    CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
+    self.memoryBuildHeight = height;
+    self.memoryBuildPagedWidth = floor(panelWidth * kZSMemoryPagedColumnWidthFraction);
+    return YES;
+}
+
+- (UIView *)zs_memoryColumnForGroup:(ZSMemoryUsageGroup *)group height:(CGFloat)height pagedWidth:(CGFloat)pagedWidth {
+    __weak typeof(self) weakSelf = self;
+    void (^onPageChange)(NSInteger) = ^(NSInteger delta) {
+        [weakSelf zs_changeMemoryTopAssetsPageBy:delta];
+    };
+    void (^onFilterTap)(UIView *) = ^(UIView *source) {
+        [weakSelf zs_presentMemoryKindPopupFromView:source group:group];
+    };
+    void (^onPageTap)(UIView *) = ^(UIView *source) {
+        [weakSelf zs_presentMemoryPageNumpadFromView:source group:group];
+    };
+    return zs_build_memory_group_column(group, height, pagedWidth, onPageChange, onFilterTap, onPageTap);
+}
+
+- (void)zs_renderMemoryColumnsWithStats:(ZSMemorySystemStats)stats groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
+    if (![self zs_prepareMemoryBuildMetrics]) return;
+
+    CGFloat height = self.memoryBuildHeight;
+    CGFloat pagedWidth = self.memoryBuildPagedWidth;
 
     NSMutableArray<UIView *> *columns = [NSMutableArray array];
     UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, 0, height);
     if (statsColumn) [columns addObject:statsColumn];
 
-    CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
-    CGFloat pagedColumnWidth = floor(panelWidth * kZSMemoryPagedColumnWidthFraction);
-
-    __weak typeof(self) weakSelf = self;
-    void (^onPageChange)(NSInteger) = ^(NSInteger delta) {
-        [weakSelf zs_changeMemoryTopAssetsPageBy:delta];
-    };
-
     NSUInteger groupColumnCount = 0;
     for (ZSMemoryUsageGroup *group in groups) {
-        void (^onFilterTap)(UIView *) = ^(UIView *source) {
-            [weakSelf zs_presentMemoryKindPopupFromView:source group:group];
-        };
-        void (^onPageTap)(UIView *) = ^(UIView *source) {
-            [weakSelf zs_presentMemoryPageNumpadFromView:source group:group];
-        };
-        UIView *groupColumn = zs_build_memory_group_column(group, height, pagedColumnWidth, onPageChange, onFilterTap, onPageTap);
+        UIView *groupColumn = [self zs_memoryColumnForGroup:group height:height pagedWidth:pagedWidth];
         if (!groupColumn) continue;
         [columns addObject:groupColumn];
         groupColumnCount++;
     }
+
+    [self zs_installMemoryColumns:columns height:height groupColumnCount:groupColumnCount];
+}
+
+- (void)zs_installMemoryColumns:(NSArray<UIView *> *)columns height:(CGFloat)height groupColumnCount:(NSUInteger)groupColumnCount {
+    UIScrollView *scrollView = self.memoryFullScreenScrollView;
+    UIView *overlay = self.memoryFullScreenOverlay;
+    if (!scrollView || !overlay) return;
+    if (self.memoryPopupScrim) return;
+    if (scrollView.isDragging || scrollView.isDecelerating) return;
+
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlay.safeAreaInsets.left * 0.15;
+    self.memoryCloseButtonLeadingConstraint.constant = logIndent;
 
     self.memoryFullScreenStatusLabel.text = groupColumnCount > 0 ? nil : @"No trackable memory usage found";
 
@@ -12772,6 +13065,49 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [scrollView layoutIfNeeded];
     CGFloat maxOffsetX = MAX(0, scrollView.contentSize.width - scrollView.bounds.size.width);
     scrollView.contentOffset = CGPointMake(MIN(previousOffset.x, maxOffsetX), 0);
+}
+
+- (void)zs_exportMemchartTapped {
+    if (!self.memoryHasSnapshot) {
+        UINotificationFeedbackGenerator *warning = [UINotificationFeedbackGenerator new];
+        [warning notificationOccurred:UINotificationFeedbackTypeWarning];
+        return;
+    }
+
+    NSDictionary *document = zs_memchart_export_document(self.memorySnapshotStats,
+                                                         self.memorySnapshotSystemRows,
+                                                         self.memorySnapshotGroups,
+                                                         self.memorySnapshotDate ?: [NSDate date]);
+    NSError *error = nil;
+    NSJSONWritingOptions options = NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys | NSJSONWritingWithoutEscapingSlashes;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:document options:options error:&error];
+    if (!data) {
+        ZLog(@"[UserInterface] Memchart export: JSON serialization failed: %@", error);
+        return;
+    }
+
+    NSDateFormatter *nameFormatter = [[NSDateFormatter alloc] init];
+    nameFormatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    nameFormatter.dateFormat = @"yyyyMMdd-HHmmss";
+    NSString *fileName = [NSString stringWithFormat:@"Memchart-%@.json", [nameFormatter stringFromDate:self.memorySnapshotDate ?: [NSDate date]]];
+    NSURL *fileURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:fileName]];
+    if (![data writeToURL:fileURL options:NSDataWritingAtomic error:&error]) {
+        ZLog(@"[UserInterface] Memchart export: couldn't write %@: %@", fileName, error);
+        return;
+    }
+
+    UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+    activityVC.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+        [NSFileManager.defaultManager removeItemAtURL:fileURL error:nil];
+    };
+    activityVC.popoverPresentationController.sourceView = self.memoryExportButton;
+    activityVC.popoverPresentationController.sourceRect = self.memoryExportButton.bounds;
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    [presenter presentViewController:activityVC animated:YES completion:nil];
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
 #pragma mark Auth
