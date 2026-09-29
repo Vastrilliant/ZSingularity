@@ -350,6 +350,7 @@ int32_t zs_last_observed_memory_usage_tier(void);
 @property (nonatomic, assign) NSUInteger objectCount;
 @property (nonatomic, assign) int64_t residentBytes;
 @property (nonatomic, assign) int64_t compressedBytes;
+@property (nonatomic, assign) int64_t virtualBytes;
 @property (nonatomic, copy, nullable) NSString *detail;
 @end
 

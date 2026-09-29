@@ -2824,6 +2824,8 @@ static CGFloat zs_memory_column_width(NSString *title, CGFloat panelWidth) {
         fractions = @{
             @"System": @0.5,
             @"Process footprint by owner": @0.7,
+            @"Malloc zones": @0.7,
+            @"Malloc attribution": @0.8,
             @"Unity allocations by subsystem": @0.7,
             @"Reservations & diagnostics": @0.7,
             @"Live object counts": @0.4,

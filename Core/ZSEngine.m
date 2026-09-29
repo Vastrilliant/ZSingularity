@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #import <mach/mach.h>
+#import <malloc/malloc.h>
 #import <os/proc.h>
 #import <Security/Security.h>
 #import "UnityBundleTools.h"
@@ -1954,6 +1955,8 @@ typedef struct {
     int64_t swappedTotal;
     int64_t untaggedDirty;
     int64_t untaggedSwapped;
+    int64_t mallocDirty;
+    int64_t mallocSwapped;
     int64_t virtualTotal;
     int64_t regionCount;
     double milliseconds;
@@ -2057,6 +2060,41 @@ static NSString *zs_vm_anonymous_name(uint32_t tag) {
     return [NSString stringWithFormat:@"VM tag %u", tag];
 }
 
+static BOOL zs_vm_tag_is_malloc(uint32_t tag) {
+    switch (tag) {
+        case 1: case 2: case 3: case 4: case 6: case 7: case 8: case 9: case 11: case 12: case 13:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+static const NSUInteger kZSMallocTopRegionCount = 8;
+static const int64_t kZSMallocTopRegionMinBytes = 1024 * 1024;
+
+static void zs_malloc_track_region(NSMutableArray<ZSMemoryUsageCategory *> *regions,
+                                   vm_address_t address,
+                                   vm_size_t size,
+                                   NSString *tagName,
+                                   int64_t dirty,
+                                   int64_t swapped) {
+    int64_t footprintBytes = dirty + swapped;
+    if (footprintBytes < kZSMallocTopRegionMinBytes) return;
+    if (regions.count >= kZSMallocTopRegionCount && footprintBytes <= regions.lastObject.totalBytes) return;
+
+    ZSMemoryUsageCategory *row = [ZSMemoryUsageCategory new];
+    row.name = [NSString stringWithFormat:@"%@ @ 0x%llx", tagName, (unsigned long long)address];
+    row.totalBytes = footprintBytes;
+    row.residentBytes = dirty;
+    row.compressedBytes = swapped;
+    row.virtualBytes = (int64_t)size;
+
+    NSUInteger index = regions.count;
+    while (index > 0 && regions[index - 1].totalBytes < footprintBytes) index--;
+    [regions insertObject:row atIndex:index];
+    if (regions.count > kZSMallocTopRegionCount) [regions removeLastObject];
+}
+
 static BOOL zs_vm_path_is_system(NSString *path) {
     return [path hasPrefix:@"/System/"] ||
            [path hasPrefix:@"/usr/lib/"] ||
@@ -2078,6 +2116,8 @@ static NSMutableDictionary<NSNumber *, NSString *> *g_vmFileLabelCache;
 
 static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners,
                                NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles,
+                               NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *mallocTags,
+                               NSMutableArray<ZSMemoryUsageCategory *> *mallocRegions,
                                ZSVMWalkTotals *totals,
                                ZSVMWalkCursor *cursor,
                                NSUInteger regionBudget) {
@@ -2141,11 +2181,24 @@ static void zs_walk_vm_regions(NSMutableDictionary<NSString *, ZSMemoryUsageCate
                 totals->untaggedSwapped += swapped;
             }
             if (footprintBytes > 0) {
-                ZSMemoryUsageCategory *bucket = zs_vm_bucket(owners, zs_vm_anonymous_name(info.user_tag));
+                NSString *anonymousName = zs_vm_anonymous_name(info.user_tag);
+                ZSMemoryUsageCategory *bucket = zs_vm_bucket(owners, anonymousName);
                 bucket.totalBytes += footprintBytes;
                 bucket.residentBytes += dirty;
                 bucket.compressedBytes += swapped;
                 bucket.objectCount++;
+
+                if (zs_vm_tag_is_malloc(info.user_tag)) {
+                    ZSMemoryUsageCategory *mallocBucket = zs_vm_bucket(mallocTags, anonymousName);
+                    mallocBucket.totalBytes += footprintBytes;
+                    mallocBucket.residentBytes += dirty;
+                    mallocBucket.compressedBytes += swapped;
+                    mallocBucket.virtualBytes += (int64_t)size;
+                    mallocBucket.objectCount++;
+                    totals->mallocDirty += dirty;
+                    totals->mallocSwapped += swapped;
+                    zs_malloc_track_region(mallocRegions, address, size, anonymousName, dirty, swapped);
+                }
             }
             address += size;
             continue;
@@ -2591,6 +2644,175 @@ static ZSMemoryUsageGroup *zs_build_clean_files_group(NSDictionary<NSString *, Z
                                 rows);
 }
 
+static kern_return_t zs_malloc_local_reader(task_t task, vm_address_t address, vm_size_t size, void **local) {
+    *local = (void *)address;
+    return KERN_SUCCESS;
+}
+
+static NSString *zs_malloc_zone_label(malloc_zone_t *zone, NSUInteger index) {
+    const char *rawName = malloc_get_zone_name(zone);
+    if (!rawName || rawName[0] == '\0') return [NSString stringWithFormat:@"Unnamed zone %lu", (unsigned long)index];
+    NSString *name = [NSString stringWithUTF8String:rawName];
+    NSRange suffix = [name rangeOfString:@"_0x"];
+    if (suffix.location != NSNotFound && suffix.location > 0) name = [name substringToIndex:suffix.location];
+    return name.length > 0 ? name : [NSString stringWithFormat:@"Unnamed zone %lu", (unsigned long)index];
+}
+
+typedef struct {
+    int64_t inUse;
+    int64_t held;
+    int64_t blocks;
+    NSUInteger zoneCount;
+    double milliseconds;
+} ZSMallocZoneTotals;
+
+static NSMutableArray<ZSMemoryUsageCategory *> *zs_collect_malloc_zone_rows(ZSMallocZoneTotals *totals) {
+    memset(totals, 0, sizeof(*totals));
+    CFTimeInterval started = CACurrentMediaTime();
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [NSMutableArray new];
+    NSMutableDictionary<NSString *, NSNumber *> *labelUse = [NSMutableDictionary new];
+
+    vm_address_t *zones = NULL;
+    unsigned zoneCount = 0;
+    kern_return_t kr = malloc_get_all_zones(mach_task_self(), zs_malloc_local_reader, &zones, &zoneCount);
+    if (kr != KERN_SUCCESS || !zones) {
+        totals->milliseconds = (CACurrentMediaTime() - started) * 1000.0;
+        return rows;
+    }
+
+    for (unsigned i = 0; i < zoneCount; i++) {
+        malloc_zone_t *zone = (malloc_zone_t *)zones[i];
+        if (!zone || !zone->introspect || !zone->introspect->statistics) continue;
+
+        malloc_statistics_t stats;
+        memset(&stats, 0, sizeof(stats));
+        zone->introspect->statistics(zone, &stats);
+        totals->zoneCount++;
+        if (stats.size_in_use == 0 && stats.size_allocated == 0) continue;
+
+        int64_t inUse = (int64_t)stats.size_in_use;
+        int64_t held = MAX((int64_t)stats.size_allocated, inUse);
+        totals->inUse += inUse;
+        totals->held += held;
+        totals->blocks += (int64_t)stats.blocks_in_use;
+
+        NSString *label = zs_malloc_zone_label(zone, i);
+        NSNumber *seen = labelUse[label];
+        labelUse[label] = @(seen.unsignedIntegerValue + 1);
+        if (seen) label = [NSString stringWithFormat:@"%@ #%lu", label, (unsigned long)(seen.unsignedIntegerValue + 1)];
+
+        NSString *average = stats.blocks_in_use > 0
+            ? zs_memory_bytes_string((int64_t)(stats.size_in_use / stats.blocks_in_use))
+            : @"n/a";
+        ZSMemoryUsageCategory *row = zs_make_memory_row(label,
+                                                        inUse,
+                                                        [NSString stringWithFormat:@"%u blocks · avg %@ · zone holds %@ · peak %@",
+                                                         stats.blocks_in_use,
+                                                         average,
+                                                         zs_memory_bytes_string(held),
+                                                         zs_memory_bytes_string((int64_t)stats.max_size_in_use)]);
+        row.objectCount = stats.blocks_in_use;
+        row.virtualBytes = held;
+        [rows addObject:row];
+    }
+
+    totals->milliseconds = (CACurrentMediaTime() - started) * 1000.0;
+    return rows;
+}
+
+static ZSMemoryUsageGroup *zs_build_malloc_zones_group(NSMutableArray<ZSMemoryUsageCategory *> *zoneRows,
+                                                       const ZSMallocZoneTotals *zoneTotals) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [zoneRows mutableCopy];
+    int64_t freeInside = zoneTotals->held - zoneTotals->inUse;
+    if (freeInside > 0) {
+        [rows addObject:zs_make_memory_row(@"Free inside zones",
+                                           freeInside,
+                                           @"Held by the allocator, not handed out")];
+    }
+    zs_sort_memory_rows_descending(rows);
+    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, 8, 0.004, NO);
+
+    NSString *subtitle = [NSString stringWithFormat:@"In use %@ · zones hold %@ · %lld blocks · %lu zones · %.1f ms",
+                          zs_memory_bytes_string(zoneTotals->inUse),
+                          zs_memory_bytes_string(zoneTotals->held),
+                          (long long)zoneTotals->blocks,
+                          (unsigned long)zoneTotals->zoneCount,
+                          zoneTotals->milliseconds];
+    return zs_make_memory_group(@"Malloc zones", subtitle, YES, folded);
+}
+
+static NSString *zs_malloc_density_string(ZSMemoryUsageCategory *row) {
+    if (row.virtualBytes <= 0) return @"n/a";
+    return [NSString stringWithFormat:@"%.0f%%", (double)row.totalBytes / (double)row.virtualBytes * 100.0];
+}
+
+static ZSMemoryUsageGroup *zs_build_malloc_attribution_group(NSDictionary<NSString *, ZSMemoryUsageCategory *> *mallocTags,
+                                                             NSArray<ZSMemoryUsageCategory *> *mallocRegions,
+                                                             const ZSVMWalkTotals *totals,
+                                                             const ZSMallocZoneTotals *zoneTotals,
+                                                             const ZSUnityMemoryFacts *facts) {
+    NSMutableArray<ZSMemoryUsageCategory *> *rows = [NSMutableArray new];
+
+    int64_t mallocFootprint = totals->mallocDirty + totals->mallocSwapped;
+    [rows addObject:zs_make_memory_row(@"Malloc footprint (VM regions)",
+                                       mallocFootprint,
+                                       [NSString stringWithFormat:@"dirty %@ · compressed %@",
+                                        zs_memory_bytes_string(totals->mallocDirty),
+                                        zs_memory_bytes_string(totals->mallocSwapped)])];
+
+    [rows addObject:zs_make_memory_row(@"Malloc in use (zones)",
+                                       zoneTotals->inUse,
+                                       [NSString stringWithFormat:@"%lld live blocks", (long long)zoneTotals->blocks])];
+
+    int64_t retained = mallocFootprint - zoneTotals->inUse;
+    if (retained > 0) {
+        [rows addObject:zs_make_memory_row(@"Retained free memory",
+                                           retained,
+                                           @"Footprint beyond live blocks · freed but not returned to the OS")];
+    }
+
+    if (facts->hasAllocated && facts->allocated > 0) {
+        [rows addObject:zs_make_memory_row(@"Unity allocated (logical)",
+                                           facts->allocated,
+                                           @"Includes GPU-side assets that never touch Malloc")];
+        int64_t outside = zoneTotals->inUse - facts->allocated;
+        [rows addObject:zs_make_memory_row(@"Outside Unity (lower bound)",
+                                           MAX(outside, (int64_t)0),
+                                           outside > 0
+                                               ? @"Live Malloc blocks beyond everything Unity reports"
+                                               : @"No Malloc excess provable from Unity's own totals")];
+    }
+
+    NSMutableArray<ZSMemoryUsageCategory *> *tagRows = [mallocTags.allValues mutableCopy];
+    zs_sort_memory_rows_descending(tagRows);
+    for (ZSMemoryUsageCategory *tag in tagRows) {
+        int64_t average = tag.objectCount > 0 ? tag.totalBytes / (int64_t)tag.objectCount : 0;
+        [rows addObject:zs_make_memory_row([@"VM: " stringByAppendingString:tag.name],
+                                           tag.totalBytes,
+                                           [NSString stringWithFormat:@"dirty %@ · compressed %@ · span %@ · density %@ · %lu regions · avg %@",
+                                            zs_memory_bytes_string(tag.residentBytes),
+                                            zs_memory_bytes_string(tag.compressedBytes),
+                                            zs_memory_bytes_string(tag.virtualBytes),
+                                            zs_malloc_density_string(tag),
+                                            (unsigned long)tag.objectCount,
+                                            zs_memory_bytes_string(average)])];
+    }
+
+    for (ZSMemoryUsageCategory *region in mallocRegions) {
+        [rows addObject:zs_make_memory_row([@"Region: " stringByAppendingString:region.name],
+                                           region.totalBytes,
+                                           [NSString stringWithFormat:@"dirty %@ · compressed %@ · span %@",
+                                            zs_memory_bytes_string(region.residentBytes),
+                                            zs_memory_bytes_string(region.compressedBytes),
+                                            zs_memory_bytes_string(region.virtualBytes)])];
+    }
+
+    return zs_make_memory_group(@"Malloc attribution",
+                                @"Not additive: several rows describe the same memory from different angles",
+                                NO,
+                                rows);
+}
+
 @interface ZSTopAssetEntry : NSObject
 @property (nonatomic, assign) int64_t size;
 @property (nonatomic, copy) NSString *name;
@@ -2609,6 +2831,8 @@ static ZSMemoryUsageGroup *zs_build_clean_files_group(NSDictionary<NSString *, Z
 @property (nonatomic, assign) double busyMilliseconds;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *owners;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *cleanFiles;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSMemoryUsageCategory *> *mallocTags;
+@property (nonatomic, strong) NSMutableArray<ZSMemoryUsageCategory *> *mallocRegions;
 @property (nonatomic, assign) ZSVMWalkTotals totals;
 @property (nonatomic, assign) ZSVMWalkCursor vmCursor;
 @property (nonatomic, assign) int64_t footprint;
@@ -2637,6 +2861,8 @@ static void zs_memory_scan_session_prepare(ZSMemoryScanSession *session, BOOL un
     session.busyMilliseconds = 0;
     session.owners = [NSMutableDictionary new];
     session.cleanFiles = [NSMutableDictionary new];
+    session.mallocTags = [NSMutableDictionary new];
+    session.mallocRegions = [NSMutableArray new];
 
     ZSVMWalkTotals totals;
     memset(&totals, 0, sizeof(totals));
@@ -2855,7 +3081,12 @@ static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_finalize(ZSMemoryScanSessio
     ZSVMWalkTotals totals = session.totals;
 
     NSMutableArray<ZSMemoryUsageGroup *> *groups = [NSMutableArray new];
+    ZSMallocZoneTotals zoneTotals;
+    NSMutableArray<ZSMemoryUsageCategory *> *zoneRows = zs_collect_malloc_zone_rows(&zoneTotals);
+
     [groups addObject:zs_build_footprint_group(session.owners, &totals, session.footprint)];
+    [groups addObject:zs_build_malloc_zones_group(zoneRows, &zoneTotals)];
+    [groups addObject:zs_build_malloc_attribution_group(session.mallocTags, session.mallocRegions, &totals, &zoneTotals, &facts)];
     [groups addObject:zs_build_unity_group(scan, &facts)];
     [groups addObject:zs_build_top_assets_group(scan)];
     [groups addObject:zs_build_diagnostics_group(scan, &facts, &totals)];
@@ -2871,7 +3102,7 @@ static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_run_unit(ZSMemoryScanSessio
     if (session.stage == 0) {
         ZSVMWalkTotals totals = session.totals;
         ZSVMWalkCursor cursor = session.vmCursor;
-        zs_walk_vm_regions(session.owners, session.cleanFiles, &totals, &cursor, session.unbounded ? 0 : kZSMemoryScanVMRegionsPerUnit);
+        zs_walk_vm_regions(session.owners, session.cleanFiles, session.mallocTags, session.mallocRegions, &totals, &cursor, session.unbounded ? 0 : kZSMemoryScanVMRegionsPerUnit);
         session.totals = totals;
         session.vmCursor = cursor;
         if (cursor.finished) {
