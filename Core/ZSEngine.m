@@ -2465,7 +2465,7 @@ static ZSMemoryUsageGroup *zs_build_footprint_group(NSDictionary<NSString *, ZSM
     if (unaccounted > (int64_t)4 * 1024 * 1024) {
         ZSMemoryUsageCategory *kernel = zs_make_memory_row(@"Kernel-accounted (no VM region)",
                                                           unaccounted,
-                                                          @"Ledger pages the VM map does not expose (graphics / IOKit)");
+                                                          @"GPU / IOKit ledger pages");
         [rows addObject:kernel];
     }
 
