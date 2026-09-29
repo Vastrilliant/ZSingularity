@@ -6386,7 +6386,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
                                             restingFrame.size.height);
 
     [unityView layoutIfNeeded];
-    if (fromTabs) self.glassContainer.alpha = 0;
     self.glassContainer.hidden = NO;
     self.contentOverlay.hidden = NO;
 
@@ -6397,14 +6396,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [self zs_updateSliderGlassVisibility];
 
     __weak typeof(self) weakSelf = self;
-    if (fromTabs) {
-        [UIView animateWithDuration:0.16
-                              delay:0
-                            options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction
-                         animations:^{
-            weakSelf.glassContainer.alpha = 1;
-        } completion:nil];
-    }
     [UIView animateWithDuration:0.28
                           delay:0
          usingSpringWithDamping:0.85
@@ -6501,16 +6492,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
             [weakSelf teardownPanelState];
             return;
         }
-        UIView *fadingContainer = weakSelf.glassContainer;
+        UIView *closingContainer = weakSelf.glassContainer;
         [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
-        [UIView animateWithDuration:0.16
-                              delay:0
-                            options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionAllowUserInteraction
-                         animations:^{
-            fadingContainer.alpha = 0;
-        } completion:^(BOOL fadeFinished) {
-            if (!weakSelf.panelOpen && weakSelf.glassContainer == fadingContainer) [weakSelf teardownPanelState];
-        }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!weakSelf.panelOpen && weakSelf.glassContainer == closingContainer) [weakSelf teardownPanelState];
+        });
     }];
 }
 
