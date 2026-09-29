@@ -4920,6 +4920,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) CGFloat pinClusterOffsetY;
 @property (nonatomic, assign) BOOL pinRecenterPending;
 @property (nonatomic, assign) BOOL panelFullScreenLayoutActive;
+@property (nonatomic, assign) BOOL extendedCoverMode;
+@property (nonatomic, assign) BOOL extendedCoverEntering;
 @property (nonatomic, assign) NSUInteger pinRecenterToken;
 @property (nonatomic, strong) UIView *pinMenuScrim;
 @property (nonatomic, strong) UIView *pinMenuContent;
@@ -6445,11 +6447,9 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
         return;
     }
 
-    UIView *closingHandle = self.handleGlass ?: self.handle;
-    BOOL landOnTabs = [self zs_metalTabsAvailableAfterClose] && closingHandle.frame.origin.x < 0.5;
-    CGFloat tabInset = landOnTabs ? kHandleWidth : 0;
+    UIView *closingContainer = self.glassContainer;
 
-    CGRect offscreenFrame = CGRectMake(unityView.bounds.size.width - tabInset,
+    CGRect offscreenFrame = CGRectMake(unityView.bounds.size.width,
                                         self.glassContainer.frame.origin.y,
                                         self.glassContainer.frame.size.width,
                                         self.glassContainer.frame.size.height);
@@ -6462,14 +6462,14 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     CGRect extendedOffscreenFrame = extendedVisible ? CGRectOffset(self.extendedContentClip.frame, offscreenDeltaX, 0) : CGRectZero;
 
     UIView *handleElement = self.handleGlass ?: self.handle;
-    CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + (landOnTabs ? 0 : kHandleWidth),
+    CGRect handleRetractedFrame = CGRectMake(handleElement.frame.origin.x + kHandleWidth,
                                               handleElement.frame.origin.y,
                                               handleElement.frame.size.width,
                                               handleElement.frame.size.height);
 
     NSMutableDictionary<NSString *, NSValue *> *pinnedRetractedFrames = [NSMutableDictionary dictionary];
     for (NSString *pinKey in self.pinnedTabElements) {
-        pinnedRetractedFrames[pinKey] = [NSValue valueWithCGRect:CGRectOffset(self.pinnedTabElements[pinKey].frame, landOnTabs ? 0 : kHandleWidth, 0)];
+        pinnedRetractedFrames[pinKey] = [NSValue valueWithCGRect:CGRectOffset(self.pinnedTabElements[pinKey].frame, kHandleWidth, 0)];
     }
 
     __weak typeof(self) weakSelf = self;
@@ -6487,16 +6487,9 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
         if (extendedVisible) weakSelf.extendedContentClip.frame = extendedOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
-        if (!landOnTabs) {
-            [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
-            [weakSelf teardownPanelState];
-            return;
-        }
-        UIView *closingContainer = weakSelf.glassContainer;
+        if (weakSelf.panelOpen || weakSelf.glassContainer != closingContainer) return;
+        [weakSelf teardownPanelState];
         [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.16 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!weakSelf.panelOpen && weakSelf.glassContainer == closingContainer) [weakSelf teardownPanelState];
-        });
     }];
 }
 
@@ -6566,6 +6559,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.pinRecenterPending = NO;
     self.pinRecenterToken = self.pinRecenterToken + 1;
     self.panelFullScreenLayoutActive = NO;
+    self.extendedCoverMode = NO;
+    self.extendedCoverEntering = NO;
 
     self.glassContainer = nil;
     self.panelGlass = nil;
@@ -9204,6 +9199,11 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
 
 - (void)closeDocsPanel {
     if (!self.docsPanelOpen) return;
+
+    if (self.extendedCoverMode) {
+        [self closePanel];
+        return;
+    }
 
     if (self.docsLanguageDropdownOpen) {
         [self zs_closeDocsLanguageDropdownAnimated:NO];
@@ -13000,7 +13000,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
-        [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
+        [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
         [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
@@ -13254,7 +13254,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_startSyslogInfoRefresh];
 
     self.docsPanelOpen = YES;
-    [self positionPanelAnimated:YES];
+    [self positionPanelAnimated:!self.extendedCoverEntering];
 
     [self.syslogFullScreenOverlay layoutIfNeeded];
     [self zs_updateSyslogInfoLabel];
@@ -13441,7 +13441,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [statusLabel.trailingAnchor constraintEqualToAnchor:pieView.leadingAnchor constant:-10],
 
         [pieView.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [pieView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor constant:-kPanelPadding],
+        [pieView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
         [pieView.widthAnchor constraintEqualToConstant:30],
         [pieView.heightAnchor constraintEqualToConstant:30],
 
@@ -13475,7 +13475,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryFullScreenStatusLabel.text = @"Scanning…";
 
     self.docsPanelOpen = YES;
-    [self positionPanelAnimated:YES];
+    [self positionPanelAnimated:!self.extendedCoverEntering];
 
     [self zs_renderMemoryColumnsWithStats:zs_collect_memory_system_stats() groups:@[]];
     self.memoryFullScreenStatusLabel.text = @"Scanning…";
@@ -14078,6 +14078,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (height < 80) return NO;
 
     CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
+    if (self.extendedCoverMode) {
+        panelWidth = MAX(panelWidth - (self.panelWidth > 0 ? self.panelWidth : kPanelWidth), 0);
+    }
     self.memoryBuildHeight = height;
     self.memoryBuildPanelWidth = panelWidth;
     return YES;
@@ -15078,10 +15081,6 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     }];
 }
 
-- (BOOL)zs_metalTabsAvailableAfterClose {
-    return zs_ui_host_view() != nil && self.installed && !self.tutorialPresented && [self zs_pinnedKeys].count > 0;
-}
-
 - (void)zs_refreshMetalTabs {
     [self zs_syncMetalTabsAllowingHierarchy:NO snap:NO];
 }
@@ -15122,6 +15121,64 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     [self zs_performPinnedActionForKey:key];
 }
 
+- (void)zs_openExtendedOnlyForKey:(NSString *)key {
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView || self.panelOpen) return;
+
+    BOOL isMemory = [key isEqualToString:kZSPinKeyMemory];
+
+    self.panelOpen = YES;
+    [[ZSMetalTabs shared] setVisible:NO snap:NO];
+    [self buildPanel:unityView];
+    zs_reapply_all_settings();
+
+    self.extendedCoverMode = YES;
+    self.extendedCoverEntering = YES;
+    if (isMemory) {
+        [self memoryUsageAnalyzeTapped:nil];
+    } else {
+        self.syslogTabEnabled = NO;
+        [self toggleSyslogTapped];
+    }
+    self.extendedCoverEntering = NO;
+
+    UIView *container = self.glassContainer;
+    UIView *clip = self.extendedContentClip;
+    if (!container || !clip || !self.docsPanelOpen) {
+        self.extendedCoverMode = NO;
+        self.panelOpen = NO;
+        [self teardownPanelState];
+        [self zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
+        return;
+    }
+
+    CGFloat offscreenDeltaX = unityView.bounds.size.width;
+    CGRect containerRestingFrame = container.frame;
+    CGRect clipRestingFrame = clip.frame;
+
+    [UIView performWithoutAnimation:^{
+        container.frame = CGRectOffset(containerRestingFrame, offscreenDeltaX, 0);
+        clip.frame = CGRectOffset(clipRestingFrame, offscreenDeltaX, 0);
+        container.hidden = NO;
+        [unityView layoutIfNeeded];
+    }];
+
+    [[FPS120Controller shared] setPanelOpen:YES];
+    zs_set_glass_suspended(NO);
+    zs_gif_tint_set_paused(NO);
+    zs_gif_tint_reconstruct_all();
+
+    [UIView animateWithDuration:0.28
+                          delay:0
+         usingSpringWithDamping:0.85
+          initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        container.frame = containerRestingFrame;
+        clip.frame = clipRestingFrame;
+    } completion:nil];
+}
+
 - (void)zs_pinnedTabTapped:(UITapGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) return;
     if (self.pinMenuOpen) return;
@@ -15133,12 +15190,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     if (!key) return;
     BOOL needsPanel = [key isEqualToString:kZSPinKeyMemory] || [key isEqualToString:kZSPinKeySyslog];
     if (needsPanel && !self.panelOpen) {
-        [self openPanel];
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (strongSelf && strongSelf.panelOpen) [strongSelf zs_performPinnedActionForKey:key];
-        });
+        [self zs_openExtendedOnlyForKey:key];
         return;
     }
     if ([key isEqualToString:kZSPinKeyMemory]) {
@@ -15490,7 +15542,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 - (void)zs_updateSliderGlassVisibility {
     if (!zs_has_liquid_glass() || !self.stack || !self.scrollViewport) return;
 
-    if (!self.panelOpen) {
+    if (!self.panelOpen || self.extendedCoverMode) {
         [self zs_updateSliderGlassVisibilityForArrangedSubviews:self.stack.arrangedSubviews containerHidden:YES visibleRect:CGRectZero];
         if (self.experimentalSectionContainer) {
             [self zs_updateSliderGlassVisibilityForArrangedSubviews:self.experimentalSectionContainer.arrangedSubviews containerHidden:YES visibleRect:CGRectZero];
@@ -15556,13 +15608,18 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     self.panelFullScreenLayoutActive = fullScreenOpen;
     BOOL leftCornersFlatChanged = docsVisible != self.panelLeftCornersFlat;
     self.panelLeftCornersFlat = docsVisible;
+    BOOL coverActive = self.extendedCoverMode && fullScreenOpen && docsVisible;
     CGFloat docsW = 0;
     if (docsVisible) {
-        docsW = fullScreenOpen
-            ? (unityView.bounds.size.width - kHandleWidth - panelW)
-            : (self.docsPanelWidth > 0 ? self.docsPanelWidth : panelW);
+        if (coverActive) {
+            docsW = unityView.bounds.size.width - kHandleWidth;
+        } else {
+            docsW = fullScreenOpen
+                ? (unityView.bounds.size.width - kHandleWidth - panelW)
+                : (self.docsPanelWidth > 0 ? self.docsPanelWidth : panelW);
+        }
     }
-    CGFloat chromeWidth = kHandleWidth + docsW + panelW;
+    CGFloat chromeWidth = coverActive ? unityView.bounds.size.width : (kHandleWidth + docsW + panelW);
     CGFloat height = unityView.bounds.size.height;
 
     CGFloat targetX = unityView.bounds.size.width - chromeWidth;
@@ -15708,7 +15765,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     if (separator) {
         static const NSTimeInterval kSeparatorFadeInDuration = 0.25;
         static const NSTimeInterval kSeparatorFadeOutDuration = 0.16;
-        if (docsVisible) {
+        if (docsVisible && !coverActive) {
             BOOL needsFadeIn = separator.hidden || separator.alpha < 1;
             if (separator.hidden) {
                 [separator.layer removeAllAnimations];
