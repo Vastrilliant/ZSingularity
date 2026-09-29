@@ -5124,13 +5124,14 @@ static NSString * const kZSMTShaderSource =
 @"        float inside = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);\n"
 @"        float4 sk = skinTex.sample(smp, suv, level(0));\n"
 @"        sk *= inside;\n"
-@"        if (sk.a < 0.004 && cover <= 0.0) {\n"
+@"        if (sk.a < 0.004) {\n"
 @"            return dst;\n"
 @"        }\n"
+@"        float cov = smoothstep(0.03, 0.12, sk.a);\n"
 @"\n"
 @"        float2 nrm = grad / max(length(grad), 0.0001);\n"
 @"        float dist = max(-sd, 0.0);\n"
-@"        float lens = (sd < 0.0) ? exp(-dist / (3.0 * px)) * 6.0 * px : 0.0;\n"
+@"        float lens = exp(-dist / (3.0 * px)) * 6.0 * px * cov;\n"
 @"        float2 texel = 1.0 / scene.back.zw;\n"
 @"        float2 buv = (pos - nrm * lens - scene.back.xy) * texel;\n"
 @"\n"
@@ -5143,10 +5144,9 @@ static NSString * const kZSMTShaderSource =
 @"        }\n"
 @"        float3 blurred = lin ? pow(max(acc, float3(0.0)), float3(1.0 / 2.2)) : acc;\n"
 @"\n"
-@"        float shape = saturate(0.5 - sd);\n"
-@"        float3 under = mix(g, blurred, shape);\n"
+@"        float3 under = mix(g, blurred, cov);\n"
 @"        float3 glassOut = sk.rgb + (1.0 - sk.a) * under;\n"
-@"        glassOut += pressAcc * 0.08 * shape;\n"
+@"        glassOut += pressAcc * 0.08 * cov;\n"
 @"        glassOut = mix(saturate(glassOut), float3(1.0), iconAcc);\n"
 @"        result = mix(g, glassOut, master);\n"
 @"    } else if (flatStyle) {\n"
@@ -5384,11 +5384,21 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     float quadX1 = ceilf(fminf(maxX + margin, (float)target.width));
     float quadY1 = ceilf(fminf(maxY + margin, (float)target.height));
     if (quadX1 <= quadX0 || quadY1 <= quadY0) return;
+    float skinMargin = kZSMTSkinMargin * px;
+    float regionX0 = floorf(fmaxf(restMinX - skinMargin, 0.0f));
+    float regionY0 = floorf(fmaxf(restMinY - skinMargin, 0.0f));
+    float regionX1 = ceilf(fminf(restMaxX + skinMargin, (float)target.width));
+    float regionY1 = ceilf(fminf(restMaxY + skinMargin, (float)target.height));
+    if (regionX1 <= regionX0 || regionY1 <= regionY0) return;
+    quadX0 = fmaxf(quadX0, regionX0);
+    quadY0 = fmaxf(quadY0, regionY0);
+    quadX1 = fminf(quadX1, regionX1);
+    quadY1 = fminf(quadY1, regionY1);
+    if (quadX1 <= quadX0 || quadY1 <= quadY0) return;
     scene.quad[0] = quadX0;
     scene.quad[1] = quadY0;
     scene.quad[2] = quadX1;
     scene.quad[3] = quadY1;
-    float skinMargin = kZSMTSkinMargin * px;
     scene.skinRect[0] = restMinX - skinMargin;
     scene.skinRect[1] = restMinY - skinMargin;
     scene.skinRect[2] = restMaxX + skinMargin;
@@ -5400,16 +5410,14 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
 
     id<MTLTexture> backdrop = nil;
     if (useReal) {
-        NSUInteger copyX = (NSUInteger)quadX0;
-        NSUInteger copyY = (NSUInteger)quadY0;
-        NSUInteger copyW = (NSUInteger)(quadX1 - quadX0);
-        NSUInteger copyH = (NSUInteger)(quadY1 - quadY0);
-        NSUInteger allocW = ((copyW + 63) / 64) * 64;
-        NSUInteger allocH = ((copyH + 63) / 64) * 64;
-        if (!r_zsmtBackdrop || r_zsmtBackdrop.width < allocW || r_zsmtBackdrop.height < allocH || r_zsmtBackdrop.pixelFormat != format) {
+        NSUInteger copyX = (NSUInteger)regionX0;
+        NSUInteger copyY = (NSUInteger)regionY0;
+        NSUInteger copyW = (NSUInteger)(regionX1 - regionX0);
+        NSUInteger copyH = (NSUInteger)(regionY1 - regionY0);
+        if (!r_zsmtBackdrop || r_zsmtBackdrop.width != copyW || r_zsmtBackdrop.height != copyH || r_zsmtBackdrop.pixelFormat != format) {
             MTLTextureDescriptor *backDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
-                                                                                                      width:allocW
-                                                                                                     height:allocH
+                                                                                                      width:copyW
+                                                                                                     height:copyH
                                                                                                   mipmapped:YES];
             backDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
             backDescriptor.storageMode = MTLStorageModePrivate;
@@ -5431,10 +5439,10 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
                     destinationOrigin:MTLOriginMake(0, 0, 0)];
                 [blit generateMipmapsForTexture:backdrop];
                 [blit endEncoding];
-                scene.back[0] = quadX0;
-                scene.back[1] = quadY0;
-                scene.back[2] = (float)backdrop.width;
-                scene.back[3] = (float)backdrop.height;
+                scene.back[0] = (float)copyX;
+                scene.back[1] = (float)copyY;
+                scene.back[2] = (float)copyW;
+                scene.back[3] = (float)copyH;
             } else {
                 backdrop = nil;
             }
