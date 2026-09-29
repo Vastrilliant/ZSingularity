@@ -1152,33 +1152,12 @@ UIView *zs_unity_view(void) {
     return found;
 }
 
-static void configure_metal_layer(UIView *unityView) {
-    if (!unityView) return;
-    if (![unityView.layer isKindOfClass:[CAMetalLayer class]]) return;
-
-    CAMetalLayer *metalLayer = (CAMetalLayer *)unityView.layer;
-    metalLayer.framebufferOnly = YES;
-}
-
 #pragma mark - Startup
 
 static void *background_worker(void *arg) {
     (void)arg;
 
     __block BOOL fpsReady = NO;
-    __block BOOL metalConfigured = NO;
-
-    while (!metalConfigured) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            UIView *unityView = zs_unity_view();
-            if (unityView) {
-                configure_metal_layer(unityView);
-                metalConfigured = YES;
-                ZLog(@"Unity view found, Metal layer configured");
-            }
-        });
-        if (!metalConfigured) usleep(200 * 1000);
-    }
 
     while (!fpsReady) {
         dispatch_sync(dispatch_get_main_queue(), ^{

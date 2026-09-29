@@ -4943,11 +4943,14 @@ static NSString * const kZSMTHandleKey = @"__handle";
 static const CGFloat kZSMTCornerRadius = 10;
 static const CGFloat kZSMTCellPoints = 24;
 static const int kZSMTMaxItems = 8;
+static const CGFloat kZSMTSkinMargin = 18;
+static const CGFloat kZSMTGlassSpacing = 16;
 
 typedef struct {
     float rect[4];
     float radii[4];
     float params[4];
+    float rest[4];
 } ZSMTGPUItem;
 
 typedef struct {
@@ -4955,6 +4958,9 @@ typedef struct {
     float misc[4];
     float quad[4];
     float counts[4];
+    float skin[4];
+    float back[4];
+    float skinRect[4];
     ZSMTGPUItem items[8];
 } ZSMTGPUScene;
 
@@ -4972,6 +4978,10 @@ static BOOL g_zsmtSnap;
 static BOOL g_zsmtGlass;
 static float g_zsmtPressTarget[8];
 static NSData *g_zsmtAtlasData;
+static NSData *g_zsmtSkinData;
+static int g_zsmtSkinVersion;
+static int g_zsmtSkinW;
+static int g_zsmtSkinH;
 static int g_zsmtAtlasVersion;
 static int g_zsmtAtlasCellPx;
 static int g_zsmtAtlasCells;
@@ -4981,6 +4991,9 @@ static MTLPixelFormat g_zsmtPipelineFormat;
 static __weak CAMetalLayer *g_zsmtLayer;
 
 static id<MTLTexture> r_zsmtAtlas;
+static id<MTLTexture> r_zsmtSkin;
+static int r_zsmtSkinVersion = -1;
+static id<MTLTexture> r_zsmtBackdrop;
 static int r_zsmtAtlasVersion = -1;
 static float r_zsmtMaster;
 static float r_zsmtPress[8];
@@ -5002,6 +5015,7 @@ static NSString * const kZSMTShaderSource =
 @"    float4 rect;\n"
 @"    float4 radii;\n"
 @"    float4 params;\n"
+@"    float4 rest;\n"
 @"};\n"
 @"\n"
 @"struct ZSScene {\n"
@@ -5009,6 +5023,9 @@ static NSString * const kZSMTShaderSource =
 @"    float4 misc;\n"
 @"    float4 quad;\n"
 @"    float4 counts;\n"
+@"    float4 skin;\n"
+@"    float4 back;\n"
+@"    float4 skinRect;\n"
 @"    ZSItem items[8];\n"
 @"};\n"
 @"\n"
@@ -5053,21 +5070,25 @@ static NSString * const kZSMTShaderSource =
 @"fragment float4 zs_tab_fragment(VOut in [[stage_in]],\n"
 @"                                float4 dst [[color(0)]],\n"
 @"                                constant ZSScene &scene [[buffer(0)]],\n"
-@"                                texture2d<float> atlas [[texture(0)]]) {\n"
+@"                                texture2d<float> atlas [[texture(0)]],\n"
+@"                                texture2d<float> skinTex [[texture(1)]],\n"
+@"                                texture2d<float> backTex [[texture(2)]]) {\n"
 @"    constexpr sampler smp(coord::normalized, filter::linear, address::clamp_to_edge);\n"
+@"    constexpr sampler mipSmp(coord::normalized, filter::linear, mip_filter::linear, address::clamp_to_edge);\n"
 @"    float px = scene.misc.y;\n"
 @"    float master = scene.misc.w;\n"
 @"    bool lin = scene.misc.z > 0.5;\n"
 @"    bool flatStyle = scene.counts.w > 0.5;\n"
+@"    bool realGlass = scene.skin.x > 0.5 && scene.skin.y > 0.5 && !flatStyle;\n"
 @"    float2 pos = in.local;\n"
 @"\n"
 @"    float sd = zs_union(pos, scene);\n"
 @"    float sh = zs_union(pos - float2(0.0, 2.0 * px), scene);\n"
 @"    float2 grad = float2(dfdx(sd), dfdy(sd));\n"
 @"\n"
-@"    float shadow = flatStyle ? 0.0 : exp(-max(sh, 0.0) / (5.0 * px)) * 0.30 * master;\n"
+@"    float shadow = (flatStyle || realGlass) ? 0.0 : exp(-max(sh, 0.0) / (5.0 * px)) * 0.30 * master;\n"
 @"    float cover = saturate(0.5 - sd) * master;\n"
-@"    if (cover <= 0.0 && shadow < 0.004) {\n"
+@"    if (!realGlass && cover <= 0.0 && shadow < 0.004) {\n"
 @"        return dst;\n"
 @"    }\n"
 @"\n"
@@ -5075,12 +5096,18 @@ static NSString * const kZSMTShaderSource =
 @"    float cells = max(scene.counts.z, 1.0);\n"
 @"    float iconAcc = 0.0;\n"
 @"    float pressAcc = 0.0;\n"
+@"    float best = 1.0e9;\n"
+@"    float2 restPos = pos;\n"
 @"    for (int i = 0; i < n; i++) {\n"
 @"        constant ZSItem &it = scene.items[i];\n"
 @"        float2 hs = it.rect.zw * 0.5;\n"
 @"        float2 c = it.rect.xy + hs;\n"
 @"        float si = zs_box(pos - c, hs, it.radii);\n"
 @"        pressAcc = max(pressAcc, it.params.x * saturate(0.5 - si / (3.0 * px)));\n"
+@"        if (si < best) {\n"
+@"            best = si;\n"
+@"            restPos = (it.rest.xy + it.rest.zw * 0.5) + (pos - c) * (it.rest.zw / max(it.rect.zw, float2(1.0)));\n"
+@"        }\n"
 @"        float2 ip = (pos - c) / (24.0 * px) + 0.5;\n"
 @"        if (ip.x >= 0.0 && ip.x <= 1.0 && ip.y >= 0.0 && ip.y <= 1.0) {\n"
 @"            float a = atlas.sample(smp, float2((it.params.y + ip.x) / cells, ip.y), level(0)).a;\n"
@@ -5091,7 +5118,37 @@ static NSString * const kZSMTShaderSource =
 @"    float3 g = lin ? pow(max(dst.rgb, float3(0.0)), float3(1.0 / 2.2)) : dst.rgb;\n"
 @"    float3 result;\n"
 @"\n"
-@"    if (flatStyle) {\n"
+@"    if (realGlass) {\n"
+@"        float2 suv = (restPos - scene.skinRect.xy) / max(scene.skinRect.zw - scene.skinRect.xy, float2(1.0));\n"
+@"        float inside = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);\n"
+@"        float4 sk = skinTex.sample(smp, suv, level(0));\n"
+@"        sk *= inside;\n"
+@"        if (sk.a < 0.004 && cover <= 0.0) {\n"
+@"            return dst;\n"
+@"        }\n"
+@"\n"
+@"        float2 nrm = grad / max(length(grad), 0.0001);\n"
+@"        float dist = max(-sd, 0.0);\n"
+@"        float lens = (sd < 0.0) ? exp(-dist / (3.0 * px)) * 6.0 * px : 0.0;\n"
+@"        float2 texel = 1.0 / scene.back.zw;\n"
+@"        float2 buv = (pos - nrm * lens - scene.back.xy) * texel;\n"
+@"\n"
+@"        float3 acc = backTex.sample(mipSmp, buv, level(2.5)).rgb * 0.25;\n"
+@"        float rad = 5.0 * px;\n"
+@"        for (int k = 0; k < 8; k++) {\n"
+@"            float ang = float(k) * 0.78539816;\n"
+@"            float2 d = float2(cos(ang), sin(ang)) * rad * texel;\n"
+@"            acc += backTex.sample(mipSmp, buv + d, level(2.0)).rgb * 0.09375;\n"
+@"        }\n"
+@"        float3 blurred = lin ? pow(max(acc, float3(0.0)), float3(1.0 / 2.2)) : acc;\n"
+@"\n"
+@"        float shape = saturate(0.5 - sd);\n"
+@"        float3 under = mix(g, blurred, shape);\n"
+@"        float3 glassOut = sk.rgb + (1.0 - sk.a) * under;\n"
+@"        glassOut += pressAcc * 0.08 * shape;\n"
+@"        glassOut = mix(saturate(glassOut), float3(1.0), iconAcc);\n"
+@"        result = mix(g, glassOut, master);\n"
+@"    } else if (flatStyle) {\n"
 @"        float3 body = mix(g, float3(0.08), 0.94);\n"
 @"        body = mix(body, float3(1.0), iconAcc);\n"
 @"        result = mix(g, body, cover);\n"
@@ -5170,7 +5227,9 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     float viewW, viewH;
     BOOL visible, snap, glass;
     NSData *atlasData;
+    NSData *skinData;
     int atlasVersion, atlasCellPx, atlasCells;
+    int skinVersion, skinW, skinH;
     id<MTLLibrary> library;
     id<MTLRenderPipelineState> pipeline = nil;
 
@@ -5188,6 +5247,10 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     atlasVersion = g_zsmtAtlasVersion;
     atlasCellPx = g_zsmtAtlasCellPx;
     atlasCells = g_zsmtAtlasCells;
+    skinData = g_zsmtSkinData;
+    skinVersion = g_zsmtSkinVersion;
+    skinW = g_zsmtSkinW;
+    skinH = g_zsmtSkinH;
     library = g_zsmtLibrary;
     if (g_zsmtPipelineFormat == target.pixelFormat) pipeline = g_zsmtPipeline;
     os_unfair_lock_unlock(&g_zsmtLock);
@@ -5248,10 +5311,31 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     }
     if (!r_zsmtAtlas) return;
 
+    if (glass && skinData.length > 0 && skinW > 0 && skinH > 0) {
+        if (!r_zsmtSkin || r_zsmtSkinVersion != skinVersion) {
+            MTLTextureDescriptor *skinDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                                       width:(NSUInteger)skinW
+                                                                                                      height:(NSUInteger)skinH
+                                                                                                   mipmapped:NO];
+            skinDescriptor.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> skin = [commandBuffer.device newTextureWithDescriptor:skinDescriptor];
+            if (skin && skinData.length >= (NSUInteger)skinW * (NSUInteger)skinH * 4) {
+                [skin replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)skinW, (NSUInteger)skinH) mipmapLevel:0 withBytes:skinData.bytes bytesPerRow:(NSUInteger)skinW * 4];
+                r_zsmtSkin = skin;
+                r_zsmtSkinVersion = skinVersion;
+            }
+        }
+    } else {
+        r_zsmtSkin = nil;
+        r_zsmtSkinVersion = -1;
+    }
+    BOOL useReal = glass && r_zsmtSkin != nil && !layer.framebufferOnly;
+
     ZSMTGPUScene scene;
     memset(&scene, 0, sizeof(scene));
     float px = sx;
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    float restMinX = 1e9f, restMinY = 1e9f, restMaxX = -1e9f, restMaxY = -1e9f;
     for (int i = 0; i < count && i < kZSMTMaxItems; i++) {
         float pr = r_zsmtPress[i];
         float w = rects[i].w * (1.0f + 0.10f * pr);
@@ -5273,6 +5357,15 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
         scene.items[i].params[0] = pr;
         scene.items[i].params[1] = (float)i;
         scene.items[i].params[2] = i == 0 ? 0.66f : 0.85f;
+        float restX = rects[i].x * sx, restY = rects[i].y * sy, restW = rects[i].w * sx, restH = rects[i].h * sy;
+        scene.items[i].rest[0] = restX;
+        scene.items[i].rest[1] = restY;
+        scene.items[i].rest[2] = restW;
+        scene.items[i].rest[3] = restH;
+        restMinX = MIN(restMinX, restX);
+        restMinY = MIN(restMinY, restY);
+        restMaxX = MAX(restMaxX, restX + restW);
+        restMaxY = MAX(restMaxY, restY + restH);
         minX = MIN(minX, rx);
         minY = MIN(minY, ry);
         maxX = MAX(maxX, rx + rw);
@@ -5285,14 +5378,71 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     scene.misc[1] = px;
     scene.misc[2] = zs_mt_format_is_linear(format) ? 1.0f : 0.0f;
     scene.misc[3] = r_zsmtMaster;
-    scene.quad[0] = minX - margin;
-    scene.quad[1] = minY - margin;
-    scene.quad[2] = maxX + margin;
-    scene.quad[3] = maxY + margin;
+    float quadX0 = floorf(fmaxf(minX - margin, 0.0f));
+    float quadY0 = floorf(fmaxf(minY - margin, 0.0f));
+    float quadX1 = ceilf(fminf(maxX + margin, (float)target.width));
+    float quadY1 = ceilf(fminf(maxY + margin, (float)target.height));
+    if (quadX1 <= quadX0 || quadY1 <= quadY0) return;
+    scene.quad[0] = quadX0;
+    scene.quad[1] = quadY0;
+    scene.quad[2] = quadX1;
+    scene.quad[3] = quadY1;
+    float skinMargin = kZSMTSkinMargin * px;
+    scene.skinRect[0] = restMinX - skinMargin;
+    scene.skinRect[1] = restMinY - skinMargin;
+    scene.skinRect[2] = restMaxX + skinMargin;
+    scene.skinRect[3] = restMaxY + skinMargin;
     scene.counts[0] = (float)MIN(count, kZSMTMaxItems);
     scene.counts[1] = 9.0f * px;
     scene.counts[2] = (float)atlasCells;
     scene.counts[3] = glass ? 0.0f : 1.0f;
+
+    id<MTLTexture> backdrop = nil;
+    if (useReal) {
+        NSUInteger copyX = (NSUInteger)quadX0;
+        NSUInteger copyY = (NSUInteger)quadY0;
+        NSUInteger copyW = (NSUInteger)(quadX1 - quadX0);
+        NSUInteger copyH = (NSUInteger)(quadY1 - quadY0);
+        NSUInteger allocW = ((copyW + 63) / 64) * 64;
+        NSUInteger allocH = ((copyH + 63) / 64) * 64;
+        if (!r_zsmtBackdrop || r_zsmtBackdrop.width < allocW || r_zsmtBackdrop.height < allocH || r_zsmtBackdrop.pixelFormat != format) {
+            MTLTextureDescriptor *backDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                                      width:allocW
+                                                                                                     height:allocH
+                                                                                                  mipmapped:YES];
+            backDescriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+            backDescriptor.storageMode = MTLStorageModePrivate;
+            r_zsmtBackdrop = [commandBuffer.device newTextureWithDescriptor:backDescriptor];
+        }
+        backdrop = r_zsmtBackdrop;
+        if (backdrop && copyX + copyW <= target.width && copyY + copyH <= target.height) {
+            id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+            if (blit) {
+                blit.label = @"ZS Pull Tab Backdrop";
+                [blit copyFromTexture:target
+                          sourceSlice:0
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(copyX, copyY, 0)
+                           sourceSize:MTLSizeMake(copyW, copyH, 1)
+                            toTexture:backdrop
+                     destinationSlice:0
+                     destinationLevel:0
+                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+                [blit generateMipmapsForTexture:backdrop];
+                [blit endEncoding];
+                scene.back[0] = quadX0;
+                scene.back[1] = quadY0;
+                scene.back[2] = (float)backdrop.width;
+                scene.back[3] = (float)backdrop.height;
+            } else {
+                backdrop = nil;
+            }
+        } else {
+            backdrop = nil;
+        }
+    }
+    scene.skin[0] = (useReal && backdrop) ? 1.0f : 0.0f;
+    scene.skin[1] = (useReal && backdrop) ? 1.0f : 0.0f;
 
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
@@ -5305,6 +5455,8 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     [encoder setVertexBytes:&scene length:sizeof(scene) atIndex:0];
     [encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
     [encoder setFragmentTexture:r_zsmtAtlas atIndex:0];
+    [encoder setFragmentTexture:(useReal && backdrop) ? r_zsmtSkin : r_zsmtAtlas atIndex:1];
+    [encoder setFragmentTexture:(useReal && backdrop) ? backdrop : r_zsmtAtlas atIndex:2];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [encoder endEncoding];
 }
@@ -5344,6 +5496,68 @@ static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *ori
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
 }
 
+static uint8_t *zs_mt_rgba_buffer(UIImage *image, size_t *widthOut, size_t *heightOut) {
+    CGImageRef cgImage = image.CGImage;
+    if (!cgImage) return NULL;
+    size_t width = CGImageGetWidth(cgImage);
+    size_t height = CGImageGetHeight(cgImage);
+    if (width == 0 || height == 0) return NULL;
+    uint8_t *buffer = calloc(width * height * 4, 1);
+    if (!buffer) return NULL;
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef bitmap = CGBitmapContextCreate(buffer, width, height, 8, width * 4, colorSpace, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+    if (!bitmap) {
+        free(buffer);
+        return NULL;
+    }
+    CGContextDrawImage(bitmap, CGRectMake(0, 0, width, height), cgImage);
+    CGContextRelease(bitmap);
+    *widthOut = width;
+    *heightOut = height;
+    return buffer;
+}
+
+static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *widthOut, int *heightOut) {
+    size_t blackW = 0, blackH = 0, whiteW = 0, whiteH = 0;
+    uint8_t *black = zs_mt_rgba_buffer(onBlack, &blackW, &blackH);
+    uint8_t *white = zs_mt_rgba_buffer(onWhite, &whiteW, &whiteH);
+    if (!black || !white || blackW != whiteW || blackH != whiteH) {
+        free(black);
+        free(white);
+        return nil;
+    }
+    size_t count = blackW * blackH;
+    uint8_t *skin = malloc(count * 4);
+    if (!skin) {
+        free(black);
+        free(white);
+        return nil;
+    }
+    int peak = 0;
+    for (size_t i = 0; i < count; i++) {
+        const uint8_t *pb = black + i * 4;
+        const uint8_t *pw = white + i * 4;
+        int transmit = (((int)pw[0] - (int)pb[0]) + ((int)pw[1] - (int)pb[1]) + ((int)pw[2] - (int)pb[2])) / 3;
+        transmit = MAX(0, MIN(255, transmit));
+        int alpha = 255 - transmit;
+        skin[i * 4 + 0] = (uint8_t)MIN((int)pb[0], alpha);
+        skin[i * 4 + 1] = (uint8_t)MIN((int)pb[1], alpha);
+        skin[i * 4 + 2] = (uint8_t)MIN((int)pb[2], alpha);
+        skin[i * 4 + 3] = (uint8_t)alpha;
+        if (alpha > peak) peak = alpha;
+    }
+    free(black);
+    free(white);
+    if (peak < 12) {
+        free(skin);
+        return nil;
+    }
+    *widthOut = (int)blackW;
+    *heightOut = (int)blackH;
+    return [NSData dataWithBytesNoCopy:skin length:count * 4 freeWhenDone:YES];
+}
+
 @interface ZSMetalTabs : NSObject
 + (instancetype)shared;
 - (void)ensureInstalled;
@@ -5369,6 +5583,8 @@ static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *ori
     NSArray<NSString *> *_keys;
     NSString *_atlasSignature;
     int _atlasVersion;
+    NSString *_skinSignature;
+    int _skinVersion;
     __weak UITouch *_activeTouch;
     NSInteger _activeIndex;
 }
@@ -5503,6 +5719,84 @@ static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *ori
     return [NSData dataWithBytesNoCopy:buffer length:width * height * 4 freeWhenDone:YES];
 }
 
+- (UIImage *)glassStageImageOverColor:(UIColor *)color rects:(NSArray<NSValue *> *)rects box:(CGRect)box scale:(CGFloat)scale host:(UIView *)host {
+    UIView *stage = [[UIView alloc] initWithFrame:CGRectMake(-box.size.width - 64, 0, box.size.width, box.size.height)];
+    stage.backgroundColor = color;
+    stage.userInteractionEnabled = NO;
+    stage.clipsToBounds = YES;
+
+    UIVisualEffectView *container = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_container_effect(kZSMTGlassSpacing)];
+    container.frame = stage.bounds;
+    [stage addSubview:container];
+
+    for (NSValue *value in rects) {
+        CGRect r = value.CGRectValue;
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
+        glass.frame = CGRectMake(r.origin.x - box.origin.x, r.origin.y - box.origin.y, r.size.width, r.size.height);
+        zs_configure_glass_corners_sides(glass, kZSMTCornerRadius, NO, YES, NO);
+        [container.contentView addSubview:glass];
+    }
+
+    [host addSubview:stage];
+    [stage layoutIfNeeded];
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = scale;
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:box.size format:format];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [stage drawViewHierarchyInRect:stage.bounds afterScreenUpdates:YES];
+    }];
+    [stage removeFromSuperview];
+    return image;
+}
+
+- (void)refreshGlassSkinForRects:(NSArray<NSValue *> *)rects glass:(BOOL)glass {
+    if (!glass || rects.count == 0) {
+        if (_skinSignature) {
+            _skinSignature = nil;
+            os_unfair_lock_lock(&g_zsmtLock);
+            g_zsmtSkinData = nil;
+            g_zsmtSkinW = 0;
+            g_zsmtSkinH = 0;
+            g_zsmtSkinVersion = ++_skinVersion;
+            os_unfair_lock_unlock(&g_zsmtLock);
+        }
+        return;
+    }
+
+    CGRect unionRect = CGRectNull;
+    for (NSValue *value in rects) unionRect = CGRectUnion(unionRect, value.CGRectValue);
+
+    NSMutableString *signature = [NSMutableString string];
+    for (NSValue *value in rects) {
+        CGRect r = value.CGRectValue;
+        [signature appendFormat:@"%.1f,%.1f,%.1f,%.1f;", r.origin.x - unionRect.origin.x, r.origin.y - unionRect.origin.y, r.size.width, r.size.height];
+    }
+    if ([signature isEqualToString:_skinSignature]) return;
+
+    UIView *host = zs_ui_host_view();
+    if (!host) return;
+    _skinSignature = signature;
+
+    CGRect box = CGRectInset(unionRect, -kZSMTSkinMargin, -kZSMTSkinMargin);
+    CGFloat scale = MAX(host.traitCollection.displayScale, 1.0);
+
+    UIImage *onBlack = [self glassStageImageOverColor:UIColor.blackColor rects:rects box:box scale:scale host:host];
+    UIImage *onWhite = [self glassStageImageOverColor:UIColor.whiteColor rects:rects box:box scale:scale host:host];
+
+    int width = 0, height = 0;
+    NSData *skin = (onBlack && onWhite) ? zs_mt_compose_skin(onBlack, onWhite, &width, &height) : nil;
+    if (!skin) ZLog(@"[MetalTabs] real glass capture produced no usable pixels, using procedural glass");
+
+    os_unfair_lock_lock(&g_zsmtLock);
+    g_zsmtSkinData = skin;
+    g_zsmtSkinW = skin ? width : 0;
+    g_zsmtSkinH = skin ? height : 0;
+    g_zsmtSkinVersion = ++_skinVersion;
+    os_unfair_lock_unlock(&g_zsmtLock);
+}
+
 - (void)updateWithViewSize:(CGSize)size
                      rects:(NSArray<NSValue *> *)rects
                       keys:(NSArray<NSString *> *)keys
@@ -5513,6 +5807,8 @@ static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *ori
     NSUInteger count = MIN(rects.count, (NSUInteger)kZSMTMaxItems);
     _rects = [rects subarrayWithRange:NSMakeRange(0, count)];
     _keys = [keys subarrayWithRange:NSMakeRange(0, MIN(keys.count, count))];
+
+    [self refreshGlassSkinForRects:_rects glass:glass];
 
     NSString *signature = [symbols componentsJoinedByString:@"|"];
     NSData *atlas = nil;
