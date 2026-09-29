@@ -2821,8 +2821,8 @@ static CGFloat zs_memory_column_width(NSString *title, CGFloat panelWidth) {
     dispatch_once(&once, ^{
         fractions = @{
             @"System": @0.5,
-            @"Process footprint by owner": @0.6,
-            @"Unity allocations by subsystem": @0.6,
+            @"Process footprint by owner": @0.7,
+            @"Unity allocations by subsystem": @0.7,
             @"Reservations & diagnostics": @0.7,
             @"Live object counts": @0.4,
             @"Clean file-backed pages": @0.5,
@@ -10194,6 +10194,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         overlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
         overlay.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
     }
+    overlay.alpha = 0;
     [self.contentOverlay addSubview:overlay];
     self.modsOptionsDropdownOverlay = overlay;
 
@@ -10237,6 +10238,12 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
             subview.alpha = 1;
         }
     } completion:nil];
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        overlay.alpha = 1;
+    } completion:nil];
 
     UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
     [haptic selectionChanged];
@@ -10278,18 +10285,12 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         return;
     }
 
-    UIView *rowHost = [overlay isKindOfClass:[UIVisualEffectView class]]
-        ? ((UIVisualEffectView *)overlay).contentView
-        : overlay;
-    for (UIView *subview in rowHost.subviews) {
-        subview.alpha = 0;
-    }
-
     [UIView animateWithDuration:0.18
                           delay:0
-                        options:UIViewAnimationOptionCurveEaseIn
+                        options:UIViewAnimationOptionCurveEaseOut
                      animations:^{
         overlay.frame = collapsedDropdownFrame;
+        overlay.alpha = 0;
     } completion:^(BOOL finished) {
         finish();
     }];
@@ -12562,13 +12563,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         return;
     }
     if (dropdownSource && dropdownCollapsed) {
-        UIView *rowHost = [popup isKindOfClass:[UIVisualEffectView class]] ? ((UIVisualEffectView *)popup).contentView : popup;
-        for (UIView *subview in rowHost.subviews) subview.alpha = 0;
         [UIView animateWithDuration:0.18
                               delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
                          animations:^{
             popup.frame = dropdownCollapsed.CGRectValue;
+            popup.alpha = 0;
         } completion:^(BOOL finished) {
             remove();
         }];
@@ -12635,11 +12635,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     for (ZSMemoryUsageCategory *option in options) totalBytes += option.totalBytes;
 
     NSMutableArray<NSDictionary *> *entries = [NSMutableArray arrayWithCapacity:options.count + 1];
-    [entries addObject:@{@"title": [NSString stringWithFormat:@"All Kinds \u2022 %@", zs_memory_megabytes_string(totalBytes)],
+    [entries addObject:@{@"title": [NSString stringWithFormat:@"All Kinds · %@", zs_memory_megabytes_string(totalBytes)],
                          @"active": @(group.activeKind.length == 0)}];
     for (ZSMemoryUsageCategory *option in options) {
         [entries addObject:@{@"kind": option.name ?: @"",
-                             @"title": [NSString stringWithFormat:@"%@ \u2022 %@", option.name, zs_memory_megabytes_string(option.totalBytes)],
+                             @"title": [NSString stringWithFormat:@"%@ · %@", option.name, zs_memory_megabytes_string(option.totalBytes)],
                              @"active": @([option.name isEqualToString:group.activeKind])}];
     }
 
@@ -12714,6 +12714,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     objc_setAssociatedObject(dropdown, "zs_dropdownSource", source, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(dropdown, "zs_dropdownCollapsedFrame", [NSValue valueWithCGRect:anchor], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     source.hidden = YES;
+    dropdown.alpha = 0;
     self.memoryPopupScrim = scrim;
     self.memoryPopupView = dropdown;
 
@@ -12725,6 +12726,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
                      animations:^{
         dropdown.frame = expandedFrame;
         scroll.alpha = 1;
+    } completion:nil];
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        dropdown.alpha = 1;
     } completion:nil];
 
     UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];

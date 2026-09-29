@@ -2513,7 +2513,7 @@ static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const Z
         if (engine > 0) {
             [rows addObject:zs_make_memory_row(@"Engine (uncategorized native)",
                                                engine,
-                                               @"Allocated − tracked assets − managed − graphics driver")];
+                                               @"Allocated minus everything above")];
         }
     }
 
