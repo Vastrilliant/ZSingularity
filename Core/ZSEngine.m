@@ -1840,8 +1840,8 @@ static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[]
 };
 
 static const NSUInteger kZSTopAssetsPageSize = 20;
-static const NSUInteger kZSFootprintMaxRows = 22;
-static const NSUInteger kZSUnityMaxRows = 16;
+static const NSUInteger kZSFootprintMaxRows = 11;
+static const NSUInteger kZSUnityMaxRows = 11;
 static const NSUInteger kZSCleanFileMaxRows = 10;
 
 static NSUInteger g_topAssetsPage = 0;
@@ -1935,9 +1935,14 @@ static NSArray<ZSMemoryUsageCategory *> *zs_fold_memory_rows(NSArray<ZSMemoryUsa
     ZSMemoryUsageCategory *other = nil;
     NSUInteger otherItems = 0;
 
+    NSUInteger passCount = 0;
+    while (passCount < sortedRows.count && (double)sortedRows[passCount].totalBytes >= (double)total * minFraction) passCount++;
+    NSUInteger keepCount = sortedRows.count;
+    if (passCount < sortedRows.count || sortedRows.count > maxRows) keepCount = MIN(passCount, maxRows - 1);
+
     for (NSUInteger i = 0; i < sortedRows.count; i++) {
         ZSMemoryUsageCategory *row = sortedRows[i];
-        BOOL keep = i < maxRows && (double)row.totalBytes >= (double)total * minFraction;
+        BOOL keep = i < keepCount;
         if (keep) {
             [kept addObject:row];
             continue;
@@ -2513,7 +2518,7 @@ static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const Z
     }
 
     zs_sort_memory_rows_descending(rows);
-    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSUnityMaxRows, 0.004, NO);
+    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSUnityMaxRows, 0, NO);
 
     NSString *subtitle = @"Logical sizes reported by Unity, not physical pages";
     if (facts->hasAllocated && facts->hasReserved) {
@@ -2549,7 +2554,7 @@ static ZSMemoryUsageGroup *zs_build_diagnostics_group(ZSAssetScanResult *scan,
     if (untagged > 0) {
         ZSMemoryUsageCategory *row = zs_make_memory_row(@"Untagged anonymous (physical)",
                                                         untagged,
-                                                        [NSString stringWithFormat:@"dirty %@ · compressed %@ · compare with Unity reserved + GC heap",
+                                                        [NSString stringWithFormat:@"dirty %@ · compressed %@",
                                                          zs_memory_bytes_string(totals->untaggedDirty),
                                                          zs_memory_bytes_string(totals->untaggedSwapped)]);
         [rows addObject:row];

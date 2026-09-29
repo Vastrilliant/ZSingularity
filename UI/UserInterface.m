@@ -2815,6 +2815,24 @@ static const CGFloat kZSMemoryMaxNameWidth = 260;
 static const CGFloat kZSMemoryMaxDetailWidth = 380;
 static const CGFloat kZSMemoryPagedColumnWidthFraction = 0.98;
 
+static CGFloat zs_memory_column_width(NSString *title, CGFloat panelWidth) {
+    static NSDictionary<NSString *, NSNumber *> *fractions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fractions = @{
+            @"System": @0.5,
+            @"Process footprint by owner": @0.6,
+            @"Unity allocations by subsystem": @0.6,
+            @"Reservations & diagnostics": @0.7,
+            @"Live object counts": @0.4,
+            @"Clean file-backed pages": @0.5,
+            @"Heaviest loaded assets": @(kZSMemoryPagedColumnWidthFraction),
+        };
+    });
+    CGFloat fraction = title ? fractions[title].doubleValue : 0;
+    return fraction > 0 ? floor(panelWidth * fraction) : 0;
+}
+
 static NSMutableDictionary<NSString *, NSNumber *> *g_memorySubtitleShrinkState;
 
 static CGFloat zs_memory_text_width(NSString *text, UIFont *font) {
@@ -3005,6 +3023,17 @@ static UIView *zs_build_memory_column(NSString *title,
     CGFloat legendWidth = (innerWidth - pillarExtra - kZSMemoryLegendColumnGap * (CGFloat)(legendColumns - 1)) / (CGFloat)legendColumns;
     CGFloat lineOneBox = ceil(nameFont.lineHeight) + 2;
     CGFloat detailLineHeight = ceil(detailFont.lineHeight);
+    CGFloat lineBudget = legendWidth - swatchWidth - (valueWidth > 0 ? 14 + valueWidth : 0);
+    CGFloat drawNameWidth = nameWidth;
+    CGFloat drawDetailWidth = detailWidth;
+    if (!twoLine) {
+        if (detailWidth > 0 && nameWidth + 10 + detailWidth > lineBudget) {
+            drawDetailWidth = MAX(lineBudget - 10 - nameWidth, lineBudget * 0.3);
+            drawNameWidth = MAX(MIN(nameWidth, lineBudget - 10 - drawDetailWidth), 40);
+        } else if (nameWidth > lineBudget) {
+            drawNameWidth = MAX(lineBudget, 40);
+        }
+    }
     CGFloat twoLineBlockHeight = lineOneBox + detailLineHeight;
 
     for (NSUInteger i = 0; i < count; i++) {
@@ -3049,12 +3078,12 @@ static UIView *zs_build_memory_column(NSString *title,
             }
         } else {
             UILabel *nameLabel = zs_memory_make_label(row.name, nameFont, nameColor, NSTextAlignmentLeft);
-            nameLabel.frame = CGRectMake(nameX, rowY, nameWidth, rowHeight);
+            nameLabel.frame = CGRectMake(nameX, rowY, drawNameWidth, rowHeight);
             [column addSubview:nameLabel];
 
             if (detailWidth > 0 && row.detail.length > 0) {
                 UILabel *detailLabel = zs_memory_make_label(row.detail, detailFont, detailColor, NSTextAlignmentLeft);
-                detailLabel.frame = CGRectMake(nameX + nameWidth + 10, rowY, detailWidth, rowHeight);
+                detailLabel.frame = CGRectMake(nameX + drawNameWidth + 10, rowY, drawDetailWidth, rowHeight);
                 [column addSubview:detailLabel];
             }
         }
@@ -3118,7 +3147,7 @@ static CGRect zs_memory_popup_frame(UIView *overlay, UIView *source, CGSize desi
 
 static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
                                             CGFloat height,
-                                            CGFloat pagedColumnWidth,
+                                            CGFloat panelWidth,
                                             void (^onPageChange)(NSInteger delta),
                                             void (^onFilterTap)(UIView *source),
                                             void (^onPageTap)(UIView *source)) {
@@ -3163,7 +3192,8 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
     CGFloat filterWidth = showsFilter ? kZSMemoryPageButtonSize : 0;
     CGFloat controlsWidth = filterWidth + kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
     CGFloat reserve = showsPaging ? controlsWidth + 10 : 0;
-    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, showsPaging ? pagedColumnWidth : 0, height);
+    CGFloat columnWidth = showsPaging ? floor(panelWidth * kZSMemoryPagedColumnWidthFraction) : zs_memory_column_width(group.title, panelWidth);
+    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, columnWidth, height);
     if (!column || !showsPaging) return column;
 
     CGFloat titleLineHeight = ceil(zs_mono_font(12, UIFontWeightSemibold).lineHeight);
@@ -3904,8 +3934,11 @@ static UIButton *zs_make_mods_options_row_button(NSDictionary<NSString *, id> *o
     row.backgroundColor = UIColor.clearColor;
     [row addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
 
+    NSString *symbolName = option[@"symbol"];
+    if (symbolName.length == 0) return row;
+
     UIImageSymbolConfiguration *symConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
-    UIImage *symbolImage = [UIImage systemImageNamed:option[@"symbol"] withConfiguration:symConfig];
+    UIImage *symbolImage = [UIImage systemImageNamed:symbolName withConfiguration:symConfig];
     symbolImage = [symbolImage imageWithTintColor:tint renderingMode:UIImageRenderingModeAlwaysOriginal];
     UIImageView *symbolView = [[UIImageView alloc] initWithImage:symbolImage];
     symbolView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -4869,7 +4902,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) CFTimeInterval memoryCycleStart;
 @property (nonatomic, assign) NSUInteger memoryBuildIndex;
 @property (nonatomic, assign) CGFloat memoryBuildHeight;
-@property (nonatomic, assign) CGFloat memoryBuildPagedWidth;
+@property (nonatomic, assign) CGFloat memoryBuildPanelWidth;
 @property (nonatomic, assign) BOOL memoryBuildSkipped;
 @property (nonatomic, assign) NSUInteger memoryBuildGroupColumnCount;
 @property (nonatomic, strong) NSArray<ZSMemoryUsageGroup *> *memoryPendingGroups;
@@ -12292,6 +12325,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryPendingColumns = nil;
     self.memoryCyclePhase = 0;
     self.memoryCycleUnitsDone = 0;
+    self.memoryCycleStart = 0;
     self.memorySnapshotSystemRows = nil;
     self.memorySnapshotGroups = nil;
     self.memorySnapshotDate = nil;
@@ -12516,12 +12550,28 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryNumpadText = nil;
     self.memoryNumpadDisplayLabel = nil;
     scrim.userInteractionEnabled = NO;
+    UIView *dropdownSource = objc_getAssociatedObject(popup, "zs_dropdownSource");
+    NSValue *dropdownCollapsed = objc_getAssociatedObject(popup, "zs_dropdownCollapsedFrame");
     void (^remove)(void) = ^{
         [scrim removeFromSuperview];
         [popup removeFromSuperview];
+        dropdownSource.hidden = NO;
     };
     if (!animated) {
         remove();
+        return;
+    }
+    if (dropdownSource && dropdownCollapsed) {
+        UIView *rowHost = [popup isKindOfClass:[UIVisualEffectView class]] ? ((UIVisualEffectView *)popup).contentView : popup;
+        for (UIView *subview in rowHost.subviews) subview.alpha = 0;
+        [UIView animateWithDuration:0.18
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                         animations:^{
+            popup.frame = dropdownCollapsed.CGRectValue;
+        } completion:^(BOOL finished) {
+            remove();
+        }];
         return;
     }
     [UIView animateWithDuration:0.12
@@ -12593,52 +12643,92 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
                              @"active": @([option.name isEqualToString:group.activeKind])}];
     }
 
-    static const CGFloat kRowHeight = 34;
-    static const CGFloat kWidth = 236;
-    static const CGFloat kVerticalPadding = 6;
-    CGFloat contentHeight = entries.count * kRowHeight + kVerticalPadding * 2;
-    CGRect frame = zs_memory_popup_frame(overlay, source, CGSizeMake(kWidth, contentHeight));
+    static const CGFloat kWidth = 260;
+    CGRect anchor = [source convertRect:source.bounds toView:overlay];
+    UIEdgeInsets insets = overlay.safeAreaInsets;
+    CGFloat minX = insets.left + 8;
+    CGFloat maxX = MAX(minX, overlay.bounds.size.width - insets.right - 8 - kWidth);
+    CGFloat top = insets.top + 8;
+    CGFloat bottom = overlay.bounds.size.height - insets.bottom - 8;
+    CGFloat fullHeight = kZSModsOptionsRowHeight * entries.count;
+    CGFloat height = MIN(fullHeight, MAX(bottom - top, kZSModsOptionsRowHeight));
+    CGFloat x = MIN(MAX(CGRectGetMaxX(anchor) - kWidth, minX), maxX);
+    CGFloat y = MAX(top, MIN(CGRectGetMinY(anchor), bottom - height));
+    CGRect expandedFrame = CGRectMake(x, y, kWidth, height);
 
-    UIVisualEffectView *surface = zs_memory_make_popup_surface(frame.size);
-    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:surface.bounds];
+    UIControl *scrim = [[UIControl alloc] initWithFrame:overlay.bounds];
+    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scrim.backgroundColor = UIColor.clearColor;
+    [scrim addTarget:self action:@selector(zs_memoryPopupScrimTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:scrim];
+
+    UIView *dropdown;
+    UIVisualEffectView *glassDropdown = nil;
+    if (zs_has_liquid_glass()) {
+        glassDropdown = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
+        glassDropdown.frame = anchor;
+        glassDropdown.clipsToBounds = YES;
+        zs_configure_glass_corners(glassDropdown, kZSAuthFieldCornerRadius, NO);
+        glassDropdown.layer.borderWidth = 1;
+        glassDropdown.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        zs_register_suspendable_glass(glassDropdown);
+        dropdown = glassDropdown;
+    } else {
+        dropdown = [[UIView alloc] initWithFrame:anchor];
+        dropdown.clipsToBounds = YES;
+        dropdown.layer.cornerRadius = kZSAuthFieldCornerRadius;
+        dropdown.layer.cornerCurve = kCACornerCurveContinuous;
+        dropdown.layer.borderWidth = 1;
+        dropdown.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        dropdown.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
+    }
+    [overlay addSubview:dropdown];
+
+    UIView *rowHost = glassDropdown ? glassDropdown.contentView : dropdown;
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 0, kWidth, height)];
     scroll.showsVerticalScrollIndicator = NO;
     scroll.alwaysBounceVertical = NO;
-    scroll.contentSize = CGSizeMake(kWidth, contentHeight);
-    [surface.contentView addSubview:scroll];
+    scroll.contentSize = CGSizeMake(kWidth, fullHeight);
+    scroll.alpha = 0;
+    [rowHost addSubview:scroll];
 
-    UIImageSymbolConfiguration *checkConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
-    CGFloat y = kVerticalPadding;
-    for (NSDictionary *entry in entries) {
+    CGFloat hairline = 1.0 / MAX(UIScreen.mainScreen.scale, (CGFloat)1.0);
+    for (NSInteger i = 0; i < (NSInteger)entries.count; i++) {
+        NSDictionary *entry = entries[i];
         BOOL active = [entry[@"active"] boolValue];
-        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
-        row.frame = CGRectMake(0, y, kWidth, kRowHeight);
-        objc_setAssociatedObject(row, "zs_kind", entry[@"kind"], OBJC_ASSOCIATION_COPY_NONATOMIC);
-        [row addTarget:self action:@selector(zs_memoryKindRowTapped:) forControlEvents:UIControlEventTouchUpInside];
-        [row addTarget:self action:@selector(zs_memoryPopupHighlight:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
-        [row addTarget:self action:@selector(zs_memoryPopupUnhighlight:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+        UIButton *rowButton = zs_make_mods_options_row_button(@{@"title": entry[@"title"],
+                                                                @"symbol": active ? @"checkmark" : @"",
+                                                                @"destructive": @NO},
+                                                              i, self, @selector(zs_memoryKindRowTapped:));
+        rowButton.frame = CGRectMake(0, i * kZSModsOptionsRowHeight, kWidth, kZSModsOptionsRowHeight);
+        objc_setAssociatedObject(rowButton, "zs_kind", entry[@"kind"], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [scroll addSubview:rowButton];
 
-        UILabel *label = zs_memory_make_label(entry[@"title"],
-                                              zs_mono_font(11, active ? UIFontWeightSemibold : UIFontWeightMedium),
-                                              [UIColor colorWithWhite:active ? 1.0 : 0.86 alpha:1],
-                                              NSTextAlignmentLeft);
-        label.frame = CGRectMake(16, 0, kWidth - 16 - 38, kRowHeight);
-        label.userInteractionEnabled = NO;
-        [row addSubview:label];
-
-        if (active) {
-            UIImageView *check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark" withConfiguration:checkConfig]];
-            check.tintColor = UIColor.whiteColor;
-            check.contentMode = UIViewContentModeCenter;
-            check.frame = CGRectMake(kWidth - 34, 0, 22, kRowHeight);
-            check.userInteractionEnabled = NO;
-            [row addSubview:check];
+        if (i > 0) {
+            UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, i * kZSModsOptionsRowHeight - hairline, kWidth, hairline)];
+            divider.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.5];
+            [scroll addSubview:divider];
         }
-
-        [scroll addSubview:row];
-        y += kRowHeight;
     }
 
-    [self zs_installMemoryPopup:surface frame:frame overlay:overlay];
+    objc_setAssociatedObject(dropdown, "zs_dropdownSource", source, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(dropdown, "zs_dropdownCollapsedFrame", [NSValue valueWithCGRect:anchor], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    source.hidden = YES;
+    self.memoryPopupScrim = scrim;
+    self.memoryPopupView = dropdown;
+
+    [UIView animateWithDuration:0.22
+                          delay:0
+         usingSpringWithDamping:0.86
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        dropdown.frame = expandedFrame;
+        scroll.alpha = 1;
+    } completion:nil];
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
 }
 
 - (void)zs_memoryKindRowTapped:(UIButton *)row {
@@ -12815,6 +12905,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryCycleUnitEstimate = 30;
     self.memoryCycleUnitsDone = 0;
     self.memoryCyclePhase = 0;
+    self.memoryCycleStart = 0;
     [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(zs_memoryAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     [self zs_startMemoryRefreshPie];
@@ -12837,13 +12928,19 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_restartMemoryCycle {
+    [self zs_restartMemoryCycleKeepingPie:NO];
+}
+
+- (void)zs_restartMemoryCycleKeepingPie:(BOOL)keepPie {
     zs_memory_scan_reset();
     self.memoryCyclePhase = 0;
     self.memoryCycleUnitsDone = 0;
     self.memoryPendingGroups = nil;
     self.memoryPendingColumns = nil;
-    self.memoryCycleStart = CACurrentMediaTime();
-    [self zs_startMemoryRefreshPie];
+    if (!keepPie) {
+        self.memoryCycleStart = CACurrentMediaTime();
+        [self zs_startMemoryRefreshPie];
+    }
     [self zs_scheduleNextMemoryStep];
 }
 
@@ -12923,11 +13020,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
         self.memoryBuildSkipped = ![self zs_prepareMemoryBuildMetrics];
         if (!self.memoryBuildSkipped) {
-            UIView *systemColumn = zs_build_memory_column(@"System", nil, rows, nil, YES, 0, 0, self.memoryBuildHeight);
+            UIView *systemColumn = zs_build_memory_column(@"System", nil, rows, nil, YES, 0, zs_memory_column_width(@"System", self.memoryBuildPanelWidth), self.memoryBuildHeight);
             if (systemColumn) [self.memoryPendingColumns addObject:systemColumn];
         }
     } else if (!self.memoryBuildSkipped && index - 1 < groups.count) {
-        UIView *column = [self zs_memoryColumnForGroup:groups[index - 1] height:self.memoryBuildHeight pagedWidth:self.memoryBuildPagedWidth];
+        UIView *column = [self zs_memoryColumnForGroup:groups[index - 1] height:self.memoryBuildHeight panelWidth:self.memoryBuildPanelWidth];
         if (column) {
             [self.memoryPendingColumns addObject:column];
             self.memoryBuildGroupColumnCount++;
@@ -12951,7 +13048,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         ZSMemorySystemStats stats = zs_collect_memory_system_stats();
         [strongSelf zs_storeMemorySnapshotWithStats:stats rows:zs_memory_system_stat_rows(stats) groups:groups];
         [strongSelf zs_renderMemoryColumnsWithStats:stats groups:groups];
-        [strongSelf zs_restartMemoryCycle];
+        [strongSelf zs_restartMemoryCycleKeepingPie:strongSelf.memoryCycleStart > 0];
     });
 }
 
@@ -12974,11 +13071,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
     self.memoryBuildHeight = height;
-    self.memoryBuildPagedWidth = floor(panelWidth * kZSMemoryPagedColumnWidthFraction);
+    self.memoryBuildPanelWidth = panelWidth;
     return YES;
 }
 
-- (UIView *)zs_memoryColumnForGroup:(ZSMemoryUsageGroup *)group height:(CGFloat)height pagedWidth:(CGFloat)pagedWidth {
+- (UIView *)zs_memoryColumnForGroup:(ZSMemoryUsageGroup *)group height:(CGFloat)height panelWidth:(CGFloat)panelWidth {
     __weak typeof(self) weakSelf = self;
     void (^onPageChange)(NSInteger) = ^(NSInteger delta) {
         [weakSelf zs_changeMemoryTopAssetsPageBy:delta];
@@ -12989,22 +13086,22 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     void (^onPageTap)(UIView *) = ^(UIView *source) {
         [weakSelf zs_presentMemoryPageNumpadFromView:source group:group];
     };
-    return zs_build_memory_group_column(group, height, pagedWidth, onPageChange, onFilterTap, onPageTap);
+    return zs_build_memory_group_column(group, height, panelWidth, onPageChange, onFilterTap, onPageTap);
 }
 
 - (void)zs_renderMemoryColumnsWithStats:(ZSMemorySystemStats)stats groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
     if (![self zs_prepareMemoryBuildMetrics]) return;
 
     CGFloat height = self.memoryBuildHeight;
-    CGFloat pagedWidth = self.memoryBuildPagedWidth;
+    CGFloat panelWidth = self.memoryBuildPanelWidth;
 
     NSMutableArray<UIView *> *columns = [NSMutableArray array];
-    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, 0, height);
+    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, zs_memory_column_width(@"System", panelWidth), height);
     if (statsColumn) [columns addObject:statsColumn];
 
     NSUInteger groupColumnCount = 0;
     for (ZSMemoryUsageGroup *group in groups) {
-        UIView *groupColumn = [self zs_memoryColumnForGroup:group height:height pagedWidth:pagedWidth];
+        UIView *groupColumn = [self zs_memoryColumnForGroup:group height:height panelWidth:panelWidth];
         if (!groupColumn) continue;
         [columns addObject:groupColumn];
         groupColumnCount++;
