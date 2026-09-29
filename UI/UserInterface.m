@@ -5140,8 +5140,9 @@ static NSString * const kZSMTShaderSource =
 @"        }\n"
 @"        float3 blurred = lin ? pow(max(acc, float3(0.0)), float3(1.0 / 2.2)) : acc;\n"
 @"\n"
+@"        float glassAlpha = saturate(max(cov * scene.skin.z, dot(sk.rgb, float3(0.299, 0.587, 0.114))));\n"
 @"        float3 under = mix(g, blurred, cov);\n"
-@"        float3 glassOut = sk.rgb + (1.0 - sk.a) * under;\n"
+@"        float3 glassOut = sk.rgb + (1.0 - glassAlpha) * under;\n"
 @"        glassOut += pressAcc * 0.08 * cov;\n"
 @"        glassOut = mix(saturate(glassOut), float3(1.0), iconAcc);\n"
 @"        result = mix(g, glassOut, master);\n"
@@ -5258,7 +5259,7 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
 
     float masterTarget = (visible && count > 0) ? 1.0f : 0.0f;
     if (snap && masterTarget > 0.0f) r_zsmtMaster = 1.0f;
-    float masterRate = masterTarget > r_zsmtMaster ? 18.0f : 28.0f;
+    float masterRate = 18.0f;
     r_zsmtMaster += (masterTarget - r_zsmtMaster) * (1.0f - expf(-dt * masterRate));
     if (fabsf(masterTarget - r_zsmtMaster) < 0.004f) r_zsmtMaster = masterTarget;
 
@@ -5448,6 +5449,7 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     }
     scene.skin[0] = (useReal && backdrop) ? 1.0f : 0.0f;
     scene.skin[1] = (useReal && backdrop) ? 1.0f : 0.0f;
+    scene.skin[2] = (float)CGColorGetAlpha(zs_glass_tint_color().CGColor);
 
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
@@ -6384,6 +6386,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
                                             restingFrame.size.height);
 
     [unityView layoutIfNeeded];
+    if (fromTabs) self.glassContainer.alpha = 0;
     self.glassContainer.hidden = NO;
     self.contentOverlay.hidden = NO;
 
@@ -6394,6 +6397,14 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [self zs_updateSliderGlassVisibility];
 
     __weak typeof(self) weakSelf = self;
+    if (fromTabs) {
+        [UIView animateWithDuration:0.16
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            weakSelf.glassContainer.alpha = 1;
+        } completion:nil];
+    }
     [UIView animateWithDuration:0.28
                           delay:0
          usingSpringWithDamping:0.85
@@ -6485,8 +6496,21 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
         if (extendedVisible) weakSelf.extendedContentClip.frame = extendedOffscreenFrame;
         handleElement.frame = handleRetractedFrame;
     } completion:^(BOOL finished) {
-        [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:landOnTabs];
-        [weakSelf teardownPanelState];
+        if (!landOnTabs) {
+            [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
+            [weakSelf teardownPanelState];
+            return;
+        }
+        UIView *fadingContainer = weakSelf.glassContainer;
+        [weakSelf zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
+        [UIView animateWithDuration:0.16
+                              delay:0
+                            options:UIViewAnimationOptionCurveEaseIn | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            fadingContainer.alpha = 0;
+        } completion:^(BOOL fadeFinished) {
+            if (!weakSelf.panelOpen && weakSelf.glassContainer == fadingContainer) [weakSelf teardownPanelState];
+        }];
     }];
 }
 
