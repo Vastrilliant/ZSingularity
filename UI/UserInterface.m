@@ -5120,7 +5120,6 @@ static NSString * const kZSMTShaderSource =
 @"\n"
 @"    if (realGlass) {\n"
 @"        float2 suv = (restPos - scene.skinRect.xy) / max(scene.skinRect.zw - scene.skinRect.xy, float2(1.0));\n"
-@"        suv = suv.yx;\n"
 @"        float inside = step(0.0, suv.x) * step(suv.x, 1.0) * step(0.0, suv.y) * step(suv.y, 1.0);\n"
 @"        float4 sk = skinTex.sample(smp, suv, level(0));\n"
 @"        sk *= inside;\n"
@@ -5129,11 +5128,8 @@ static NSString * const kZSMTShaderSource =
 @"        }\n"
 @"        float cov = smoothstep(0.03, 0.12, sk.a);\n"
 @"\n"
-@"        float2 nrm = grad / max(length(grad), 0.0001);\n"
-@"        float dist = max(-sd, 0.0);\n"
-@"        float lens = exp(-dist / (3.0 * px)) * 6.0 * px * cov;\n"
 @"        float2 texel = 1.0 / scene.back.zw;\n"
-@"        float2 buv = (pos - nrm * lens - scene.back.xy) * texel;\n"
+@"        float2 buv = (pos - scene.back.xy) * texel;\n"
 @"\n"
 @"        float3 acc = backTex.sample(mipSmp, buv, level(2.5)).rgb * 0.25;\n"
 @"        float rad = 5.0 * px;\n"
@@ -5160,7 +5156,7 @@ static NSString * const kZSMTShaderSource =
 @"        float3 body = mix(g, float3(luma), 0.5) * 0.5 + 0.055;\n"
 @"\n"
 @"        float2 nrm = grad / max(length(grad), 0.0001);\n"
-@"        float facing = dot(nrm, normalize(float2(-1.0, 0.0)));\n"
+@"        float facing = dot(nrm, normalize(float2(-0.62, -0.78)));\n"
 @"        float lit = saturate(facing);\n"
 @"        float back = saturate(-facing);\n"
 @"        float spec = lit * lit + 0.55 * back * back;\n"
@@ -5505,31 +5501,6 @@ static void zs_mt_hook_method(Class cls, SEL selector, IMP replacement, IMP *ori
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
 }
 
-static void zs_configure_glass_corners_top_only(UIView *view, CGFloat radius) {
-    if (!view || !zs_has_liquid_glass()) return;
-
-    Class radiusClass = NSClassFromString(@"UICornerRadius");
-    Class configClass = NSClassFromString(@"UICornerConfiguration");
-    SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
-    SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
-    SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
-
-    if (!radiusClass || !configClass ||
-        ![radiusClass respondsToSelector:fixedSelector] ||
-        ![configClass respondsToSelector:fourCornerSelector] ||
-        ![view respondsToSelector:setConfiguration]) {
-        return;
-    }
-
-    id round = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, radius);
-    id flat = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, 0);
-    if (!round || !flat) return;
-
-    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, round, round, flat, flat);
-    if (!configuration) return;
-    ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
-}
-
 static uint8_t *zs_mt_rgba_buffer(UIImage *image, size_t *widthOut, size_t *heightOut) {
     CGImageRef cgImage = image.CGImage;
     if (!cgImage) return NULL;
@@ -5756,7 +5727,7 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
 }
 
 - (UIImage *)glassStageImageOverColor:(UIColor *)color rects:(NSArray<NSValue *> *)rects box:(CGRect)box scale:(CGFloat)scale host:(UIView *)host {
-    UIView *stage = [[UIView alloc] initWithFrame:CGRectMake(-box.size.height - 64, 0, box.size.height, box.size.width)];
+    UIView *stage = [[UIView alloc] initWithFrame:CGRectMake(-box.size.width - 64, 0, box.size.width, box.size.height)];
     stage.backgroundColor = color;
     stage.userInteractionEnabled = NO;
     stage.clipsToBounds = YES;
@@ -5768,8 +5739,8 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
     for (NSValue *value in rects) {
         CGRect r = value.CGRectValue;
         UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        glass.frame = CGRectMake(r.origin.y - box.origin.y, r.origin.x - box.origin.x, r.size.height, r.size.width);
-        zs_configure_glass_corners_top_only(glass, kZSMTCornerRadius);
+        glass.frame = CGRectMake(r.origin.x - box.origin.x, r.origin.y - box.origin.y, r.size.width, r.size.height);
+        zs_configure_glass_corners_sides(glass, kZSMTCornerRadius, NO, YES, NO);
         [container.contentView addSubview:glass];
     }
 
@@ -5779,7 +5750,7 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
     format.scale = scale;
     format.opaque = YES;
-    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(box.size.height, box.size.width) format:format];
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:box.size format:format];
     UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         [stage drawViewHierarchyInRect:stage.bounds afterScreenUpdates:YES];
     }];
