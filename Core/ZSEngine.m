@@ -1785,6 +1785,9 @@ void *zs_array_object_at(void *array, NSUInteger index) {
 @property (nonatomic, assign) CFTimeInterval scannedAt;
 @property (nonatomic, assign) NSUInteger pageIndex;
 @property (nonatomic, assign) BOOL hasNextPage;
+@property (nonatomic, assign) NSUInteger pageCount;
+@property (nonatomic, strong) NSMutableArray<ZSMemoryUsageCategory *> *kindOptions;
+@property (nonatomic, copy) NSString *kindFilter;
 @property (nonatomic, assign) int64_t estimatedGpuTextureBytes;
 @end
 
@@ -1843,9 +1846,25 @@ static const NSUInteger kZSCleanFileMaxRows = 10;
 static const CFTimeInterval kZSAssetScanMinInterval = 3.0;
 
 static NSUInteger g_topAssetsPage = 0;
+static NSString *g_topAssetsKindFilter = nil;
+static NSUInteger g_topAssetsKnownLastPage = NSUIntegerMax;
+static ZSAssetScanResult *g_cachedAssetScan;
 
 void zs_set_memory_top_assets_page(NSUInteger page) {
     g_topAssetsPage = page;
+}
+
+void zs_set_memory_top_assets_kind_filter(NSString *kind) {
+    NSString *normalized = kind.length > 0 ? [kind copy] : nil;
+    if ((normalized == nil && g_topAssetsKindFilter == nil) || [normalized isEqualToString:g_topAssetsKindFilter]) return;
+    g_topAssetsKindFilter = normalized;
+    g_topAssetsPage = 0;
+    g_topAssetsKnownLastPage = NSUIntegerMax;
+    g_cachedAssetScan = nil;
+}
+
+NSString *zs_memory_top_assets_kind_filter(void) {
+    return g_topAssetsKindFilter;
 }
 
 NSUInteger zs_memory_top_assets_page(void) {
@@ -2419,7 +2438,13 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
 
     NSUInteger descriptorCount = sizeof(kZSMemoryUsageCategoryDescriptors) / sizeof(kZSMemoryUsageCategoryDescriptors[0]);
 
+    NSString *kindFilter = g_topAssetsKindFilter;
+    BOOL kindFilterMatched = kindFilter == nil;
+    result.kindFilter = kindFilter;
+    result.kindOptions = [NSMutableArray new];
+
     NSUInteger requestedPage = g_topAssetsPage;
+    if (g_topAssetsKnownLastPage != NSUIntegerMax) requestedPage = MIN(requestedPage, g_topAssetsKnownLastPage);
     NSUInteger candidateCapacity = (requestedPage + 1) * kZSTopAssetsPageSize;
     ZSTopAssetCandidate *candidates = calloc(candidateCapacity, sizeof(ZSTopAssetCandidate));
     NSUInteger candidateCount = 0;
@@ -2443,6 +2468,9 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
 
         int64_t categoryTotal = 0;
         NSUInteger liveCount = 0;
+
+        NSString *kindName = [NSString stringWithUTF8String:descriptor->klassName];
+        BOOL kindMatchesFilter = kindFilter == nil || [kindFilter isEqualToString:kindName];
 
         BOOL estimatesTexture = descriptor->family == ZSAssetFamilyTexture;
         ZSTextureMethods textureMethods;
@@ -2491,11 +2519,18 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
                 }
             }
 
-            totalAssets++;
-            if (candidates) zs_top_assets_consider(candidates, &candidateCount, candidateCapacity, obj, size, descriptor);
+            if (kindMatchesFilter) {
+                totalAssets++;
+                if (candidates) zs_top_assets_consider(candidates, &candidateCount, candidateCapacity, obj, size, descriptor);
+            }
         }
 
         if (categoryTotal <= 0) continue;
+
+        if (kindMatchesFilter) kindFilterMatched = YES;
+        ZSMemoryUsageCategory *kindRow = zs_make_memory_row(kindName, categoryTotal, nil);
+        kindRow.objectCount = liveCount;
+        [result.kindOptions addObject:kindRow];
 
         ZSMemoryUsageCategory *category = zs_make_memory_row([NSString stringWithUTF8String:descriptor->displayName],
                                                              categoryTotal,
@@ -2505,9 +2540,24 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
         result.assetTrackedBytes += categoryTotal;
     }
 
+    if (!kindFilterMatched) {
+        free(candidates);
+        g_topAssetsKindFilter = nil;
+        g_topAssetsPage = 0;
+        g_topAssetsKnownLastPage = NSUIntegerMax;
+        return zs_scan_loaded_assets();
+    }
+
+    [result.kindOptions sortUsingComparator:^NSComparisonResult(ZSMemoryUsageCategory *a, ZSMemoryUsageCategory *b) {
+        if (a.totalBytes == b.totalBytes) return NSOrderedSame;
+        return a.totalBytes > b.totalBytes ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
     NSUInteger lastPage = totalAssets > 0 ? (totalAssets - 1) / kZSTopAssetsPageSize : 0;
     NSUInteger page = MIN(requestedPage, lastPage);
     g_topAssetsPage = page;
+    g_topAssetsKnownLastPage = lastPage;
+    result.pageCount = lastPage + 1;
 
     NSUInteger pageStart = page * kZSTopAssetsPageSize;
     NSUInteger pageEnd = MIN(candidateCount, pageStart + kZSTopAssetsPageSize);
@@ -2532,8 +2582,6 @@ static ZSAssetScanResult *zs_scan_loaded_assets(void) {
     result.scanMilliseconds = (result.scannedAt - started) * 1000.0;
     return result;
 }
-
-static ZSAssetScanResult *g_cachedAssetScan;
 
 static ZSAssetScanResult *zs_cached_asset_scan(void) {
     CFTimeInterval now = CACurrentMediaTime();
@@ -2620,6 +2668,12 @@ static ZSMemoryUsageGroup *zs_build_top_assets_group(ZSAssetScanResult *scan) {
     group.pagingEnabled = YES;
     group.pageIndex = scan.pageIndex;
     group.hasNextPage = scan.hasNextPage;
+    group.pageCount = MAX(scan.pageCount, (NSUInteger)1);
+    group.kindOptions = scan.kindOptions;
+    group.activeKind = scan.kindFilter;
+    if (scan.kindFilter.length > 0) {
+        group.subtitle = [NSString stringWithFormat:@"Individual objects by Profiler runtime size · %@", scan.kindFilter];
+    }
     return group;
 }
 

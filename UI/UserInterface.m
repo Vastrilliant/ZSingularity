@@ -3073,13 +3073,55 @@ static UIButton *zs_memory_make_page_button(NSString *symbolName, BOOL enabled, 
     button.tintColor = UIColor.whiteColor;
     button.enabled = enabled;
     button.alpha = enabled ? 0.9 : 0.28;
-    [button addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
-        if (handler) handler();
-    }] forControlEvents:UIControlEventTouchUpInside];
+    if (handler) {
+        [button addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+            handler();
+        }] forControlEvents:UIControlEventTouchUpInside];
+    }
     return button;
 }
 
-static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat height, CGFloat pagedColumnWidth, void (^onPageChange)(NSInteger delta)) {
+static NSString *zs_memory_megabytes_string(int64_t bytes) {
+    return [NSString stringWithFormat:@"%.2fMB", (double)bytes / (1024.0 * 1024.0)];
+}
+
+static UIVisualEffectView *zs_memory_make_popup_surface(CGSize size) {
+    UIVisualEffect *effect = zs_has_liquid_glass()
+        ? zs_make_glass_effect_dark(NO)
+        : [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark];
+    UIVisualEffectView *surface = [[UIVisualEffectView alloc] initWithEffect:effect];
+    surface.frame = CGRectMake(0, 0, size.width, size.height);
+    if (zs_has_liquid_glass()) {
+        zs_configure_glass_corners(surface, 18, NO);
+    } else {
+        surface.layer.cornerRadius = 18;
+        surface.layer.cornerCurve = kCACornerCurveContinuous;
+        surface.clipsToBounds = YES;
+    }
+    zs_force_dark(surface);
+    return surface;
+}
+
+static CGRect zs_memory_popup_frame(UIView *overlay, UIView *source, CGSize desired) {
+    CGRect anchor = [source convertRect:source.bounds toView:overlay];
+    UIEdgeInsets insets = overlay.safeAreaInsets;
+    CGFloat minX = insets.left + 8;
+    CGFloat maxX = MAX(minX, overlay.bounds.size.width - insets.right - 8 - desired.width);
+    CGFloat x = MIN(MAX(anchor.origin.x, minX), maxX);
+    CGFloat top = insets.top + 8;
+    CGFloat bottom = overlay.bounds.size.height - insets.bottom - 8;
+    CGFloat height = MIN(desired.height, MAX(bottom - top, 60));
+    CGFloat y = CGRectGetMaxY(anchor) + 6;
+    if (y + height > bottom) y = MAX(top, bottom - height);
+    return CGRectMake(x, y, desired.width, height);
+}
+
+static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
+                                            CGFloat height,
+                                            CGFloat pagedColumnWidth,
+                                            void (^onPageChange)(NSInteger delta),
+                                            void (^onFilterTap)(UIView *source),
+                                            void (^onPageTap)(UIView *source)) {
     if (group.categories.count == 0) return nil;
 
     int64_t grandTotal = 0;
@@ -3117,7 +3159,9 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat h
     }
 
     BOOL showsPaging = group.pagingEnabled && onPageChange != nil;
-    CGFloat controlsWidth = kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
+    BOOL showsFilter = showsPaging && onFilterTap != nil && group.kindOptions.count > 0;
+    CGFloat filterWidth = showsFilter ? kZSMemoryPageButtonSize : 0;
+    CGFloat controlsWidth = filterWidth + kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
     CGFloat reserve = showsPaging ? controlsWidth + 10 : 0;
     UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, showsPaging ? pagedColumnWidth : 0, height);
     if (!column || !showsPaging) return column;
@@ -3126,19 +3170,40 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group, CGFloat h
     CGFloat controlsY = kZSMemoryColumnVerticalInset + floor((titleLineHeight - kZSMemoryPageButtonSize) / 2.0);
     CGFloat controlsX = column.bounds.size.width - kZSMemoryColumnPadding - controlsWidth;
 
+    if (showsFilter) {
+        BOOL filtering = group.activeKind.length > 0;
+        UIButton *filter = zs_memory_make_page_button(filtering ? @"line.3.horizontal.decrease.circle.fill" : @"line.3.horizontal.decrease.circle", YES, nil);
+        filter.frame = CGRectMake(controlsX, controlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
+        __weak UIButton *weakFilter = filter;
+        [filter addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+            UIButton *strongFilter = weakFilter;
+            if (strongFilter) onFilterTap(strongFilter);
+        }] forControlEvents:UIControlEventTouchUpInside];
+        [column addSubview:filter];
+    }
+
+    CGFloat pagerX = controlsX + filterWidth;
+
     UIButton *previous = zs_memory_make_page_button(@"chevron.left", group.pageIndex > 0, ^{ onPageChange(-1); });
-    previous.frame = CGRectMake(controlsX, controlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
+    previous.frame = CGRectMake(pagerX, controlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
     [column addSubview:previous];
 
-    UILabel *pageLabel = zs_memory_make_label([NSString stringWithFormat:@"%lu", (unsigned long)(group.pageIndex + 1)],
-                                              zs_mono_font(10, UIFontWeightMedium),
-                                              [UIColor colorWithWhite:0.92 alpha:1],
-                                              NSTextAlignmentCenter);
-    pageLabel.frame = CGRectMake(controlsX + kZSMemoryPageButtonSize, controlsY, kZSMemoryPageLabelWidth, kZSMemoryPageButtonSize);
-    [column addSubview:pageLabel];
+    UIButton *pageButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [pageButton setTitle:[NSString stringWithFormat:@"%lu", (unsigned long)(group.pageIndex + 1)] forState:UIControlStateNormal];
+    [pageButton setTitleColor:[UIColor colorWithWhite:0.92 alpha:1] forState:UIControlStateNormal];
+    pageButton.titleLabel.font = zs_mono_font(10, UIFontWeightMedium);
+    pageButton.frame = CGRectMake(pagerX + kZSMemoryPageButtonSize, controlsY, kZSMemoryPageLabelWidth, kZSMemoryPageButtonSize);
+    if (onPageTap) {
+        __weak UIButton *weakPageButton = pageButton;
+        [pageButton addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+            UIButton *strongPageButton = weakPageButton;
+            if (strongPageButton) onPageTap(strongPageButton);
+        }] forControlEvents:UIControlEventTouchUpInside];
+    }
+    [column addSubview:pageButton];
 
     UIButton *next = zs_memory_make_page_button(@"chevron.right", group.hasNextPage, ^{ onPageChange(1); });
-    next.frame = CGRectMake(controlsX + kZSMemoryPageButtonSize + kZSMemoryPageLabelWidth, controlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
+    next.frame = CGRectMake(pagerX + kZSMemoryPageButtonSize + kZSMemoryPageLabelWidth, controlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
     [column addSubview:next];
 
     return column;
@@ -4696,6 +4761,13 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieLayer;
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieTrackLayer;
 @property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
+@property (nonatomic, strong) UIView *memoryPopupScrim;
+@property (nonatomic, strong) UIView *memoryPopupView;
+@property (nonatomic, strong) NSMutableString *memoryNumpadText;
+@property (nonatomic, assign) BOOL memoryNumpadFresh;
+@property (nonatomic, assign) NSUInteger memoryNumpadPageCount;
+@property (nonatomic, assign) NSUInteger memoryNumpadCurrentPage;
+@property (nonatomic, strong) UILabel *memoryNumpadDisplayLabel;
 
 @property (nonatomic, strong) NSMutableArray<NSString *> *pinnedActionKeys;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, UIView *> *pinnedTabElements;
@@ -5392,6 +5464,10 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.memoryUsageRefreshTimer = nil;
     [self.memoryFullScreenOverlay removeFromSuperview];
     self.memoryFullScreenOverlay = nil;
+    self.memoryPopupScrim = nil;
+    self.memoryPopupView = nil;
+    self.memoryNumpadText = nil;
+    self.memoryNumpadDisplayLabel = nil;
     self.memoryFullScreenScrollView = nil;
     self.memoryFullScreenContentView = nil;
     self.memoryFullScreenStatusLabel = nil;
@@ -12018,6 +12094,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_endMemoryAnalysis {
+    [self zs_dismissMemoryPopupAnimated:NO];
     [self.memoryRefreshPieLayer removeAllAnimations];
     [self.memoryRefreshPieTrackLayer removeAllAnimations];
     [self.memoryUsageRefreshTimer invalidate];
@@ -12214,6 +12291,308 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_runMemoryUsageScan];
 }
 
+- (void)zs_dismissMemoryPopupAnimated:(BOOL)animated {
+    UIView *scrim = self.memoryPopupScrim;
+    UIView *popup = self.memoryPopupView;
+    if (!scrim && !popup) return;
+    self.memoryPopupScrim = nil;
+    self.memoryPopupView = nil;
+    self.memoryNumpadText = nil;
+    self.memoryNumpadDisplayLabel = nil;
+    scrim.userInteractionEnabled = NO;
+    void (^remove)(void) = ^{
+        [scrim removeFromSuperview];
+        [popup removeFromSuperview];
+    };
+    if (!animated) {
+        remove();
+        return;
+    }
+    [UIView animateWithDuration:0.12
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        popup.alpha = 0;
+        popup.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
+        remove();
+    }];
+}
+
+- (void)zs_memoryPopupScrimTapped {
+    [self zs_dismissMemoryPopupAnimated:YES];
+}
+
+- (void)zs_installMemoryPopup:(UIView *)popup frame:(CGRect)frame overlay:(UIView *)overlay {
+    UIControl *scrim = [[UIControl alloc] initWithFrame:overlay.bounds];
+    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scrim.backgroundColor = UIColor.clearColor;
+    [scrim addTarget:self action:@selector(zs_memoryPopupScrimTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:scrim];
+
+    popup.frame = frame;
+    popup.alpha = 0;
+    popup.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    [overlay addSubview:popup];
+
+    self.memoryPopupScrim = scrim;
+    self.memoryPopupView = popup;
+
+    [UIView animateWithDuration:0.16
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        popup.alpha = 1;
+        popup.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
+- (void)zs_memoryPopupHighlight:(UIControl *)control {
+    control.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+}
+
+- (void)zs_memoryPopupUnhighlight:(UIControl *)control {
+    control.backgroundColor = UIColor.clearColor;
+}
+
+- (void)zs_presentMemoryKindPopupFromView:(UIView *)source group:(ZSMemoryUsageGroup *)group {
+    UIView *overlay = self.memoryFullScreenOverlay;
+    if (!overlay) return;
+    if (self.memoryPopupView) {
+        [self zs_dismissMemoryPopupAnimated:YES];
+        return;
+    }
+    NSArray<ZSMemoryUsageCategory *> *options = group.kindOptions;
+    if (options.count == 0) return;
+
+    int64_t totalBytes = 0;
+    for (ZSMemoryUsageCategory *option in options) totalBytes += option.totalBytes;
+
+    NSMutableArray<NSDictionary *> *entries = [NSMutableArray arrayWithCapacity:options.count + 1];
+    [entries addObject:@{@"title": [NSString stringWithFormat:@"All Kinds \u2022 %@", zs_memory_megabytes_string(totalBytes)],
+                         @"active": @(group.activeKind.length == 0)}];
+    for (ZSMemoryUsageCategory *option in options) {
+        [entries addObject:@{@"kind": option.name ?: @"",
+                             @"title": [NSString stringWithFormat:@"%@ \u2022 %@", option.name, zs_memory_megabytes_string(option.totalBytes)],
+                             @"active": @([option.name isEqualToString:group.activeKind])}];
+    }
+
+    static const CGFloat kRowHeight = 34;
+    static const CGFloat kWidth = 236;
+    static const CGFloat kVerticalPadding = 6;
+    CGFloat contentHeight = entries.count * kRowHeight + kVerticalPadding * 2;
+    CGRect frame = zs_memory_popup_frame(overlay, source, CGSizeMake(kWidth, contentHeight));
+
+    UIVisualEffectView *surface = zs_memory_make_popup_surface(frame.size);
+    UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:surface.bounds];
+    scroll.showsVerticalScrollIndicator = NO;
+    scroll.alwaysBounceVertical = NO;
+    scroll.contentSize = CGSizeMake(kWidth, contentHeight);
+    [surface.contentView addSubview:scroll];
+
+    UIImageSymbolConfiguration *checkConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
+    CGFloat y = kVerticalPadding;
+    for (NSDictionary *entry in entries) {
+        BOOL active = [entry[@"active"] boolValue];
+        UIButton *row = [UIButton buttonWithType:UIButtonTypeCustom];
+        row.frame = CGRectMake(0, y, kWidth, kRowHeight);
+        objc_setAssociatedObject(row, "zs_kind", entry[@"kind"], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [row addTarget:self action:@selector(zs_memoryKindRowTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [row addTarget:self action:@selector(zs_memoryPopupHighlight:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [row addTarget:self action:@selector(zs_memoryPopupUnhighlight:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+
+        UILabel *label = zs_memory_make_label(entry[@"title"],
+                                              zs_mono_font(11, active ? UIFontWeightSemibold : UIFontWeightMedium),
+                                              [UIColor colorWithWhite:active ? 1.0 : 0.86 alpha:1],
+                                              NSTextAlignmentLeft);
+        label.frame = CGRectMake(16, 0, kWidth - 16 - 38, kRowHeight);
+        label.userInteractionEnabled = NO;
+        [row addSubview:label];
+
+        if (active) {
+            UIImageView *check = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"checkmark" withConfiguration:checkConfig]];
+            check.tintColor = UIColor.whiteColor;
+            check.contentMode = UIViewContentModeCenter;
+            check.frame = CGRectMake(kWidth - 34, 0, 22, kRowHeight);
+            check.userInteractionEnabled = NO;
+            [row addSubview:check];
+        }
+
+        [scroll addSubview:row];
+        y += kRowHeight;
+    }
+
+    [self zs_installMemoryPopup:surface frame:frame overlay:overlay];
+}
+
+- (void)zs_memoryKindRowTapped:(UIButton *)row {
+    NSString *kind = objc_getAssociatedObject(row, "zs_kind");
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    zs_set_memory_top_assets_kind_filter(kind);
+    [self zs_dismissMemoryPopupAnimated:YES];
+    [self zs_runMemoryUsageScan];
+}
+
+- (void)zs_updateMemoryNumpadDisplay {
+    UILabel *label = self.memoryNumpadDisplayLabel;
+    if (!label) return;
+    BOOL empty = self.memoryNumpadText.length == 0;
+    NSMutableDictionary *attributes = [@{
+        NSFontAttributeName: zs_mono_font(26, UIFontWeightMedium),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:empty ? 0.3 : 1],
+    } mutableCopy];
+    if (self.memoryNumpadFresh && !empty) {
+        attributes[NSBackgroundColorAttributeName] = [UIColor colorWithRed:0.96 green:0.62 blue:0.22 alpha:0.42];
+    }
+    label.attributedText = [[NSAttributedString alloc] initWithString:empty ? @"\u2014" : self.memoryNumpadText attributes:attributes];
+}
+
+- (void)zs_presentMemoryPageNumpadFromView:(UIView *)source group:(ZSMemoryUsageGroup *)group {
+    UIView *overlay = self.memoryFullScreenOverlay;
+    if (!overlay) return;
+    if (self.memoryPopupView) {
+        [self zs_dismissMemoryPopupAnimated:YES];
+        return;
+    }
+
+    static const CGFloat kKeyWidth = 62;
+    static const CGFloat kKeyHeight = 46;
+    static const CGFloat kHeaderHeight = 54;
+    CGFloat width = kKeyWidth * 4;
+    CGFloat height = kHeaderHeight + kKeyHeight * 4;
+    CGRect frame = zs_memory_popup_frame(overlay, source, CGSizeMake(width, height));
+    if (frame.size.height < height) {
+        frame.size.height = height;
+        frame.origin.y = MAX(overlay.safeAreaInsets.top + 4, overlay.bounds.size.height - overlay.safeAreaInsets.bottom - 4 - height);
+    }
+
+    self.memoryNumpadPageCount = MAX(group.pageCount, (NSUInteger)1);
+    self.memoryNumpadCurrentPage = group.pageIndex + 1;
+    self.memoryNumpadText = [NSMutableString stringWithFormat:@"%lu", (unsigned long)self.memoryNumpadCurrentPage];
+    self.memoryNumpadFresh = YES;
+
+    UIVisualEffectView *surface = zs_memory_make_popup_surface(CGSizeMake(width, height));
+    UIView *content = surface.contentView;
+
+    UILabel *display = [[UILabel alloc] initWithFrame:CGRectMake(14, 0, width - 14 - 78, kHeaderHeight)];
+    display.textAlignment = NSTextAlignmentRight;
+    display.adjustsFontSizeToFitWidth = YES;
+    display.minimumScaleFactor = 0.6;
+    [content addSubview:display];
+    self.memoryNumpadDisplayLabel = display;
+
+    UILabel *suffix = zs_memory_make_label([NSString stringWithFormat:@"/ %lu", (unsigned long)self.memoryNumpadPageCount],
+                                           zs_mono_font(14, UIFontWeightMedium),
+                                           [UIColor colorWithWhite:1 alpha:0.55],
+                                           NSTextAlignmentLeft);
+    suffix.frame = CGRectMake(width - 70, 0, 60, kHeaderHeight);
+    [content addSubview:suffix];
+
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+    void (^addKey)(NSString *, NSString *, CGRect) = ^(NSString *identifier, NSString *symbol, CGRect keyFrame) {
+        UIButton *key = [UIButton buttonWithType:UIButtonTypeCustom];
+        key.frame = keyFrame;
+        if (symbol) {
+            [key setImage:[UIImage systemImageNamed:symbol withConfiguration:symbolConfig] forState:UIControlStateNormal];
+            key.tintColor = UIColor.whiteColor;
+        } else {
+            [key setTitle:identifier forState:UIControlStateNormal];
+            [key setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+            key.titleLabel.font = zs_mono_font(20, UIFontWeightMedium);
+        }
+        objc_setAssociatedObject(key, "zs_key", identifier, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        [key addTarget:self action:@selector(zs_memoryNumpadKeyTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [key addTarget:self action:@selector(zs_memoryPopupHighlight:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [key addTarget:self action:@selector(zs_memoryPopupUnhighlight:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+        [content addSubview:key];
+    };
+
+    NSArray<NSArray<NSString *> *> *digitRows = @[@[@"7", @"8", @"9"], @[@"4", @"5", @"6"], @[@"1", @"2", @"3"]];
+    for (NSUInteger r = 0; r < digitRows.count; r++) {
+        for (NSUInteger c = 0; c < 3; c++) {
+            addKey(digitRows[r][c], nil, CGRectMake(c * kKeyWidth, kHeaderHeight + r * kKeyHeight, kKeyWidth, kKeyHeight));
+        }
+    }
+    addKey(@"0", nil, CGRectMake(0, kHeaderHeight + 3 * kKeyHeight, kKeyWidth * 3, kKeyHeight));
+    addKey(@"delete", @"delete.left", CGRectMake(kKeyWidth * 3, kHeaderHeight, kKeyWidth, kKeyHeight * 2));
+    addKey(@"enter", @"return", CGRectMake(kKeyWidth * 3, kHeaderHeight + kKeyHeight * 2, kKeyWidth, kKeyHeight * 2));
+
+    CGFloat hairline = 1.0 / MAX(overlay.traitCollection.displayScale, 1.0);
+    UIColor *lineColor = [UIColor colorWithWhite:1 alpha:0.14];
+    void (^addLine)(CGRect) = ^(CGRect lineFrame) {
+        UIView *line = [[UIView alloc] initWithFrame:lineFrame];
+        line.backgroundColor = lineColor;
+        line.userInteractionEnabled = NO;
+        [content addSubview:line];
+    };
+    addLine(CGRectMake(0, kHeaderHeight, width, hairline));
+    addLine(CGRectMake(0, kHeaderHeight + kKeyHeight, kKeyWidth * 3, hairline));
+    addLine(CGRectMake(0, kHeaderHeight + kKeyHeight * 2, width, hairline));
+    addLine(CGRectMake(0, kHeaderHeight + kKeyHeight * 3, kKeyWidth * 3, hairline));
+    addLine(CGRectMake(kKeyWidth, kHeaderHeight, hairline, kKeyHeight * 3));
+    addLine(CGRectMake(kKeyWidth * 2, kHeaderHeight, hairline, kKeyHeight * 3));
+    addLine(CGRectMake(kKeyWidth * 3, kHeaderHeight, hairline, kKeyHeight * 4));
+
+    [self zs_updateMemoryNumpadDisplay];
+    [self zs_installMemoryPopup:surface frame:frame overlay:overlay];
+}
+
+- (void)zs_memoryNumpadKeyTapped:(UIButton *)key {
+    NSString *identifier = objc_getAssociatedObject(key, "zs_key");
+    if (!identifier || !self.memoryNumpadText) return;
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+
+    if ([identifier isEqualToString:@"enter"]) {
+        [self zs_commitMemoryPageNumpad];
+        return;
+    }
+
+    if ([identifier isEqualToString:@"delete"]) {
+        if (self.memoryNumpadFresh) {
+            [self.memoryNumpadText setString:@""];
+            self.memoryNumpadFresh = NO;
+        } else if (self.memoryNumpadText.length > 0) {
+            [self.memoryNumpadText deleteCharactersInRange:NSMakeRange(self.memoryNumpadText.length - 1, 1)];
+        }
+        [self zs_updateMemoryNumpadDisplay];
+        return;
+    }
+
+    if (self.memoryNumpadFresh) {
+        [self.memoryNumpadText setString:@""];
+        self.memoryNumpadFresh = NO;
+    }
+    if ([self.memoryNumpadText isEqualToString:@"0"]) {
+        if ([identifier isEqualToString:@"0"]) return;
+        [self.memoryNumpadText setString:@""];
+    }
+    if (self.memoryNumpadText.length >= 9) return;
+    [self.memoryNumpadText appendString:identifier];
+    [self zs_updateMemoryNumpadDisplay];
+}
+
+- (void)zs_commitMemoryPageNumpad {
+    NSString *text = [self.memoryNumpadText copy];
+    BOOL unchanged = self.memoryNumpadFresh;
+    NSUInteger pageCount = MAX(self.memoryNumpadPageCount, (NSUInteger)1);
+    NSUInteger currentPage = self.memoryNumpadCurrentPage;
+    [self zs_dismissMemoryPopupAnimated:YES];
+
+    if (text.length == 0 || unchanged) return;
+
+    unsigned long long requested = strtoull(text.UTF8String, NULL, 10);
+    unsigned long long clamped = MIN(MAX(requested, 1ULL), (unsigned long long)pageCount);
+    if ((NSUInteger)clamped == currentPage) return;
+
+    zs_set_memory_top_assets_page((NSUInteger)clamped - 1);
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    [self zs_runMemoryUsageScan];
+}
+
 - (void)zs_startMemoryUsageAutoRefresh {
     [self.memoryUsageRefreshTimer invalidate];
     [self zs_startMemoryRefreshPie];
@@ -12242,6 +12621,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIScrollView *scrollView = self.memoryFullScreenScrollView;
     UIView *overlay = self.memoryFullScreenOverlay;
     if (!scrollView || !overlay) return;
+    if (self.memoryPopupScrim) return;
     if (scrollView.isDragging || scrollView.isDecelerating) return;
 
     [overlay layoutIfNeeded];
@@ -12271,7 +12651,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     NSUInteger groupColumnCount = 0;
     for (ZSMemoryUsageGroup *group in groups) {
-        UIView *groupColumn = zs_build_memory_group_column(group, height, pagedColumnWidth, onPageChange);
+        void (^onFilterTap)(UIView *) = ^(UIView *source) {
+            [weakSelf zs_presentMemoryKindPopupFromView:source group:group];
+        };
+        void (^onPageTap)(UIView *) = ^(UIView *source) {
+            [weakSelf zs_presentMemoryPageNumpadFromView:source group:group];
+        };
+        UIView *groupColumn = zs_build_memory_group_column(group, height, pagedColumnWidth, onPageChange, onFilterTap, onPageTap);
         if (!groupColumn) continue;
         [columns addObject:groupColumn];
         groupColumnCount++;

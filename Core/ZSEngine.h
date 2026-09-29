@@ -360,11 +360,16 @@ int32_t zs_last_observed_memory_usage_tier(void);
 @property (nonatomic, assign) BOOL pagingEnabled;
 @property (nonatomic, assign) NSUInteger pageIndex;
 @property (nonatomic, assign) BOOL hasNextPage;
+@property (nonatomic, assign) NSUInteger pageCount;
+@property (nonatomic, copy, nullable) NSArray<ZSMemoryUsageCategory *> *kindOptions;
+@property (nonatomic, copy, nullable) NSString *activeKind;
 @property (nonatomic, copy) NSArray<ZSMemoryUsageCategory *> *categories;
 @end
 
 void zs_set_memory_top_assets_page(NSUInteger page);
 NSUInteger zs_memory_top_assets_page(void);
+void zs_set_memory_top_assets_kind_filter(NSString * _Nullable kind);
+NSString * _Nullable zs_memory_top_assets_kind_filter(void);
 
 void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMemoryUsageGroup *> * _Nonnull groups));
 int64_t zs_current_process_resident_memory_bytes(void);
