@@ -14,6 +14,9 @@ Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's 
 
 Need some help, have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
 
+>[!WARNING]
+>ZSingularity is purely a cosmetic / performance mod ONLY, it will not and will never contain anything that might potentially give the player an in-game advantage.
+
 <p align="center">
   <img src="assets/demo/settings_demo.jpg" width="40.18%" />
   <img src="assets/demo/mods_demo.jpg" width="50%" />
@@ -50,7 +53,7 @@ Supported Mods:
 
 **Pre-built ipa is available in the [Discord Server](https://discord.gg/nRmztE2unw)**
 
-Download a decrypted .ipa of Limbus Company through your decryption service of choice, fork this repository and use `build-ipa.yml` to inject ZSingularity into your .ipa
+If you’d like to build it yourself; download a decrypted .ipa of Limbus Company through your decryption service of choice, fork this repository and use `build-ipa.yml` to inject ZSingularity into your .ipa
 
 You must modify the .ipa’s `info.plist` to get all of ZSingularity’s functionality
 
