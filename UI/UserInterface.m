@@ -4820,6 +4820,66 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 }
 @end
 
+static const void *kZSHostOwnedViewKey = &kZSHostOwnedViewKey;
+
+static void zs_mark_host_owned(UIView *view) {
+    if (view) objc_setAssociatedObject(view, kZSHostOwnedViewKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static BOOL zs_touch_belongs_to_host_ui(UITouch *touch, UIView *hostView) {
+    UIView *view = touch.view;
+    while (view && view != hostView) {
+        if (objc_getAssociatedObject(view, kZSHostOwnedViewKey)) return YES;
+        view = view.superview;
+    }
+    return NO;
+}
+
+static void zs_install_unity_touch_filter(UIView *hostView) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        Class cls = [hostView class];
+        NSHashTable<UITouch *> *swallowed = [NSHashTable weakObjectsHashTable];
+
+        SEL selectors[] = {
+            @selector(touchesBegan:withEvent:),
+            @selector(touchesMoved:withEvent:),
+            @selector(touchesEnded:withEvent:),
+            @selector(touchesCancelled:withEvent:),
+        };
+        for (NSUInteger i = 0; i < 4; i++) {
+            SEL selector = selectors[i];
+            BOOL isBegan = selector == @selector(touchesBegan:withEvent:);
+            BOOL isTerminal = selector == @selector(touchesEnded:withEvent:) || selector == @selector(touchesCancelled:withEvent:);
+
+            Method method = class_getInstanceMethod(cls, selector);
+            if (!method) continue;
+            IMP original = method_getImplementation(method);
+            const char *encoding = method_getTypeEncoding(method);
+
+            IMP replacement = imp_implementationWithBlock(^(UIView *receiver, NSSet<UITouch *> *touches, UIEvent *event) {
+                NSMutableSet<UITouch *> *forwarded = nil;
+                for (UITouch *touch in touches) {
+                    BOOL swallow;
+                    if (isBegan) {
+                        swallow = zs_touch_belongs_to_host_ui(touch, receiver);
+                        if (swallow) [swallowed addObject:touch];
+                    } else {
+                        swallow = [swallowed containsObject:touch];
+                        if (isTerminal && swallow) [swallowed removeObject:touch];
+                    }
+                    if (swallow) continue;
+                    if (!forwarded) forwarded = [NSMutableSet setWithCapacity:touches.count];
+                    [forwarded addObject:touch];
+                }
+                if (forwarded.count == 0) return;
+                ((void (*)(id, SEL, NSSet *, UIEvent *))original)(receiver, selector, forwarded, event);
+            });
+            class_replaceMethod(cls, selector, replacement, encoding);
+        }
+    });
+}
+
 @implementation UserInterface
 
 + (instancetype)shared {
@@ -4861,6 +4921,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     [unityView setMultipleTouchEnabled:YES];
     unityView.exclusiveTouch = NO;
+    zs_install_unity_touch_filter(unityView);
 
     UISwipeGestureRecognizer *openSwipe =
         [[UISwipeGestureRecognizer alloc] initWithTarget:self action:@selector(zs_handleOpenPanelGesture:)];
@@ -4933,6 +4994,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     overlay.userInteractionEnabled = YES;
     [unityView addSubview:overlay];
+    zs_mark_host_owned(overlay);
     self.tutorialOverlay = overlay;
     zs_force_dark(overlay);
 
@@ -5900,6 +5962,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.glassContainer.userInteractionEnabled = YES;
     self.glassContainer.hidden = YES;
     [unityView addSubview:self.glassContainer];
+    zs_mark_host_owned(self.glassContainer);
     zs_force_dark(self.glassContainer);
 
     if (zs_has_liquid_glass()) {
@@ -5935,6 +5998,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.contentOverlay.userInteractionEnabled = YES;
     self.contentOverlay.hidden = YES;
     [unityView addSubview:self.contentOverlay];
+    zs_mark_host_owned(self.contentOverlay);
     zs_force_dark(self.contentOverlay);
 
     UIPanGestureRecognizer *closeSwipe = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(panelSwiped:)];
@@ -7454,6 +7518,7 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
     self.extendedContentClip.userInteractionEnabled = YES;
     self.extendedContentClip.hidden = YES;
     [unityView addSubview:self.extendedContentClip];
+    zs_mark_host_owned(self.extendedContentClip);
     if (self.contentOverlay) {
         [unityView insertSubview:self.extendedContentClip belowSubview:self.contentOverlay];
     }
@@ -10582,6 +10647,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     backdrop.userInteractionEnabled = YES;
     [backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_floatingFieldBackdropTapped)]];
     [unityView addSubview:backdrop];
+    zs_mark_host_owned(backdrop);
     zs_force_dark(backdrop);
     self.zsFloatingFieldBackdrop = backdrop;
     [NSLayoutConstraint activateConstraints:@[
@@ -10608,6 +10674,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     UIView *container = glass ?: field;
     container.translatesAutoresizingMaskIntoConstraints = NO;
     [unityView addSubview:container];
+    zs_mark_host_owned(container);
     zs_force_dark(container);
     [unityView bringSubviewToFront:container];
     self.zsFloatingFieldContainer = container;
@@ -13636,6 +13703,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     UITapGestureRecognizer *scrimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_pinMenuDismissTapped)];
     [scrim addGestureRecognizer:scrimTap];
     [unityView addSubview:scrim];
+    zs_mark_host_owned(scrim);
 
     UIView *menuContent = [[UIView alloc] initWithFrame:CGRectMake(0, 0, kZSPinMenuWidth, menuHeight)];
     menuContent.alpha = 0;
