@@ -12846,6 +12846,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 static NSString * const kZSPinKeyMemory = @"memory";
 static NSString * const kZSPinKeySyslog = @"syslog";
+static NSString * const kZSPinKeyMemoryCleanup = @"memoryCleanup";
+static NSString * const kZSPinKeyReapply = @"reapplySettings";
 static NSString * const kZSPinnedActionsSettingsSection = @"pinnedActions";
 static NSString * const kZSPinnedActionsSettingsKey = @"keys";
 
@@ -12864,8 +12866,10 @@ static const CGFloat kZSPinMenuCornerRadius = 20;
 
 static NSArray<NSDictionary<NSString *, NSString *> *> *zs_pin_action_catalog(void) {
     return @[
-        @{@"key": kZSPinKeyMemory, @"title": @"Memory analysis", @"symbol": @"memorychip"},
-        @{@"key": kZSPinKeySyslog, @"title": @"Console log", @"symbol": @"terminal"},
+        @{@"key": kZSPinKeyMemory, @"title": @"Memory Analysis", @"symbol": @"memorychip"},
+        @{@"key": kZSPinKeyMemoryCleanup, @"title": @"Memory Cleanup", @"symbol": @"sparkles"},
+        @{@"key": kZSPinKeySyslog, @"title": @"Console Log", @"symbol": @"terminal"},
+        @{@"key": kZSPinKeyReapply, @"title": @"Reapply Settings", @"symbol": @"arrow.clockwise"},
     ];
 }
 
@@ -13189,6 +13193,10 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     } else if ([key isEqualToString:kZSPinKeySyslog]) {
         self.syslogTabEnabled = self.syslogFullScreenOpen;
         [self toggleSyslogTapped];
+    } else if ([key isEqualToString:kZSPinKeyMemoryCleanup]) {
+        [self memoryCleanupTapped:nil];
+    } else if ([key isEqualToString:kZSPinKeyReapply]) {
+        [self reapplySettingsTapped];
     }
 }
 
