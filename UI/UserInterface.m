@@ -7479,7 +7479,41 @@ static const CGFloat kContentFadeHeight = 22;
     memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
     [self.stack addArrangedSubview:memoryActionsCard];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryActionsCard];
+    [self.stack setCustomSpacing:8 afterView:memoryActionsCard];
+
+    NSInteger atlasDownscaleIndex = (g_expTMPAtlasDownscale == 2) ? 1 : (g_expTMPAtlasDownscale == 4) ? 2 : 0;
+    ZSRow *atlasDownscaleRow = zs_make_mode_slider_row(@"TMP Atlas Downscale", @[@"Off", @"2x", @"4x"], atlasDownscaleIndex, 0);
+    objc_setAssociatedObject(atlasDownscaleRow.modeSlider, @"zs_exp_key", @"TMPAtlasDownscale", OBJC_ASSOCIATION_RETAIN);
+    [atlasDownscaleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:atlasDownscaleRow];
+
+    ZSRow *readableCopiesRow = zs_make_switch_row(@"Drop CPU Texture Copies", g_expDropReadableTextureCopies);
+    objc_setAssociatedObject(readableCopiesRow.toggle, @"zs_exp_key", @"DropReadableTextureCopies", OBJC_ASSOCIATION_RETAIN);
+    [readableCopiesRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:readableCopiesRow];
+
+    ZSRow *drawableCountRow = zs_make_switch_row(@"Limit Metal Drawables", g_expReduceMetalDrawables);
+    objc_setAssociatedObject(drawableCountRow.toggle, @"zs_exp_key", @"ReduceMetalDrawables", OBJC_ASSOCIATION_RETAIN);
+    [drawableCountRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:drawableCountRow];
+
+    NSInteger nativeScaleIndex = (g_expNativeResolutionScale == 85) ? 1 : (g_expNativeResolutionScale == 75) ? 2 : (g_expNativeResolutionScale == 60) ? 3 : 0;
+    ZSRow *nativeScaleRow = zs_make_mode_slider_row(@"Native Resolution", @[@"Off", @"85%", @"75%", @"60%"], nativeScaleIndex, 0);
+    objc_setAssociatedObject(nativeScaleRow.modeSlider, @"zs_exp_key", @"NativeResolutionScale", OBJC_ASSOCIATION_RETAIN);
+    [nativeScaleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:nativeScaleRow];
+
+    NSInteger opaqueDownsampleIndex = MAX(0, MIN(2, (NSInteger)g_expOpaqueDownsampling));
+    ZSRow *opaqueDownsampleRow = zs_make_mode_slider_row(@"Opaque Downsample", @[@"Off", @"2x", @"4x"], opaqueDownsampleIndex, 0);
+    objc_setAssociatedObject(opaqueDownsampleRow.modeSlider, @"zs_exp_key", @"OpaqueDownsampling", OBJC_ASSOCIATION_RETAIN);
+    [opaqueDownsampleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:opaqueDownsampleRow];
+
+    ZSRow *staleRenderTexturesRow = zs_make_switch_row(@"Release Stale RTs", g_expReleaseStaleRenderTextures);
+    objc_setAssociatedObject(staleRenderTexturesRow.toggle, @"zs_exp_key", @"ReleaseStaleRenderTextures", OBJC_ASSOCIATION_RETAIN);
+    [staleRenderTexturesRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.stack addArrangedSubview:staleRenderTexturesRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:staleRenderTexturesRow];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -16573,6 +16607,9 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     else if ([key isEqualToString:@"OpaqueTexture"]) g_expOpaqueTexture = toggle.on;
     else if ([key isEqualToString:@"RenderShadows"]) g_expRenderShadows = toggle.on;
     else if ([key isEqualToString:@"PostProcessing"]) g_expPostProcessing = toggle.on;
+    else if ([key isEqualToString:@"DropReadableTextureCopies"]) g_expDropReadableTextureCopies = toggle.on;
+    else if ([key isEqualToString:@"ReduceMetalDrawables"]) g_expReduceMetalDrawables = toggle.on;
+    else if ([key isEqualToString:@"ReleaseStaleRenderTextures"]) g_expReleaseStaleRenderTextures = toggle.on;
     else if ([key isEqualToString:@"CameraDithering"]) g_expCameraDithering = toggle.on;
     else if ([key isEqualToString:@"CameraResetHistory"]) g_expCameraResetHistory = toggle.on;
     else if ([key isEqualToString:@"CameraStopNaN"]) g_expCameraStopNaN = toggle.on;
@@ -16698,6 +16735,9 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
         [self zs_scheduleSave];
         return;
     }
+    else if ([key isEqualToString:@"TMPAtlasDownscale"]) g_expTMPAtlasDownscale = (i==0?0:(i==1?2:4));
+    else if ([key isEqualToString:@"NativeResolutionScale"]) g_expNativeResolutionScale = (i==0?100:(i==1?85:(i==2?75:60)));
+    else if ([key isEqualToString:@"OpaqueDownsampling"]) g_expOpaqueDownsampling = (int32_t)i;
     else if ([key isEqualToString:@"URPMSAA"]) g_expURPMSAA = (i==0?1:(i==1?2:(i==2?4:8)));
     else if ([key isEqualToString:@"StoreActionsOptimization"]) g_expStoreActionsOptimization = (int32_t)i;
     else if ([key isEqualToString:@"IntermediateTextureMode"]) g_expIntermediateTextureMode = (int32_t)i;

@@ -297,6 +297,12 @@ extern BOOL    g_expAutoUnloadOnMemoryWarning;
 extern BOOL    g_expAutoClearPortraitCacheOnBattleExit;
 extern BOOL    g_expDebugLogMemoryUsageTier;
 extern BOOL    g_expAutoUnloadOnElevatedMemoryUsage;
+extern BOOL    g_expDropReadableTextureCopies;
+extern int32_t g_expTMPAtlasDownscale;
+extern BOOL    g_expReduceMetalDrawables;
+extern int32_t g_expNativeResolutionScale;
+extern int32_t g_expOpaqueDownsampling;
+extern BOOL    g_expReleaseStaleRenderTextures;
 
 #pragma mark - Threading / Async / Jobs
 
