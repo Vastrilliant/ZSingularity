@@ -5133,7 +5133,6 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UILabel *memoryFullScreenStatusLabel;
 @property (nonatomic, strong) UIView *memoryRefreshPieView;
 @property (nonatomic, strong) CAShapeLayer *memoryRefreshPieLayer;
-@property (nonatomic, strong) CAShapeLayer *memoryRefreshPieTrackLayer;
 @property (nonatomic, strong) NSLayoutConstraint *memoryCloseButtonLeadingConstraint;
 @property (nonatomic, strong) UIView *memoryPopupScrim;
 @property (nonatomic, strong) UIView *memoryPopupView;
@@ -5148,9 +5147,11 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *memoryInfoPanel;
 @property (nonatomic, strong) UIView *memoryBigPieDisc;
 @property (nonatomic, strong) CAShapeLayer *memoryBigPieLayer;
-@property (nonatomic, strong) CAShapeLayer *memoryBigPieTrackLayer;
 @property (nonatomic, strong) UILabel *memoryClockLabel;
-@property (nonatomic, strong) UIView *memoryFeedContainer;
+@property (nonatomic, strong) UIView *memoryInvertClip;
+@property (nonatomic, strong) CAShapeLayer *memoryInvertMaskLayer;
+@property (nonatomic, strong) UILabel *memoryInvertClockLabel;
+@property (nonatomic, strong) NSArray<UILabel *> *memoryInvertFeedLabels;
 @property (nonatomic, strong) NSArray<UILabel *> *memoryFeedLabels;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *memoryFeed;
 @property (nonatomic, strong) NSTimer *memoryClockTimer;
@@ -6933,7 +6934,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryFullScreenStatusLabel = nil;
     self.memoryRefreshPieView = nil;
     self.memoryRefreshPieLayer = nil;
-    self.memoryRefreshPieTrackLayer = nil;
     self.memoryCloseButtonLeadingConstraint = nil;
     self.memoryExportButton = nil;
     self.memoryPageControl = nil;
@@ -6943,9 +6943,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryInfoPanel = nil;
     self.memoryBigPieDisc = nil;
     self.memoryBigPieLayer = nil;
-    self.memoryBigPieTrackLayer = nil;
     self.memoryClockLabel = nil;
-    self.memoryFeedContainer = nil;
+    self.memoryInvertClip = nil;
+    self.memoryInvertMaskLayer = nil;
+    self.memoryInvertClockLabel = nil;
+    self.memoryInvertFeedLabels = nil;
     self.memoryFeedLabels = nil;
     self.memoryFeed = nil;
     self.memoryPendingGroups = nil;
@@ -13600,10 +13602,23 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     pinch.enabled = YES;
     if (self.memoryPopupScrim) return;
     if (self.memoryFullScreenOpen) {
+        [self zs_playPinchDismissOnOverlay:self.memoryFullScreenOverlay];
         [self zs_closeMemoryFullScreenPanelTapped];
     } else if (self.syslogFullScreenOpen) {
+        [self zs_playPinchDismissOnOverlay:self.syslogFullScreenOverlay];
         [self zs_closeSyslogFullScreenPanelTapped];
     }
+}
+
+- (void)zs_playPinchDismissOnOverlay:(UIView *)overlay {
+    if (!overlay) return;
+    [UIView animateWithDuration:0.26
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        overlay.transform = CGAffineTransformMakeScale(0.78, 0.78);
+        overlay.alpha = 0;
+    } completion:nil];
 }
 
 - (void)zs_closeSyslogFullScreenPanelTapped {
@@ -13645,9 +13660,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [self zs_dismissMemoryPopupAnimated:NO];
     [self.memoryRefreshPieLayer removeAllAnimations];
-    [self.memoryRefreshPieTrackLayer removeAllAnimations];
     [self.memoryBigPieLayer removeAllAnimations];
-    [self.memoryBigPieTrackLayer removeAllAnimations];
+    [self.memoryInvertMaskLayer removeAllAnimations];
     [self.memoryClockTimer invalidate];
     self.memoryClockTimer = nil;
     self.memoryFeed = nil;
@@ -13737,11 +13751,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     pieDisc.layer.cornerRadius = 13;
     pieDisc.layer.masksToBounds = YES;
     [pieView addSubview:pieDisc];
-    CAShapeLayer *trackLayer = [CAShapeLayer layer];
-    trackLayer.frame = CGRectMake(0, 0, 26, 26);
-    trackLayer.path = [UIBezierPath bezierPathWithRect:CGRectMake(0, 0, 26, 26)].CGPath;
-    trackLayer.fillColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
-    [pieDisc.layer addSublayer:trackLayer];
     CAShapeLayer *pieLayer = [CAShapeLayer layer];
     pieLayer.frame = CGRectMake(0, 0, 26, 26);
     pieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(13, 13) radius:7 startAngle:-M_PI_2 endAngle:1.5 * M_PI clockwise:YES].CGPath;
@@ -13753,7 +13762,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:pieView];
     self.memoryRefreshPieView = pieView;
     self.memoryRefreshPieLayer = pieLayer;
-    self.memoryRefreshPieTrackLayer = trackLayer;
 
     ZSDeadZoneScrollView *scrollView = [[ZSDeadZoneScrollView alloc] init];
     scrollView.deadZone = 12;
@@ -13782,9 +13790,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     bigDisc.userInteractionEnabled = NO;
     bigDisc.layer.masksToBounds = YES;
     [infoPanel addSubview:bigDisc];
-    CAShapeLayer *bigTrack = [CAShapeLayer layer];
-    bigTrack.fillColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
-    [bigDisc.layer addSublayer:bigTrack];
     CAShapeLayer *bigPie = [CAShapeLayer layer];
     bigPie.fillColor = UIColor.clearColor.CGColor;
     bigPie.strokeColor = UIColor.whiteColor.CGColor;
@@ -13792,24 +13797,32 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [bigDisc.layer addSublayer:bigPie];
     self.memoryBigPieDisc = bigDisc;
     self.memoryBigPieLayer = bigPie;
-    self.memoryBigPieTrackLayer = bigTrack;
 
     UILabel *clockLabel = [[UILabel alloc] init];
     clockLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
     clockLabel.textAlignment = NSTextAlignmentLeft;
-    clockLabel.text = @"0.000 s";
+    clockLabel.text = @"0.000000 s";
     [infoPanel addSubview:clockLabel];
     self.memoryClockLabel = clockLabel;
 
-    UIView *feedContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    feedContainer.backgroundColor = [UIColor colorWithWhite:0 alpha:0.38];
-    feedContainer.layer.cornerRadius = 6;
-    feedContainer.layer.cornerCurve = kCACornerCurveContinuous;
-    feedContainer.layer.borderWidth = 1.0 / MAX(UIScreen.mainScreen.scale, 1.0);
-    feedContainer.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
-    feedContainer.clipsToBounds = YES;
-    [infoPanel addSubview:feedContainer];
-    self.memoryFeedContainer = feedContainer;
+    UIView *invertClip = [[UIView alloc] initWithFrame:CGRectZero];
+    invertClip.userInteractionEnabled = NO;
+    invertClip.backgroundColor = UIColor.clearColor;
+    invertClip.layer.masksToBounds = YES;
+    [infoPanel addSubview:invertClip];
+    CAShapeLayer *invertMask = [CAShapeLayer layer];
+    invertMask.fillColor = UIColor.clearColor.CGColor;
+    invertMask.strokeColor = UIColor.whiteColor.CGColor;
+    invertMask.strokeEnd = 1;
+    invertClip.layer.mask = invertMask;
+    UILabel *invertClock = [[UILabel alloc] init];
+    invertClock.textColor = [UIColor colorWithWhite:0.04 alpha:1];
+    invertClock.textAlignment = NSTextAlignmentLeft;
+    invertClock.text = clockLabel.text;
+    [invertClip addSubview:invertClock];
+    self.memoryInvertClip = invertClip;
+    self.memoryInvertMaskLayer = invertMask;
+    self.memoryInvertClockLabel = invertClock;
 
     NSLayoutConstraint *pageControlLeading = [pageControl.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8];
     pageControlLeading.priority = UILayoutPriorityDefaultHigh;
@@ -13889,50 +13902,45 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic impactOccurred];
 }
 
-- (void)zs_applyMemoryPieAnimationsToLayer:(CAShapeLayer *)layer track:(CAShapeLayer *)track beginMediaTime:(CFTimeInterval)beginMediaTime {
-    if (!layer || !track) return;
+- (void)zs_applyMemoryPieAnimationsToLayers:(NSArray<CAShapeLayer *> *)layers beginMediaTime:(CFTimeInterval)beginMediaTime {
+    if (layers.count == 0) return;
 
-    UIColor *white = UIColor.whiteColor;
-    UIColor *grey = [UIColor colorWithWhite:0.22 alpha:1];
+    CFTimeInterval begin = [layers.firstObject convertTime:beginMediaTime fromLayer:nil];
+    CFTimeInterval duration = ZS_MEMORY_SCAN_CYCLE_SECONDS * 2.0;
 
-    [layer removeAllAnimations];
-    [track removeAllAnimations];
+    for (CAShapeLayer *layer in layers) {
+        [layer removeAllAnimations];
 
-    CFTimeInterval begin = [layer convertTime:beginMediaTime fromLayer:nil];
+        CAKeyframeAnimation *fill = [CAKeyframeAnimation animationWithKeyPath:@"strokeEnd"];
+        fill.values = @[@0, @1, @1];
+        fill.keyTimes = @[@0, @0.5, @1];
+        fill.calculationMode = kCAAnimationLinear;
+        fill.duration = duration;
+        fill.repeatCount = HUGE_VALF;
+        fill.beginTime = begin;
+        [layer addAnimation:fill forKey:@"zsPieFill"];
 
-    CABasicAnimation *sweep = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
-    sweep.fromValue = @0;
-    sweep.toValue = @1;
-    sweep.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS;
-    sweep.repeatCount = HUGE_VALF;
-    sweep.beginTime = begin;
-    sweep.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear];
-    [layer addAnimation:sweep forKey:@"zsPieSweep"];
-
-    CAKeyframeAnimation *sweepColor = [CAKeyframeAnimation animationWithKeyPath:@"strokeColor"];
-    sweepColor.values = @[(id)white.CGColor, (id)white.CGColor, (id)grey.CGColor, (id)grey.CGColor];
-    sweepColor.keyTimes = @[@0, @0.4999, @0.5, @1];
-    sweepColor.calculationMode = kCAAnimationLinear;
-    sweepColor.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS * 2.0;
-    sweepColor.repeatCount = HUGE_VALF;
-    sweepColor.beginTime = begin;
-    [layer addAnimation:sweepColor forKey:@"zsPieSweepColor"];
-
-    CAKeyframeAnimation *trackColor = [CAKeyframeAnimation animationWithKeyPath:@"fillColor"];
-    trackColor.values = @[(id)grey.CGColor, (id)grey.CGColor, (id)white.CGColor, (id)white.CGColor];
-    trackColor.keyTimes = @[@0, @0.4999, @0.5, @1];
-    trackColor.calculationMode = kCAAnimationLinear;
-    trackColor.duration = ZS_MEMORY_SCAN_CYCLE_SECONDS * 2.0;
-    trackColor.repeatCount = HUGE_VALF;
-    trackColor.beginTime = begin;
-    [track addAnimation:trackColor forKey:@"zsPieTrackColor"];
+        CAKeyframeAnimation *drain = [CAKeyframeAnimation animationWithKeyPath:@"strokeStart"];
+        drain.values = @[@0, @0, @1];
+        drain.keyTimes = @[@0, @0.5, @1];
+        drain.calculationMode = kCAAnimationLinear;
+        drain.duration = duration;
+        drain.repeatCount = HUGE_VALF;
+        drain.beginTime = begin;
+        [layer addAnimation:drain forKey:@"zsPieDrain"];
+    }
 }
 
 - (void)zs_startMemoryRefreshPie {
     CFTimeInterval now = CACurrentMediaTime();
     self.memoryPieBegin = now;
-    [self zs_applyMemoryPieAnimationsToLayer:self.memoryRefreshPieLayer track:self.memoryRefreshPieTrackLayer beginMediaTime:now];
-    [self zs_applyMemoryPieAnimationsToLayer:self.memoryBigPieLayer track:self.memoryBigPieTrackLayer beginMediaTime:now];
+    if (self.memoryRefreshPieLayer) {
+        [self zs_applyMemoryPieAnimationsToLayers:@[self.memoryRefreshPieLayer] beginMediaTime:now];
+    }
+    NSMutableArray<CAShapeLayer *> *bigLayers = [NSMutableArray array];
+    if (self.memoryBigPieLayer) [bigLayers addObject:self.memoryBigPieLayer];
+    if (self.memoryInvertMaskLayer) [bigLayers addObject:self.memoryInvertMaskLayer];
+    [self zs_applyMemoryPieAnimationsToLayers:bigLayers beginMediaTime:now];
     [self zs_memoryClockTick];
 }
 
@@ -13954,9 +13962,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     double cycle = ZS_MEMORY_SCAN_CYCLE_SECONDS;
     double elapsed = MAX(CACurrentMediaTime() - self.memoryPieBegin, 0.0);
     double remaining = cycle - fmod(elapsed, cycle);
-    NSInteger totalMs = MAX(MIN((NSInteger)llround(remaining * 1000.0), (NSInteger)llround(cycle * 1000.0)), 0);
-    NSString *text = [NSString stringWithFormat:@"%ld.%03ld s", (long)(totalMs / 1000), (long)(totalMs % 1000)];
+    NSInteger totalUs = MAX(MIN((NSInteger)llround(remaining * 1000000.0), (NSInteger)llround(cycle * 1000000.0)), 0);
+    NSString *text = [NSString stringWithFormat:@"%ld.%06ld s", (long)(totalUs / 1000000), (long)(totalUs % 1000000)];
     if (![label.text isEqualToString:text]) label.text = text;
+    if (![self.memoryInvertClockLabel.text isEqualToString:text]) self.memoryInvertClockLabel.text = text;
 }
 
 - (void)zs_pushMemoryFeed:(NSString *)text {
@@ -13977,19 +13986,24 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     NSArray<UILabel *> *labels = self.memoryFeedLabels;
     if (labels.count == 0 || self.memoryInfoPanel.hidden) return;
 
+    NSArray<UILabel *> *invertLabels = self.memoryInvertFeedLabels;
     NSUInteger total = labels.count;
     NSUInteger available = self.memoryFeed.count;
     for (NSUInteger i = 0; i < total; i++) {
         UILabel *label = labels[i];
+        UILabel *invertLabel = i < invertLabels.count ? invertLabels[i] : nil;
         NSInteger entryIndex = (NSInteger)available - (NSInteger)total + (NSInteger)i;
         if (entryIndex < 0) {
             label.text = nil;
+            invertLabel.text = nil;
             continue;
         }
         NSDictionary *entry = self.memoryFeed[(NSUInteger)entryIndex];
         NSInteger repeats = [entry[@"n"] integerValue];
         label.text = repeats > 1 ? [NSString stringWithFormat:@"> %@ ×%ld", entry[@"t"], (long)repeats] : [@"> " stringByAppendingString:entry[@"t"]];
         label.alpha = 0.3 + 0.7 * (CGFloat)(i + 1) / (CGFloat)total;
+        invertLabel.text = label.text;
+        invertLabel.alpha = label.alpha;
     }
 }
 
@@ -14003,59 +14017,75 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CGFloat gap = 14;
     CGFloat sideInset = 20;
     CGFloat innerWidth = MAX(width - sideInset * 2, 40);
-    CGFloat minTextWidth = 96;
 
     CGFloat basePie = MAX(MIN(innerWidth, (height - gap * 4 - 34) * 0.6), 40);
-    CGFloat pieSide = basePie * 1.3;
-    pieSide = MIN(pieSide, height - gap * 2);
-    pieSide = MIN(pieSide, innerWidth - minTextWidth - gap);
+    CGFloat pieSide = MIN(basePie * 1.3, height - gap * 2);
+    pieSide = MIN(pieSide, innerWidth);
     pieSide = floor(MAX(pieSide, 40));
 
-    CGFloat pieX = floor(width - sideInset - pieSide);
+    CGFloat pieX = floor((width - pieSide) / 2.0);
     CGFloat pieY = floor((height - pieSide) / 2.0);
-    CGFloat textWidth = MAX(pieX - gap - sideInset, 0);
+    CGFloat pieBottom = pieY + pieSide;
 
     UIView *disc = self.memoryBigPieDisc;
     disc.frame = CGRectMake(pieX, pieY, pieSide, pieSide);
     disc.layer.cornerRadius = pieSide / 2.0;
     CGRect local = CGRectMake(0, 0, pieSide, pieSide);
     CGFloat pieStroke = pieSide / 2.0 + 2.0;
-    self.memoryBigPieTrackLayer.frame = local;
-    self.memoryBigPieTrackLayer.path = [UIBezierPath bezierPathWithRect:local].CGPath;
+    UIBezierPath *piePath = [UIBezierPath bezierPathWithArcCenter:CGPointMake(pieSide / 2.0, pieSide / 2.0)
+                                                           radius:pieStroke / 2.0
+                                                       startAngle:-M_PI_2
+                                                         endAngle:1.5 * M_PI
+                                                        clockwise:YES];
     self.memoryBigPieLayer.frame = local;
-    self.memoryBigPieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(pieSide / 2.0, pieSide / 2.0)
-                                                                 radius:pieStroke / 2.0
-                                                             startAngle:-M_PI_2
-                                                               endAngle:1.5 * M_PI
-                                                              clockwise:YES].CGPath;
+    self.memoryBigPieLayer.path = piePath.CGPath;
     self.memoryBigPieLayer.lineWidth = pieStroke;
+
+    UIView *invertClip = self.memoryInvertClip;
+    invertClip.frame = disc.frame;
+    invertClip.layer.cornerRadius = pieSide / 2.0;
+    self.memoryInvertMaskLayer.frame = local;
+    self.memoryInvertMaskLayer.path = piePath.CGPath;
+    self.memoryInvertMaskLayer.lineWidth = pieStroke;
 
     UILabel *clock = self.memoryClockLabel;
     clock.font = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
     CGFloat clockHeight = ceil(clock.font.lineHeight);
-    clock.frame = CGRectMake(sideInset, pieY, textWidth, clockHeight);
+    clock.frame = CGRectMake(sideInset, pieY, MAX(pieX + pieSide - sideInset, 0), clockHeight);
 
-    CGFloat feedY = pieY + clockHeight + 10;
-    CGFloat feedHeight = MAX(pieY + pieSide - feedY, 0);
-    UIView *container = self.memoryFeedContainer;
-    container.frame = CGRectMake(sideInset, feedY, textWidth, feedHeight);
-    container.hidden = feedHeight < 24 || textWidth < 40;
+    UILabel *invertClock = self.memoryInvertClockLabel;
+    invertClock.font = clock.font;
+    invertClock.frame = CGRectOffset(clock.frame, -pieX, -pieY);
+
+    CGFloat feedWidth = MAX(pieX + pieSide * 0.5 - sideInset, 0);
+    CGFloat feedTop = pieY + clockHeight + 10;
+    CGFloat feedHeight = MAX(pieBottom - feedTop, 0);
 
     UIFont *feedFont = zs_mono_font(8, UIFontWeightRegular);
     CGFloat lineHeight = ceil(feedFont.lineHeight) + 1;
-    CGFloat padding = 6;
 
     for (UILabel *old in self.memoryFeedLabels) [old removeFromSuperview];
-    NSUInteger lineCount = (NSUInteger)MAX(floor((feedHeight - padding * 2) / lineHeight), 0);
+    for (UILabel *old in self.memoryInvertFeedLabels) [old removeFromSuperview];
+    NSUInteger lineCount = feedWidth > 20 ? (NSUInteger)MAX(floor(feedHeight / lineHeight), 0) : 0;
     NSMutableArray<UILabel *> *labels = [NSMutableArray arrayWithCapacity:lineCount];
-    CGFloat firstLineY = feedHeight - padding - lineHeight * (CGFloat)lineCount;
+    NSMutableArray<UILabel *> *invertLabels = [NSMutableArray arrayWithCapacity:lineCount];
+    CGFloat firstLineY = pieBottom - lineHeight * (CGFloat)lineCount;
     for (NSUInteger i = 0; i < lineCount; i++) {
+        CGRect lineFrame = CGRectMake(sideInset, firstLineY + lineHeight * (CGFloat)i, feedWidth, lineHeight);
+
         UILabel *label = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.92 alpha:1], NSTextAlignmentLeft);
-        label.frame = CGRectMake(padding, firstLineY + lineHeight * (CGFloat)i, MAX(textWidth - padding * 2, 0), lineHeight);
-        [container addSubview:label];
+        label.frame = lineFrame;
+        [panel addSubview:label];
         [labels addObject:label];
+
+        UILabel *invertLabel = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.08 alpha:1], NSTextAlignmentLeft);
+        invertLabel.frame = CGRectOffset(lineFrame, -pieX, -pieY);
+        [invertClip addSubview:invertLabel];
+        [invertLabels addObject:invertLabel];
     }
     self.memoryFeedLabels = labels;
+    self.memoryInvertFeedLabels = invertLabels;
+    [panel bringSubviewToFront:invertClip];
 
     [self zs_renderMemoryFeed];
     [self zs_memoryClockTick];
@@ -16281,6 +16311,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             CGRect overlayFrame = CGRectMake(0, 0, docsSpanWidth, height);
             void (^prepareOverlay)(UIView *, BOOL) = ^(UIView *overlay, BOOL visible) {
                 if (!overlay) return;
+                overlay.transform = CGAffineTransformIdentity;
+                overlay.alpha = 1;
                 overlay.frame = overlayFrame;
                 overlay.hidden = !visible;
                 if (visible) [overlay layoutIfNeeded];
@@ -16505,6 +16537,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     self.docsContentOverlay.hidden = YES;
     self.syslogFullScreenOverlay.hidden = YES;
     self.memoryFullScreenOverlay.hidden = YES;
+    for (UIView *overlay in @[self.syslogFullScreenOverlay ?: [NSNull null], self.memoryFullScreenOverlay ?: [NSNull null]]) {
+        if (![overlay isKindOfClass:[UIView class]]) continue;
+        overlay.transform = CGAffineTransformIdentity;
+        overlay.alpha = 1;
+    }
 
     for (UIView *row in [self.syslogFullScreenRowsStack.arrangedSubviews copy]) {
         [self.syslogFullScreenRowsStack removeArrangedSubview:row];
