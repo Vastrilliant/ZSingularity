@@ -2453,9 +2453,10 @@ static ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float 
     row.valueLabel = [[UILabel alloc] init];
     row.valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
     row.valueLabel.text = format(displayVal);
-    row.valueLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1];
-    row.valueLabel.font = zs_mono_font(14, UIFontWeightHeavy);
+    row.valueLabel.textColor = zs_accent_green_color();
+    row.valueLabel.font = zs_mono_font(10, UIFontWeightRegular);
     row.valueLabel.textAlignment = NSTextAlignmentRight;
+    zs_apply_gif_text_tint(row.valueLabel);
     [row addSubview:row.valueLabel];
 
     row.slider = [[ZSCapsuleSlider alloc] init];
@@ -2470,17 +2471,16 @@ static ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float 
     [NSLayoutConstraint activateConstraints:@[
         [row.titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [row.titleLabel.widthAnchor constraintEqualToConstant:kTitleColumnWidth],
-        [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.slider.centerYAnchor],
 
-        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
-        [row.valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.slider.trailingAnchor],
+        [row.valueLabel.bottomAnchor constraintEqualToAnchor:row.slider.topAnchor constant:3],
 
         [row.slider.leadingAnchor constraintEqualToAnchor:row.titleLabel.trailingAnchor constant:4],
         [row.slider.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [row.slider.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     ]];
 
-    NSLayoutConstraint *sliderRowTop = [row.topAnchor constraintEqualToAnchor:row.slider.topAnchor constant:-3];
+    NSLayoutConstraint *sliderRowTop = [row.topAnchor constraintEqualToAnchor:row.valueLabel.topAnchor];
     NSLayoutConstraint *sliderRowBottom = [row.bottomAnchor constraintEqualToAnchor:row.slider.bottomAnchor constant:3];
     sliderRowTop.priority = UILayoutPriorityRequired - 1;
     sliderRowBottom.priority = UILayoutPriorityRequired - 1;
