@@ -2422,7 +2422,7 @@ static NSString *zs_custom_greeting_button_title(NSString *text) {
 
 static const CGFloat kRowHeight = 26;
 static const CGFloat kTitleColumnWidth = 92;
-static const CGFloat kValueColumnWidth = 34;
+static const CGFloat kSettingRowHeight = 24;
 
 static float zs_slider_step_for_range(float minV, float maxV) {
     if (minV >= -1.0f && maxV <= 1.0f) return 0.05f;
@@ -2453,10 +2453,9 @@ static ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float 
     row.valueLabel = [[UILabel alloc] init];
     row.valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
     row.valueLabel.text = format(displayVal);
-    row.valueLabel.textColor = zs_accent_green_color();
-    row.valueLabel.font = zs_mono_font(10, UIFontWeightRegular);
+    row.valueLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    row.valueLabel.font = zs_mono_font(14, UIFontWeightHeavy);
     row.valueLabel.textAlignment = NSTextAlignmentRight;
-    zs_apply_gif_text_tint(row.valueLabel);
     [row addSubview:row.valueLabel];
 
     row.slider = [[ZSCapsuleSlider alloc] init];
@@ -2473,12 +2472,11 @@ static ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float 
         [row.titleLabel.widthAnchor constraintEqualToConstant:kTitleColumnWidth],
         [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
 
-        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [row.valueLabel.widthAnchor constraintEqualToConstant:kValueColumnWidth],
+        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-8],
         [row.valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
 
         [row.slider.leadingAnchor constraintEqualToAnchor:row.titleLabel.trailingAnchor constant:4],
-        [row.slider.trailingAnchor constraintEqualToAnchor:row.valueLabel.leadingAnchor constant:-6],
+        [row.slider.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
         [row.slider.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
     ]];
 
@@ -2609,17 +2607,16 @@ static ZSRow *zs_make_switch_row(NSString *title, BOOL val) {
     [NSLayoutConstraint activateConstraints:@[
         [row.titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
         [row.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:row.toggle.leadingAnchor constant:-6],
+        [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
 
         [row.toggle.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:toggleTrailingCompensation],
         [row.toggle.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
         [row.toggle.leadingAnchor constraintGreaterThanOrEqualToAnchor:row.titleLabel.trailingAnchor constant:6],
     ]];
 
-    NSLayoutConstraint *switchRowTop = [row.titleLabel.topAnchor constraintEqualToAnchor:row.topAnchor constant:2];
-    NSLayoutConstraint *switchRowBottom = [row.titleLabel.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-2];
-    switchRowTop.priority = UILayoutPriorityRequired - 1;
-    switchRowBottom.priority = UILayoutPriorityRequired - 1;
-    [NSLayoutConstraint activateConstraints:@[switchRowTop, switchRowBottom]];
+    NSLayoutConstraint *switchRowHeight = [row.heightAnchor constraintEqualToConstant:kSettingRowHeight];
+    switchRowHeight.priority = UILayoutPriorityRequired - 1;
+    switchRowHeight.active = YES;
 
     return row;
 }
