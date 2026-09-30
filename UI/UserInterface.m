@@ -2295,6 +2295,9 @@ static const NSInteger kZSWheelLoopCopies = 9;
         _deadZoneArmed = NO;
     }
     if (_deadZoneArmed) {
+        CGFloat minX = -self.contentInset.left;
+        CGFloat maxX = MAX(self.contentSize.width - self.bounds.size.width + self.contentInset.right, minX);
+        contentOffset.x = MIN(MAX(contentOffset.x, minX), maxX);
         if (self.panGestureRecognizer.numberOfTouches > 1) {
             contentOffset.x = self.contentOffset.x;
         } else if (fabs(contentOffset.x - _deadZoneStartX) < self.deadZone) {
@@ -2970,6 +2973,13 @@ static CGSize zs_memory_wrapped_size(NSString *text, UIFont *font, CGFloat width
                                   attributes:@{NSFontAttributeName: font}
                                      context:nil];
     return CGSizeMake(ceil(rect.size.width), ceil(rect.size.height));
+}
+
+static NSAttributedString *zs_memory_fetch_subtext(UIColor *color) {
+    return [[NSAttributedString alloc] initWithString:@"FETCHING INFO"
+                                           attributes:@{NSFontAttributeName: zs_mono_font(8, UIFontWeightSemibold),
+                                                        NSForegroundColorAttributeName: color,
+                                                        NSKernAttributeName: @1.2}];
 }
 
 static UILabel *zs_memory_make_label(NSString *text, UIFont *font, UIColor *color, NSTextAlignment alignment) {
@@ -5151,6 +5161,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIView *memoryInvertClip;
 @property (nonatomic, strong) CAShapeLayer *memoryInvertMaskLayer;
 @property (nonatomic, strong) UILabel *memoryInvertClockLabel;
+@property (nonatomic, strong) UILabel *memorySubtextLabel;
+@property (nonatomic, strong) UILabel *memoryInvertSubtextLabel;
 @property (nonatomic, strong) NSArray<UILabel *> *memoryInvertFeedLabels;
 @property (nonatomic, strong) NSArray<UILabel *> *memoryFeedLabels;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *memoryFeed;
@@ -6947,6 +6959,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryInvertClip = nil;
     self.memoryInvertMaskLayer = nil;
     self.memoryInvertClockLabel = nil;
+    self.memorySubtextLabel = nil;
+    self.memoryInvertSubtextLabel = nil;
     self.memoryInvertFeedLabels = nil;
     self.memoryFeedLabels = nil;
     self.memoryFeed = nil;
@@ -13765,6 +13779,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     ZSDeadZoneScrollView *scrollView = [[ZSDeadZoneScrollView alloc] init];
     scrollView.deadZone = 12;
+    scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     scrollView.panGestureRecognizer.maximumNumberOfTouches = 1;
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     scrollView.backgroundColor = UIColor.clearColor;
@@ -13805,6 +13820,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [infoPanel addSubview:clockLabel];
     self.memoryClockLabel = clockLabel;
 
+    UILabel *subtextLabel = [[UILabel alloc] init];
+    subtextLabel.textAlignment = NSTextAlignmentLeft;
+    subtextLabel.attributedText = zs_memory_fetch_subtext([UIColor colorWithWhite:1 alpha:0.5]);
+    [infoPanel addSubview:subtextLabel];
+    self.memorySubtextLabel = subtextLabel;
+
     UIView *invertClip = [[UIView alloc] initWithFrame:CGRectZero];
     invertClip.userInteractionEnabled = NO;
     invertClip.backgroundColor = UIColor.clearColor;
@@ -13820,6 +13841,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     invertClock.textAlignment = NSTextAlignmentLeft;
     invertClock.text = clockLabel.text;
     [invertClip addSubview:invertClock];
+    UILabel *invertSubtext = [[UILabel alloc] init];
+    invertSubtext.textAlignment = NSTextAlignmentLeft;
+    invertSubtext.attributedText = zs_memory_fetch_subtext([UIColor colorWithWhite:0 alpha:0.55]);
+    [invertClip addSubview:invertSubtext];
+    self.memoryInvertSubtextLabel = invertSubtext;
     self.memoryInvertClip = invertClip;
     self.memoryInvertMaskLayer = invertMask;
     self.memoryInvertClockLabel = invertClock;
@@ -14020,10 +14046,26 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     CGFloat basePie = MAX(MIN(innerWidth, (height - gap * 4 - 34) * 0.6), 40);
     CGFloat pieSide = MIN(basePie * 1.3, height - gap * 2);
-    pieSide = MIN(pieSide, innerWidth);
     pieSide = floor(MAX(pieSide, 40));
 
-    CGFloat pieX = floor((width - pieSide) / 2.0);
+    UILabel *subtext = self.memorySubtextLabel;
+    NSString *clockTemplate = [NSString stringWithFormat:@"%ld.000000 s", (long)ceil(ZS_MEMORY_SCAN_CYCLE_SECONDS)];
+    UIFont *clockFont = nil;
+    CGFloat columnWidth = 0;
+    for (NSUInteger pass = 0; pass < 3; pass++) {
+        clockFont = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
+        CGFloat clockWidth = ceil([clockTemplate sizeWithAttributes:@{NSFontAttributeName: clockFont}].width) + 2;
+        CGFloat subtextWidth = ceil([subtext sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)].width) + 2;
+        columnWidth = MAX(clockWidth, subtextWidth);
+        if (columnWidth + pieSide / 2.0 <= innerWidth) break;
+        CGFloat fitted = floor(MAX(2.0 * (innerWidth - columnWidth), 40));
+        if (fitted >= pieSide) break;
+        pieSide = fitted;
+    }
+
+    CGFloat collectiveWidth = columnWidth + pieSide / 2.0;
+    CGFloat columnX = floor((width - collectiveWidth) / 2.0);
+    CGFloat pieX = floor(columnX + columnWidth - pieSide / 2.0);
     CGFloat pieY = floor((height - pieSide) / 2.0);
     CGFloat pieBottom = pieY + pieSide;
 
@@ -14048,17 +14090,20 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryInvertMaskLayer.path = piePath.CGPath;
     self.memoryInvertMaskLayer.lineWidth = pieStroke;
 
+    CGFloat subtextHeight = ceil([subtext sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)].height);
+    subtext.frame = CGRectMake(columnX, pieY, columnWidth, subtextHeight);
+    self.memoryInvertSubtextLabel.frame = CGRectOffset(subtext.frame, -pieX, -pieY);
+
     UILabel *clock = self.memoryClockLabel;
-    clock.font = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
+    clock.font = clockFont;
     CGFloat clockHeight = ceil(clock.font.lineHeight);
-    clock.frame = CGRectMake(sideInset, pieY, MAX(pieX + pieSide - sideInset, 0), clockHeight);
+    clock.frame = CGRectMake(columnX, pieY + subtextHeight + 1, columnWidth, clockHeight);
 
     UILabel *invertClock = self.memoryInvertClockLabel;
     invertClock.font = clock.font;
     invertClock.frame = CGRectOffset(clock.frame, -pieX, -pieY);
 
-    CGFloat feedWidth = MAX(pieX + pieSide * 0.5 - sideInset, 0);
-    CGFloat feedTop = pieY + clockHeight + 10;
+    CGFloat feedTop = CGRectGetMaxY(clock.frame) + 10;
     CGFloat feedHeight = MAX(pieBottom - feedTop, 0);
 
     UIFont *feedFont = zs_mono_font(8, UIFontWeightRegular);
@@ -14066,12 +14111,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     for (UILabel *old in self.memoryFeedLabels) [old removeFromSuperview];
     for (UILabel *old in self.memoryInvertFeedLabels) [old removeFromSuperview];
-    NSUInteger lineCount = feedWidth > 20 ? (NSUInteger)MAX(floor(feedHeight / lineHeight), 0) : 0;
+    NSUInteger lineCount = (NSUInteger)MAX(floor(feedHeight / lineHeight), 0);
     NSMutableArray<UILabel *> *labels = [NSMutableArray arrayWithCapacity:lineCount];
     NSMutableArray<UILabel *> *invertLabels = [NSMutableArray arrayWithCapacity:lineCount];
     CGFloat firstLineY = pieBottom - lineHeight * (CGFloat)lineCount;
     for (NSUInteger i = 0; i < lineCount; i++) {
-        CGRect lineFrame = CGRectMake(sideInset, firstLineY + lineHeight * (CGFloat)i, feedWidth, lineHeight);
+        CGRect lineFrame = CGRectMake(columnX, firstLineY + lineHeight * (CGFloat)i, columnWidth, lineHeight);
 
         UILabel *label = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.92 alpha:1], NSTextAlignmentLeft);
         label.frame = lineFrame;
