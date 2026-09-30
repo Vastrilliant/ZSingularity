@@ -967,6 +967,12 @@ static const CGFloat kCapsuleSliderThinHeight = 6;
 static const CGFloat kCapsuleSliderFatHeight = 18;
 static const CGFloat kDefaultSnapFraction = 0.035;
 
+static BOOL zs_pan_should_begin_horizontally(UIGestureRecognizer *gesture, UIView *view) {
+    if (![gesture isKindOfClass:[UIPanGestureRecognizer class]]) return YES;
+    CGPoint translation = [(UIPanGestureRecognizer *)gesture translationInView:view];
+    return fabs(translation.x) >= fabs(translation.y);
+}
+
 @interface ZSFillView : UIView
 @property (nonatomic, assign) CGFloat cornerRadius;
 @property (nonatomic, assign, getter=isTrailingSquared) BOOL trailingSquared;
@@ -1213,6 +1219,7 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
 @property (nonatomic, assign) BOOL touching;
 
 @property (nonatomic, assign) float liveDragValue;
+@property (nonatomic, assign) BOOL panActive;
 @property (nonatomic, strong) UIVisualEffectView *trackGlass;
 @property (nonatomic, assign) BOOL glassEnabled;
 @end
@@ -1270,11 +1277,18 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
         self.defaultTick.hidden = YES;
         [self addSubview:self.defaultTick];
 
-        UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
-        press.minimumPressDuration = 0;
-        [self addGestureRecognizer:press];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
+        pan.maximumNumberOfTouches = 1;
+        [self addGestureRecognizer:pan];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        [self addGestureRecognizer:tap];
     }
     return self;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (![super gestureRecognizerShouldBegin:gestureRecognizer]) return NO;
+    return zs_pan_should_begin_horizontally(gestureRecognizer, self);
 }
 
 - (void)layoutSubviews {
@@ -1559,11 +1573,11 @@ static const CGFloat kFillAlpha = 1.0;
     if (send) [self sendActionsForControlEvents:UIControlEventValueChanged];
 }
 
-- (void)handlePress:(UILongPressGestureRecognizer *)gesture {
+- (void)handlePress:(UIGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self];
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
-
+            self.panActive = YES;
             [self setPillTouching:YES];
             [self setValueFromLocation:location sendActions:YES];
             break;
@@ -1573,11 +1587,24 @@ static const CGFloat kFillAlpha = 1.0;
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed:
+            self.panActive = NO;
             [self setPillTouching:NO];
             break;
         default:
             break;
     }
+}
+
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    CGPoint location = [gesture locationInView:self];
+    [self setPillTouching:YES];
+    [self setValueFromLocation:location sendActions:YES];
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && !strongSelf.panActive) [strongSelf setPillTouching:NO];
+    });
 }
 
 @end
@@ -1643,11 +1670,18 @@ static const CGFloat kFillAlpha = 1.0;
             [self.track.heightAnchor constraintEqualToConstant:kCapsuleSliderHeight],
         ]];
 
-        UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
-        press.minimumPressDuration = 0;
-        [self addGestureRecognizer:press];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
+        pan.maximumNumberOfTouches = 1;
+        [self addGestureRecognizer:pan];
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
+        [self addGestureRecognizer:tap];
     }
     return self;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (![super gestureRecognizerShouldBegin:gestureRecognizer]) return NO;
+    return zs_pan_should_begin_horizontally(gestureRecognizer, self);
 }
 
 - (void)dealloc {
@@ -1830,7 +1864,12 @@ static const CGFloat kFillAlpha = 1.0;
     }
 }
 
-- (void)handlePress:(UILongPressGestureRecognizer *)gesture {
+- (void)handleTap:(UITapGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateEnded) return;
+    [self selectIndexForLocation:[gesture locationInView:self] sendActions:YES];
+}
+
+- (void)handlePress:(UIGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self];
     switch (gesture.state) {
         case UIGestureRecognizerStateBegan:
@@ -1942,6 +1981,11 @@ static const NSInteger kZSWheelLoopCopies = 9;
         [self addGestureRecognizer:tap];
     }
     return self;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (![super gestureRecognizerShouldBegin:gestureRecognizer]) return NO;
+    return zs_pan_should_begin_horizontally(gestureRecognizer, self);
 }
 
 - (void)dealloc {
@@ -2305,6 +2349,23 @@ static const NSInteger kZSWheelLoopCopies = 9;
         }
     }
     [super setContentOffset:contentOffset];
+}
+
+@end
+
+@interface ZSPanelScrollView : UIScrollView
+@end
+
+@implementation ZSPanelScrollView
+
+- (BOOL)touchesShouldCancelInContentView:(UIView *)view {
+    return YES;
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    if (hit && hit != self && self.isDecelerating && !self.isDragging) return self;
+    return hit;
 }
 
 @end
@@ -7444,7 +7505,7 @@ static const CGFloat kContentFadeHeight = 22;
     self.scrollViewport.clipsToBounds = NO;
     [self.contentOverlay addSubview:self.scrollViewport];
 
-    self.scrollView = [[UIScrollView alloc] init];
+    self.scrollView = [[ZSPanelScrollView alloc] init];
     self.scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     self.scrollView.showsVerticalScrollIndicator = NO;
     self.scrollView.showsHorizontalScrollIndicator = NO;
