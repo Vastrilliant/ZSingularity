@@ -13767,6 +13767,20 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
+- (void)zs_syncGamePaused {
+    [[FPS120Controller shared] setGamePaused:self.syslogFullScreenOpen || self.memoryFullScreenOpen];
+}
+
+- (void)setSyslogFullScreenOpen:(BOOL)open {
+    _syslogFullScreenOpen = open;
+    [self zs_syncGamePaused];
+}
+
+- (void)setMemoryFullScreenOpen:(BOOL)open {
+    _memoryFullScreenOpen = open;
+    [self zs_syncGamePaused];
+}
+
 - (void)zs_openSyslogFullScreenPanel {
     if (!self.panelOpen) return;
     if (self.syslogFullScreenOpen) return;
@@ -14196,14 +14210,15 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_startMemoryRefreshPie {
     CFTimeInterval now = CACurrentMediaTime();
-    self.memoryPieBegin = now;
+    CFTimeInterval begin = (self.memoryCycleStart > 0 && self.memoryCycleStart <= now) ? self.memoryCycleStart : now;
+    self.memoryPieBegin = begin;
     if (self.memoryRefreshPieLayer) {
-        [self zs_applyMemoryPieAnimationsToLayers:@[self.memoryRefreshPieLayer] beginMediaTime:now];
+        [self zs_applyMemoryPieAnimationsToLayers:@[self.memoryRefreshPieLayer] beginMediaTime:begin];
     }
     NSMutableArray<CAShapeLayer *> *bigLayers = [NSMutableArray array];
     if (self.memoryBigPieLayer) [bigLayers addObject:self.memoryBigPieLayer];
     if (self.memoryInvertMaskLayer) [bigLayers addObject:self.memoryInvertMaskLayer];
-    [self zs_applyMemoryPieAnimationsToLayers:bigLayers beginMediaTime:now];
+    [self zs_applyMemoryPieAnimationsToLayers:bigLayers beginMediaTime:begin];
     [self zs_memoryClockTick];
 }
 
@@ -14824,7 +14839,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryCycleUnitEstimate = 30;
     self.memoryCycleUnitsDone = 0;
     self.memoryCyclePhase = 0;
-    self.memoryCycleStart = 0;
+    self.memoryCycleStart = CACurrentMediaTime();
     self.memoryCycleCount = 0;
     self.memoryCycleOverruns = 0;
     self.memoryCycleWorkAccum = 0;

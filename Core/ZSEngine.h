@@ -45,6 +45,7 @@ NSString * _Nonnull ZSGlobalSceneState_Name(int32_t state);
 
 - (void)setManualCombatFPS:(NSInteger)fps;
 - (void)setPanelOpen:(BOOL)open;
+- (void)setGamePaused:(BOOL)paused;
 - (void)clearManualCombatOverride;
 @end
 

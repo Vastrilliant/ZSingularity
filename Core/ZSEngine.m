@@ -1053,6 +1053,19 @@ static void zs_schedule_particle_apply(void) {
     [self battleStatePoll];
 }
 
+- (void)setGamePaused:(BOOL)paused {
+    static BOOL weSetPaused = NO;
+    if (paused == weSetPaused) return;
+    id appController = [[UIApplication sharedApplication] delegate];
+    if (!appController) return;
+    @try {
+        [appController setValue:@(paused) forKey:@"paused"];
+        weSetPaused = paused;
+    } @catch (NSException *exception) {
+        ZLog(@"[ZSScripts] couldn't set paused on %@: %@", NSStringFromClass([appController class]), exception.reason);
+    }
+}
+
 - (void)dealloc {
     [self.battleStatePollTimer invalidate];
     [self.fpsPollTimer invalidate];
