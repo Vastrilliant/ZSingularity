@@ -2420,75 +2420,6 @@ static NSString *zs_custom_greeting_button_title(NSString *text) {
     return text;
 }
 
-static ZSMarqueeLabel *zs_custom_greeting_marquee_label(UIButton *button) {
-    static const void *kGreetingLabelKey = &kGreetingLabelKey;
-    ZSMarqueeLabel *label = objc_getAssociatedObject(button, kGreetingLabelKey);
-    if (!label) {
-        label = [[ZSMarqueeLabel alloc] init];
-        label.translatesAutoresizingMaskIntoConstraints = NO;
-        label.userInteractionEnabled = NO;
-        [button addSubview:label];
-        [NSLayoutConstraint activateConstraints:@[
-            [label.leadingAnchor constraintEqualToAnchor:button.leadingAnchor constant:10],
-            [label.trailingAnchor constraintEqualToAnchor:button.trailingAnchor constant:-10],
-            [label.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
-        ]];
-        objc_setAssociatedObject(button, kGreetingLabelKey, label, OBJC_ASSOCIATION_RETAIN);
-    }
-    return label;
-}
-
-static ZSRow *zs_make_custom_greeting_row(NSString *currentText, id target, SEL tapAction) {
-    ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-
-    row.titleLabel = [[UILabel alloc] init];
-    row.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    row.titleLabel.text = @"Custom Greeting Text";
-    row.titleLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1];
-    row.titleLabel.font = zs_mono_font(11, UIFontWeightMedium);
-    row.titleLabel.adjustsFontSizeToFitWidth = YES;
-    row.titleLabel.minimumScaleFactor = 0.8;
-    [row addSubview:row.titleLabel];
-
-    UIFont *greetingButtonFont = zs_mono_font(11, UIFontWeightRegular);
-
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(button, @"", UIColor.whiteColor, greetingButtonFont);
-    [button addTarget:target action:tapAction forControlEvents:UIControlEventTouchUpInside];
-    [row addSubview:button];
-
-    UIButton *buttonFallback = zs_make_liquid_glass_fallback_twin(button, @"", UIColor.whiteColor, greetingButtonFont);
-    [buttonFallback addTarget:target action:tapAction forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *activeGreetingButton = zs_has_liquid_glass() ? button : buttonFallback;
-    objc_setAssociatedObject(row, "zs_button", activeGreetingButton, OBJC_ASSOCIATION_RETAIN);
-
-    ZSMarqueeLabel *greetingLabel = zs_custom_greeting_marquee_label(activeGreetingButton);
-    greetingLabel.font = greetingButtonFont;
-    greetingLabel.textColor = UIColor.whiteColor;
-    greetingLabel.marqueeKey = @"customGreetingButton";
-    greetingLabel.text = zs_custom_greeting_button_title(currentText);
-
-    static const CGFloat kZSCustomGreetingFieldWidth = 156;
-    static const CGFloat kZSCustomGreetingFieldHeight = 26;
-    [NSLayoutConstraint activateConstraints:@[
-        [row.titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [row.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:button.leadingAnchor constant:-6],
-        [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [button.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [button.widthAnchor constraintEqualToConstant:kZSCustomGreetingFieldWidth],
-        [button.heightAnchor constraintEqualToConstant:kZSCustomGreetingFieldHeight],
-        [button.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.topAnchor constraintEqualToAnchor:button.topAnchor constant:-3],
-        [row.bottomAnchor constraintEqualToAnchor:button.bottomAnchor constant:3],
-    ]];
-
-    return row;
-}
-
 static const CGFloat kRowHeight = 26;
 static const CGFloat kTitleColumnWidth = 92;
 static const CGFloat kValueColumnWidth = 34;
@@ -2815,6 +2746,7 @@ static UIView *zs_make_grouped_action_card(NSArray<UIView *> *rows) {
 
     UIView *card;
     UIView *contentHost;
+    NSLayoutConstraint *innerBottom = nil;
     if (zs_has_liquid_glass()) {
         UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
         glass.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2834,14 +2766,141 @@ static UIView *zs_make_grouped_action_card(NSArray<UIView *> *rows) {
     }
 
     [contentHost addSubview:innerStack];
+    innerBottom = [innerStack.bottomAnchor constraintEqualToAnchor:contentHost.bottomAnchor];
     [NSLayoutConstraint activateConstraints:@[
         [innerStack.topAnchor constraintEqualToAnchor:contentHost.topAnchor],
-        [innerStack.bottomAnchor constraintEqualToAnchor:contentHost.bottomAnchor],
+        innerBottom,
         [innerStack.leadingAnchor constraintEqualToAnchor:contentHost.leadingAnchor constant:kZSGroupedCardHorizontalPadding],
         [innerStack.trailingAnchor constraintEqualToAnchor:contentHost.trailingAnchor constant:-kZSGroupedCardHorizontalPadding],
     ]];
 
+    objc_setAssociatedObject(card, "zs_innerStack", innerStack, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(card, "zs_innerBottom", innerBottom, OBJC_ASSOCIATION_RETAIN);
+
     return card;
+}
+
+static UIColor *zs_disclosure_secondary_color(void) {
+    return [UIColor colorWithWhite:1 alpha:0.55];
+}
+
+static UIControl *zs_make_disclosure_row(NSString *title, NSString *value, id target, SEL action) {
+    UIControl *row = [[UIControl alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.userInteractionEnabled = NO;
+    titleLabel.text = title;
+    titleLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+    titleLabel.font = zs_mono_font(11, UIFontWeightMedium);
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.8;
+    [titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultHigh forAxis:UILayoutConstraintAxisHorizontal];
+    [row addSubview:titleLabel];
+
+    UILabel *valueLabel = [[UILabel alloc] init];
+    valueLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    valueLabel.userInteractionEnabled = NO;
+    valueLabel.text = value;
+    valueLabel.textColor = zs_disclosure_secondary_color();
+    valueLabel.font = zs_mono_font(11, UIFontWeightLight);
+    valueLabel.textAlignment = NSTextAlignmentRight;
+    valueLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [valueLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [row addSubview:valueLabel];
+
+    UIImageSymbolConfiguration *chevronConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
+    UIImage *chevronImage = [[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevronConfig]
+                             imageWithTintColor:zs_disclosure_secondary_color()
+                                  renderingMode:UIImageRenderingModeAlwaysOriginal];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:chevronImage];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.userInteractionEnabled = NO;
+    chevron.contentMode = UIViewContentModeCenter;
+    [chevron setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [chevron setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [row addSubview:chevron];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+
+        [chevron.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [chevron.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+
+        [valueLabel.trailingAnchor constraintEqualToAnchor:chevron.leadingAnchor constant:-4],
+        [valueLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [valueLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:10],
+    ]];
+
+    objc_setAssociatedObject(row, "zs_valueLabel", valueLabel, OBJC_ASSOCIATION_RETAIN);
+    return row;
+}
+
+static void zs_disclosure_row_set_value(UIControl *row, NSString *value) {
+    UILabel *valueLabel = objc_getAssociatedObject(row, "zs_valueLabel");
+    valueLabel.text = value;
+}
+
+static UIView *zs_enclosing_grouped_card(UIView *view) {
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if (objc_getAssociatedObject(candidate, "zs_innerStack")) return candidate;
+    }
+    return nil;
+}
+
+static UIStackView *zs_make_card_options_stack(NSArray<NSString *> *titles, NSInteger selectedIndex, id target, SEL action) {
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.spacing = 0;
+
+    UIColor *checkColor = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
+    UIImageSymbolConfiguration *checkConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightSemibold];
+    UIImage *checkImage = [[UIImage systemImageNamed:@"checkmark" withConfiguration:checkConfig]
+                           imageWithTintColor:checkColor
+                                renderingMode:UIImageRenderingModeAlwaysOriginal];
+
+    for (NSUInteger i = 0; i < titles.count; i++) {
+        UIControl *option = [[UIControl alloc] init];
+        option.translatesAutoresizingMaskIntoConstraints = NO;
+        option.tag = (NSInteger)i;
+        [option addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+        [option.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight].active = YES;
+
+        UILabel *label = [[UILabel alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.userInteractionEnabled = NO;
+        label.text = titles[i];
+        label.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+        label.font = zs_mono_font(11, UIFontWeightMedium);
+        [option addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:option.leadingAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:option.centerYAnchor],
+        ]];
+
+        if ((NSInteger)i == selectedIndex) {
+            UIImageView *check = [[UIImageView alloc] initWithImage:checkImage];
+            check.translatesAutoresizingMaskIntoConstraints = NO;
+            check.userInteractionEnabled = NO;
+            check.contentMode = UIViewContentModeCenter;
+            [option addSubview:check];
+            [NSLayoutConstraint activateConstraints:@[
+                [check.trailingAnchor constraintEqualToAnchor:option.trailingAnchor],
+                [check.centerYAnchor constraintEqualToAnchor:option.centerYAnchor],
+                [label.trailingAnchor constraintLessThanOrEqualToAnchor:check.leadingAnchor constant:-8],
+            ]];
+        }
+
+        [stack addArrangedSubview:option];
+        if (i + 1 < titles.count) {
+            [stack addArrangedSubview:zs_make_grouped_row_separator()];
+        }
+    }
+    return stack;
 }
 
 static NSArray<UIColor *> *zs_memory_chart_palette(void) {
@@ -3677,12 +3736,7 @@ static NSArray<NSString *> *zs_reencode_format_options(void) {
 
 static NSString * const kZSDefaultReencodeFormat = @"ASTC_RGBA_6x6";
 
-static const CGFloat kZSReencodeFieldWidth = 116;
 static const CGFloat kZSReencodeFieldHeight = 28;
-
-static const CGFloat kZSReencodeHorizontalPadding = 10;
-
-static const CGFloat kZSReencodeChevronReserve = 20;
 
 static NSString *zs_reencode_format_display_name(NSString *format) {
     if ([format isEqualToString:@"ASTC_RGBA_4x4"]) return @"ASTC 4x4";
@@ -3716,125 +3770,6 @@ static UIImage *zs_make_release_history_arrow_image(BOOL pointingLeft) {
     arrowImage = [arrowImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.55]
                                    renderingMode:UIImageRenderingModeAlwaysOriginal];
     return arrowImage;
-}
-
-static UIImageView *zs_reencode_chevron_view(UIButton *button) {
-    static const void *kChevronKey = &kChevronKey;
-    UIImageView *chevron = objc_getAssociatedObject(button, kChevronKey);
-    if (!chevron) {
-        chevron = [[UIImageView alloc] initWithImage:zs_make_dropdown_chevron_image()];
-        chevron.translatesAutoresizingMaskIntoConstraints = NO;
-        chevron.contentMode = UIViewContentModeCenter;
-
-        chevron.userInteractionEnabled = NO;
-        [button addSubview:chevron];
-        [NSLayoutConstraint activateConstraints:@[
-
-            [chevron.trailingAnchor constraintEqualToAnchor:button.trailingAnchor
-                                                    constant:-kZSReencodeHorizontalPadding],
-            [chevron.centerYAnchor constraintEqualToAnchor:button.centerYAnchor],
-        ]];
-        objc_setAssociatedObject(button, kChevronKey, chevron, OBJC_ASSOCIATION_RETAIN);
-    }
-    return chevron;
-}
-
-static void zs_style_reencode_format_button(UIButton *button, NSString *format) {
-
-    zs_style_button_as_native_glass_with_font(button, zs_reencode_format_display_name(format), UIColor.whiteColor, zs_mono_font(11, UIFontWeightRegular));
-    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
-
-    SEL getConfiguration = NSSelectorFromString(@"configuration");
-    BOOL appliedConfigurationInsets = NO;
-    if ([button respondsToSelector:getConfiguration]) {
-        id configuration = ((id (*)(id, SEL))objc_msgSend)(button, getConfiguration);
-        if (configuration) {
-
-            SEL setButtonSize = NSSelectorFromString(@"setButtonSize:");
-            if ([configuration respondsToSelector:setButtonSize]) {
-                ((void (*)(id, SEL, NSInteger))objc_msgSend)(configuration, setButtonSize, 3);
-            }
-
-            SEL setContentInsets = NSSelectorFromString(@"setContentInsets:");
-            if ([configuration respondsToSelector:setContentInsets]) {
-                NSDirectionalEdgeInsets insets = NSDirectionalEdgeInsetsMake(
-                    6, kZSReencodeHorizontalPadding,
-                    6, kZSReencodeHorizontalPadding + kZSReencodeChevronReserve);
-                ((void (*)(id, SEL, NSDirectionalEdgeInsets))objc_msgSend)(configuration, setContentInsets, insets);
-            }
-            SEL setConfig = NSSelectorFromString(@"setConfiguration:");
-            if ([button respondsToSelector:setConfig]) {
-                ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
-                appliedConfigurationInsets = YES;
-            }
-        }
-    }
-
-    if (!appliedConfigurationInsets) {
-        button.contentEdgeInsets = UIEdgeInsetsMake(6, kZSReencodeHorizontalPadding,
-                                                     6, kZSReencodeHorizontalPadding + kZSReencodeChevronReserve);
-    }
-
-    zs_configure_glass_button_fixed_corner_radius(button, kZSAuthFieldCornerRadius);
-    if (!zs_has_liquid_glass()) {
-        button.layer.cornerRadius = kZSAuthFieldCornerRadius;
-        button.clipsToBounds = YES;
-    }
-
-    [button bringSubviewToFront:zs_reencode_chevron_view(button)];
-}
-
-static UIButton *zs_make_reencode_dropdown_option_button(NSString *format, BOOL selected, NSInteger tag, id target, SEL action) {
-    UIButton *option = [UIButton buttonWithType:UIButtonTypeSystem];
-    option.tag = tag;
-    option.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
-    option.titleEdgeInsets = UIEdgeInsetsMake(0, 10, 0, 10);
-    option.titleLabel.font = zs_mono_font(11, UIFontWeightRegular);
-    [option setTitle:zs_reencode_format_display_name(format) forState:UIControlStateNormal];
-    [option setTitleColor:(selected ? UIColor.whiteColor : [UIColor colorWithWhite:1 alpha:0.6])
-                  forState:UIControlStateNormal];
-    option.backgroundColor = UIColor.clearColor;
-
-    [option addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
-    return option;
-}
-
-static ZSRow *zs_make_reencode_format_row(NSString *selectedFormat, id target, SEL tapAction) {
-    ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
-    row.translatesAutoresizingMaskIntoConstraints = NO;
-
-    row.titleLabel = [[UILabel alloc] init];
-    row.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    row.titleLabel.text = @"Transcode format";
-    row.titleLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1];
-    row.titleLabel.font = zs_mono_font(11, UIFontWeightMedium);
-    row.titleLabel.adjustsFontSizeToFitWidth = YES;
-    row.titleLabel.minimumScaleFactor = 0.8;
-    [row addSubview:row.titleLabel];
-
-    UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-    button.translatesAutoresizingMaskIntoConstraints = NO;
-
-    [button addTarget:target action:tapAction forControlEvents:UIControlEventTouchDown];
-    [row addSubview:button];
-    objc_setAssociatedObject(row, "zs_button", button, OBJC_ASSOCIATION_RETAIN);
-
-    zs_style_reencode_format_button(button, selectedFormat);
-
-    [NSLayoutConstraint activateConstraints:@[
-        [row.titleLabel.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
-        [row.titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:button.leadingAnchor constant:-6],
-        [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-
-        [button.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
-        [button.widthAnchor constraintEqualToConstant:kZSReencodeFieldWidth],
-        [button.heightAnchor constraintEqualToConstant:kZSReencodeFieldHeight],
-        [button.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
-        [row.topAnchor constraintEqualToAnchor:button.topAnchor constant:-3],
-        [row.bottomAnchor constraintEqualToAnchor:button.bottomAnchor constant:3],
-    ]];
-
-    return row;
 }
 
 static ZSRow *zs_make_full_width_glass_button_row(NSString *buttonTitle, UIColor *buttonTint) {
@@ -5039,12 +4974,9 @@ static UIView *zs_make_title_block(void) {
 
 @property (nonatomic, assign) BOOL authCredentialsStale;
 
-@property (nonatomic, strong) UIButton *customGreetingTextButton;
+@property (nonatomic, strong) UIControl *customGreetingRow;
 
-@property (nonatomic, strong) UIButton *reencodeFormatButton;
-@property (nonatomic, strong) UIView *reencodeDropdownOverlay;
-@property (nonatomic, strong) UIControl *reencodeDropdownScrim;
-@property (nonatomic, assign) BOOL reencodeDropdownOpen;
+@property (nonatomic, strong) UIControl *reencodeFormatRow;
 
 @property (nonatomic, weak) UIButton *modsOptionsDropdownButton;
 @property (nonatomic, strong) UIView *modsOptionsDropdownOverlay;
@@ -5198,6 +5130,7 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) BOOL pinRecenterPending;
 @property (nonatomic, assign) BOOL panelFullScreenLayoutActive;
 @property (nonatomic, assign) BOOL extendedCoverMode;
+@property (nonatomic, assign) BOOL pinchDismissInFlight;
 @property (nonatomic, assign) BOOL extendedCoverEntering;
 @property (nonatomic, assign) NSUInteger pinRecenterToken;
 @property (nonatomic, strong) UIView *pinMenuScrim;
@@ -6700,6 +6633,10 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 }
 
 - (void)closePanel {
+    [self closePanelAnimated:YES];
+}
+
+- (void)closePanelAnimated:(BOOL)animated {
     if (!self.panelOpen || !self.glassContainer) return;
     UIView *unityView = zs_ui_host_view();
 
@@ -6721,6 +6658,12 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 
     if (!unityView) {
         [self teardownPanelState];
+        return;
+    }
+
+    if (!animated) {
+        [self teardownPanelState];
+        [self zs_syncMetalTabsAllowingHierarchy:YES snap:NO];
         return;
     }
 
@@ -6908,11 +6851,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.authVerifyButton = nil;
     self.authStatusLabel = nil;
 
-    self.customGreetingTextButton = nil;
-    self.reencodeFormatButton = nil;
-    self.reencodeDropdownOverlay = nil;
-    self.reencodeDropdownScrim = nil;
-    self.reencodeDropdownOpen = NO;
+    self.customGreetingRow = nil;
+    self.reencodeFormatRow = nil;
 
     self.modsOptionsDropdownOverlay = nil;
     self.modsOptionsDropdownScrim = nil;
@@ -7771,41 +7711,7 @@ static const CGFloat kContentFadeHeight = 22;
     memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
     [self.stack addArrangedSubview:memoryActionsCard];
-    [self.stack setCustomSpacing:8 afterView:memoryActionsCard];
-
-    NSInteger atlasDownscaleIndex = (g_expTMPAtlasDownscale == 2) ? 1 : (g_expTMPAtlasDownscale == 4) ? 2 : 0;
-    ZSRow *atlasDownscaleRow = zs_make_mode_slider_row(@"TMP Atlas Downscale", @[@"Off", @"2x", @"4x"], atlasDownscaleIndex, 0);
-    objc_setAssociatedObject(atlasDownscaleRow.modeSlider, @"zs_exp_key", @"TMPAtlasDownscale", OBJC_ASSOCIATION_RETAIN);
-    [atlasDownscaleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:atlasDownscaleRow];
-
-    ZSRow *readableCopiesRow = zs_make_switch_row(@"Drop CPU Texture Copies", g_expDropReadableTextureCopies);
-    objc_setAssociatedObject(readableCopiesRow.toggle, @"zs_exp_key", @"DropReadableTextureCopies", OBJC_ASSOCIATION_RETAIN);
-    [readableCopiesRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:readableCopiesRow];
-
-    ZSRow *drawableCountRow = zs_make_switch_row(@"Limit Metal Drawables", g_expReduceMetalDrawables);
-    objc_setAssociatedObject(drawableCountRow.toggle, @"zs_exp_key", @"ReduceMetalDrawables", OBJC_ASSOCIATION_RETAIN);
-    [drawableCountRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:drawableCountRow];
-
-    NSInteger nativeScaleIndex = (g_expNativeResolutionScale == 85) ? 1 : (g_expNativeResolutionScale == 75) ? 2 : (g_expNativeResolutionScale == 60) ? 3 : 0;
-    ZSRow *nativeScaleRow = zs_make_mode_slider_row(@"Native Resolution", @[@"Off", @"85%", @"75%", @"60%"], nativeScaleIndex, 0);
-    objc_setAssociatedObject(nativeScaleRow.modeSlider, @"zs_exp_key", @"NativeResolutionScale", OBJC_ASSOCIATION_RETAIN);
-    [nativeScaleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:nativeScaleRow];
-
-    NSInteger opaqueDownsampleIndex = MAX(0, MIN(2, (NSInteger)g_expOpaqueDownsampling));
-    ZSRow *opaqueDownsampleRow = zs_make_mode_slider_row(@"Opaque Downsample", @[@"Off", @"2x", @"4x"], opaqueDownsampleIndex, 0);
-    objc_setAssociatedObject(opaqueDownsampleRow.modeSlider, @"zs_exp_key", @"OpaqueDownsampling", OBJC_ASSOCIATION_RETAIN);
-    [opaqueDownsampleRow.modeSlider addTarget:self action:@selector(expModeChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:opaqueDownsampleRow];
-
-    ZSRow *staleRenderTexturesRow = zs_make_switch_row(@"Release Stale RTs", g_expReleaseStaleRenderTextures);
-    objc_setAssociatedObject(staleRenderTexturesRow.toggle, @"zs_exp_key", @"ReleaseStaleRenderTextures", OBJC_ASSOCIATION_RETAIN);
-    [staleRenderTexturesRow.toggle addTarget:self action:@selector(expToggleChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:staleRenderTexturesRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:staleRenderTexturesRow];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:memoryActionsCard];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -7881,6 +7787,7 @@ static const CGFloat kContentFadeHeight = 22;
     [keepAliveButton addTarget:self action:@selector(toggleKeepAliveTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
+        overrideTutorialRow,
         dumpIL2CPPMethodsButton,
         librarySymlinkButton,
         syslogButton,
@@ -7889,8 +7796,6 @@ static const CGFloat kContentFadeHeight = 22;
     developerActionsCard.layer.borderWidth = 1;
     developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
-    [self.stack addArrangedSubview:overrideTutorialRow];
-    [self.stack setCustomSpacing:8 afterView:overrideTutorialRow];
     [self.stack addArrangedSubview:developerActionsCard];
     [self.stack setCustomSpacing:8 afterView:developerActionsCard];
 
@@ -7959,9 +7864,10 @@ static const CGFloat kContentFadeHeight = 22;
     [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Miscellaneous", self, @selector(docsInfoTapped:));
 
-    ZSRow *customGreetingRow = zs_make_custom_greeting_row(zs_custom_greeting_text(), self,
-                                                            @selector(zs_customGreetingTextButtonTapped:));
-    self.customGreetingTextButton = objc_getAssociatedObject(customGreetingRow, "zs_button");
+    UIControl *customGreetingRow = zs_make_disclosure_row(@"Custom Greeting Text",
+                                                           zs_custom_greeting_button_title(zs_custom_greeting_text()),
+                                                           self, @selector(zs_customGreetingTextButtonTapped:));
+    self.customGreetingRow = customGreetingRow;
 
     ZSRow *uidRedactorRow = zs_make_switch_row(@"Hide user ID", UIDRedactor.isEnabled);
     [uidRedactorRow.toggle addTarget:self action:@selector(uidRedactorChanged:) forControlEvents:UIControlEventValueChanged];
@@ -7972,14 +7878,17 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
-    [self.stack addArrangedSubview:customGreetingRow];
-    [self.stack setCustomSpacing:8 afterView:customGreetingRow];
-    [self.stack addArrangedSubview:uidRedactorRow];
-    [self.stack setCustomSpacing:8 afterView:uidRedactorRow];
-    [self.stack addArrangedSubview:disableLiquidGlassRow];
-    [self.stack setCustomSpacing:8 afterView:disableLiquidGlassRow];
-    [self.stack addArrangedSubview:disableEnkephalinRow];
-    [self.stack setCustomSpacing:kSectionSpacing afterView:disableEnkephalinRow];
+    UIView *miscCard = zs_make_grouped_action_card(@[
+        customGreetingRow,
+        uidRedactorRow,
+        disableLiquidGlassRow,
+        disableEnkephalinRow,
+    ]);
+    miscCard.layer.borderWidth = 1;
+    miscCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+
+    [self.stack addArrangedSubview:miscCard];
+    [self.stack setCustomSpacing:kSectionSpacing afterView:miscCard];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -7987,9 +7896,10 @@ static const CGFloat kContentFadeHeight = 22;
 
     NSString *currentReencodeFormat = [ZTranscoderSettings loadConfig].outputFormat;
     if (currentReencodeFormat.length == 0) currentReencodeFormat = kZSDefaultReencodeFormat;
-    ZSRow *reencodeFormatRow = zs_make_reencode_format_row(currentReencodeFormat, self,
-                                                            @selector(zs_reencodeFormatButtonTapped:));
-    self.reencodeFormatButton = objc_getAssociatedObject(reencodeFormatRow, "zs_button");
+    UIControl *reencodeFormatRow = zs_make_disclosure_row(@"Transcode format",
+                                                           zs_reencode_format_display_name(currentReencodeFormat),
+                                                           self, @selector(zs_reencodeFormatRowTapped:));
+    self.reencodeFormatRow = reencodeFormatRow;
 
     ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
     [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
@@ -8028,6 +7938,11 @@ static const CGFloat kContentFadeHeight = 22;
     });
 
     UIView *configActionsCard = zs_make_grouped_action_card(@[
+        reencodeFormatRow,
+        manifestZeroingRow,
+        lz4hcRow,
+        checkCIBuildsRow,
+        experimentalEnabledRow,
         manualIndexButton,
         resetReapplyRow,
         deleteSpecificAssetButton,
@@ -8037,16 +7952,6 @@ static const CGFloat kContentFadeHeight = 22;
     configActionsCard.layer.borderWidth = 1;
     configActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
 
-    [self.stack addArrangedSubview:reencodeFormatRow];
-    [self.stack setCustomSpacing:8 afterView:reencodeFormatRow];
-    [self.stack addArrangedSubview:manifestZeroingRow];
-    [self.stack setCustomSpacing:8 afterView:manifestZeroingRow];
-    [self.stack addArrangedSubview:lz4hcRow];
-    [self.stack setCustomSpacing:8 afterView:lz4hcRow];
-    [self.stack addArrangedSubview:checkCIBuildsRow];
-    [self.stack setCustomSpacing:8 afterView:checkCIBuildsRow];
-    [self.stack addArrangedSubview:experimentalEnabledRow];
-    [self.stack setCustomSpacing:8 afterView:experimentalEnabledRow];
     [self.stack addArrangedSubview:configActionsCard];
     [self.stack setCustomSpacing:kSectionSpacing afterView:configActionsCard];
 
@@ -13622,7 +13527,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (pinch.numberOfTouches < 2 || pinch.scale > 0.8) return;
     pinch.enabled = NO;
     pinch.enabled = YES;
-    if (self.memoryPopupScrim) return;
+    if (self.memoryPopupScrim || self.pinchDismissInFlight) return;
+    if (self.extendedCoverMode && self.panelOpen) {
+        UIView *coverOverlay = self.memoryFullScreenOpen ? self.memoryFullScreenOverlay : (self.syslogFullScreenOpen ? self.syslogFullScreenOverlay : nil);
+        [self zs_pinchDismissCoverOverlay:coverOverlay];
+        return;
+    }
     if (self.memoryFullScreenOpen) {
         [self zs_playPinchDismissOnOverlay:self.memoryFullScreenOverlay];
         [self zs_closeMemoryFullScreenPanelTapped];
@@ -13630,6 +13540,34 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [self zs_playPinchDismissOnOverlay:self.syslogFullScreenOverlay];
         [self zs_closeSyslogFullScreenPanelTapped];
     }
+}
+
+- (void)zs_pinchDismissCoverOverlay:(UIView *)overlay {
+    UIView *container = self.glassContainer;
+    if (!overlay || !container) return;
+
+    self.pinchDismissInFlight = YES;
+    overlay.userInteractionEnabled = NO;
+    [self.syslogSearchField resignFirstResponder];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.26
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        overlay.transform = CGAffineTransformMakeScale(0.78, 0.78);
+        overlay.alpha = 0;
+        container.alpha = 0;
+    } completion:^(BOOL finished) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.pinchDismissInFlight = NO;
+        if (!strongSelf.panelOpen || strongSelf.glassContainer != container) return;
+        [strongSelf closePanelAnimated:NO];
+    }];
 }
 
 - (void)zs_playPinchDismissOnOverlay:(UIView *)overlay {
@@ -15166,8 +15104,8 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
         return;
     }
 
-    if (self.reencodeFormatButton) {
-        zs_style_reencode_format_button(self.reencodeFormatButton, format);
+    if (self.reencodeFormatRow) {
+        zs_disclosure_row_set_value(self.reencodeFormatRow, zs_reencode_format_display_name(format));
     }
 
     UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
@@ -15176,7 +15114,7 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
 
 #pragma mark Custom Greeting Text
 
-- (void)zs_customGreetingTextButtonTapped:(UIButton *)sender {
+- (void)zs_customGreetingTextButtonTapped:(UIControl *)sender {
     UIViewController *presenter = zs_key_window().rootViewController;
     if (!presenter) return;
 
@@ -15193,170 +15131,125 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
         field.clearButtonMode = UITextFieldViewModeWhileEditing;
     }];
     [prompt addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
     if (currentText.length > 0) {
         [prompt addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
             zs_set_custom_greeting_text(@"");
-            zs_custom_greeting_marquee_label(self.customGreetingTextButton).text = zs_custom_greeting_button_title(@"");
+            if (weakSelf.customGreetingRow) zs_disclosure_row_set_value(weakSelf.customGreetingRow, zs_custom_greeting_button_title(@""));
         }]];
     }
-    __weak typeof(self) weakSelf = self;
     [prompt addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         NSString *entered = prompt.textFields.firstObject.text ?: @"";
         zs_set_custom_greeting_text(entered);
         NSString *stored = zs_custom_greeting_text();
-        zs_custom_greeting_marquee_label(weakSelf.customGreetingTextButton).text = zs_custom_greeting_button_title(stored);
+        if (weakSelf.customGreetingRow) zs_disclosure_row_set_value(weakSelf.customGreetingRow, zs_custom_greeting_button_title(stored));
     }]];
     [presenter presentViewController:prompt animated:YES completion:nil];
 }
 
-- (void)zs_reencodeFormatButtonTapped:(UIButton *)sender {
-    if (self.reencodeDropdownOpen) {
-        [self zs_closeReencodeDropdownAnimated:YES];
-    } else {
-        [self zs_openReencodeDropdown];
-    }
-}
+- (void)zs_reencodeFormatRowTapped:(UIControl *)sender {
+    UIView *card = zs_enclosing_grouped_card(sender);
+    if (!card) return;
 
-- (void)zs_openReencodeDropdown {
-    if (!self.reencodeFormatButton || !self.contentOverlay || self.reencodeDropdownOpen) return;
-
-    NSArray<NSString *> *options = zs_reencode_format_options();
-    if (options.count == 0) return;
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    NSString *currentFormat = config.outputFormat.length > 0 ? config.outputFormat : kZSDefaultReencodeFormat;
-
-    CGRect collapsedFrame = [self.reencodeFormatButton convertRect:self.reencodeFormatButton.bounds
-                                                              toView:self.contentOverlay];
-
-    UIControl *scrim = [[UIControl alloc] initWithFrame:self.contentOverlay.bounds];
-    scrim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    scrim.backgroundColor = UIColor.clearColor;
-    [scrim addTarget:self action:@selector(zs_reencodeDropdownScrimTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [self.contentOverlay addSubview:scrim];
-    self.reencodeDropdownScrim = scrim;
-
-    UIView *overlay;
-    UIVisualEffectView *glassOverlay = nil;
-    if (zs_has_liquid_glass()) {
-        glassOverlay = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(YES)];
-        glassOverlay.frame = collapsedFrame;
-        glassOverlay.clipsToBounds = YES;
-        zs_configure_glass_corners(glassOverlay, kZSAuthFieldCornerRadius, NO);
-        glassOverlay.layer.borderWidth = 1;
-        glassOverlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
-        zs_register_suspendable_glass(glassOverlay);
-        overlay = glassOverlay;
-    } else {
-        overlay = [[UIView alloc] initWithFrame:collapsedFrame];
-        overlay.clipsToBounds = YES;
-        overlay.layer.cornerRadius = kZSAuthFieldCornerRadius;
-        overlay.layer.cornerCurve = kCACornerCurveContinuous;
-        overlay.layer.borderWidth = 1;
-        overlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
-
-        overlay.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
-    }
-    [self.contentOverlay addSubview:overlay];
-    self.reencodeDropdownOverlay = overlay;
-
-    UIView *rowHost = glassOverlay ? glassOverlay.contentView : overlay;
-
-    for (NSInteger i = 0; i < (NSInteger)options.count; i++) {
-        NSString *format = options[i];
-        BOOL selected = [format isEqualToString:currentFormat];
-        UIButton *optionButton = zs_make_reencode_dropdown_option_button(format, selected, i, self,
-                                                                          @selector(zs_reencodeDropdownOptionTapped:));
-        optionButton.frame = CGRectMake(0, i * kZSReencodeFieldHeight,
-                                         CGRectGetWidth(collapsedFrame), kZSReencodeFieldHeight);
-
-        optionButton.alpha = 0;
-        [rowHost addSubview:optionButton];
-
-        if (i > 0) {
-
-            CGFloat hairline = 1.0 / MAX(UIScreen.mainScreen.scale, (CGFloat)1.0);
-            UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, i * kZSReencodeFieldHeight - hairline,
-                                                                        CGRectGetWidth(collapsedFrame), hairline)];
-            divider.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.5];
-            divider.alpha = 0;
-            [rowHost addSubview:divider];
-        }
+    NSArray<NSString *> *formats = zs_reencode_format_options();
+    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:formats.count];
+    for (NSString *format in formats) {
+        [titles addObject:zs_reencode_format_display_name(format)];
     }
 
-    self.reencodeFormatButton.hidden = YES;
-    self.reencodeDropdownOpen = YES;
+    NSString *currentFormat = [ZTranscoderSettings loadConfig].outputFormat;
+    if (currentFormat.length == 0) currentFormat = kZSDefaultReencodeFormat;
+    NSInteger selectedIndex = (NSInteger)[formats indexOfObject:currentFormat];
+    if (selectedIndex == NSNotFound) selectedIndex = -1;
 
-    CGFloat expandedHeight = kZSReencodeFieldHeight * options.count;
-    CGRect expandedFrame = CGRectMake(CGRectGetMinX(collapsedFrame), CGRectGetMinY(collapsedFrame),
-                                       CGRectGetWidth(collapsedFrame), expandedHeight);
-    [UIView animateWithDuration:0.22
-                          delay:0
-         usingSpringWithDamping:0.86
-          initialSpringVelocity:0
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-        overlay.frame = expandedFrame;
-        for (UIView *subview in rowHost.subviews) {
-            subview.alpha = 1;
-        }
-    } completion:nil];
+    [self zs_presentOptionsInCard:card titles:titles selectedIndex:selectedIndex action:@selector(zs_reencodeOptionTapped:)];
 
     UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
     [haptic selectionChanged];
 }
 
-- (void)zs_closeReencodeDropdownAnimated:(BOOL)animated {
-    if (!self.reencodeDropdownOpen) return;
+- (void)zs_reencodeOptionTapped:(UIControl *)sender {
+    NSArray<NSString *> *formats = zs_reencode_format_options();
+    if (sender.tag < 0 || sender.tag >= (NSInteger)formats.count) return;
 
-    UIView *overlay = self.reencodeDropdownOverlay;
-    UIControl *scrim = self.reencodeDropdownScrim;
-    self.reencodeDropdownOverlay = nil;
-    self.reencodeDropdownScrim = nil;
-    self.reencodeDropdownOpen = NO;
+    UIView *card = zs_enclosing_grouped_card(sender);
+    [self zs_reencodeFormatSelected:formats[sender.tag]];
+    if (card) [self zs_restoreCardFromOptions:card];
+}
 
-    CGRect collapsedFrame = [self.reencodeFormatButton convertRect:self.reencodeFormatButton.bounds
-                                                              toView:self.contentOverlay];
-
-    void (^finish)(void) = ^{
-        [overlay removeFromSuperview];
-        [scrim removeFromSuperview];
-        self.reencodeFormatButton.hidden = NO;
-    };
-
-    if (!animated) {
-        finish();
-        return;
-    }
-
-    UIView *rowHost = [overlay isKindOfClass:[UIVisualEffectView class]]
-        ? ((UIVisualEffectView *)overlay).contentView
-        : overlay;
-    for (UIView *subview in rowHost.subviews) {
-        subview.alpha = 0;
-    }
-
-    [UIView animateWithDuration:0.18
+- (void)zs_animateCardSwapFrom:(UIView *)outgoing to:(UIView *)incoming completion:(void (^)(void))completion {
+    incoming.hidden = NO;
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.28
                           delay:0
-                        options:UIViewAnimationOptionCurveEaseIn
+                        options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
                      animations:^{
-        overlay.frame = collapsedFrame;
+        outgoing.alpha = 0;
+        incoming.alpha = 1;
+        [weakSelf.stack setNeedsLayout];
+        [weakSelf.stack layoutIfNeeded];
+        [weakSelf.glassContainer layoutIfNeeded];
+        [weakSelf.panel layoutIfNeeded];
+        [weakSelf.scrollViewport layoutIfNeeded];
     } completion:^(BOOL finished) {
-        finish();
+        outgoing.hidden = YES;
+        [weakSelf zs_updateSliderGlassVisibility];
+        if (completion) completion();
     }];
 }
 
-- (void)zs_reencodeDropdownOptionTapped:(UIButton *)sender {
-    NSArray<NSString *> *options = zs_reencode_format_options();
-    if (sender.tag < 0 || sender.tag >= (NSInteger)options.count) return;
+- (void)zs_presentOptionsInCard:(UIView *)card titles:(NSArray<NSString *> *)titles selectedIndex:(NSInteger)selectedIndex action:(SEL)action {
+    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
+    NSLayoutConstraint *innerBottom = objc_getAssociatedObject(card, "zs_innerBottom");
+    if (!inner || !innerBottom || titles.count == 0) return;
+    if (objc_getAssociatedObject(card, "zs_optionsStack")) return;
 
-    NSString *format = options[sender.tag];
-    [self zs_reencodeFormatSelected:format];
-    [self zs_closeReencodeDropdownAnimated:YES];
+    UIView *host = [card isKindOfClass:[UIVisualEffectView class]] ? ((UIVisualEffectView *)card).contentView : card;
+    host.clipsToBounds = YES;
+
+    UIStackView *options = zs_make_card_options_stack(titles, selectedIndex, self, action);
+    options.alpha = 0;
+    [host addSubview:options];
+
+    CGFloat rowsHeight = titles.count * kZSGroupedCardRowHeight + (titles.count - 1);
+    options.frame = CGRectMake(kZSGroupedCardHorizontalPadding, 0,
+                               MAX(CGRectGetWidth(host.bounds) - 2 * kZSGroupedCardHorizontalPadding, 0),
+                               rowsHeight);
+
+    NSLayoutConstraint *optionsBottom = [options.bottomAnchor constraintEqualToAnchor:host.bottomAnchor];
+    innerBottom.active = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [options.topAnchor constraintEqualToAnchor:host.topAnchor],
+        [options.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:kZSGroupedCardHorizontalPadding],
+        [options.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-kZSGroupedCardHorizontalPadding],
+        optionsBottom,
+    ]];
+
+    objc_setAssociatedObject(card, "zs_optionsStack", options, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(card, "zs_optionsBottom", optionsBottom, OBJC_ASSOCIATION_RETAIN);
+    inner.userInteractionEnabled = NO;
+
+    [self zs_animateCardSwapFrom:inner to:options completion:nil];
 }
 
-- (void)zs_reencodeDropdownScrimTapped:(UIControl *)sender {
-    [self zs_closeReencodeDropdownAnimated:YES];
+- (void)zs_restoreCardFromOptions:(UIView *)card {
+    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
+    NSLayoutConstraint *innerBottom = objc_getAssociatedObject(card, "zs_innerBottom");
+    UIStackView *options = objc_getAssociatedObject(card, "zs_optionsStack");
+    NSLayoutConstraint *optionsBottom = objc_getAssociatedObject(card, "zs_optionsBottom");
+    if (!inner || !innerBottom || !options) return;
+
+    objc_setAssociatedObject(card, "zs_optionsStack", nil, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(card, "zs_optionsBottom", nil, OBJC_ASSOCIATION_RETAIN);
+
+    options.userInteractionEnabled = NO;
+    optionsBottom.active = NO;
+    innerBottom.active = YES;
+    inner.userInteractionEnabled = YES;
+
+    [self zs_animateCardSwapFrom:options to:inner completion:^{
+        [options removeFromSuperview];
+    }];
 }
 
 - (void)zs_authVerifyTapped:(UIButton *)sender {
@@ -16307,10 +16200,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     }
     [self zs_fillVisiblePanelSectionsWithHeadroom];
     [self zs_updateSliderGlassVisibility];
-
-    if (self.reencodeDropdownOpen) {
-        [self zs_closeReencodeDropdownAnimated:NO];
-    }
 }
 
 - (void)zs_updateSliderGlassVisibilityForArrangedSubviews:(NSArray<UIView *> *)arrangedSubviews containerHidden:(BOOL)containerHidden visibleRect:(CGRect)visibleRect {
@@ -17377,9 +17266,6 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     else if ([key isEqualToString:@"OpaqueTexture"]) g_expOpaqueTexture = toggle.on;
     else if ([key isEqualToString:@"RenderShadows"]) g_expRenderShadows = toggle.on;
     else if ([key isEqualToString:@"PostProcessing"]) g_expPostProcessing = toggle.on;
-    else if ([key isEqualToString:@"DropReadableTextureCopies"]) g_expDropReadableTextureCopies = toggle.on;
-    else if ([key isEqualToString:@"ReduceMetalDrawables"]) g_expReduceMetalDrawables = toggle.on;
-    else if ([key isEqualToString:@"ReleaseStaleRenderTextures"]) g_expReleaseStaleRenderTextures = toggle.on;
     else if ([key isEqualToString:@"CameraDithering"]) g_expCameraDithering = toggle.on;
     else if ([key isEqualToString:@"CameraResetHistory"]) g_expCameraResetHistory = toggle.on;
     else if ([key isEqualToString:@"CameraStopNaN"]) g_expCameraStopNaN = toggle.on;
@@ -17505,9 +17391,6 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
         [self zs_scheduleSave];
         return;
     }
-    else if ([key isEqualToString:@"TMPAtlasDownscale"]) g_expTMPAtlasDownscale = (i==0?0:(i==1?2:4));
-    else if ([key isEqualToString:@"NativeResolutionScale"]) g_expNativeResolutionScale = (i==0?100:(i==1?85:(i==2?75:60)));
-    else if ([key isEqualToString:@"OpaqueDownsampling"]) g_expOpaqueDownsampling = (int32_t)i;
     else if ([key isEqualToString:@"URPMSAA"]) g_expURPMSAA = (i==0?1:(i==1?2:(i==2?4:8)));
     else if ([key isEqualToString:@"StoreActionsOptimization"]) g_expStoreActionsOptimization = (int32_t)i;
     else if ([key isEqualToString:@"IntermediateTextureMode"]) g_expIntermediateTextureMode = (int32_t)i;
