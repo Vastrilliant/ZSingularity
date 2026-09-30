@@ -440,6 +440,54 @@ static void zs_configure_glass_corners_sides(UIView *view, CGFloat radius, BOOL 
     ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
 }
 
+static CGFloat zs_screen_corner_radius(UIView *view, CGFloat fallback) {
+    UIScreen *screen = view.window.screen ?: UIScreen.mainScreen;
+    CGFloat radius = 0;
+    @try {
+        id value = [screen valueForKey:@"_displayCornerRadius"];
+        if ([value isKindOfClass:[NSNumber class]]) radius = [value doubleValue];
+    } @catch (__unused NSException *exception) {
+    }
+    return radius > 0 ? radius : fallback;
+}
+
+static void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft) {
+    if (!view || !zs_has_liquid_glass()) return;
+
+    Class radiusClass = NSClassFromString(@"UICornerRadius");
+    Class configClass = NSClassFromString(@"UICornerConfiguration");
+    SEL concentricSelector = NSSelectorFromString(@"containerConcentricRadiusWithMinimum:");
+    SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
+    SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
+    SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
+
+    if (!radiusClass || !configClass ||
+        ![radiusClass respondsToSelector:concentricSelector] ||
+        ![radiusClass respondsToSelector:fixedSelector] ||
+        ![configClass respondsToSelector:fourCornerSelector] ||
+        ![view respondsToSelector:setConfiguration]) {
+        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        return;
+    }
+
+    CGFloat rightRadius = MAX(zs_screen_corner_radius(view, radius), radius);
+    id roundLeftRadius = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, concentricSelector, radius);
+    id flatRadius = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, 0);
+    id rightFixed = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, rightRadius);
+    if (!roundLeftRadius || !flatRadius || !rightFixed) {
+        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        return;
+    }
+
+    id left = roundLeft ? roundLeftRadius : flatRadius;
+    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, left, rightFixed, left, rightFixed);
+    if (!configuration) {
+        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        return;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
+}
+
 static NSHashTable<UIVisualEffectView *> *zs_suspendable_glass_registry(void) {
     static NSHashTable<UIVisualEffectView *> *table;
     static dispatch_once_t once;
@@ -2227,6 +2275,35 @@ static const NSInteger kZSWheelLoopCopies = 9;
 @end
 
 @implementation ZSRow
+@end
+
+@interface ZSDeadZoneScrollView : UIScrollView
+@property (nonatomic, assign) CGFloat deadZone;
+@end
+
+@implementation ZSDeadZoneScrollView {
+    BOOL _deadZoneArmed;
+    CGFloat _deadZoneStartX;
+}
+
+- (void)setContentOffset:(CGPoint)contentOffset {
+    UIGestureRecognizerState state = self.panGestureRecognizer.state;
+    if (state == UIGestureRecognizerStateBegan) {
+        _deadZoneArmed = YES;
+        _deadZoneStartX = self.contentOffset.x;
+    } else if (state != UIGestureRecognizerStateChanged) {
+        _deadZoneArmed = NO;
+    }
+    if (_deadZoneArmed) {
+        if (self.panGestureRecognizer.numberOfTouches > 1) {
+            contentOffset.x = self.contentOffset.x;
+        } else if (fabs(contentOffset.x - _deadZoneStartX) < self.deadZone) {
+            contentOffset.x = _deadZoneStartX;
+        }
+    }
+    [super setContentOffset:contentOffset];
+}
+
 @end
 
 @interface ZSMarqueeLabel : UIView
@@ -5074,7 +5151,6 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) CAShapeLayer *memoryBigPieTrackLayer;
 @property (nonatomic, strong) UILabel *memoryClockLabel;
 @property (nonatomic, strong) UIView *memoryFeedContainer;
-@property (nonatomic, strong) UILabel *memoryFeedCaption;
 @property (nonatomic, strong) NSArray<UILabel *> *memoryFeedLabels;
 @property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *memoryFeed;
 @property (nonatomic, strong) NSTimer *memoryClockTimer;
@@ -6870,7 +6946,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryBigPieTrackLayer = nil;
     self.memoryClockLabel = nil;
     self.memoryFeedContainer = nil;
-    self.memoryFeedCaption = nil;
     self.memoryFeedLabels = nil;
     self.memoryFeed = nil;
     self.memoryPendingGroups = nil;
@@ -6905,6 +6980,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    if ([gestureRecognizer isKindOfClass:[UIPinchGestureRecognizer class]]) return YES;
 
     if ([touch.view isKindOfClass:[ZSCapsuleSlider class]]) return NO;
     if ([touch.view isKindOfClass:[ZSModeSlider class]]) return NO;
@@ -7312,7 +7388,7 @@ static const CGFloat kContentFadeHeight = 22;
 
         self.panelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
         self.panelGlass.userInteractionEnabled = YES;
-        zs_configure_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
+        zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];
 
         self.handleGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
@@ -13131,6 +13207,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self.extendedContentClip addSubview:overlay];
     zs_force_dark(overlay);
     self.syslogFullScreenOverlay = overlay;
+    [self zs_installPinchToExitOnView:overlay];
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
     UIImage *closeImage = [UIImage systemImageNamed:@"xmark" withConfiguration:closeSymbolConfig];
@@ -13195,6 +13272,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
     scrollView.alwaysBounceVertical = NO;
     scrollView.bounces = NO;
+    scrollView.panGestureRecognizer.maximumNumberOfTouches = 1;
     [overlay addSubview:scrollView];
     self.syslogFullScreenScrollView = scrollView;
 
@@ -13508,6 +13586,26 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [scrollView setContentOffset:CGPointMake(0, y) animated:NO];
 }
 
+- (void)zs_installPinchToExitOnView:(UIView *)view {
+    UIPinchGestureRecognizer *pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(zs_fullScreenPinched:)];
+    pinch.delegate = self;
+    pinch.cancelsTouchesInView = NO;
+    [view addGestureRecognizer:pinch];
+}
+
+- (void)zs_fullScreenPinched:(UIPinchGestureRecognizer *)pinch {
+    if (pinch.state != UIGestureRecognizerStateChanged) return;
+    if (pinch.numberOfTouches < 2 || pinch.scale > 0.8) return;
+    pinch.enabled = NO;
+    pinch.enabled = YES;
+    if (self.memoryPopupScrim) return;
+    if (self.memoryFullScreenOpen) {
+        [self zs_closeMemoryFullScreenPanelTapped];
+    } else if (self.syslogFullScreenOpen) {
+        [self zs_closeSyslogFullScreenPanelTapped];
+    }
+}
+
 - (void)zs_closeSyslogFullScreenPanelTapped {
     if (!self.syslogFullScreenOpen) return;
 
@@ -13583,6 +13681,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self.extendedContentClip addSubview:overlay];
     zs_force_dark(overlay);
     self.memoryFullScreenOverlay = overlay;
+    [self zs_installPinchToExitOnView:overlay];
 
     UIImageSymbolConfiguration *closeSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
     UIImage *closeImage = [UIImage systemImageNamed:@"xmark" withConfiguration:closeSymbolConfig];
@@ -13656,7 +13755,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryRefreshPieLayer = pieLayer;
     self.memoryRefreshPieTrackLayer = trackLayer;
 
-    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    ZSDeadZoneScrollView *scrollView = [[ZSDeadZoneScrollView alloc] init];
+    scrollView.deadZone = 12;
+    scrollView.panGestureRecognizer.maximumNumberOfTouches = 1;
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
     scrollView.backgroundColor = UIColor.clearColor;
     scrollView.showsHorizontalScrollIndicator = NO;
@@ -13695,22 +13796,20 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UILabel *clockLabel = [[UILabel alloc] init];
     clockLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
-    clockLabel.textAlignment = NSTextAlignmentCenter;
+    clockLabel.textAlignment = NSTextAlignmentLeft;
     clockLabel.text = @"0.000 s";
     [infoPanel addSubview:clockLabel];
     self.memoryClockLabel = clockLabel;
 
     UIView *feedContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    feedContainer.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
-    feedContainer.layer.cornerRadius = 10;
+    feedContainer.backgroundColor = [UIColor colorWithWhite:0 alpha:0.38];
+    feedContainer.layer.cornerRadius = 6;
     feedContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    feedContainer.layer.borderWidth = 1.0 / MAX(UIScreen.mainScreen.scale, 1.0);
+    feedContainer.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
     feedContainer.clipsToBounds = YES;
     [infoPanel addSubview:feedContainer];
     self.memoryFeedContainer = feedContainer;
-
-    UILabel *feedCaption = zs_memory_make_label(@"Fetching", zs_mono_font(9, UIFontWeightSemibold), [UIColor colorWithWhite:1 alpha:0.5], NSTextAlignmentCenter);
-    [feedContainer addSubview:feedCaption];
-    self.memoryFeedCaption = feedCaption;
 
     NSLayoutConstraint *pageControlLeading = [pageControl.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8];
     pageControlLeading.priority = UILayoutPriorityDefaultHigh;
@@ -13889,7 +13988,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         }
         NSDictionary *entry = self.memoryFeed[(NSUInteger)entryIndex];
         NSInteger repeats = [entry[@"n"] integerValue];
-        label.text = repeats > 1 ? [NSString stringWithFormat:@"%@ ×%ld", entry[@"t"], (long)repeats] : entry[@"t"];
+        label.text = repeats > 1 ? [NSString stringWithFormat:@"> %@ ×%ld", entry[@"t"], (long)repeats] : [@"> " stringByAppendingString:entry[@"t"]];
         label.alpha = 0.3 + 0.7 * (CGFloat)(i + 1) / (CGFloat)total;
     }
 }
@@ -13904,49 +14003,55 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CGFloat gap = 14;
     CGFloat sideInset = 20;
     CGFloat innerWidth = MAX(width - sideInset * 2, 40);
-    CGFloat usable = height - gap * 4;
+    CGFloat minTextWidth = 96;
 
-    CGFloat pieSide = floor(MAX(MIN(innerWidth, (usable - 34) * 0.6), 40));
-    CGFloat clockHeight = 34;
-    CGFloat pieY = gap;
-    CGFloat clockY = pieY + pieSide + gap;
-    CGFloat feedY = clockY + clockHeight + gap;
-    CGFloat feedHeight = MAX(height - feedY - gap, 0);
+    CGFloat basePie = MAX(MIN(innerWidth, (height - gap * 4 - 34) * 0.6), 40);
+    CGFloat pieSide = basePie * 1.3;
+    pieSide = MIN(pieSide, height - gap * 2);
+    pieSide = MIN(pieSide, innerWidth - minTextWidth - gap);
+    pieSide = floor(MAX(pieSide, 40));
+
+    CGFloat pieX = floor(width - sideInset - pieSide);
+    CGFloat pieY = floor((height - pieSide) / 2.0);
+    CGFloat textWidth = MAX(pieX - gap - sideInset, 0);
 
     UIView *disc = self.memoryBigPieDisc;
-    disc.frame = CGRectMake(floor((width - pieSide) / 2.0), pieY, pieSide, pieSide);
+    disc.frame = CGRectMake(pieX, pieY, pieSide, pieSide);
     disc.layer.cornerRadius = pieSide / 2.0;
     CGRect local = CGRectMake(0, 0, pieSide, pieSide);
+    CGFloat pieStroke = pieSide / 2.0 + 2.0;
     self.memoryBigPieTrackLayer.frame = local;
     self.memoryBigPieTrackLayer.path = [UIBezierPath bezierPathWithRect:local].CGPath;
     self.memoryBigPieLayer.frame = local;
     self.memoryBigPieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(pieSide / 2.0, pieSide / 2.0)
-                                                                 radius:pieSide / 4.0
+                                                                 radius:pieStroke / 2.0
                                                              startAngle:-M_PI_2
                                                                endAngle:1.5 * M_PI
                                                               clockwise:YES].CGPath;
-    self.memoryBigPieLayer.lineWidth = pieSide / 2.0;
+    self.memoryBigPieLayer.lineWidth = pieStroke;
 
     UILabel *clock = self.memoryClockLabel;
     clock.font = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
-    clock.frame = CGRectMake(sideInset, clockY, innerWidth, clockHeight);
+    CGFloat clockHeight = ceil(clock.font.lineHeight);
+    clock.frame = CGRectMake(sideInset, pieY, textWidth, clockHeight);
 
+    CGFloat feedY = pieY + clockHeight + 10;
+    CGFloat feedHeight = MAX(pieY + pieSide - feedY, 0);
     UIView *container = self.memoryFeedContainer;
-    container.frame = CGRectMake(sideInset, feedY, innerWidth, feedHeight);
+    container.frame = CGRectMake(sideInset, feedY, textWidth, feedHeight);
+    container.hidden = feedHeight < 24 || textWidth < 40;
 
-    UIFont *feedFont = zs_mono_font(9, UIFontWeightRegular);
-    CGFloat lineHeight = ceil(feedFont.lineHeight) + 3;
-    CGFloat captionHeight = 16;
-    CGFloat padding = 8;
-    self.memoryFeedCaption.frame = CGRectMake(padding, padding, innerWidth - padding * 2, captionHeight);
+    UIFont *feedFont = zs_mono_font(8, UIFontWeightRegular);
+    CGFloat lineHeight = ceil(feedFont.lineHeight) + 1;
+    CGFloat padding = 6;
 
     for (UILabel *old in self.memoryFeedLabels) [old removeFromSuperview];
-    NSUInteger lineCount = (NSUInteger)MAX(floor((feedHeight - padding * 2 - captionHeight - 4) / lineHeight), 0);
+    NSUInteger lineCount = (NSUInteger)MAX(floor((feedHeight - padding * 2) / lineHeight), 0);
     NSMutableArray<UILabel *> *labels = [NSMutableArray arrayWithCapacity:lineCount];
-    CGFloat lineY = padding + captionHeight + 4;
+    CGFloat firstLineY = feedHeight - padding - lineHeight * (CGFloat)lineCount;
     for (NSUInteger i = 0; i < lineCount; i++) {
-        UILabel *label = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.92 alpha:1], NSTextAlignmentCenter);
-        label.frame = CGRectMake(padding, lineY + lineHeight * (CGFloat)i, innerWidth - padding * 2, lineHeight);
+        UILabel *label = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.92 alpha:1], NSTextAlignmentLeft);
+        label.frame = CGRectMake(padding, firstLineY + lineHeight * (CGFloat)i, MAX(textWidth - padding * 2, 0), lineHeight);
         [container addSubview:label];
         [labels addObject:label];
     }
@@ -16157,8 +16262,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     CGFloat docsX = fullScreenOpen ? 0 : kHandleWidth;
     CGFloat docsSpanWidth = docsW + (fullScreenOpen ? kHandleWidth : 0);
-    BOOL roundDocsLeft = !fullScreenOpen;
-    CACornerMask docsCornerMask = roundDocsLeft ? (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner) : 0;
+    CGFloat docsLeftRadius = fullScreenOpen ? zs_screen_corner_radius(unityView, kPanelCornerRadiusMinimum) : kPanelCornerRadiusMinimum;
+    CACornerMask docsCornerMask = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
     CACornerMask contentOverlayCornerMask = docsVisible
         ? (kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner)
         : (kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner | kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner);
@@ -16188,7 +16293,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     void (^applyPanelCorners)(void) = ^{
         if (self.panelGlass) {
-            zs_configure_glass_corners_sides(self.panelGlass, kPanelCornerRadiusMinimum, YES, !docsVisible, YES);
+            zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, !docsVisible);
         }
         if (self.contentOverlay) {
             self.contentOverlay.layer.maskedCorners = contentOverlayCornerMask;
@@ -16232,10 +16337,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         if (docsPanelElement) {
             docsPanelElement.frame = docsFrameLocal;
             if (glass) {
-                zs_configure_glass_corners_sides(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES, roundDocsLeft, NO);
+                zs_configure_glass_corners_sides(self.docsPanelGlass, docsLeftRadius, !fullScreenOpen, YES, NO);
             } else {
                 docsPanelElement.clipsToBounds = YES;
-                docsPanelElement.layer.cornerRadius = kPanelCornerRadiusMinimum;
+                docsPanelElement.layer.cornerRadius = docsLeftRadius;
                 docsPanelElement.layer.cornerCurve = kCACornerCurveContinuous;
                 docsPanelElement.layer.maskedCorners = docsCornerMask;
             }
@@ -16266,7 +16371,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
         if (clip && docsPanelElement) {
             clip.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
-            clip.layer.cornerRadius = kPanelCornerRadiusMinimum;
+            clip.layer.cornerRadius = docsLeftRadius;
             clip.layer.cornerCurve = kCACornerCurveContinuous;
             clip.layer.maskedCorners = docsCornerMask;
         }
