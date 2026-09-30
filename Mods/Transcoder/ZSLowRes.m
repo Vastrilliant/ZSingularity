@@ -28,7 +28,8 @@
 #define ZSLR_FORMAT_ASTC_6x6 50
 #define ZSLR_FORMAT_ASTC_8x8 51
 
-#define ZSLR_LOG(label, fmt, ...) ZLog(@"[LowRes] %s: " fmt, (label), ##__VA_ARGS__)
+static volatile int g_zslrQuiet = 0;
+#define ZSLR_LOG(label, fmt, ...) do { if (!g_zslrQuiet) ZLog(@"[LowRes] %s: " fmt, (label), ##__VA_ARGS__); } while (0)
 #define ZSLR_MB(bytes) ((unsigned long long)((bytes) / (1024ull * 1024ull)))
 #define ZSLR_MS(since) ((CACurrentMediaTime() - (since)) * 1000.0)
 #define ZSLR_WHY(...) do { if (why && whyLen) snprintf(why, whyLen, __VA_ARGS__); } while (0)
@@ -127,6 +128,7 @@ typedef struct {
     int (*reserve)(void *user, uint64_t workingSetBytes);
     int (*tick)(void *user);
     int (*transcode)(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen);
+    void (*progress)(void *user, uint32_t delta);
 } ZSLRCodec;
 
 typedef struct {
@@ -1462,6 +1464,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         uint32_t newSize = (uint32_t)zslr_astc_size(t->width, t->height, 8, 8);
         if (resultBytes + newSize > policy->maxResultBytes) {
             capSkipped++;
+            if (codec->progress) codec->progress(codec->user, 1);
             continue;
         }
         if (codec->tick && codec->tick(codec->user) != 0) {
@@ -1490,6 +1493,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
             free(out);
             ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): rejected, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
                      t->width, t->height, why[0] ? why : "quality", ZSLR_MS(texStart));
+            if (codec->progress) codec->progress(codec->user, 1);
             continue;
         }
         if (tr != 0 || !out) {
@@ -1497,6 +1501,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
             result->rejected++;
             ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): failed, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
                      t->width, t->height, why[0] ? why : "unknown transcode error", ZSLR_MS(texStart));
+            if (codec->progress) codec->progress(codec->user, 1);
             continue;
         }
         conv[convCount].texture = (uint32_t)(t - textures);
@@ -1509,6 +1514,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         result->newBytes += newSize;
         ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
                  t->width, t->height, t->streamSize, newSize, why, ZSLR_MS(texStart));
+        if (codec->progress) codec->progress(codec->user, 1);
     }
     if (capSkipped) {
         ZSLR_LOG(label, "result cap of %llu MB reached, %u texture(s) left unconverted", ZSLR_MB(policy->maxResultBytes), capSkipped);
@@ -1624,7 +1630,7 @@ static const uint32_t kZSLowResMinPixels = 256u * 256u;
 static const uint32_t kZSLowResMaxPixels = 4096u * 4096u;
 static const uint64_t kZSLowResMaxResultBytes = 256ull * 1024ull * 1024ull;
 static const double kZSLowResMinPSNR = 27.0;
-static const double kZSLowResRescueWindowDB = 10.0;
+static const double kZSLowResRescueWindowDB = 4.0;
 
 static const int64_t kZSLowResFullSpeedAbove = 450ll * 1024 * 1024;
 static const int64_t kZSLowResHalfSpeedAbove = 300ll * 1024 * 1024;
@@ -1634,7 +1640,8 @@ static const int64_t kZSLowResReserveBytes = 130ll * 1024 * 1024;
 static const NSTimeInterval kZSLowResMemoryWaitLimit = 30.0;
 static const NSTimeInterval kZSLowResWarningPause = 8.0;
 static const useconds_t kZSLowResConstrainedSleep = 25000;
-static const NSUInteger kZSLowResMaxWorkers = 6;
+#define ZSLR_MAX_WORKERS 8
+static const NSUInteger kZSLowResMaxWorkers = ZSLR_MAX_WORKERS;
 
 enum {
     kZSLowResDecodeSRGB = 0,
@@ -1667,6 +1674,12 @@ static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
 static NSUInteger g_zslrLedgerDirty = 0;
 static struct astcenc_context *g_zslrParents[kZSLowResContextKinds];
+static os_unfair_lock g_zslrCountLock = OS_UNFAIR_LOCK_INIT;
+static double g_zslrTranscodeStart = 0;
+static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
+static NSUInteger g_zslrWorkerSeq[ZSLR_MAX_WORKERS];
+static NSUInteger g_zslrWorkerTotal[ZSLR_MAX_WORKERS];
+static NSUInteger g_zslrWorkerDone[ZSLR_MAX_WORKERS];
 
 static int64_t zslr_available_memory(void) {
     if (@available(iOS 13.0, *)) return (int64_t)os_proc_available_memory();
@@ -1760,6 +1773,26 @@ static int zslr_codec_reserve(void *user, uint64_t need) {
     return 2;
 }
 
+static void zslr_codec_progress(void *user, uint32_t delta) {
+    ZSLRWorker *worker = (ZSLRWorker *)user;
+    os_unfair_lock_lock(&g_zslrLock);
+    g_zslrStatus.texturesProcessed += delta;
+    if (worker && worker->index < ZSLR_MAX_WORKERS) g_zslrWorkerDone[worker->index] += delta;
+    os_unfair_lock_unlock(&g_zslrLock);
+}
+
+static BOOL zslr_ledger_skips(NSDictionary *item) {
+    NSString *key = item[@"key"];
+    uint64_t size = [item[@"size"] unsignedLongLongValue];
+    double mtime = [item[@"mtime"] doubleValue];
+    os_unfair_lock_lock(&g_zslrLock);
+    NSDictionary *entry = g_zslrLedger[key];
+    os_unfair_lock_unlock(&g_zslrLock);
+    NSString *state = entry[@"state"];
+    return entry && [entry[@"size"] unsignedLongLongValue] == size && fabs([entry[@"mtime"] doubleValue] - mtime) < 0.5 &&
+           ([state isEqualToString:@"done"] || [state isEqualToString:@"noop"]);
+}
+
 static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *config) {
     BOOL rescue = kind >= kZSLowResEncodeOpaqueSRGB + kZSLowResRescueOffset;
     int base = rescue ? kind - kZSLowResRescueOffset : kind;
@@ -1774,27 +1807,28 @@ static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *conf
 }
 
 static void zslr_measure(const uint8_t *ref, const uint8_t *test, size_t pixels, int hasAlpha, double *weighted, double *raw) {
-    double rawSum = 0;
-    double rgbSum = 0;
-    double weightSum = 0;
-    double alphaSum = 0;
+    uint64_t rawSum = 0;
+    uint64_t rgbSum = 0;
+    uint64_t weightSum = 0;
+    uint64_t alphaSum = 0;
     for (size_t i = 0; i < pixels; i++) {
         const uint8_t *r = ref + i * 4;
         const uint8_t *t = test + i * 4;
-        double dr = (double)r[0] - (double)t[0];
-        double dg = (double)r[1] - (double)t[1];
-        double db = (double)r[2] - (double)t[2];
-        double da = (double)r[3] - (double)t[3];
-        double rgbErr = dr * dr + dg * dg + db * db;
-        double w = hasAlpha ? (double)r[3] / 255.0 : 1.0;
-        rawSum += rgbErr + da * da;
-        rgbSum += w * rgbErr;
+        int dr = (int)r[0] - (int)t[0];
+        int dg = (int)r[1] - (int)t[1];
+        int db = (int)r[2] - (int)t[2];
+        int da = (int)r[3] - (int)t[3];
+        uint32_t rgbErr = (uint32_t)(dr * dr + dg * dg + db * db);
+        uint32_t aErr = (uint32_t)(da * da);
+        uint32_t w = hasAlpha ? r[3] : 255u;
+        rawSum += (uint64_t)rgbErr + aErr;
+        rgbSum += (uint64_t)w * rgbErr;
         weightSum += w;
-        alphaSum += da * da;
+        alphaSum += aErr;
     }
-    double rawMse = rawSum / ((double)pixels * 4.0);
-    double mseRGB = weightSum > 0 ? rgbSum / (3.0 * weightSum) : 0.0;
-    double mseA = alphaSum / (double)pixels;
+    double rawMse = (double)rawSum / ((double)pixels * 4.0);
+    double mseRGB = weightSum > 0 ? (double)rgbSum / (3.0 * (double)weightSum) : 0.0;
+    double mseA = (double)alphaSum / (double)pixels;
     double mse = (3.0 * mseRGB + mseA) / 4.0;
     *raw = rawMse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / rawMse);
     *weighted = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
@@ -2051,6 +2085,90 @@ done:
     return items;
 }
 
++ (NSArray<NSDictionary *> *)countedItems:(NSArray<NSDictionary *> *)items {
+    os_unfair_lock_lock(&g_zslrLock);
+    g_zslrStatus.preparing = YES;
+    os_unfair_lock_unlock(&g_zslrLock);
+
+    NSUInteger total = items.count;
+    NSUInteger *counts = (NSUInteger *)calloc(total ? total : 1, sizeof(NSUInteger));
+    BOOL *skipped = (BOOL *)calloc(total ? total : 1, sizeof(BOOL));
+    __block NSUInteger next = 0;
+    NSUInteger poolSize = MIN((NSUInteger)4, MAX((NSUInteger)1, g_zslrMaxWorkers));
+    ZLog(@"[LowRes] counting candidate textures across %lu bundle(s)", (unsigned long)total);
+    double countStart = CACurrentMediaTime();
+    g_zslrQuiet = 1;
+
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0);
+    dispatch_queue_t queue = dispatch_queue_create("zs.lowres.count", attr);
+    dispatch_group_t group = dispatch_group_create();
+    for (NSUInteger w = 0; w < poolSize; w++) {
+        dispatch_group_async(group, queue, ^{
+            char label[32];
+            snprintf(label, sizeof(label), "count%lu", (unsigned long)w);
+            while (!g_zslrCancel) {
+                os_unfair_lock_lock(&g_zslrCountLock);
+                NSUInteger i = next < total ? next++ : NSNotFound;
+                os_unfair_lock_unlock(&g_zslrCountLock);
+                if (i == NSNotFound) break;
+                @autoreleasepool {
+                    NSDictionary *item = items[i];
+                    if (zslr_ledger_skips(item)) {
+                        skipped[i] = YES;
+                        continue;
+                    }
+                    NSString *scanKey = [item[@"key"] stringByAppendingString:@"#scan"];
+                    uint64_t size = [item[@"size"] unsignedLongLongValue];
+                    double mtime = [item[@"mtime"] doubleValue];
+                    os_unfair_lock_lock(&g_zslrLock);
+                    NSDictionary *cached = g_zslrLedger[scanKey];
+                    os_unfair_lock_unlock(&g_zslrLock);
+                    if (cached && [cached[@"size"] unsignedLongLongValue] == size && fabs([cached[@"mtime"] doubleValue] - mtime) < 0.5 && cached[@"cands"]) {
+                        counts[i] = [cached[@"cands"] unsignedIntegerValue];
+                        continue;
+                    }
+                    ZSLRCodec codec = {0};
+                    ZSLRPolicy policy = { kZSLowResMinPixels, kZSLowResMaxPixels, kZSLowResMaxResultBytes };
+                    ZSLRResult result;
+                    char err[256] = {0};
+                    int rc = zslr_process_bundle(label, [item[@"path"] fileSystemRepresentation], "", 1, &codec, &policy, &result, err, sizeof(err));
+                    counts[i] = rc == ZSLR_OK ? result.candidates : 0;
+                    os_unfair_lock_lock(&g_zslrLock);
+                    g_zslrLedger[scanKey] = @{ @"size": @(size), @"mtime": @(mtime), @"cands": @(counts[i]) };
+                    g_zslrLedgerDirty++;
+                    os_unfair_lock_unlock(&g_zslrLock);
+                }
+            }
+        });
+    }
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    g_zslrQuiet = 0;
+
+    NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:total];
+    NSUInteger grand = 0;
+    for (NSUInteger i = 0; i < total; i++) {
+        if (skipped[i]) {
+            [result addObject:items[i]];
+            continue;
+        }
+        NSMutableDictionary *copy = [items[i] mutableCopy];
+        copy[@"cands"] = @(counts[i]);
+        grand += counts[i];
+        [result addObject:copy];
+    }
+    free(counts);
+    free(skipped);
+    ZLog(@"[LowRes] counted %lu candidate texture(s) in %.1fs", (unsigned long)grand, CACurrentMediaTime() - countStart);
+    if (g_zslrLedgerDirty > 0) [self saveLedger];
+
+    os_unfair_lock_lock(&g_zslrLock);
+    g_zslrStatus.texturesTotal = grand;
+    g_zslrStatus.preparing = NO;
+    g_zslrTranscodeStart = CACurrentMediaTime();
+    os_unfair_lock_unlock(&g_zslrLock);
+    return result;
+}
+
 - (BOOL)startWithMode:(ZSLowResMode)mode completion:(void (^)(ZSLowResStatus))completion {
     os_unfair_lock_lock(&g_zslrLock);
     if (g_zslrStatus.running) {
@@ -2068,6 +2186,11 @@ done:
     g_zslrLastState = -1;
     g_zslrLastWaitLog = 0;
     g_zslrNoStream = 0;
+    g_zslrTranscodeStart = 0;
+    memset(g_zslrWorkerActive, 0, sizeof(g_zslrWorkerActive));
+    memset(g_zslrWorkerSeq, 0, sizeof(g_zslrWorkerSeq));
+    memset(g_zslrWorkerTotal, 0, sizeof(g_zslrWorkerTotal));
+    memset(g_zslrWorkerDone, 0, sizeof(g_zslrWorkerDone));
     g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     os_unfair_lock_unlock(&g_zslrLock);
     ZLog(@"[LowRes] %@ requested, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", (long long)(zslr_available_memory() / (1024 * 1024)));
@@ -2085,6 +2208,12 @@ done:
             [ZSLowRes loadLedger];
         }
         NSArray<NSDictionary *> *items = [ZSLowRes enumerateBundles];
+        if (mode == ZSLowResModeTranscode) {
+            os_unfair_lock_lock(&g_zslrLock);
+            g_zslrStatus.bundlesTotal = items.count;
+            os_unfair_lock_unlock(&g_zslrLock);
+            items = [ZSLowRes countedItems:items];
+        }
         unsigned long long totalBytes = 0;
         for (NSDictionary *entry in items) totalBytes += [entry[@"size"] unsignedLongLongValue];
         os_unfair_lock_lock(&g_zslrLock);
@@ -2200,7 +2329,17 @@ done:
         [fm removeItemAtPath:[partPath stringByAppendingString:@".scratch"] error:nil];
     }
 
-    ZSLRCodec codec = { worker, zslr_codec_reserve, zslr_codec_tick, zslr_codec_transcode };
+    NSUInteger slot = worker->index;
+    if (!scanOnly && slot < ZSLR_MAX_WORKERS) {
+        os_unfair_lock_lock(&g_zslrLock);
+        g_zslrWorkerActive[slot] = YES;
+        g_zslrWorkerSeq[slot] = index;
+        g_zslrWorkerTotal[slot] = [item[@"cands"] unsignedIntegerValue];
+        g_zslrWorkerDone[slot] = 0;
+        os_unfair_lock_unlock(&g_zslrLock);
+    }
+
+    ZSLRCodec codec = { worker, zslr_codec_reserve, zslr_codec_tick, zslr_codec_transcode, zslr_codec_progress };
     ZSLRPolicy policy = { kZSLowResMinPixels, kZSLowResMaxPixels, kZSLowResMaxResultBytes };
     ZSLRResult result;
     char err[256] = {0};
@@ -2239,6 +2378,12 @@ done:
     }
 
     os_unfair_lock_lock(&g_zslrLock);
+    if (!scanOnly && slot < ZSLR_MAX_WORKERS) {
+        if (rc != ZSLR_CANCELLED && g_zslrWorkerTotal[slot] > g_zslrWorkerDone[slot]) {
+            g_zslrStatus.texturesProcessed += g_zslrWorkerTotal[slot] - g_zslrWorkerDone[slot];
+        }
+        g_zslrWorkerActive[slot] = NO;
+    }
     if (rc == ZSLR_OK) {
         g_zslrStatus.texturesCandidate += result.candidates;
         g_zslrStatus.texturesConverted += result.converted;
@@ -2293,7 +2438,26 @@ done:
 - (ZSLowResStatus)status {
     os_unfair_lock_lock(&g_zslrLock);
     ZSLowResStatus copy = g_zslrStatus;
+    NSUInteger best = NSNotFound;
+    NSUInteger bestSeq = NSUIntegerMax;
+    for (NSUInteger i = 0; i < ZSLR_MAX_WORKERS; i++) {
+        if (g_zslrWorkerActive[i] && g_zslrWorkerTotal[i] > 0 && g_zslrWorkerSeq[i] < bestSeq) {
+            best = i;
+            bestSeq = g_zslrWorkerSeq[i];
+        }
+    }
+    if (best != NSNotFound) {
+        copy.currentBundleTotal = g_zslrWorkerTotal[best];
+        copy.currentBundleProcessed = MIN(g_zslrWorkerDone[best], g_zslrWorkerTotal[best]);
+    }
+    double start = g_zslrTranscodeStart;
     os_unfair_lock_unlock(&g_zslrLock);
+    if (copy.texturesProcessed > copy.texturesTotal) copy.texturesProcessed = copy.texturesTotal;
+    copy.etaSeconds = -1;
+    if (copy.running && !copy.preparing && copy.mode == ZSLowResModeTranscode && copy.texturesProcessed > 0 && start > 0) {
+        double elapsed = CACurrentMediaTime() - start;
+        copy.etaSeconds = elapsed / (double)copy.texturesProcessed * (double)(copy.texturesTotal - copy.texturesProcessed);
+    }
     return copy;
 }
 

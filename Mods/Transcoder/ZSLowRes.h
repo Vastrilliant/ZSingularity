@@ -26,6 +26,12 @@ typedef struct {
     uint64_t newBytes;
     NSUInteger activeWorkers;
     NSUInteger allowedWorkers;
+    BOOL preparing;
+    NSUInteger texturesTotal;
+    NSUInteger texturesProcessed;
+    NSUInteger currentBundleTotal;
+    NSUInteger currentBundleProcessed;
+    double etaSeconds;
 } ZSLowResStatus;
 
 @interface ZSLowRes : NSObject
