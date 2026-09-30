@@ -384,6 +384,7 @@ void zs_collect_memory_usage_breakdown(void (^ _Nonnull completion)(NSArray<ZSMe
 
 void zs_memory_scan_reset(void);
 NSArray<ZSMemoryUsageGroup *> * _Nullable zs_memory_scan_step(NSUInteger * _Nullable unitsDoneOut);
+NSString * _Nullable zs_memory_scan_current_status(void);
 int64_t zs_current_process_resident_memory_bytes(void);
 
 typedef struct {

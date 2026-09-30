@@ -2844,9 +2844,9 @@ static CGFloat zs_memory_column_fraction(NSString *title, BOOL fullScreen) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         fullFractions = @{
-            @"System": @1.0,
-            @"Process footprint by owner": @0.5,
-            @"Unity allocations by subsystem": @0.5,
+            @"System": @0.5,
+            @"Process footprint by owner": @0.6,
+            @"Unity allocations by subsystem": @0.4,
             @"Malloc zones": @0.4,
             @"Malloc attribution": @0.6,
             @"Heaviest loaded assets": @0.7,
@@ -5068,6 +5068,17 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) UIButton *memoryExportButton;
 @property (nonatomic, strong) UIPageControl *memoryPageControl;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *memoryLocalPages;
+@property (nonatomic, strong) UIView *memoryInfoPanel;
+@property (nonatomic, strong) UIView *memoryBigPieDisc;
+@property (nonatomic, strong) CAShapeLayer *memoryBigPieLayer;
+@property (nonatomic, strong) CAShapeLayer *memoryBigPieTrackLayer;
+@property (nonatomic, strong) UILabel *memoryClockLabel;
+@property (nonatomic, strong) UIView *memoryFeedContainer;
+@property (nonatomic, strong) UILabel *memoryFeedCaption;
+@property (nonatomic, strong) NSArray<UILabel *> *memoryFeedLabels;
+@property (nonatomic, strong) NSMutableArray<NSMutableDictionary *> *memoryFeed;
+@property (nonatomic, strong) NSTimer *memoryClockTimer;
+@property (nonatomic, assign) CFTimeInterval memoryPieBegin;
 @property (nonatomic, assign) NSUInteger memoryCyclePhase;
 @property (nonatomic, assign) NSUInteger memoryCycleUnitsDone;
 @property (nonatomic, assign) NSUInteger memoryCycleUnitEstimate;
@@ -6851,6 +6862,17 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryExportButton = nil;
     self.memoryPageControl = nil;
     self.memoryLocalPages = nil;
+    [self.memoryClockTimer invalidate];
+    self.memoryClockTimer = nil;
+    self.memoryInfoPanel = nil;
+    self.memoryBigPieDisc = nil;
+    self.memoryBigPieLayer = nil;
+    self.memoryBigPieTrackLayer = nil;
+    self.memoryClockLabel = nil;
+    self.memoryFeedContainer = nil;
+    self.memoryFeedCaption = nil;
+    self.memoryFeedLabels = nil;
+    self.memoryFeed = nil;
     self.memoryPendingGroups = nil;
     self.memoryPendingColumns = nil;
     self.memorySnapshotSystemRows = nil;
@@ -13526,6 +13548,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_dismissMemoryPopupAnimated:NO];
     [self.memoryRefreshPieLayer removeAllAnimations];
     [self.memoryRefreshPieTrackLayer removeAllAnimations];
+    [self.memoryBigPieLayer removeAllAnimations];
+    [self.memoryBigPieTrackLayer removeAllAnimations];
+    [self.memoryClockTimer invalidate];
+    self.memoryClockTimer = nil;
+    self.memoryFeed = nil;
+    self.memoryInfoPanel.hidden = YES;
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
     self.memoryFullScreenOpen = NO;
@@ -13642,6 +13670,48 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:scrollView];
     self.memoryFullScreenScrollView = scrollView;
 
+    UIView *infoPanel = [[UIView alloc] initWithFrame:CGRectZero];
+    infoPanel.backgroundColor = UIColor.clearColor;
+    infoPanel.hidden = YES;
+    infoPanel.userInteractionEnabled = NO;
+    [scrollView addSubview:infoPanel];
+    self.memoryInfoPanel = infoPanel;
+
+    UIView *bigDisc = [[UIView alloc] initWithFrame:CGRectZero];
+    bigDisc.userInteractionEnabled = NO;
+    bigDisc.layer.masksToBounds = YES;
+    [infoPanel addSubview:bigDisc];
+    CAShapeLayer *bigTrack = [CAShapeLayer layer];
+    bigTrack.fillColor = [UIColor colorWithWhite:0.22 alpha:1].CGColor;
+    [bigDisc.layer addSublayer:bigTrack];
+    CAShapeLayer *bigPie = [CAShapeLayer layer];
+    bigPie.fillColor = UIColor.clearColor.CGColor;
+    bigPie.strokeColor = UIColor.whiteColor.CGColor;
+    bigPie.strokeEnd = 1;
+    [bigDisc.layer addSublayer:bigPie];
+    self.memoryBigPieDisc = bigDisc;
+    self.memoryBigPieLayer = bigPie;
+    self.memoryBigPieTrackLayer = bigTrack;
+
+    UILabel *clockLabel = [[UILabel alloc] init];
+    clockLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
+    clockLabel.textAlignment = NSTextAlignmentCenter;
+    clockLabel.text = @"0.000 s";
+    [infoPanel addSubview:clockLabel];
+    self.memoryClockLabel = clockLabel;
+
+    UIView *feedContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    feedContainer.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    feedContainer.layer.cornerRadius = 10;
+    feedContainer.layer.cornerCurve = kCACornerCurveContinuous;
+    feedContainer.clipsToBounds = YES;
+    [infoPanel addSubview:feedContainer];
+    self.memoryFeedContainer = feedContainer;
+
+    UILabel *feedCaption = zs_memory_make_label(@"Fetching", zs_mono_font(9, UIFontWeightSemibold), [UIColor colorWithWhite:1 alpha:0.5], NSTextAlignmentCenter);
+    [feedContainer addSubview:feedCaption];
+    self.memoryFeedCaption = feedCaption;
+
     NSLayoutConstraint *pageControlLeading = [pageControl.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8];
     pageControlLeading.priority = UILayoutPriorityDefaultHigh;
 
@@ -13720,9 +13790,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic impactOccurred];
 }
 
-- (void)zs_startMemoryRefreshPie {
-    CAShapeLayer *layer = self.memoryRefreshPieLayer;
-    CAShapeLayer *track = self.memoryRefreshPieTrackLayer;
+- (void)zs_applyMemoryPieAnimationsToLayer:(CAShapeLayer *)layer track:(CAShapeLayer *)track beginMediaTime:(CFTimeInterval)beginMediaTime {
     if (!layer || !track) return;
 
     UIColor *white = UIColor.whiteColor;
@@ -13731,7 +13799,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [layer removeAllAnimations];
     [track removeAllAnimations];
 
-    CFTimeInterval begin = [layer convertTime:CACurrentMediaTime() fromLayer:nil];
+    CFTimeInterval begin = [layer convertTime:beginMediaTime fromLayer:nil];
 
     CABasicAnimation *sweep = [CABasicAnimation animationWithKeyPath:@"strokeEnd"];
     sweep.fromValue = @0;
@@ -13759,6 +13827,133 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     trackColor.repeatCount = HUGE_VALF;
     trackColor.beginTime = begin;
     [track addAnimation:trackColor forKey:@"zsPieTrackColor"];
+}
+
+- (void)zs_startMemoryRefreshPie {
+    CFTimeInterval now = CACurrentMediaTime();
+    self.memoryPieBegin = now;
+    [self zs_applyMemoryPieAnimationsToLayer:self.memoryRefreshPieLayer track:self.memoryRefreshPieTrackLayer beginMediaTime:now];
+    [self zs_applyMemoryPieAnimationsToLayer:self.memoryBigPieLayer track:self.memoryBigPieTrackLayer beginMediaTime:now];
+    [self zs_memoryClockTick];
+}
+
+- (void)zs_startMemoryClockTimer {
+    [self.memoryClockTimer invalidate];
+    __weak typeof(self) weakSelf = self;
+    NSTimer *timer = [NSTimer timerWithTimeInterval:1.0 / 30.0 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf zs_memoryClockTick];
+    }];
+    self.memoryClockTimer = timer;
+    [NSRunLoop.mainRunLoop addTimer:timer forMode:NSRunLoopCommonModes];
+}
+
+- (void)zs_memoryClockTick {
+    UILabel *label = self.memoryClockLabel;
+    if (!label || !self.memoryFullScreenOpen || self.memoryInfoPanel.hidden) return;
+    if (self.memoryPageControl.currentPage != 0) return;
+
+    double cycle = ZS_MEMORY_SCAN_CYCLE_SECONDS;
+    double elapsed = MAX(CACurrentMediaTime() - self.memoryPieBegin, 0.0);
+    double remaining = cycle - fmod(elapsed, cycle);
+    NSInteger totalMs = MAX(MIN((NSInteger)llround(remaining * 1000.0), (NSInteger)llround(cycle * 1000.0)), 0);
+    NSString *text = [NSString stringWithFormat:@"%ld.%03ld s", (long)(totalMs / 1000), (long)(totalMs % 1000)];
+    if (![label.text isEqualToString:text]) label.text = text;
+}
+
+- (void)zs_pushMemoryFeed:(NSString *)text {
+    if (text.length == 0) return;
+    if (!self.memoryFeed) self.memoryFeed = [NSMutableArray new];
+
+    NSMutableDictionary *last = self.memoryFeed.lastObject;
+    if (last && [last[@"t"] isEqualToString:text]) {
+        last[@"n"] = @([last[@"n"] integerValue] + 1);
+    } else {
+        [self.memoryFeed addObject:[@{@"t": text, @"n": @1} mutableCopy]];
+        if (self.memoryFeed.count > 32) [self.memoryFeed removeObjectAtIndex:0];
+    }
+    [self zs_renderMemoryFeed];
+}
+
+- (void)zs_renderMemoryFeed {
+    NSArray<UILabel *> *labels = self.memoryFeedLabels;
+    if (labels.count == 0 || self.memoryInfoPanel.hidden) return;
+
+    NSUInteger total = labels.count;
+    NSUInteger available = self.memoryFeed.count;
+    for (NSUInteger i = 0; i < total; i++) {
+        UILabel *label = labels[i];
+        NSInteger entryIndex = (NSInteger)available - (NSInteger)total + (NSInteger)i;
+        if (entryIndex < 0) {
+            label.text = nil;
+            continue;
+        }
+        NSDictionary *entry = self.memoryFeed[(NSUInteger)entryIndex];
+        NSInteger repeats = [entry[@"n"] integerValue];
+        label.text = repeats > 1 ? [NSString stringWithFormat:@"%@ ×%ld", entry[@"t"], (long)repeats] : entry[@"t"];
+        label.alpha = 0.3 + 0.7 * (CGFloat)(i + 1) / (CGFloat)total;
+    }
+}
+
+- (void)zs_layoutMemoryInfoPanelInFrame:(CGRect)frame {
+    UIView *panel = self.memoryInfoPanel;
+    if (!panel) return;
+
+    panel.frame = frame;
+    CGFloat width = frame.size.width;
+    CGFloat height = frame.size.height;
+    CGFloat gap = 14;
+    CGFloat sideInset = 20;
+    CGFloat innerWidth = MAX(width - sideInset * 2, 40);
+    CGFloat usable = height - gap * 4;
+
+    CGFloat pieSide = floor(MAX(MIN(innerWidth, (usable - 34) * 0.6), 40));
+    CGFloat clockHeight = 34;
+    CGFloat pieY = gap;
+    CGFloat clockY = pieY + pieSide + gap;
+    CGFloat feedY = clockY + clockHeight + gap;
+    CGFloat feedHeight = MAX(height - feedY - gap, 0);
+
+    UIView *disc = self.memoryBigPieDisc;
+    disc.frame = CGRectMake(floor((width - pieSide) / 2.0), pieY, pieSide, pieSide);
+    disc.layer.cornerRadius = pieSide / 2.0;
+    CGRect local = CGRectMake(0, 0, pieSide, pieSide);
+    self.memoryBigPieTrackLayer.frame = local;
+    self.memoryBigPieTrackLayer.path = [UIBezierPath bezierPathWithRect:local].CGPath;
+    self.memoryBigPieLayer.frame = local;
+    self.memoryBigPieLayer.path = [UIBezierPath bezierPathWithArcCenter:CGPointMake(pieSide / 2.0, pieSide / 2.0)
+                                                                 radius:pieSide / 4.0
+                                                             startAngle:-M_PI_2
+                                                               endAngle:1.5 * M_PI
+                                                              clockwise:YES].CGPath;
+    self.memoryBigPieLayer.lineWidth = pieSide / 2.0;
+
+    UILabel *clock = self.memoryClockLabel;
+    clock.font = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
+    clock.frame = CGRectMake(sideInset, clockY, innerWidth, clockHeight);
+
+    UIView *container = self.memoryFeedContainer;
+    container.frame = CGRectMake(sideInset, feedY, innerWidth, feedHeight);
+
+    UIFont *feedFont = zs_mono_font(9, UIFontWeightRegular);
+    CGFloat lineHeight = ceil(feedFont.lineHeight) + 3;
+    CGFloat captionHeight = 16;
+    CGFloat padding = 8;
+    self.memoryFeedCaption.frame = CGRectMake(padding, padding, innerWidth - padding * 2, captionHeight);
+
+    for (UILabel *old in self.memoryFeedLabels) [old removeFromSuperview];
+    NSUInteger lineCount = (NSUInteger)MAX(floor((feedHeight - padding * 2 - captionHeight - 4) / lineHeight), 0);
+    NSMutableArray<UILabel *> *labels = [NSMutableArray arrayWithCapacity:lineCount];
+    CGFloat lineY = padding + captionHeight + 4;
+    for (NSUInteger i = 0; i < lineCount; i++) {
+        UILabel *label = zs_memory_make_label(nil, feedFont, [UIColor colorWithWhite:0.92 alpha:1], NSTextAlignmentCenter);
+        label.frame = CGRectMake(padding, lineY + lineHeight * (CGFloat)i, innerWidth - padding * 2, lineHeight);
+        [container addSubview:label];
+        [labels addObject:label];
+    }
+    self.memoryFeedLabels = labels;
+
+    [self zs_renderMemoryFeed];
+    [self zs_memoryClockTick];
 }
 
 - (void)zs_changeMemoryTopAssetsPageBy:(NSInteger)delta {
@@ -14145,7 +14340,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryCycleStart = 0;
     [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(zs_memoryAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
+    self.memoryFeed = nil;
+    [self zs_pushMemoryFeed:@"Starting scan"];
     [self zs_startMemoryRefreshPie];
+    [self zs_startMemoryClockTimer];
     [self zs_runMemoryUsageScan];
 }
 
@@ -14211,6 +14409,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     BOOL cycleDone = NO;
     if (self.memoryCyclePhase == 0) {
         NSArray<ZSMemoryUsageGroup *> *groups = zs_memory_scan_step(NULL);
+        [self zs_pushMemoryFeed:zs_memory_scan_current_status()];
         if (groups) {
             self.memoryPendingGroups = groups;
             self.memoryPendingColumns = [NSMutableArray array];
@@ -14251,6 +14450,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     NSUInteger index = self.memoryBuildIndex;
 
     if (index == 0) {
+        [self zs_pushMemoryFeed:@"task_info · host_statistics64 · sysctl"];
         ZSMemorySystemStats stats = zs_collect_memory_system_stats();
         NSArray<ZSMemoryColumnRow *> *rows = zs_memory_system_stat_rows(stats);
         [self zs_storeMemorySnapshotWithStats:stats rows:rows groups:groups];
@@ -14279,9 +14479,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_runMemoryUsageScan {
     __weak typeof(self) weakSelf = self;
+    [self zs_pushMemoryFeed:@"Full scan · VM · IL2CPP · malloc"];
     zs_collect_memory_usage_breakdown(^(NSArray<ZSMemoryUsageGroup *> *groups) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || !strongSelf.memoryFullScreenOpen) return;
+        [strongSelf zs_pushMemoryFeed:@"task_info · host_statistics64 · sysctl"];
         ZSMemorySystemStats stats = zs_collect_memory_system_stats();
         [strongSelf zs_storeMemorySnapshotWithStats:stats rows:zs_memory_system_stat_rows(stats) groups:groups];
         [strongSelf zs_renderMemoryColumnsWithStats:stats groups:groups];
@@ -14399,6 +14601,7 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
 
     CGFloat hairline = 1.0 / MAX(overlay.traitCollection.displayScale, 1.0);
     NSUInteger pageCount = 0;
+    CGRect infoPanelFrame = CGRectZero;
     for (NSArray<NSString *> *titles in zs_memory_page_titles(self.extendedCoverMode)) {
         NSMutableArray<UIView *> *pageColumns = [NSMutableArray arrayWithCapacity:titles.count];
         for (NSString *title in titles) {
@@ -14420,11 +14623,16 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
             [pageView addSubview:column];
             x += frame.size.width;
 
-            if (i + 1 < pageColumns.count) {
+            BOOL hostsInfoPanel = self.extendedCoverMode && pageCount == 0 && pageColumns.count == 1 && [column.accessibilityIdentifier isEqualToString:@"System"];
+            if (i + 1 < pageColumns.count || hostsInfoPanel) {
                 UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(x, 0, hairline, height)];
                 separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
                 separator.userInteractionEnabled = NO;
                 [pageView addSubview:separator];
+            }
+            if (hostsInfoPanel) {
+                CGFloat panelX = x + hairline;
+                infoPanelFrame = CGRectMake(panelX, 0, MAX(pageWidth - rightInset - panelX, 0), height);
             }
         }
         pageCount++;
@@ -14452,6 +14660,27 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
 
     self.memoryPageControl.numberOfPages = pageCount;
     self.memoryPageControl.currentPage = targetPage;
+
+    if (!CGRectIsEmpty(infoPanelFrame)) {
+        self.memoryInfoPanel.hidden = NO;
+        [scrollView bringSubviewToFront:self.memoryInfoPanel];
+        [self zs_layoutMemoryInfoPanelInFrame:infoPanelFrame];
+    } else {
+        self.memoryInfoPanel.hidden = YES;
+    }
+    [self zs_updateMemoryHeaderPieAlpha];
+}
+
+- (void)zs_updateMemoryHeaderPieAlpha {
+    UIScrollView *scrollView = self.memoryFullScreenScrollView;
+    UIView *pie = self.memoryRefreshPieView;
+    if (!pie) return;
+    if (self.memoryInfoPanel.hidden || !scrollView || scrollView.bounds.size.width < 1) {
+        pie.alpha = 1;
+        return;
+    }
+    CGFloat progress = scrollView.contentOffset.x / (scrollView.bounds.size.width * 0.6);
+    pie.alpha = MAX(0, MIN(1, progress));
 }
 
 - (void)zs_memoryPageControlChanged:(UIPageControl *)control {
@@ -15799,6 +16028,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             page = MAX(0, MIN(page, (NSInteger)pageControl.numberOfPages - 1));
             if (pageControl.currentPage != page) pageControl.currentPage = page;
         }
+        [self zs_updateMemoryHeaderPieAlpha];
         return;
     }
     [self zs_fillVisiblePanelSectionsWithHeadroom];

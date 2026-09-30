@@ -1840,6 +1840,7 @@ static NSString *g_topAssetsKindFilter = nil;
 static NSUInteger g_topAssetsKnownLastPage = NSUIntegerMax;
 @class ZSMemoryScanSession;
 static ZSMemoryScanSession *g_memoryScanSession;
+static NSString *g_memoryScanStatus;
 
 void zs_set_memory_top_assets_page(NSUInteger page) {
     if (g_topAssetsPage != page) g_memoryScanSession = nil;
@@ -2900,6 +2901,7 @@ static void zs_memory_scan_process_assets(ZSMemoryScanSession *session) {
     }
 
     const ZSMemoryUsageCategoryDescriptor *descriptor = &kZSMemoryUsageCategoryDescriptors[session.descriptorIndex];
+    g_memoryScanStatus = [NSString stringWithFormat:@"IL2CPP · %s", descriptor->klassName];
     void *klass = mt_class(descriptor->ns, descriptor->klassName, descriptor->assembly);
     NSUInteger count = 0;
     void *array = klass ? zs_resources_find_all_for_class(klass, &count) : NULL;
@@ -3056,6 +3058,7 @@ static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_run_unit(ZSMemoryScanSessio
     NSArray<ZSMemoryUsageGroup *> *groups = nil;
 
     if (session.stage == 0) {
+        g_memoryScanStatus = @"VM regions · mach_vm_region";
         ZSVMWalkTotals totals = session.totals;
         ZSVMWalkCursor cursor = session.vmCursor;
         zs_walk_vm_regions(session.owners, session.cleanFiles, session.mallocTags, session.mallocRegions, &totals, &cursor, session.unbounded ? 0 : kZSMemoryScanVMRegionsPerUnit);
@@ -3068,6 +3071,7 @@ static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_run_unit(ZSMemoryScanSessio
     } else if (session.stage == 1) {
         zs_memory_scan_process_assets(session);
     } else {
+        g_memoryScanStatus = @"Malloc zones · Unity Profiler";
         groups = zs_memory_scan_finalize(session);
     }
 
@@ -3077,6 +3081,11 @@ static NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_run_unit(ZSMemoryScanSessio
 
 void zs_memory_scan_reset(void) {
     g_memoryScanSession = nil;
+    g_memoryScanStatus = nil;
+}
+
+NSString *zs_memory_scan_current_status(void) {
+    return g_memoryScanStatus;
 }
 
 NSArray<ZSMemoryUsageGroup *> *zs_memory_scan_step(NSUInteger *unitsDoneOut) {
