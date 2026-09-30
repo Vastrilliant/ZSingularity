@@ -2375,8 +2375,8 @@ static const NSInteger kZSWheelLoopCopies = 9;
 - (void)setTitles:(NSArray<NSString *> *)titles;
 @end
 
-static const CGFloat kZSSectionIndexRowHeight = 16;
-static const CGFloat kZSSectionIndexVerticalPadding = 6;
+static const CGFloat kZSSectionIndexRowHeight = 12;
+static const CGFloat kZSSectionIndexVerticalPadding = 4;
 
 @implementation ZSSectionIndexView {
     NSArray<NSString *> *_titles;
@@ -2406,7 +2406,7 @@ static const CGFloat kZSSectionIndexVerticalPadding = 6;
         UILabel *label = [[UILabel alloc] init];
         label.text = title;
         label.textAlignment = NSTextAlignmentCenter;
-        label.font = zs_mono_font(10, UIFontWeightSemibold);
+        label.font = zs_mono_font(8, UIFontWeightSemibold);
         label.textColor = [UIColor colorWithWhite:1 alpha:0.5];
         [self addSubview:label];
         [_labels addObject:label];
@@ -2431,7 +2431,7 @@ static const CGFloat kZSSectionIndexVerticalPadding = 6;
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
-    return CGRectContainsPoint(CGRectInset(self.bounds, -6, 0), point);
+    return CGRectContainsPoint(CGRectInset(self.bounds, -8, 0), point);
 }
 
 - (NSInteger)indexForTouch:(UITouch *)touch {
@@ -7147,10 +7147,10 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 
 #pragma mark Panel
 
-static const CGFloat kZSSectionIndexReservedWidth = 26;
-static const CGFloat kZSSectionIndexViewWidth = 22;
-static const CGFloat kZSSectionIndexTrailingInset = 4;
-static const CGFloat kPanelWidth = 346;
+static const CGFloat kZSSectionIndexReservedWidth = 10;
+static const CGFloat kZSSectionIndexViewWidth = 14;
+static const CGFloat kZSSectionIndexTrailingInset = 3;
+static const CGFloat kPanelWidth = 330;
 static const CGFloat kPanelPadding = 16;
 
 static const CGFloat kRowSpacing = 4;
