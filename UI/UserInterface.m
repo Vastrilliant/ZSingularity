@@ -13,6 +13,7 @@
 #import "ZTweakLog.h"
 #import "Mods.h"
 #import "Transcoder.h"
+#import "ZSLowRes.h"
 #import "PatchManifestNetwork.h"
 #import "ZSVersion.h"
 #import "ZSUpdater.h"
@@ -2849,6 +2850,10 @@ static ZSRow *zs_make_button_pair_row(NSString *leftTitle, UIColor *leftTint,
 static const CGFloat kZSGroupedCardRowHeight = 40;
 static const CGFloat kZSGroupedCardHorizontalPadding = 14;
 static const CGFloat kZSGroupedCardCornerRadius = 14;
+
+static __weak UIButton *g_zsLowResScanButton;
+static __weak UIButton *g_zsLowResTranscodeButton;
+static NSTimer *g_zsLowResTimer;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -7905,9 +7910,18 @@ static const CGFloat kContentFadeHeight = 22;
     self.memoryUsageAnalyzeButton = zs_make_grouped_action_button(@"Analyze memory usage", zs_accent_green_color());
     [self.memoryUsageAnalyzeButton addTarget:self action:@selector(memoryUsageAnalyzeTapped:) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *lowResScanButton = zs_make_grouped_action_button(@"LowRes: scan textures", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [lowResScanButton addTarget:self action:@selector(lowResScanTapped:) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *lowResTranscodeButton = zs_make_grouped_action_button(@"LowRes: transcode to Documents/LowRes", zs_accent_green_color());
+    [lowResTranscodeButton addTarget:self action:@selector(lowResTranscodeTapped:) forControlEvents:UIControlEventTouchUpInside];
+    g_zsLowResScanButton = lowResScanButton;
+    g_zsLowResTranscodeButton = lowResTranscodeButton;
+
     UIView *memoryActionsCard = zs_make_grouped_action_card(@[
         memoryCleanupButton,
         self.memoryUsageAnalyzeButton,
+        lowResScanButton,
+        lowResTranscodeButton,
     ]);
     memoryActionsCard.layer.borderWidth = 1;
     memoryActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -9876,6 +9890,57 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         UINotificationFeedbackGenerator *doneHaptic = [UINotificationFeedbackGenerator new];
         [doneHaptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     });
+}
+
+- (void)lowResScanTapped:(UIButton *)sender {
+    [self zs_lowResToggleWithMode:ZSLowResModeScan];
+}
+
+- (void)lowResTranscodeTapped:(UIButton *)sender {
+    [self zs_lowResToggleWithMode:ZSLowResModeTranscode];
+}
+
+- (void)zs_lowResToggleWithMode:(ZSLowResMode)mode {
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    ZSLowRes *lowRes = ZSLowRes.shared;
+    if ([lowRes status].running) {
+        [lowRes cancel];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    BOOL started = [lowRes startWithMode:mode completion:^(ZSLowResStatus status) {
+        [weakSelf zs_lowResFinishedWithMode:mode];
+    }];
+    if (!started) return;
+    [g_zsLowResTimer invalidate];
+    g_zsLowResTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+        ZSLowRes *current = ZSLowRes.shared;
+        ZSLowResStatus st = [current status];
+        if (!st.running) {
+            [timer invalidate];
+            g_zsLowResTimer = nil;
+            return;
+        }
+        NSString *line = [current statusLine];
+        [g_zsLowResScanButton setTitle:st.mode == ZSLowResModeScan ? line : @"LowRes: scan textures" forState:UIControlStateNormal];
+        [g_zsLowResTranscodeButton setTitle:st.mode == ZSLowResModeTranscode ? line : @"LowRes: transcode to Documents/LowRes" forState:UIControlStateNormal];
+    }];
+}
+
+- (void)zs_lowResFinishedWithMode:(ZSLowResMode)mode {
+    [g_zsLowResTimer invalidate];
+    g_zsLowResTimer = nil;
+    [g_zsLowResScanButton setTitle:@"LowRes: scan textures" forState:UIControlStateNormal];
+    [g_zsLowResTranscodeButton setTitle:@"LowRes: transcode to Documents/LowRes" forState:UIControlStateNormal];
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:mode == ZSLowResModeScan ? @"LowRes scan" : @"LowRes transcode"
+                                                                   message:[ZSLowRes.shared summary]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)dumpIL2CPPMethodsTapped {
