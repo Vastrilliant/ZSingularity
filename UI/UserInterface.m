@@ -7970,6 +7970,12 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *overrideTutorialRow = zs_make_switch_row(@"Override tutorial completion", zs_tutorial_override_completion_enabled());
     [overrideTutorialRow.toggle addTarget:self action:@selector(overrideTutorialCompletionChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *checkCIBuildsRow = zs_make_switch_row(@"Enable nightly builds", zs_update_uses_nightly_releases());
+    [checkCIBuildsRow.toggle addTarget:self action:@selector(nightlyReleasesEnabledChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *experimentalEnabledRow = zs_make_switch_row(@"Enable Experimental Settings", g_experimentalSettingsEnabled);
+    [experimentalEnabledRow.toggle addTarget:self action:@selector(experimentalSettingsEnabledChanged:) forControlEvents:UIControlEventValueChanged];
+
     UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     zs_attach_tap_to_confirm(dumpIL2CPPMethodsButton, self,
         @"Dump IL2CPP Methods?", @"This enumerates every loaded assembly, class, method, field, and property and writes the dump to Documents. It may take a while.", @"Dump", NO, ^{
@@ -7990,6 +7996,8 @@ static const CGFloat kContentFadeHeight = 22;
 
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         overrideTutorialRow,
+        checkCIBuildsRow,
+        experimentalEnabledRow,
         dumpIL2CPPMethodsButton,
         librarySymlinkButton,
         syslogButton,
@@ -8109,12 +8117,6 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *lz4hcRow = zs_make_switch_row(@"LZ4HC compression on dispatch", ZTranscoderService.isUploadCompressionEnabled);
     [lz4hcRow.toggle addTarget:self action:@selector(lz4hcCompressionChanged:) forControlEvents:UIControlEventValueChanged];
 
-    ZSRow *checkCIBuildsRow = zs_make_switch_row(@"Enable nightly builds", zs_update_uses_nightly_releases());
-    [checkCIBuildsRow.toggle addTarget:self action:@selector(nightlyReleasesEnabledChanged:) forControlEvents:UIControlEventValueChanged];
-
-    ZSRow *experimentalEnabledRow = zs_make_switch_row(@"Enable Experimental Settings", g_experimentalSettingsEnabled);
-    [experimentalEnabledRow.toggle addTarget:self action:@selector(experimentalSettingsEnabledChanged:) forControlEvents:UIControlEventValueChanged];
-
     UIButton *manualIndexButton = zs_make_grouped_action_button(@"Manually Index Files", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [manualIndexButton addTarget:self action:@selector(manuallyIndexFilesTapped) forControlEvents:UIControlEventTouchUpInside];
 
@@ -8143,8 +8145,6 @@ static const CGFloat kContentFadeHeight = 22;
         reencodeFormatRow,
         manifestZeroingRow,
         lz4hcRow,
-        checkCIBuildsRow,
-        experimentalEnabledRow,
         manualIndexButton,
         resetReapplyRow,
         deleteSpecificAssetButton,
@@ -9378,6 +9378,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     ZLog(@"[UserInterface] developer settings %@", enabled ? @"enabled" : @"disabled");
     [self zs_applyDeveloperSectionVisibilityRelayout:YES];
     [self zs_refreshSectionIndex];
+    [self zs_removeDeveloperOnlyPins];
 
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
     [haptic notificationOccurred:enabled ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
@@ -15740,12 +15741,15 @@ static const CGFloat kZSPinMenuBottomPadding = 8;
 static const CGFloat kZSPinMenuCornerRadius = 20;
 
 static NSArray<NSDictionary<NSString *, NSString *> *> *zs_pin_action_catalog(void) {
-    return @[
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *catalog = [NSMutableArray arrayWithObjects:
         @{@"key": kZSPinKeyMemory, @"title": @"Memory Analysis", @"symbol": @"memorychip"},
         @{@"key": kZSPinKeyMemoryCleanup, @"title": @"Memory Cleanup", @"symbol": @"sparkles"},
-        @{@"key": kZSPinKeySyslog, @"title": @"Console Log", @"symbol": @"terminal"},
-        @{@"key": kZSPinKeyReapply, @"title": @"Reapply Settings", @"symbol": @"arrow.clockwise"},
-    ];
+        nil];
+    if (zs_developer_settings_enabled()) {
+        [catalog addObject:@{@"key": kZSPinKeySyslog, @"title": @"Console Log", @"symbol": @"terminal"}];
+    }
+    [catalog addObject:@{@"key": kZSPinKeyReapply, @"title": @"Reapply Settings", @"symbol": @"arrow.clockwise"}];
+    return catalog;
 }
 
 static NSDictionary<NSString *, NSString *> *zs_pin_action_for_key(NSString *key) {
@@ -15802,6 +15806,11 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         self.pinnedActionKeys = keys;
     }
     return self.pinnedActionKeys;
+}
+
+- (void)zs_removeDeveloperOnlyPins {
+    if (zs_developer_settings_enabled()) return;
+    [self zs_removePinnedKey:kZSPinKeySyslog delay:0];
 }
 
 - (void)zs_persistPinnedKeys {
