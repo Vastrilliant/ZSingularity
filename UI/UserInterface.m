@@ -2815,26 +2815,64 @@ static const CGFloat kZSMemoryLegendColumnGap = 18;
 static const CGFloat kZSMemoryMinInnerWidth = 200;
 static const CGFloat kZSMemoryMaxNameWidth = 260;
 static const CGFloat kZSMemoryMaxDetailWidth = 380;
-static const CGFloat kZSMemoryPagedColumnWidthFraction = 0.98;
 
-static CGFloat zs_memory_column_width(NSString *title, CGFloat panelWidth) {
-    static NSDictionary<NSString *, NSNumber *> *fractions;
+static NSArray<NSArray<NSString *> *> *zs_memory_page_titles(BOOL fullScreen) {
+    if (fullScreen) {
+        return @[
+            @[@"System"],
+            @[@"Process footprint by owner", @"Unity allocations by subsystem"],
+            @[@"Malloc zones", @"Malloc attribution"],
+            @[@"Heaviest loaded assets", @"Live object counts"],
+            @[@"Reservations & diagnostics", @"Clean file-backed pages"],
+        ];
+    }
+    return @[
+        @[@"System"],
+        @[@"Process footprint by owner"],
+        @[@"Unity allocations by subsystem"],
+        @[@"Malloc zones"],
+        @[@"Malloc attribution"],
+        @[@"Heaviest loaded assets"],
+        @[@"Live object counts"],
+        @[@"Reservations & diagnostics", @"Clean file-backed pages"],
+    ];
+}
+
+static CGFloat zs_memory_column_fraction(NSString *title, BOOL fullScreen) {
+    static NSDictionary<NSString *, NSNumber *> *fullFractions;
+    static NSDictionary<NSString *, NSNumber *> *partialFractions;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        fractions = @{
-            @"System": @0.5,
-            @"Process footprint by owner": @0.7,
-            @"Malloc zones": @0.7,
-            @"Malloc attribution": @0.8,
-            @"Unity allocations by subsystem": @0.7,
-            @"Reservations & diagnostics": @0.7,
-            @"Live object counts": @0.4,
-            @"Clean file-backed pages": @0.5,
-            @"Heaviest loaded assets": @(kZSMemoryPagedColumnWidthFraction),
+        fullFractions = @{
+            @"System": @1.0,
+            @"Process footprint by owner": @0.5,
+            @"Unity allocations by subsystem": @0.5,
+            @"Malloc zones": @0.4,
+            @"Malloc attribution": @0.6,
+            @"Heaviest loaded assets": @0.7,
+            @"Live object counts": @0.3,
+            @"Reservations & diagnostics": @0.6,
+            @"Clean file-backed pages": @0.4,
+        };
+        partialFractions = @{
+            @"System": @1.0,
+            @"Process footprint by owner": @1.0,
+            @"Unity allocations by subsystem": @1.0,
+            @"Malloc zones": @1.0,
+            @"Malloc attribution": @1.0,
+            @"Heaviest loaded assets": @1.0,
+            @"Live object counts": @1.0,
+            @"Reservations & diagnostics": @0.6,
+            @"Clean file-backed pages": @0.4,
         };
     });
-    CGFloat fraction = title ? fractions[title].doubleValue : 0;
-    return fraction > 0 ? floor(panelWidth * fraction) : 0;
+    if (!title) return 0;
+    return (fullScreen ? fullFractions : partialFractions)[title].doubleValue;
+}
+
+static CGFloat zs_memory_column_width(NSString *title, CGFloat windowWidth, BOOL fullScreen) {
+    CGFloat fraction = zs_memory_column_fraction(title, fullScreen);
+    return fraction > 0 ? floor(windowWidth * fraction) : 0;
 }
 
 static NSMutableDictionary<NSString *, NSNumber *> *g_memorySubtitleShrinkState;
@@ -2877,8 +2915,12 @@ static UIView *zs_build_memory_column(NSString *title,
                                       BOOL compactStats,
                                       CGFloat headerTrailingReserve,
                                       CGFloat fixedColumnWidth,
-                                      CGFloat height) {
+                                      CGFloat height,
+                                      BOOL localPaging,
+                                      NSUInteger *pageInOut,
+                                      NSUInteger *pageCountOut) {
     NSUInteger count = rows.count;
+    if (pageCountOut) *pageCountOut = 1;
     if (count == 0 || height <= 0) return nil;
 
     BOOL hasPillar = fractions.count == count;
@@ -2896,9 +2938,18 @@ static UIView *zs_build_memory_column(NSString *title,
     BOOL previouslyShrunk = [g_memorySubtitleShrinkState[shrinkStateKey] boolValue];
     __block BOOL shrinkSubtitle = NO;
 
+    CGFloat fixedInnerWidth = fixedColumnWidth > 0 ? fixedColumnWidth - kZSMemoryColumnPadding * 2 : 0;
+    NSUInteger minLegendColumns = 1;
+    NSUInteger maxLegendColumns = localPaging ? 1 : 3;
+    if (compactStats) {
+        maxLegendColumns = fixedInnerWidth > 0 ? (NSUInteger)zs_memory_clamp(floor(fixedInnerWidth / 120.0), 1, 6) : 4;
+        minLegendColumns = fixedInnerWidth > 0 ? (NSUInteger)zs_memory_clamp(floor(fixedInnerWidth / 250.0), 1, maxLegendColumns) : 1;
+    }
+    CGFloat minRowHeight = compactStats ? 15 : kZSMemoryMinRowHeight;
+
     __block CGFloat fontSize = compactStats ? 11 : 10;
     __block BOOL twoLine = NO;
-    __block NSUInteger legendColumns = 1;
+    __block NSUInteger legendColumns = minLegendColumns;
     __block CGFloat nameWidth = 0;
     __block CGFloat detailWidth = 0;
     __block CGFloat valueWidth = 0;
@@ -2943,18 +2994,45 @@ static UIView *zs_build_memory_column(NSString *title,
         regionHeight = usableHeight - headerHeight - kZSMemoryHeaderGap;
     };
 
+    NSArray<ZSMemoryColumnRow *> *pageRows = rows;
+    NSArray<NSNumber *> *pageFractions = fractions;
+    NSUInteger layoutCount = count;
+
+    if (localPaging) {
+        measure();
+        NSUInteger capacity = MAX((NSUInteger)floor(MAX(regionHeight, 0) / kZSMemoryMinRowHeight), (NSUInteger)1);
+        if (count > capacity) {
+            NSUInteger totalPages = (count + capacity - 1) / capacity;
+            NSUInteger page = MIN(pageInOut ? *pageInOut : 0, totalPages - 1);
+            NSUInteger start = page * capacity;
+            NSRange range = NSMakeRange(start, MIN(capacity, count - start));
+            pageRows = [rows subarrayWithRange:range];
+            if (hasPillar) {
+                NSArray<NSNumber *> *slice = [fractions subarrayWithRange:range];
+                double sliceTotal = 0;
+                for (NSNumber *fraction in slice) sliceTotal += fraction.doubleValue;
+                NSMutableArray<NSNumber *> *normalized = [NSMutableArray arrayWithCapacity:slice.count];
+                for (NSNumber *fraction in slice) [normalized addObject:@(sliceTotal > 0 ? fraction.doubleValue / sliceTotal : 0)];
+                pageFractions = normalized;
+            }
+            layoutCount = capacity;
+            if (pageInOut) *pageInOut = page;
+            if (pageCountOut) *pageCountOut = totalPages;
+        } else if (pageInOut) {
+            *pageInOut = 0;
+        }
+    }
+
     for (NSInteger pass = 0; pass < 5; pass++) {
         measure();
 
-        NSUInteger nextLegendColumns = legendColumns;
-        if (!compactStats) {
-            while (nextLegendColumns < 3) {
-                NSUInteger perColumn = (count + nextLegendColumns - 1) / nextLegendColumns;
-                if (floor(regionHeight / (CGFloat)perColumn) >= kZSMemoryMinRowHeight) break;
-                nextLegendColumns++;
-            }
+        NSUInteger nextLegendColumns = MAX(legendColumns, minLegendColumns);
+        while (nextLegendColumns < maxLegendColumns) {
+            NSUInteger perColumn = (layoutCount + nextLegendColumns - 1) / nextLegendColumns;
+            if (floor(regionHeight / (CGFloat)perColumn) >= minRowHeight) break;
+            nextLegendColumns++;
         }
-        NSUInteger rowsPerColumn = (count + nextLegendColumns - 1) / nextLegendColumns;
+        NSUInteger rowsPerColumn = (layoutCount + nextLegendColumns - 1) / nextLegendColumns;
         CGFloat availableRow = floor(regionHeight / (CGFloat)rowsPerColumn);
 
         BOOL nextTwoLine = !compactStats && !lockedSingleLine && nextLegendColumns == 1 && availableRow >= kZSMemoryTwoLineThreshold;
@@ -2973,7 +3051,7 @@ static UIView *zs_build_memory_column(NSString *title,
     }
 
     measure();
-    NSUInteger rowsPerColumn = (count + legendColumns - 1) / legendColumns;
+    NSUInteger rowsPerColumn = (layoutCount + legendColumns - 1) / legendColumns;
     if (twoLine && floor(regionHeight / (CGFloat)rowsPerColumn) < 24) {
         twoLine = NO;
         measure();
@@ -2987,6 +3065,7 @@ static UIView *zs_build_memory_column(NSString *title,
     CGFloat columnWidth = innerWidth + kZSMemoryColumnPadding * 2;
     UIView *column = [[UIView alloc] initWithFrame:CGRectMake(0, 0, columnWidth, height)];
     column.backgroundColor = UIColor.clearColor;
+    column.accessibilityIdentifier = title;
 
     CGFloat left = kZSMemoryColumnPadding;
     CGFloat top = kZSMemoryColumnVerticalInset;
@@ -3011,9 +3090,9 @@ static UIView *zs_build_memory_column(NSString *title,
     if (hasPillar) {
         ZSPillarChartView *pillar = [[ZSPillarChartView alloc] initWithFrame:CGRectMake(left, regionTop, kZSMemoryPillarWidth, regionHeight)];
         NSMutableArray<UIColor *> *pillarColors = [NSMutableArray arrayWithCapacity:count];
-        for (ZSMemoryColumnRow *row in rows) [pillarColors addObject:row.color ?: UIColor.grayColor];
+        for (ZSMemoryColumnRow *row in pageRows) [pillarColors addObject:row.color ?: UIColor.grayColor];
         [column addSubview:pillar];
-        [pillar setSegmentsWithFractions:fractions colors:pillarColors];
+        [pillar setSegmentsWithFractions:pageFractions colors:pillarColors];
     }
 
     UIFont *nameFont = zs_mono_font(fontSize, compactStats ? UIFontWeightRegular : UIFontWeightMedium);
@@ -3040,8 +3119,8 @@ static UIView *zs_build_memory_column(NSString *title,
     }
     CGFloat twoLineBlockHeight = lineOneBox + detailLineHeight;
 
-    for (NSUInteger i = 0; i < count; i++) {
-        ZSMemoryColumnRow *row = rows[i];
+    for (NSUInteger i = 0; i < pageRows.count; i++) {
+        ZSMemoryColumnRow *row = pageRows[i];
         NSUInteger legendIndex = i / rowsPerColumn;
         NSUInteger rowIndex = i % rowsPerColumn;
 
@@ -3151,7 +3230,10 @@ static CGRect zs_memory_popup_frame(UIView *overlay, UIView *source, CGSize desi
 
 static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
                                             CGFloat height,
-                                            CGFloat panelWidth,
+                                            CGFloat windowWidth,
+                                            BOOL fullScreen,
+                                            NSUInteger localPage,
+                                            void (^onLocalPageChange)(NSUInteger page),
                                             void (^onPageChange)(NSInteger delta),
                                             void (^onFilterTap)(UIView *source),
                                             void (^onPageTap)(UIView *source)) {
@@ -3191,14 +3273,45 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
         [rows addObject:row];
     }
 
+    BOOL localPaging = !group.pagingEnabled && group.showsChart && onLocalPageChange != nil;
     BOOL showsPaging = group.pagingEnabled && onPageChange != nil;
     BOOL showsFilter = showsPaging && onFilterTap != nil && group.kindOptions.count > 0;
     CGFloat filterWidth = showsFilter ? kZSMemoryPageButtonSize : 0;
     CGFloat controlsWidth = filterWidth + kZSMemoryPageButtonSize * 2 + kZSMemoryPageLabelWidth;
-    CGFloat reserve = showsPaging ? controlsWidth + 10 : 0;
-    CGFloat columnWidth = showsPaging ? floor(panelWidth * kZSMemoryPagedColumnWidthFraction) : zs_memory_column_width(group.title, panelWidth);
-    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, columnWidth, height);
-    if (!column || !showsPaging) return column;
+    CGFloat reserve = (showsPaging || localPaging) ? controlsWidth + 10 : 0;
+    CGFloat columnWidth = zs_memory_column_width(group.title, windowWidth, fullScreen);
+    NSUInteger resolvedPage = localPage;
+    NSUInteger localPageCount = 1;
+    UIView *column = zs_build_memory_column(group.title, group.subtitle, rows, fractions, NO, reserve, columnWidth, height, localPaging, &resolvedPage, &localPageCount);
+    if (!column) return nil;
+
+    if (localPaging) {
+        if (localPageCount <= 1) return column;
+
+        CGFloat lineHeight = ceil(zs_mono_font(12, UIFontWeightSemibold).lineHeight);
+        CGFloat localControlsY = kZSMemoryColumnVerticalInset + floor((lineHeight - kZSMemoryPageButtonSize) / 2.0);
+        CGFloat localControlsX = column.bounds.size.width - kZSMemoryColumnPadding - controlsWidth;
+
+        UIButton *localPrevious = zs_memory_make_page_button(@"chevron.left", resolvedPage > 0, ^{ onLocalPageChange(resolvedPage - 1); });
+        localPrevious.frame = CGRectMake(localControlsX, localControlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
+        [column addSubview:localPrevious];
+
+        UILabel *localLabel = [[UILabel alloc] initWithFrame:CGRectMake(localControlsX + kZSMemoryPageButtonSize, localControlsY, kZSMemoryPageLabelWidth, kZSMemoryPageButtonSize)];
+        localLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)(resolvedPage + 1), (unsigned long)localPageCount];
+        localLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+        localLabel.font = zs_mono_font(10, UIFontWeightMedium);
+        localLabel.textAlignment = NSTextAlignmentCenter;
+        localLabel.adjustsFontSizeToFitWidth = YES;
+        localLabel.minimumScaleFactor = 0.6;
+        [column addSubview:localLabel];
+
+        UIButton *localNext = zs_memory_make_page_button(@"chevron.right", resolvedPage + 1 < localPageCount, ^{ onLocalPageChange(resolvedPage + 1); });
+        localNext.frame = CGRectMake(localControlsX + kZSMemoryPageButtonSize + kZSMemoryPageLabelWidth, localControlsY, kZSMemoryPageButtonSize, kZSMemoryPageButtonSize);
+        [column addSubview:localNext];
+        return column;
+    }
+
+    if (!showsPaging) return column;
 
     CGFloat titleLineHeight = ceil(zs_mono_font(12, UIFontWeightSemibold).lineHeight);
     CGFloat controlsY = kZSMemoryColumnVerticalInset + floor((titleLineHeight - kZSMemoryPageButtonSize) / 2.0);
@@ -3243,42 +3356,72 @@ static UIView *zs_build_memory_group_column(ZSMemoryUsageGroup *group,
     return column;
 }
 
+static NSString *zs_memory_count_string(int64_t value) {
+    if (value >= 1000000000) return [NSString stringWithFormat:@"%.2fB", (double)value / 1e9];
+    if (value >= 1000000) return [NSString stringWithFormat:@"%.2fM", (double)value / 1e6];
+    if (value >= 1000) return [NSString stringWithFormat:@"%.1fK", (double)value / 1e3];
+    return [NSString stringWithFormat:@"%lld", (long long)value];
+}
+
 static NSArray<ZSMemoryColumnRow *> *zs_memory_system_stat_rows(ZSMemorySystemStats stats) {
     NSByteCountFormatter *formatter = [NSByteCountFormatter new];
     formatter.countStyle = NSByteCountFormatterCountStyleMemory;
 
-    NSString *residentText = [formatter stringFromByteCount:(long long)MAX(0, stats.residentBytes)];
-    NSString *peakText = stats.peakResidentBytes > 0 ? [formatter stringFromByteCount:(long long)stats.peakResidentBytes] : @"Unknown";
-    NSString *availableText = stats.availableBytes > 0 ? [formatter stringFromByteCount:(long long)stats.availableBytes] : @"Unknown";
-    NSString *limitText = stats.memoryLimitApproxBytes > 0 ? [formatter stringFromByteCount:(long long)stats.memoryLimitApproxBytes] : @"Unknown";
-    NSString *compressedText = stats.compressedBytes > 0 ? [formatter stringFromByteCount:(long long)stats.compressedBytes] : @"None";
-    NSString *dirtyResidentText = stats.internalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.internalBytes] : @"Unknown";
-    NSString *cleanMappedText = stats.externalBytes > 0 ? [formatter stringFromByteCount:(long long)stats.externalBytes] : @"None";
-    NSString *virtualText = stats.virtualBytes > 0 ? [formatter stringFromByteCount:(long long)stats.virtualBytes] : @"Unknown";
-    NSString *systemFreeText = stats.systemFreeBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemFreeBytes] : @"Unknown";
-    NSString *systemActiveText = stats.systemActiveBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemActiveBytes] : @"Unknown";
-    NSString *systemWiredText = stats.systemWiredBytes > 0 ? [formatter stringFromByteCount:(long long)stats.systemWiredBytes] : @"Unknown";
-    NSString *deviceTotalText = [formatter stringFromByteCount:(long long)MAX(0, stats.deviceTotalBytes)];
+    NSString *(^bytes)(int64_t, NSString *) = ^NSString *(int64_t value, NSString *fallback) {
+        return value > 0 ? [formatter stringFromByteCount:(long long)value] : fallback;
+    };
+    NSString *(^count)(int64_t) = ^NSString *(int64_t value) {
+        return value > 0 ? zs_memory_count_string(value) : @"0";
+    };
+
+    NSString *limitUsedText = stats.memoryLimitApproxBytes > 0
+        ? [NSString stringWithFormat:@"%.1f%%", (double)MAX(0, stats.residentBytes) / (double)stats.memoryLimitApproxBytes * 100.0]
+        : @"Unknown";
     NSString *pressureText = stats.pressureLabel ? [NSString stringWithUTF8String:stats.pressureLabel] : @"Unknown";
-    NSString *increasedMemoryLimitText = stats.hasIncreasedMemoryLimitEntitlement ? @"Yes" : @"No";
-    NSString *extendedVirtualAddressingText = stats.hasExtendedVirtualAddressingEntitlement ? @"Yes" : @"No";
+    NSString *ratioText = stats.compressionRatio > 0 ? [NSString stringWithFormat:@"%.2fx", stats.compressionRatio] : @"None";
+    NSString *freeLevelText = stats.freeLevelPercent > 0 ? [NSString stringWithFormat:@"%lld%%", (long long)stats.freeLevelPercent] : @"Unknown";
 
     NSArray<NSArray<NSString *> *> *pairs = @[
-        @[@"kernel.increased-memory-limit", increasedMemoryLimitText],
-        @[@"kernel.extended-virtual-addressing", extendedVirtualAddressingText],
-        @[@"Footprint", residentText],
-        @[@"Peak memory used", peakText],
-        @[@"Available memory", availableText],
-        @[@"Approx. memory limit", limitText],
-        @[@"Dirty resident", dirtyResidentText],
-        @[@"Compressed", compressedText],
-        @[@"Clean file-backed", cleanMappedText],
-        @[@"Virtual address space", virtualText],
-        @[@"System free", systemFreeText],
-        @[@"System active", systemActiveText],
-        @[@"System wired", systemWiredText],
-        @[@"Device memory", deviceTotalText],
-        @[@"Memory pressure", pressureText],
+        @[@"Footprint", bytes(MAX(0, stats.residentBytes), @"Unknown")],
+        @[@"Peak footprint", bytes(stats.peakFootprintBytes, @"Unknown")],
+        @[@"Resident", bytes(stats.residentSizeBytes, @"Unknown")],
+        @[@"Peak resident", bytes(stats.peakResidentBytes, @"Unknown")],
+        @[@"Dirty", bytes(stats.internalBytes, @"Unknown")],
+        @[@"Clean mapped", bytes(stats.externalBytes, @"None")],
+        @[@"Compressed", bytes(stats.compressedBytes, @"None")],
+        @[@"Comp. peak", bytes(stats.compressedPeakBytes, @"None")],
+        @[@"Comp. lifetime", bytes(stats.compressedLifetimeBytes, @"None")],
+        @[@"Reusable", bytes(stats.reusableBytes, @"None")],
+        @[@"Purgeable", bytes(stats.purgeableVolatileBytes, @"None")],
+        @[@"IOKit/GPU", bytes(stats.deviceMappedBytes, @"None")],
+        @[@"Virtual", bytes(stats.virtualBytes, @"Unknown")],
+        @[@"VM regions", count(stats.regionCount)],
+        @[@"Page size", bytes(stats.pageSizeBytes, @"Unknown")],
+        @[@"Available", bytes(stats.availableBytes, @"Unknown")],
+        @[@"Limit ≈", bytes(stats.memoryLimitApproxBytes, @"Unknown")],
+        @[@"Limit used", limitUsedText],
+        @[@"Pressure", pressureText],
+        @[@"Incr. limit", stats.hasIncreasedMemoryLimitEntitlement ? @"Yes" : @"No"],
+        @[@"Ext. VA", stats.hasExtendedVirtualAddressingEntitlement ? @"Yes" : @"No"],
+        @[@"Device RAM", bytes(MAX(0, stats.deviceTotalBytes), @"Unknown")],
+        @[@"Free", bytes(stats.systemFreeBytes, @"Unknown")],
+        @[@"Free level", freeLevelText],
+        @[@"Active", bytes(stats.systemActiveBytes, @"Unknown")],
+        @[@"Inactive", bytes(stats.systemInactiveBytes, @"Unknown")],
+        @[@"Wired", bytes(stats.systemWiredBytes, @"Unknown")],
+        @[@"Speculative", bytes(stats.systemSpeculativeBytes, @"None")],
+        @[@"Sys purgeable", bytes(stats.systemPurgeableBytes, @"None")],
+        @[@"Sys file-backed", bytes(stats.systemFileBackedBytes, @"None")],
+        @[@"Sys anonymous", bytes(stats.systemAnonymousBytes, @"None")],
+        @[@"Compressor", bytes(stats.systemCompressorBytes, @"None")],
+        @[@"Comp. ratio", ratioText],
+        @[@"Page-ins", count(stats.pageIns)],
+        @[@"Page-outs", count(stats.pageOuts)],
+        @[@"Faults", count(stats.faults)],
+        @[@"COW faults", count(stats.cowFaults)],
+        @[@"Zero-fills", count(stats.zeroFills)],
+        @[@"Compressions", count(stats.compressions)],
+        @[@"Decompress.", count(stats.decompressions)],
     ];
 
     NSMutableArray<ZSMemoryColumnRow *> *rows = [NSMutableArray arrayWithCapacity:pairs.count];
@@ -3323,6 +3466,29 @@ static NSDictionary *zs_memchart_export_document(ZSMemorySystemStats stats,
         @"compressedBytes": @(stats.compressedBytes),
         @"cleanFileBackedBytes": @(stats.externalBytes),
         @"reusableBytes": @(stats.reusableBytes),
+        @"residentBytes": @(stats.residentSizeBytes),
+        @"peakFootprintBytes": @(stats.peakFootprintBytes),
+        @"compressedPeakBytes": @(stats.compressedPeakBytes),
+        @"compressedLifetimeBytes": @(stats.compressedLifetimeBytes),
+        @"purgeableVolatileBytes": @(stats.purgeableVolatileBytes),
+        @"deviceMappedBytes": @(stats.deviceMappedBytes),
+        @"vmRegionCount": @(stats.regionCount),
+        @"pageSizeBytes": @(stats.pageSizeBytes),
+        @"systemInactiveBytes": @(stats.systemInactiveBytes),
+        @"systemSpeculativeBytes": @(stats.systemSpeculativeBytes),
+        @"systemPurgeableBytes": @(stats.systemPurgeableBytes),
+        @"systemFileBackedBytes": @(stats.systemFileBackedBytes),
+        @"systemAnonymousBytes": @(stats.systemAnonymousBytes),
+        @"systemCompressorBytes": @(stats.systemCompressorBytes),
+        @"compressionRatio": @(stats.compressionRatio),
+        @"freeLevelPercent": @(stats.freeLevelPercent),
+        @"pageIns": @(stats.pageIns),
+        @"pageOuts": @(stats.pageOuts),
+        @"faults": @(stats.faults),
+        @"cowFaults": @(stats.cowFaults),
+        @"zeroFills": @(stats.zeroFills),
+        @"compressions": @(stats.compressions),
+        @"decompressions": @(stats.decompressions),
         @"virtualAddressSpaceBytes": @(stats.virtualBytes),
         @"systemFreeBytes": @(stats.systemFreeBytes),
         @"systemActiveBytes": @(stats.systemActiveBytes),
@@ -4900,6 +5066,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) NSUInteger memoryNumpadCurrentPage;
 @property (nonatomic, strong) UILabel *memoryNumpadDisplayLabel;
 @property (nonatomic, strong) UIButton *memoryExportButton;
+@property (nonatomic, strong) UIPageControl *memoryPageControl;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *memoryLocalPages;
 @property (nonatomic, assign) NSUInteger memoryCyclePhase;
 @property (nonatomic, assign) NSUInteger memoryCycleUnitsDone;
 @property (nonatomic, assign) NSUInteger memoryCycleUnitEstimate;
@@ -6681,6 +6849,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memoryRefreshPieTrackLayer = nil;
     self.memoryCloseButtonLeadingConstraint = nil;
     self.memoryExportButton = nil;
+    self.memoryPageControl = nil;
+    self.memoryLocalPages = nil;
     self.memoryPendingGroups = nil;
     self.memoryPendingColumns = nil;
     self.memorySnapshotSystemRows = nil;
@@ -13361,6 +13531,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryFullScreenOpen = NO;
     self.memoryPendingGroups = nil;
     self.memoryPendingColumns = nil;
+    self.memoryLocalPages = nil;
     self.memoryCyclePhase = 0;
     self.memoryCycleUnitsDone = 0;
     self.memoryCycleStart = 0;
@@ -13418,6 +13589,19 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:statusLabel];
     self.memoryFullScreenStatusLabel = statusLabel;
 
+    UIPageControl *pageControl = [[UIPageControl alloc] init];
+    pageControl.translatesAutoresizingMaskIntoConstraints = NO;
+    pageControl.numberOfPages = 1;
+    pageControl.currentPage = 0;
+    pageControl.hidesForSinglePage = YES;
+    pageControl.pageIndicatorTintColor = [UIColor colorWithWhite:1 alpha:0.28];
+    pageControl.currentPageIndicatorTintColor = [UIColor colorWithWhite:1 alpha:0.92];
+    [pageControl setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [pageControl setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [pageControl addTarget:self action:@selector(zs_memoryPageControlChanged:) forControlEvents:UIControlEventValueChanged];
+    [overlay addSubview:pageControl];
+    self.memoryPageControl = pageControl;
+
     UIView *pieView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 30, 30)];
     pieView.translatesAutoresizingMaskIntoConstraints = NO;
     pieView.userInteractionEnabled = NO;
@@ -13453,8 +13637,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     scrollView.alwaysBounceVertical = NO;
     scrollView.alwaysBounceHorizontal = NO;
     scrollView.directionalLockEnabled = YES;
+    scrollView.pagingEnabled = YES;
+    scrollView.delegate = self;
     [overlay addSubview:scrollView];
     self.memoryFullScreenScrollView = scrollView;
+
+    NSLayoutConstraint *pageControlLeading = [pageControl.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:8];
+    pageControlLeading.priority = UILayoutPriorityDefaultHigh;
 
     self.memoryCloseButtonLeadingConstraint = [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset];
 
@@ -13475,6 +13664,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [statusLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:titleLabel.trailingAnchor constant:10],
         [statusLabel.trailingAnchor constraintEqualToAnchor:pieView.leadingAnchor constant:-10],
+
+        [pageControl.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [pageControl.trailingAnchor constraintEqualToAnchor:statusLabel.leadingAnchor constant:-8],
+        pageControlLeading,
 
         [pieView.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [pieView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
@@ -14064,7 +14257,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
         self.memoryBuildSkipped = ![self zs_prepareMemoryBuildMetrics];
         if (!self.memoryBuildSkipped) {
-            UIView *systemColumn = zs_build_memory_column(@"System", nil, rows, nil, YES, 0, zs_memory_column_width(@"System", self.memoryBuildPanelWidth), self.memoryBuildHeight);
+            UIView *systemColumn = zs_build_memory_column(@"System", nil, rows, nil, YES, 0, zs_memory_column_width(@"System", self.memoryBuildPanelWidth, self.extendedCoverMode), self.memoryBuildHeight, NO, NULL, NULL);
             if (systemColumn) [self.memoryPendingColumns addObject:systemColumn];
         }
     } else if (!self.memoryBuildSkipped && index - 1 < groups.count) {
@@ -14096,6 +14289,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     });
 }
 
+static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *rightOut) {
+    CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlay.safeAreaInsets.left * 0.15;
+    if (leftOut) *leftOut = MAX(0, logIndent - kZSMemoryColumnPadding);
+    if (rightOut) *rightOut = overlay.safeAreaInsets.right * 0.15;
+}
+
 - (BOOL)zs_prepareMemoryBuildMetrics {
     UIScrollView *scrollView = self.memoryFullScreenScrollView;
     UIView *overlay = self.memoryFullScreenOverlay;
@@ -14113,12 +14312,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     }
     if (height < 80) return NO;
 
-    CGFloat panelWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
-    if (self.extendedCoverMode) {
-        panelWidth = MAX(panelWidth - (self.panelWidth > 0 ? self.panelWidth : kPanelWidth), 0);
-    }
+    CGFloat pageWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
+    CGFloat leftInset = 0;
+    CGFloat rightInset = 0;
+    zs_memory_page_insets(overlay, &leftInset, &rightInset);
     self.memoryBuildHeight = height;
-    self.memoryBuildPanelWidth = panelWidth;
+    self.memoryBuildPanelWidth = MAX(pageWidth - leftInset - rightInset, 0);
     return YES;
 }
 
@@ -14133,7 +14332,21 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     void (^onPageTap)(UIView *) = ^(UIView *source) {
         [weakSelf zs_presentMemoryPageNumpadFromView:source group:group];
     };
-    return zs_build_memory_group_column(group, height, panelWidth, onPageChange, onFilterTap, onPageTap);
+    NSString *pageKey = group.title ?: @"";
+    NSUInteger localPage = [self.memoryLocalPages[pageKey] unsignedIntegerValue];
+    void (^onLocalPageChange)(NSUInteger) = ^(NSUInteger page) {
+        [weakSelf zs_setMemoryLocalPage:page forKey:pageKey];
+    };
+    return zs_build_memory_group_column(group, height, panelWidth, self.extendedCoverMode, localPage, onLocalPageChange, onPageChange, onFilterTap, onPageTap);
+}
+
+- (void)zs_setMemoryLocalPage:(NSUInteger)page forKey:(NSString *)key {
+    if (!self.memoryLocalPages) self.memoryLocalPages = [NSMutableDictionary new];
+    self.memoryLocalPages[key] = @(page);
+    self.memoryPendingColumns = nil;
+    NSArray<ZSMemoryUsageGroup *> *groups = self.memorySnapshotGroups;
+    if (!groups) return;
+    [self zs_renderMemoryColumnsWithStats:self.memorySnapshotStats groups:groups];
 }
 
 - (void)zs_renderMemoryColumnsWithStats:(ZSMemorySystemStats)stats groups:(NSArray<ZSMemoryUsageGroup *> *)groups {
@@ -14143,7 +14356,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CGFloat panelWidth = self.memoryBuildPanelWidth;
 
     NSMutableArray<UIView *> *columns = [NSMutableArray array];
-    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, zs_memory_column_width(@"System", panelWidth), height);
+    UIView *statsColumn = zs_build_memory_column(@"System", nil, zs_memory_system_stat_rows(stats), nil, YES, 0, zs_memory_column_width(@"System", panelWidth, self.extendedCoverMode), height, NO, NULL, NULL);
     if (statsColumn) [columns addObject:statsColumn];
 
     NSUInteger groupColumnCount = 0;
@@ -14169,30 +14382,58 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.memoryFullScreenStatusLabel.text = groupColumnCount > 0 ? nil : @"No trackable memory usage found";
 
+    CGFloat pageWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : overlay.bounds.size.width;
+    if (pageWidth < 1) return;
+
+    CGFloat leftInset = 0;
+    CGFloat rightInset = 0;
+    zs_memory_page_insets(overlay, &leftInset, &rightInset);
+
+    NSMutableDictionary<NSString *, UIView *> *columnsByTitle = [NSMutableDictionary dictionaryWithCapacity:columns.count];
+    for (UIView *column in columns) {
+        if (column.accessibilityIdentifier.length > 0) columnsByTitle[column.accessibilityIdentifier] = column;
+    }
+
     UIView *contentView = [[UIView alloc] init];
     contentView.translatesAutoresizingMaskIntoConstraints = NO;
 
     CGFloat hairline = 1.0 / MAX(overlay.traitCollection.displayScale, 1.0);
-    CGFloat x = MAX(0, logIndent - kZSMemoryColumnPadding);
-    for (NSUInteger i = 0; i < columns.count; i++) {
-        UIView *column = columns[i];
-        CGRect frame = column.frame;
-        frame.origin = CGPointMake(x, 0);
-        column.frame = frame;
-        [contentView addSubview:column];
-        x += frame.size.width;
-
-        if (i + 1 < columns.count) {
-            UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(x, 0, hairline, height)];
-            separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
-            separator.userInteractionEnabled = NO;
-            [contentView addSubview:separator];
-            x += 1;
+    NSUInteger pageCount = 0;
+    for (NSArray<NSString *> *titles in zs_memory_page_titles(self.extendedCoverMode)) {
+        NSMutableArray<UIView *> *pageColumns = [NSMutableArray arrayWithCapacity:titles.count];
+        for (NSString *title in titles) {
+            UIView *column = columnsByTitle[title];
+            if (column) [pageColumns addObject:column];
         }
-    }
-    x += kPanelPadding;
+        if (pageColumns.count == 0) continue;
 
-    CGPoint previousOffset = scrollView.contentOffset;
+        UIView *pageView = [[UIView alloc] initWithFrame:CGRectMake(pageWidth * (CGFloat)pageCount, 0, pageWidth, height)];
+        pageView.backgroundColor = UIColor.clearColor;
+        [contentView addSubview:pageView];
+
+        CGFloat x = leftInset;
+        for (NSUInteger i = 0; i < pageColumns.count; i++) {
+            UIView *column = pageColumns[i];
+            CGRect frame = column.frame;
+            frame.origin = CGPointMake(x, 0);
+            column.frame = frame;
+            [pageView addSubview:column];
+            x += frame.size.width;
+
+            if (i + 1 < pageColumns.count) {
+                UIView *separator = [[UIView alloc] initWithFrame:CGRectMake(x, 0, hairline, height)];
+                separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.16];
+                separator.userInteractionEnabled = NO;
+                [pageView addSubview:separator];
+            }
+        }
+        pageCount++;
+    }
+
+    CGFloat previousPageWidth = scrollView.bounds.size.width > 1 ? scrollView.bounds.size.width : pageWidth;
+    NSInteger previousPage = (NSInteger)llround(scrollView.contentOffset.x / previousPageWidth);
+    NSInteger targetPage = MAX(0, MIN(previousPage, (NSInteger)pageCount - 1));
+
     [self.memoryFullScreenContentView removeFromSuperview];
     [scrollView addSubview:contentView];
     self.memoryFullScreenContentView = contentView;
@@ -14202,13 +14443,21 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [contentView.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
         [contentView.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
         [contentView.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
-        [contentView.widthAnchor constraintEqualToConstant:x],
+        [contentView.widthAnchor constraintEqualToConstant:pageWidth * (CGFloat)MAX(pageCount, (NSUInteger)1)],
         [contentView.heightAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.heightAnchor],
     ]];
 
     [scrollView layoutIfNeeded];
-    CGFloat maxOffsetX = MAX(0, scrollView.contentSize.width - scrollView.bounds.size.width);
-    scrollView.contentOffset = CGPointMake(MIN(previousOffset.x, maxOffsetX), 0);
+    scrollView.contentOffset = CGPointMake(pageWidth * (CGFloat)targetPage, 0);
+
+    self.memoryPageControl.numberOfPages = pageCount;
+    self.memoryPageControl.currentPage = targetPage;
+}
+
+- (void)zs_memoryPageControlChanged:(UIPageControl *)control {
+    UIScrollView *scrollView = self.memoryFullScreenScrollView;
+    if (!scrollView || scrollView.bounds.size.width < 1) return;
+    [scrollView setContentOffset:CGPointMake(scrollView.bounds.size.width * (CGFloat)control.currentPage, 0) animated:YES];
 }
 
 - (void)zs_exportMemchartTapped {
@@ -15542,6 +15791,16 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 static const CGFloat kZSSliderGlassCullMargin = 0;
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if (scrollView == self.memoryFullScreenScrollView) {
+        CGFloat width = scrollView.bounds.size.width;
+        UIPageControl *pageControl = self.memoryPageControl;
+        if (width > 1 && pageControl) {
+            NSInteger page = (NSInteger)llround(scrollView.contentOffset.x / width);
+            page = MAX(0, MIN(page, (NSInteger)pageControl.numberOfPages - 1));
+            if (pageControl.currentPage != page) pageControl.currentPage = page;
+        }
+        return;
+    }
     [self zs_fillVisiblePanelSectionsWithHeadroom];
     [self zs_updateSliderGlassVisibility];
 

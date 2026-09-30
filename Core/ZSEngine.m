@@ -16,6 +16,7 @@
 #import <dlfcn.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <os/proc.h>
+#include <sys/sysctl.h>
 #import <Security/Security.h>
 #import "UnityBundleTools.h"
 #import "Mods.h"
@@ -1832,8 +1833,6 @@ static const ZSMemoryUsageCategoryDescriptor kZSMemoryUsageCategoryDescriptors[]
 };
 
 static const NSUInteger kZSTopAssetsPageSize = 20;
-static const NSUInteger kZSFootprintMaxRows = 11;
-static const NSUInteger kZSUnityMaxRows = 11;
 static const NSUInteger kZSCleanFileMaxRows = 10;
 
 static NSUInteger g_topAssetsPage = 0;
@@ -1913,46 +1912,6 @@ static NSString *zs_memory_residency_detail(ZSMemoryUsageCategory *row) {
         return [NSString stringWithFormat:@"%.0f%% compressed · %lu regions", compressedShare, (unsigned long)row.objectCount];
     }
     return [NSString stringWithFormat:@"%.0f%% compressed", compressedShare];
-}
-
-static NSArray<ZSMemoryUsageCategory *> *zs_fold_memory_rows(NSArray<ZSMemoryUsageCategory *> *sortedRows,
-                                                             NSUInteger maxRows,
-                                                             double minFraction,
-                                                             BOOL describeResidency) {
-    int64_t total = 0;
-    for (ZSMemoryUsageCategory *row in sortedRows) total += row.totalBytes;
-    if (total <= 0) return sortedRows;
-
-    NSMutableArray<ZSMemoryUsageCategory *> *kept = [NSMutableArray new];
-    ZSMemoryUsageCategory *other = nil;
-    NSUInteger otherItems = 0;
-
-    NSUInteger passCount = 0;
-    while (passCount < sortedRows.count && (double)sortedRows[passCount].totalBytes >= (double)total * minFraction) passCount++;
-    NSUInteger keepCount = sortedRows.count;
-    if (passCount < sortedRows.count || sortedRows.count > maxRows) keepCount = MIN(passCount, maxRows - 1);
-
-    for (NSUInteger i = 0; i < sortedRows.count; i++) {
-        ZSMemoryUsageCategory *row = sortedRows[i];
-        BOOL keep = i < keepCount;
-        if (keep) {
-            [kept addObject:row];
-            continue;
-        }
-        if (!other) other = [ZSMemoryUsageCategory new];
-        other.totalBytes += row.totalBytes;
-        other.residentBytes += row.residentBytes;
-        other.compressedBytes += row.compressedBytes;
-        other.objectCount += row.objectCount;
-        otherItems++;
-    }
-
-    if (other) {
-        other.name = [NSString stringWithFormat:@"Other (%lu smaller items)", (unsigned long)otherItems];
-        if (describeResidency) other.detail = zs_memory_residency_detail(other);
-        [kept addObject:other];
-    }
-    return kept;
 }
 
 static void zs_sort_memory_rows_descending(NSMutableArray<ZSMemoryUsageCategory *> *rows) {
@@ -2519,14 +2478,12 @@ static ZSMemoryUsageGroup *zs_build_footprint_group(NSDictionary<NSString *, ZSM
     }
 
     zs_sort_memory_rows_descending(rows);
-    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSFootprintMaxRows, 0.004, YES);
-
     NSString *subtitle = [NSString stringWithFormat:@"Footprint %@ · dirty %@ · compressed %@ · %lld regions",
                           zs_memory_bytes_string(footprint),
                           zs_memory_bytes_string(totals->dirtyTotal),
                           zs_memory_bytes_string(totals->swappedTotal),
                           (long long)totals->regionCount];
-    return zs_make_memory_group(@"Process footprint by owner", subtitle, YES, folded);
+    return zs_make_memory_group(@"Process footprint by owner", subtitle, YES, rows);
 }
 
 static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const ZSUnityMemoryFacts *facts) {
@@ -2562,14 +2519,12 @@ static ZSMemoryUsageGroup *zs_build_unity_group(ZSAssetScanResult *scan, const Z
     }
 
     zs_sort_memory_rows_descending(rows);
-    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, kZSUnityMaxRows, 0, NO);
-
     NSString *subtitle = @"Logical sizes reported by Unity, not physical pages";
     if (facts->hasAllocated && facts->hasReserved) {
         subtitle = [NSString stringWithFormat:@"Allocated %@ · reserved %@ · logical sizes reported by Unity",
                     zs_memory_bytes_string(facts->allocated), zs_memory_bytes_string(facts->reserved)];
     }
-    return zs_make_memory_group(@"Unity allocations by subsystem", subtitle, YES, folded);
+    return zs_make_memory_group(@"Unity allocations by subsystem", subtitle, YES, rows);
 }
 
 static ZSMemoryUsageGroup *zs_build_top_assets_group(ZSAssetScanResult *scan) {
@@ -2742,20 +2697,13 @@ static ZSMemoryUsageGroup *zs_build_malloc_zones_group(NSMutableArray<ZSMemoryUs
                                            @"Held by the allocator, not handed out")];
     }
     zs_sort_memory_rows_descending(rows);
-    NSArray<ZSMemoryUsageCategory *> *folded = zs_fold_memory_rows(rows, 8, 0.004, NO);
-
     NSString *subtitle = [NSString stringWithFormat:@"In use %@ · zones hold %@ · %lld blocks · %lu zones · %.1f ms",
                           zs_memory_bytes_string(zoneTotals->inUse),
                           zs_memory_bytes_string(zoneTotals->held),
                           (long long)zoneTotals->blocks,
                           (unsigned long)zoneTotals->zoneCount,
                           zoneTotals->milliseconds];
-    return zs_make_memory_group(@"Malloc zones", subtitle, YES, folded);
-}
-
-static NSString *zs_malloc_density_string(ZSMemoryUsageCategory *row) {
-    if (row.virtualBytes <= 0) return @"n/a";
-    return [NSString stringWithFormat:@"%.0f%%", (double)row.totalBytes / (double)row.virtualBytes * 100.0];
+    return zs_make_memory_group(@"Malloc zones", subtitle, YES, rows);
 }
 
 static ZSMemoryUsageGroup *zs_build_malloc_attribution_group(NSDictionary<NSString *, ZSMemoryUsageCategory *> *mallocTags,
@@ -2768,52 +2716,48 @@ static ZSMemoryUsageGroup *zs_build_malloc_attribution_group(NSDictionary<NSStri
     int64_t mallocFootprint = totals->mallocDirty + totals->mallocSwapped;
     [rows addObject:zs_make_memory_row(@"Malloc footprint (VM regions)",
                                        mallocFootprint,
-                                       [NSString stringWithFormat:@"dirty %@ · compressed %@",
+                                       [NSString stringWithFormat:@"dirty %@ · comp. %@",
                                         zs_memory_bytes_string(totals->mallocDirty),
                                         zs_memory_bytes_string(totals->mallocSwapped)])];
 
     [rows addObject:zs_make_memory_row(@"Malloc in use (zones)",
                                        zoneTotals->inUse,
-                                       [NSString stringWithFormat:@"%lld live blocks", (long long)zoneTotals->blocks])];
+                                       [NSString stringWithFormat:@"%lld blocks", (long long)zoneTotals->blocks])];
 
     int64_t retained = mallocFootprint - zoneTotals->inUse;
     if (retained > 0) {
         [rows addObject:zs_make_memory_row(@"Retained free memory",
                                            retained,
-                                           @"Footprint beyond live blocks · freed but not returned to the OS")];
+                                           @"Freed, not returned to OS")];
     }
 
     if (facts->hasAllocated && facts->allocated > 0) {
         [rows addObject:zs_make_memory_row(@"Unity allocated (logical)",
                                            facts->allocated,
-                                           @"Includes GPU-side assets that never touch Malloc")];
+                                           @"Includes GPU-side assets")];
         int64_t outside = zoneTotals->inUse - facts->allocated;
         [rows addObject:zs_make_memory_row(@"Outside Unity (lower bound)",
                                            MAX(outside, (int64_t)0),
                                            outside > 0
-                                               ? @"Live Malloc blocks beyond everything Unity reports"
-                                               : @"No Malloc excess provable from Unity's own totals")];
+                                               ? @"Live blocks beyond Unity's total"
+                                               : @"No excess provable")];
     }
 
     NSMutableArray<ZSMemoryUsageCategory *> *tagRows = [mallocTags.allValues mutableCopy];
     zs_sort_memory_rows_descending(tagRows);
     for (ZSMemoryUsageCategory *tag in tagRows) {
-        int64_t average = tag.objectCount > 0 ? tag.totalBytes / (int64_t)tag.objectCount : 0;
         [rows addObject:zs_make_memory_row([@"VM: " stringByAppendingString:tag.name],
                                            tag.totalBytes,
-                                           [NSString stringWithFormat:@"dirty %@ · compressed %@ · span %@ · density %@ · %lu regions · avg %@",
+                                           [NSString stringWithFormat:@"dirty %@ · comp. %@ · span %@",
                                             zs_memory_bytes_string(tag.residentBytes),
                                             zs_memory_bytes_string(tag.compressedBytes),
-                                            zs_memory_bytes_string(tag.virtualBytes),
-                                            zs_malloc_density_string(tag),
-                                            (unsigned long)tag.objectCount,
-                                            zs_memory_bytes_string(average)])];
+                                            zs_memory_bytes_string(tag.virtualBytes)])];
     }
 
     for (ZSMemoryUsageCategory *region in mallocRegions) {
         [rows addObject:zs_make_memory_row([@"Region: " stringByAppendingString:region.name],
                                            region.totalBytes,
-                                           [NSString stringWithFormat:@"dirty %@ · compressed %@ · span %@",
+                                           [NSString stringWithFormat:@"dirty %@ · comp. %@ · span %@",
                                             zs_memory_bytes_string(region.residentBytes),
                                             zs_memory_bytes_string(region.compressedBytes),
                                             zs_memory_bytes_string(region.virtualBytes)])];
@@ -3214,6 +3158,14 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
         stats.externalBytes = (int64_t)info.external;
         stats.reusableBytes = (int64_t)info.reusable;
         stats.virtualBytes = (int64_t)info.virtual_size;
+        stats.residentSizeBytes = (int64_t)info.resident_size;
+        stats.peakFootprintBytes = (int64_t)info.ledger_phys_footprint_peak;
+        stats.compressedPeakBytes = (int64_t)info.compressed_peak;
+        stats.compressedLifetimeBytes = (int64_t)info.compressed_lifetime;
+        stats.deviceMappedBytes = (int64_t)info.device;
+        stats.purgeableVolatileBytes = (int64_t)info.purgeable_volatile_resident;
+        stats.regionCount = (int64_t)info.region_count;
+        stats.pageSizeBytes = (int64_t)info.page_size;
     }
 
     stats.deviceTotalBytes = (int64_t)NSProcessInfo.processInfo.physicalMemory;
@@ -3237,6 +3189,28 @@ ZSMemorySystemStats zs_collect_memory_system_stats(void) {
         stats.systemFreeBytes = (int64_t)vmStats.free_count * (int64_t)pageSize;
         stats.systemActiveBytes = (int64_t)vmStats.active_count * (int64_t)pageSize;
         stats.systemWiredBytes = (int64_t)vmStats.wire_count * (int64_t)pageSize;
+        stats.systemInactiveBytes = (int64_t)vmStats.inactive_count * (int64_t)pageSize;
+        stats.systemSpeculativeBytes = (int64_t)vmStats.speculative_count * (int64_t)pageSize;
+        stats.systemPurgeableBytes = (int64_t)vmStats.purgeable_count * (int64_t)pageSize;
+        stats.systemFileBackedBytes = (int64_t)vmStats.external_page_count * (int64_t)pageSize;
+        stats.systemAnonymousBytes = (int64_t)vmStats.internal_page_count * (int64_t)pageSize;
+        stats.systemCompressorBytes = (int64_t)vmStats.compressor_page_count * (int64_t)pageSize;
+        if (vmStats.compressor_page_count > 0) {
+            stats.compressionRatio = (double)vmStats.total_uncompressed_pages_in_compressor / (double)vmStats.compressor_page_count;
+        }
+        stats.pageIns = (int64_t)vmStats.pageins;
+        stats.pageOuts = (int64_t)vmStats.pageouts;
+        stats.faults = (int64_t)vmStats.faults;
+        stats.cowFaults = (int64_t)vmStats.cow_faults;
+        stats.zeroFills = (int64_t)vmStats.zero_fill_count;
+        stats.compressions = (int64_t)vmStats.compressions;
+        stats.decompressions = (int64_t)vmStats.decompressions;
+    }
+
+    int freeLevel = 0;
+    size_t freeLevelSize = sizeof(freeLevel);
+    if (sysctlbyname("kern.memorystatus_level", &freeLevel, &freeLevelSize, NULL, 0) == 0) {
+        stats.freeLevelPercent = freeLevel;
     }
 
     if (stats.availableBytes <= 0) {
