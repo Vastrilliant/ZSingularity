@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <math.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,11 @@
 #define ZSLR_BLOCK_SIZE 131072u
 #define ZSLR_FORMAT_ASTC_6x6 50
 #define ZSLR_FORMAT_ASTC_8x8 51
+
+#define ZSLR_LOG(label, fmt, ...) ZLog(@"[LowRes] %s: " fmt, (label), ##__VA_ARGS__)
+#define ZSLR_MB(bytes) ((unsigned long long)((bytes) / (1024ull * 1024ull)))
+#define ZSLR_MS(since) ((CACurrentMediaTime() - (since)) * 1000.0)
+#define ZSLR_WHY(...) do { if (why && whyLen) snprintf(why, whyLen, __VA_ARGS__); } while (0)
 
 typedef struct {
     uint32_t compressedSize;
@@ -120,7 +126,7 @@ typedef struct {
     void *user;
     int (*reserve)(void *user, uint64_t workingSetBytes);
     int (*tick)(void *user);
-    int (*transcode)(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen);
+    int (*transcode)(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen);
 } ZSLRCodec;
 
 typedef struct {
@@ -140,6 +146,9 @@ typedef struct {
     uint64_t newBytes;
     uint64_t workingSetEstimate;
     int wroteOutput;
+    int noStream;
+    const char *stage;
+    const char *outcome;
 } ZSLRResult;
 
 #define ZSLR_OK 0
@@ -148,7 +157,9 @@ typedef struct {
 #define ZSLR_CANCELLED 3
 #define ZSLR_TRANSCODE_REJECTED 1
 
-static int zslr_process_bundle(const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen);
+static int zslr_process_bundle(const char *label, const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen);
+static int64_t zslr_available_memory(void);
+static void zslr_wait_log(const char *what);
 
 static void zslr_seterr(char *err, size_t errLen, const char *fmt, ...) {
     if (!err || errLen == 0) return;
@@ -442,13 +453,17 @@ static int zslr_bundle_read(ZSLRBundle *b, uint64_t offset, size_t length, uint8
 
 static int zslr_bundle_locate(const ZSLRBundle *b, int *serializedIndex, int *streamIndex) {
     int cab = -1;
+    int cabCount = 0;
+    *serializedIndex = -1;
+    *streamIndex = -1;
     for (uint32_t i = 0; i < b->nodeCount; i++) {
         if (b->nodes[i].flags & 4) {
-            if (cab >= 0) return -1;
-            cab = (int)i;
+            cabCount++;
+            if (cab < 0) cab = (int)i;
         }
     }
-    if (cab < 0) return -1;
+    if (cabCount == 0) return -1;
+    if (cabCount > 1) return -2;
     size_t cabLen = strlen(b->nodes[cab].path);
     int res = -1;
     for (uint32_t i = 0; i < b->nodeCount; i++) {
@@ -459,10 +474,9 @@ static int zslr_bundle_locate(const ZSLRBundle *b, int *serializedIndex, int *st
             break;
         }
     }
-    if (res < 0) return -1;
     *serializedIndex = cab;
     *streamIndex = res;
-    return 0;
+    return res < 0 ? 1 : 0;
 }
 
 static uint64_t zslr_astc_size(uint32_t width, uint32_t height, uint32_t blockX, uint32_t blockY) {
@@ -1234,26 +1248,34 @@ done:
     return rc;
 }
 
-static int zslr_process_bundle(const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen) {
+static int zslr_process_bundle(const char *label, const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen) {
     memset(result, 0, sizeof(*result));
+    result->stage = "open";
+    result->outcome = "not evaluated";
     int fd = open(srcPath, O_RDONLY);
     if (fd < 0) {
-        pl_err(err, errLen, "cannot open source");
+        pl_err(err, errLen, "cannot open source (errno %d: %s)", errno, strerror(errno));
         return ZSLR_ERR;
     }
     struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 64) {
+    if (fstat(fd, &st) != 0) {
+        pl_err(err, errLen, "fstat failed (errno %d: %s)", errno, strerror(errno));
         close(fd);
-        pl_err(err, errLen, "source too small");
+        return ZSLR_ERR;
+    }
+    if (st.st_size < 64) {
+        pl_err(err, errLen, "source too small (%lld bytes)", (long long)st.st_size);
+        close(fd);
         return ZSLR_ERR;
     }
     size_t fileSize = (size_t)st.st_size;
     void *map = mmap(NULL, fileSize, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
     if (map == MAP_FAILED) {
-        pl_err(err, errLen, "mmap failed");
+        pl_err(err, errLen, "mmap failed for %zu bytes (errno %d: %s)", fileSize, errno, strerror(errno));
         return ZSLR_ERR;
     }
+    ZSLR_LOG(label, "mapped %llu bytes, parsing container", (unsigned long long)fileSize);
 
     int rc = ZSLR_ERR;
     ZSLRBundle b;
@@ -1271,56 +1293,112 @@ static int zslr_process_bundle(const char *srcPath, const char *outPath, int sca
     uint32_t candCount = 0;
     uint32_t convCount = 0;
     char tmpPath[1024];
+    int si = -1;
+    int ri = -1;
+    double stageStart = CACurrentMediaTime();
 
+    result->stage = "container";
     if (zslr_bundle_open(&b, (const uint8_t *)map, fileSize, err, errLen) != 0) goto done;
     bundleOpen = 1;
-    int si, ri;
-    if (zslr_bundle_locate(&b, &si, &ri) != 0) {
-        pl_err(err, errLen, "no serialized/resS node pair");
+    ZSLR_LOG(label, "container ok: format v%u, unity %s, header flags 0x%x, %u block(s), %u node(s), %llu bytes uncompressed (%.0f ms)",
+             b.formatVersion, b.unityVersion, b.headerFlags, b.blockCount, b.nodeCount, (unsigned long long)b.totalUncompressed, ZSLR_MS(stageStart));
+    for (uint32_t i = 0; i < b.nodeCount && i < 8; i++) {
+        ZSLR_LOG(label, "node %u: %s, %llu bytes, flags 0x%x", i, b.nodes[i].path, (unsigned long long)b.nodes[i].size, b.nodes[i].flags);
+    }
+    if (b.nodeCount > 8) ZSLR_LOG(label, "%u more node(s) not listed", b.nodeCount - 8);
+
+    result->stage = "locate nodes";
+    int loc = zslr_bundle_locate(&b, &si, &ri);
+    if (loc == -1) {
+        pl_err(err, errLen, "no serialized node among %u node(s)", b.nodeCount);
         goto done;
     }
+    if (loc == -2) {
+        pl_err(err, errLen, "more than one serialized node, multi-file bundles are not supported");
+        goto done;
+    }
+    if (loc == 1) {
+        ZSLR_LOG(label, "serialized node %s has no .resS sibling", b.nodes[si].path);
+    } else {
+        ZSLR_LOG(label, "node pair: serialized %s (%llu bytes), stream %s (%llu bytes)", b.nodes[si].path, (unsigned long long)b.nodes[si].size,
+                 b.nodes[ri].path, (unsigned long long)b.nodes[ri].size);
+    }
+
+    result->stage = "read serialized node";
     if (b.nodes[si].size > ZSLR_MAX_CAB_BYTES || b.nodes[si].size < 64) {
-        pl_err(err, errLen, "serialized node size out of range");
+        pl_err(err, errLen, "serialized node size %llu bytes outside allowed range 64..%u", (unsigned long long)b.nodes[si].size, ZSLR_MAX_CAB_BYTES);
         goto done;
     }
     size_t cabLen = (size_t)b.nodes[si].size;
+    stageStart = CACurrentMediaTime();
     cab = (uint8_t *)malloc(cabLen);
-    if (!cab || zslr_bundle_read(&b, b.nodes[si].offset, cabLen, cab) != 0) {
-        pl_err(err, errLen, "cannot read serialized node");
+    if (!cab) {
+        pl_err(err, errLen, "out of memory allocating %zu bytes for serialized node", cabLen);
         goto done;
     }
+    if (zslr_bundle_read(&b, b.nodes[si].offset, cabLen, cab) != 0) {
+        pl_err(err, errLen, "cannot decompress serialized node (offset %llu, %zu bytes)", (unsigned long long)b.nodes[si].offset, cabLen);
+        goto done;
+    }
+    ZSLR_LOG(label, "serialized node read: %zu bytes (%.0f ms)", cabLen, ZSLR_MS(stageStart));
+
+    result->stage = "scan textures";
+    stageStart = CACurrentMediaTime();
     if (zslr_scan_textures(cab, cabLen, &textures, &texCount, &result->parseFailures, err, errLen) != 0) goto done;
     result->texturesTotal = texCount;
+    ZSLR_LOG(label, "scan: %u Texture2D parsed, %u parse failure(s) (%.0f ms)", texCount, result->parseFailures, ZSLR_MS(stageStart));
 
+    if (loc == 1) {
+        uint32_t inlineCount = 0;
+        for (uint32_t i = 0; i < texCount; i++) {
+            if (textures[i].imageDataLength != 0) inlineCount++;
+        }
+        result->noStream = 1;
+        result->outcome = "no .resS node";
+        if (texCount == 0) {
+            ZSLR_LOG(label, "no .resS node and no Texture2D objects, nothing to transcode");
+        } else {
+            ZSLR_LOG(label, "no .resS node: %u Texture2D (%u inline, %u with stream data), nothing to transcode", texCount, inlineCount, texCount - inlineCount);
+        }
+        rc = ZSLR_OK;
+        goto done;
+    }
+
+    result->stage = "select candidates";
     cands = (const ZSLRTexture **)malloc(((size_t)texCount + 1) * sizeof(*cands));
     if (!cands) {
         pl_err(err, errLen, "out of memory");
         goto done;
     }
     uint64_t resSize = b.nodes[ri].size;
+    uint32_t fFormat = 0, fMips = 0, fInline = 0, fDims = 0, fPixels = 0, fSize = 0, fRange = 0, fName = 0, fPath = 0, fOverlap = 0;
     for (uint32_t i = 0; i < texCount; i++) {
         const ZSLRTexture *t = &textures[i];
-        if (t->format != ZSLR_FORMAT_ASTC_6x6 || t->mipCount != 1 || t->imageDataLength != 0) continue;
-        if (t->width == 0 || t->height == 0) continue;
+        if (t->format != ZSLR_FORMAT_ASTC_6x6) { fFormat++; continue; }
+        if (t->mipCount != 1) { fMips++; continue; }
+        if (t->imageDataLength != 0) { fInline++; continue; }
+        if (t->width == 0 || t->height == 0) { fDims++; continue; }
         uint64_t pixels = (uint64_t)t->width * t->height;
-        if (pixels < policy->minPixels || pixels > policy->maxPixels) continue;
+        if (pixels < policy->minPixels || pixels > policy->maxPixels) { fPixels++; continue; }
         uint64_t expected = zslr_astc_size(t->width, t->height, 6, 6);
-        if (t->streamSize != expected || t->completeImageSize != expected) continue;
-        if (t->streamOffset > resSize || t->streamSize > resSize - t->streamOffset) continue;
-        if (t->name[0] && pl_name_blocked(t->name)) continue;
-        if (!pl_path_matches(cab, cabLen, t, b.nodes[ri].path)) continue;
+        if (t->streamSize != expected || t->completeImageSize != expected) { fSize++; continue; }
+        if (t->streamOffset > resSize || t->streamSize > resSize - t->streamOffset) { fRange++; continue; }
+        if (t->name[0] && pl_name_blocked(t->name)) { fName++; continue; }
+        if (!pl_path_matches(cab, cabLen, t, b.nodes[ri].path)) { fPath++; continue; }
         cands[candCount++] = t;
     }
     qsort(cands, candCount, sizeof(*cands), pl_cmp_candidates);
     uint32_t kept = 0;
     uint64_t lastEnd = 0;
     for (uint32_t i = 0; i < candCount; i++) {
-        if (cands[i]->streamOffset < lastEnd) continue;
+        if (cands[i]->streamOffset < lastEnd) { fOverlap++; continue; }
         lastEnd = cands[i]->streamOffset + cands[i]->streamSize;
         cands[kept++] = cands[i];
     }
     candCount = kept;
     result->candidates = candCount;
+    ZSLR_LOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, inline %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u)",
+             candCount, texCount, fFormat, fMips, fInline, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap);
 
     uint64_t peakTexture = 0;
     uint64_t projected = 0;
@@ -1334,20 +1412,40 @@ static int zslr_process_bundle(const char *srcPath, const char *outPath, int sca
     }
     uint64_t resultCap = projected < policy->maxResultBytes ? projected : policy->maxResultBytes;
     result->workingSetEstimate = peakTexture + resultCap + cabLen + ZSLR_COPY_CHUNK;
+    if (candCount > 0) {
+        ZSLR_LOG(label, "projected: %llu -> %llu bytes at 8x8, working set estimate %llu MB", (unsigned long long)result->candidateBytes,
+                 (unsigned long long)projected, ZSLR_MB(result->workingSetEstimate));
+    }
 
     if (scanOnly) {
         result->newBytes = projected;
         result->originalBytes = result->candidateBytes;
+        result->outcome = candCount ? "scanned" : "no candidates";
         rc = ZSLR_OK;
         goto done;
     }
     if (candCount == 0) {
+        result->outcome = "no candidates";
         rc = ZSLR_OK;
         goto done;
     }
-    if (codec->reserve && codec->reserve(codec->user, result->workingSetEstimate) != 0) {
-        rc = ZSLR_DEFERRED;
-        goto done;
+
+    result->stage = "reserve memory";
+    if (codec->reserve) {
+        double reserveStart = CACurrentMediaTime();
+        ZSLR_LOG(label, "reserving %llu MB working set (available %lld MB)", ZSLR_MB(result->workingSetEstimate), (long long)(zslr_available_memory() / (1024 * 1024)));
+        int rr = codec->reserve(codec->user, result->workingSetEstimate);
+        if (rr == 2) {
+            ZSLR_LOG(label, "reserve aborted: cancelled after %.1fs", ZSLR_MS(reserveStart) / 1000.0);
+            rc = ZSLR_CANCELLED;
+            goto done;
+        }
+        if (rr != 0) {
+            ZSLR_LOG(label, "reserve timed out after %.1fs (available %lld MB)", ZSLR_MS(reserveStart) / 1000.0, (long long)(zslr_available_memory() / (1024 * 1024)));
+            rc = ZSLR_DEFERRED;
+            goto done;
+        }
+        ZSLR_LOG(label, "reserve granted after %.1fs", ZSLR_MS(reserveStart) / 1000.0);
     }
 
     conv = (ZSLRConverted *)calloc(candCount, sizeof(*conv));
@@ -1355,32 +1453,50 @@ static int zslr_process_bundle(const char *srcPath, const char *outPath, int sca
         pl_err(err, errLen, "out of memory");
         goto done;
     }
+    result->stage = "transcode";
+    stageStart = CACurrentMediaTime();
+    uint32_t capSkipped = 0;
     uint64_t resultBytes = 0;
     for (uint32_t i = 0; i < candCount; i++) {
         const ZSLRTexture *t = cands[i];
         uint32_t newSize = (uint32_t)zslr_astc_size(t->width, t->height, 8, 8);
-        if (resultBytes + newSize > policy->maxResultBytes) continue;
+        if (resultBytes + newSize > policy->maxResultBytes) {
+            capSkipped++;
+            continue;
+        }
         if (codec->tick && codec->tick(codec->user) != 0) {
+            ZSLR_LOG(label, "cancelled before texture %u/%u", i + 1, candCount);
             rc = ZSLR_CANCELLED;
             goto done;
         }
         free(srcBuf);
         srcBuf = (uint8_t *)malloc(t->streamSize);
         if (!srcBuf || zslr_bundle_read(&b, b.nodes[ri].offset + t->streamOffset, t->streamSize, srcBuf) != 0) {
-            pl_err(err, errLen, "cannot read texture stream");
+            pl_err(err, errLen, "cannot read stream of texture %lld (offset %llu, %u bytes)", (long long)t->pathId, (unsigned long long)t->streamOffset, t->streamSize);
             goto done;
         }
         uint8_t *out = NULL;
         size_t outLen = 0;
-        int tr = codec->transcode(codec->user, srcBuf, t->streamSize, t->width, t->height, t->colorSpace == 1, &out, &outLen);
+        char why[160] = {0};
+        const char *texName = t->name[0] ? t->name : "<unnamed>";
+        double texStart = CACurrentMediaTime();
+        int tr = codec->transcode(codec->user, srcBuf, t->streamSize, t->width, t->height, t->colorSpace == 1, &out, &outLen, why, sizeof(why));
+        if (tr == 0 && out && outLen != newSize) {
+            snprintf(why, sizeof(why), "output size %zu, expected %u", outLen, newSize);
+            tr = -1;
+        }
         if (tr == ZSLR_TRANSCODE_REJECTED) {
             result->rejected++;
             free(out);
+            ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): rejected, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+                     t->width, t->height, why[0] ? why : "quality", ZSLR_MS(texStart));
             continue;
         }
-        if (tr != 0 || !out || outLen != newSize) {
+        if (tr != 0 || !out) {
             free(out);
             result->rejected++;
+            ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): failed, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+                     t->width, t->height, why[0] ? why : "unknown transcode error", ZSLR_MS(texStart));
             continue;
         }
         conv[convCount].texture = (uint32_t)(t - textures);
@@ -1391,17 +1507,26 @@ static int zslr_process_bundle(const char *srcPath, const char *outPath, int sca
         resultBytes += newSize;
         result->originalBytes += t->streamSize;
         result->newBytes += newSize;
+        ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+                 t->width, t->height, t->streamSize, newSize, why, ZSLR_MS(texStart));
+    }
+    if (capSkipped) {
+        ZSLR_LOG(label, "result cap of %llu MB reached, %u texture(s) left unconverted", ZSLR_MB(policy->maxResultBytes), capSkipped);
     }
     result->converted = convCount;
+    ZSLR_LOG(label, "transcode pass done: %u converted, %u rejected or failed (%.1fs)", convCount, result->rejected, ZSLR_MS(stageStart) / 1000.0);
     if (convCount == 0) {
+        result->outcome = "all candidates rejected";
         rc = ZSLR_OK;
         goto done;
     }
 
+    result->stage = "patch serialized node";
     for (uint32_t i = 0; i < convCount; i++) {
         zslr_patch_texture(cab, &textures[conv[i].texture], ZSLR_FORMAT_ASTC_8x8, conv[i].newSize);
     }
 
+    result->stage = "plan rewrite";
     regions = (ZSLRRegion *)calloc((size_t)convCount + 1, sizeof(*regions));
     chunk = (uint8_t *)malloc(ZSLR_COPY_CHUNK);
     if (!regions || !chunk) {
@@ -1424,45 +1549,56 @@ static int zslr_process_bundle(const char *srcPath, const char *outPath, int sca
     }
     qsort(regions, rcount, sizeof(*regions), pl_cmp_regions);
 
+    result->stage = "rewrite bundle";
+    stageStart = CACurrentMediaTime();
     snprintf(tmpPath, sizeof(tmpPath), "%s.scratch", outPath);
     if (zslr_writer_open(&writer, tmpPath) != 0) {
-        pl_err(err, errLen, "cannot open scratch file");
+        pl_err(err, errLen, "cannot open scratch file %s (errno %d: %s)", tmpPath, errno, strerror(errno));
         goto done;
     }
     writerOpen = 1;
+    ZSLR_LOG(label, "rewriting %llu bytes of stream with %u replaced region(s)", (unsigned long long)b.totalUncompressed, rcount);
     uint64_t cursor = 0;
     for (uint32_t i = 0; i < rcount; i++) {
         if (regions[i].absolute < cursor) {
-            pl_err(err, errLen, "overlapping regions");
+            pl_err(err, errLen, "overlapping regions at %llu (cursor %llu)", (unsigned long long)regions[i].absolute, (unsigned long long)cursor);
             goto done;
         }
         if (pl_copy_range(&b, &writer, cursor, regions[i].absolute, chunk) != 0) {
-            pl_err(err, errLen, "gap copy failed");
+            pl_err(err, errLen, "gap copy failed between %llu and %llu", (unsigned long long)cursor, (unsigned long long)regions[i].absolute);
             goto done;
         }
         if (zslr_writer_write(&writer, regions[i].data, regions[i].dataLength) != 0 ||
             zslr_writer_zeros(&writer, regions[i].originalLength - regions[i].dataLength) != 0) {
-            pl_err(err, errLen, "region write failed");
+            pl_err(err, errLen, "region write failed at %llu", (unsigned long long)regions[i].absolute);
             goto done;
         }
         cursor = regions[i].absolute + regions[i].originalLength;
     }
     if (pl_copy_range(&b, &writer, cursor, b.totalUncompressed, chunk) != 0) {
-        pl_err(err, errLen, "tail copy failed");
+        pl_err(err, errLen, "tail copy failed from %llu", (unsigned long long)cursor);
         goto done;
     }
+    ZSLR_LOG(label, "stream rewritten (%.1fs), finalizing container", ZSLR_MS(stageStart) / 1000.0);
+    result->stage = "finalize container";
+    stageStart = CACurrentMediaTime();
     rc = zslr_writer_finish(&writer, &b, outPath, err, errLen);
     writerOpen = 0;
     if (rc != 0) {
         rc = ZSLR_ERR;
         goto done;
     }
+    ZSLR_LOG(label, "container finalized (%.1fs), verifying", ZSLR_MS(stageStart) / 1000.0);
+    result->stage = "verify";
+    stageStart = CACurrentMediaTime();
     if (pl_verify(outPath, conv, convCount, textures, err, errLen) != 0) {
         unlink(outPath);
         rc = ZSLR_ERR;
         goto done;
     }
+    ZSLR_LOG(label, "verified %u converted texture(s) (%.1fs)", convCount, ZSLR_MS(stageStart) / 1000.0);
     result->wroteOutput = 1;
+    result->outcome = "written";
     rc = ZSLR_OK;
 
 done:
@@ -1521,6 +1657,9 @@ static volatile BOOL g_zslrCancel = NO;
 static double g_zslrWarningUntil = 0;
 static BOOL g_zslrHoldPaused = NO;
 static NSUInteger g_zslrMaxWorkers = 1;
+static int g_zslrLastState = -1;
+static double g_zslrLastWaitLog = 0;
+static NSUInteger g_zslrNoStream = 0;
 static NSArray<NSDictionary *> *g_zslrItems;
 static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
@@ -1535,27 +1674,59 @@ static int64_t zslr_available_memory(void) {
 static NSUInteger zslr_allowed_workers(void) {
     double now = CACurrentMediaTime();
     int64_t avail = zslr_available_memory();
+    int state;
     os_unfair_lock_lock(&g_zslrLock);
     NSUInteger allowed;
     if (now < g_zslrWarningUntil) {
         allowed = 0;
+        state = 4;
     } else if (avail <= 0) {
         allowed = g_zslrMaxWorkers;
+        state = 5;
     } else if (g_zslrHoldPaused && avail < kZSLowResResumeAbove) {
         allowed = 0;
+        state = 3;
     } else if (avail < kZSLowResPauseBelow) {
         g_zslrHoldPaused = YES;
         allowed = 0;
+        state = 3;
     } else {
         g_zslrHoldPaused = NO;
-        if (avail >= kZSLowResFullSpeedAbove) allowed = g_zslrMaxWorkers;
-        else if (avail >= kZSLowResHalfSpeedAbove) allowed = MAX((NSUInteger)1, g_zslrMaxWorkers / 2);
-        else allowed = 1;
+        if (avail >= kZSLowResFullSpeedAbove) {
+            allowed = g_zslrMaxWorkers;
+            state = 0;
+        } else if (avail >= kZSLowResHalfSpeedAbove) {
+            allowed = MAX((NSUInteger)1, g_zslrMaxWorkers / 2);
+            state = 1;
+        } else {
+            allowed = 1;
+            state = 2;
+        }
     }
     g_zslrStatus.allowedWorkers = allowed;
     g_zslrStatus.paused = (allowed == 0);
+    BOOL changed = (state != g_zslrLastState);
+    g_zslrLastState = state;
+    NSUInteger maxWorkers = g_zslrMaxWorkers;
     os_unfair_lock_unlock(&g_zslrLock);
+    if (changed) {
+        static const char *names[] = { "full speed", "half speed", "single worker", "paused: low memory", "paused: memory warning cooldown", "memory reading unavailable" };
+        ZLog(@"[LowRes] throttle: %s, %lu/%lu worker(s) allowed, available %lld MB", names[state], (unsigned long)allowed, (unsigned long)maxWorkers,
+             (long long)(avail / (1024 * 1024)));
+    }
     return allowed;
+}
+
+static void zslr_wait_log(const char *what) {
+    double now = CACurrentMediaTime();
+    os_unfair_lock_lock(&g_zslrLock);
+    BOOL due = (now - g_zslrLastWaitLog) >= 5.0;
+    if (due) g_zslrLastWaitLog = now;
+    NSUInteger allowed = g_zslrStatus.allowedWorkers;
+    os_unfair_lock_unlock(&g_zslrLock);
+    if (due) {
+        ZLog(@"[LowRes] waiting: %s (allowed %lu, available %lld MB)", what, (unsigned long)allowed, (long long)(zslr_available_memory() / (1024 * 1024)));
+    }
 }
 
 static int zslr_codec_tick(void *user) {
@@ -1563,6 +1734,7 @@ static int zslr_codec_tick(void *user) {
     while (!g_zslrCancel) {
         NSUInteger allowed = zslr_allowed_workers();
         if (allowed == 0) {
+            zslr_wait_log("conversion paused");
             usleep(200000);
             continue;
         }
@@ -1580,9 +1752,10 @@ static int zslr_codec_reserve(void *user, uint64_t need) {
         if (avail <= 0) return 0;
         if (zslr_allowed_workers() > 0 && avail - kZSLowResReserveBytes >= (int64_t)need) return 0;
         if (CACurrentMediaTime() > deadline) return 1;
+        zslr_wait_log("waiting for memory headroom before starting bundle");
         usleep(250000);
     }
-    return 1;
+    return 2;
 }
 
 static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *config) {
@@ -1631,7 +1804,7 @@ static void zslr_release_parents(void) {
     os_unfair_lock_unlock(&g_zslrParentLock);
 }
 
-static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen) {
+static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen) {
     ZSLRWorker *worker = (ZSLRWorker *)user;
     size_t pixels = (size_t)width * height;
     size_t rgbaLen = pixels * 4;
@@ -1640,18 +1813,28 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     uint8_t *check = NULL;
     uint8_t *encoded = NULL;
     int result = -1;
+    if (why && whyLen) why[0] = 0;
 
     struct astcenc_context *decoder = zslr_context(worker, srgb ? kZSLowResDecodeSRGB : kZSLowResDecodeLinear);
-    if (!decoder) return -1;
+    if (!decoder) {
+        ZSLR_WHY("cannot create ASTC decoder context");
+        return -1;
+    }
 
     rgba = (uint8_t *)malloc(rgbaLen);
-    if (!rgba) return -1;
+    if (!rgba) {
+        ZSLR_WHY("out of memory allocating %zu byte decode buffer", rgbaLen);
+        return -1;
+    }
     struct astcenc_swizzle swizzle = { ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
     void *slice = rgba;
     struct astcenc_image image = { width, height, 1, ASTCENC_TYPE_U8, &slice };
     enum astcenc_error status = astcenc_decompress_image(decoder, src, srcLen, &image, &swizzle, 0);
     astcenc_decompress_reset(decoder);
-    if (status != ASTCENC_SUCCESS) goto done;
+    if (status != ASTCENC_SUCCESS) {
+        ZSLR_WHY("ASTC decode failed: %s", astcenc_get_error_string(status));
+        goto done;
+    }
 
     int hasAlpha = 0;
     for (size_t i = 3; i < rgbaLen; i += 4) {
@@ -1663,21 +1846,33 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     int kind = srgb ? (hasAlpha ? kZSLowResEncodeAlphaSRGB : kZSLowResEncodeOpaqueSRGB)
                     : (hasAlpha ? kZSLowResEncodeAlphaLinear : kZSLowResEncodeOpaqueLinear);
     struct astcenc_context *encoder = zslr_context(worker, kind);
-    if (!encoder) goto done;
+    if (!encoder) {
+        ZSLR_WHY("cannot create ASTC encoder context (kind %d)", kind);
+        goto done;
+    }
 
     encoded = (uint8_t *)malloc(encodedLen);
     check = (uint8_t *)malloc(rgbaLen);
-    if (!encoded || !check) goto done;
+    if (!encoded || !check) {
+        ZSLR_WHY("out of memory allocating %zu byte encode buffers", encodedLen + rgbaLen);
+        goto done;
+    }
 
     status = astcenc_compress_image(encoder, &image, &swizzle, encoded, encodedLen, 0);
     astcenc_compress_reset(encoder);
-    if (status != ASTCENC_SUCCESS) goto done;
+    if (status != ASTCENC_SUCCESS) {
+        ZSLR_WHY("ASTC 8x8 encode failed: %s", astcenc_get_error_string(status));
+        goto done;
+    }
 
     void *checkSlice = check;
     struct astcenc_image checkImage = { width, height, 1, ASTCENC_TYPE_U8, &checkSlice };
     status = astcenc_decompress_image(encoder, encoded, encodedLen, &checkImage, &swizzle, 0);
     astcenc_decompress_reset(encoder);
-    if (status != ASTCENC_SUCCESS) goto done;
+    if (status != ASTCENC_SUCCESS) {
+        ZSLR_WHY("ASTC 8x8 verify decode failed: %s", astcenc_get_error_string(status));
+        goto done;
+    }
 
     double sum = 0;
     for (size_t i = 0; i < rgbaLen; i++) {
@@ -1687,9 +1882,11 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     double mse = sum / (double)rgbaLen;
     double psnr = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
     if (psnr < kZSLowResMinPSNR) {
+        ZSLR_WHY("PSNR %.2f dB below %.1f dB (%s, %s)", psnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque");
         result = ZSLR_TRANSCODE_REJECTED;
         goto done;
     }
+    ZSLR_WHY("PSNR %.2f dB (%s, %s)", psnr, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque");
     *out = encoded;
     *outLen = encodedLen;
     encoded = NULL;
@@ -1715,7 +1912,10 @@ done:
                                                     usingBlock:^(NSNotification *note) {
             os_unfair_lock_lock(&g_zslrLock);
             g_zslrWarningUntil = CACurrentMediaTime() + kZSLowResWarningPause;
+            BOOL running = g_zslrStatus.running;
             os_unfair_lock_unlock(&g_zslrLock);
+            ZLog(@"[LowRes] memory warning received (available %lld MB), workers paused for %.0fs%@", (long long)(zslr_available_memory() / (1024 * 1024)),
+                 kZSLowResWarningPause, running ? @"" : @" (idle)");
         }];
     });
     return instance;
@@ -1731,10 +1931,18 @@ done:
 }
 
 + (void)loadLedger {
-    NSData *data = [NSData dataWithContentsOfFile:[self ledgerPath]];
+    NSString *path = [self ledgerPath];
+    NSData *data = [NSData dataWithContentsOfFile:path];
     id parsed = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     g_zslrLedger = [NSMutableDictionary dictionary];
-    if ([parsed isKindOfClass:NSDictionary.class]) [g_zslrLedger addEntriesFromDictionary:parsed];
+    if ([parsed isKindOfClass:NSDictionary.class]) {
+        [g_zslrLedger addEntriesFromDictionary:parsed];
+        ZLog(@"[LowRes] ledger loaded: %lu entr%@ from %@", (unsigned long)g_zslrLedger.count, g_zslrLedger.count == 1 ? @"y" : @"ies", path);
+    } else if (data) {
+        ZLog(@"[LowRes] ledger at %@ is unreadable (%lu bytes), starting fresh", path, (unsigned long)data.length);
+    } else {
+        ZLog(@"[LowRes] no ledger at %@, starting fresh", path);
+    }
     g_zslrLedgerDirty = 0;
 }
 
@@ -1744,14 +1952,34 @@ done:
     g_zslrLedgerDirty = 0;
     os_unfair_lock_unlock(&g_zslrLock);
     if (!copy) return;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:copy options:0 error:nil];
-    if (data) [data writeToFile:[self ledgerPath] atomically:YES];
+    NSError *jsonError = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:copy options:0 error:&jsonError];
+    if (!data) {
+        ZLog(@"[LowRes] ledger serialization failed: %@", jsonError.localizedDescription ?: @"unknown error");
+        return;
+    }
+    NSError *writeError = nil;
+    if ([data writeToFile:[self ledgerPath] options:NSDataWritingAtomic error:&writeError]) {
+        ZLog(@"[LowRes] ledger saved: %lu entr%@", (unsigned long)copy.count, copy.count == 1 ? @"y" : @"ies");
+    } else {
+        ZLog(@"[LowRes] ledger save failed: %@", writeError.localizedDescription ?: @"unknown error");
+    }
 }
 
 + (NSArray<NSDictionary *> *)enumerateBundles {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray<NSDictionary *> *items = [NSMutableArray array];
-    for (NSString *root in [UnityCacheLocator unityCacheSharedDirectories]) {
+    NSArray<NSString *> *roots = [UnityCacheLocator unityCacheSharedDirectories];
+    ZLog(@"[LowRes] enumerating %lu cache root(s)", (unsigned long)roots.count);
+    for (NSString *root in roots) {
+        BOOL isDirectory = NO;
+        if (![fm fileExistsAtPath:root isDirectory:&isDirectory] || !isDirectory) {
+            ZLog(@"[LowRes] cache root missing or not a directory: %@", root);
+            continue;
+        }
+        NSUInteger rootCount = 0;
+        NSUInteger unreadable = 0;
+        unsigned long long rootBytes = 0;
         NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
         NSString *rel;
         while ((rel = [walker nextObject])) {
@@ -1762,7 +1990,12 @@ done:
             if (![rel.lastPathComponent isEqualToString:@"__data"]) continue;
             NSString *full = [root stringByAppendingPathComponent:rel];
             NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-            if (!attrs) continue;
+            if (!attrs) {
+                unreadable++;
+                continue;
+            }
+            rootCount++;
+            rootBytes += [attrs[NSFileSize] unsignedLongLongValue];
             [items addObject:@{
                 @"path": full,
                 @"key": rel.stringByDeletingLastPathComponent,
@@ -1770,6 +2003,7 @@ done:
                 @"mtime": @([attrs.fileModificationDate timeIntervalSince1970]),
             }];
         }
+        ZLog(@"[LowRes] cache root %@: %lu bundle(s), %llu MB, %lu unreadable", root, (unsigned long)rootCount, rootBytes / (1024ull * 1024ull), (unsigned long)unreadable);
     }
     [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         return [b[@"size"] compare:a[@"size"]];
@@ -1781,6 +2015,7 @@ done:
     os_unfair_lock_lock(&g_zslrLock);
     if (g_zslrStatus.running) {
         os_unfair_lock_unlock(&g_zslrLock);
+        ZLog(@"[LowRes] start ignored: a run is already in progress");
         return NO;
     }
     memset(&g_zslrStatus, 0, sizeof(g_zslrStatus));
@@ -1790,23 +2025,36 @@ done:
     g_zslrHoldPaused = NO;
     g_zslrWarningUntil = 0;
     g_zslrNextItem = 0;
+    g_zslrLastState = -1;
+    g_zslrLastWaitLog = 0;
+    g_zslrNoStream = 0;
     g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     os_unfair_lock_unlock(&g_zslrLock);
+    ZLog(@"[LowRes] %@ requested, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", (long long)(zslr_available_memory() / (1024 * 1024)));
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        double runStart = CACurrentMediaTime();
         NSFileManager *fm = NSFileManager.defaultManager;
         if (mode == ZSLowResModeTranscode) {
-            [fm createDirectoryAtPath:[ZSLowRes stagingDirectory] withIntermediateDirectories:YES attributes:nil error:nil];
+            NSError *dirError = nil;
+            if (![fm createDirectoryAtPath:[ZSLowRes stagingDirectory] withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+                ZLog(@"[LowRes] cannot create staging directory %@: %@", [ZSLowRes stagingDirectory], dirError.localizedDescription ?: @"unknown error");
+            } else {
+                ZLog(@"[LowRes] staging directory: %@", [ZSLowRes stagingDirectory]);
+            }
             [ZSLowRes loadLedger];
         }
         NSArray<NSDictionary *> *items = [ZSLowRes enumerateBundles];
+        unsigned long long totalBytes = 0;
+        for (NSDictionary *entry in items) totalBytes += [entry[@"size"] unsignedLongLongValue];
         os_unfair_lock_lock(&g_zslrLock);
         g_zslrItems = items;
         g_zslrStatus.bundlesTotal = items.count;
         NSUInteger workerCount = g_zslrMaxWorkers;
         os_unfair_lock_unlock(&g_zslrLock);
-        ZLog(@"[LowRes] %@ started: %lu bundle(s), up to %lu worker(s)", mode == ZSLowResModeScan ? @"scan" : @"transcode",
-             (unsigned long)items.count, (unsigned long)workerCount);
+        ZLog(@"[LowRes] %@ started: %lu bundle(s), %llu MB total, up to %lu worker(s)", mode == ZSLowResModeScan ? @"scan" : @"transcode",
+             (unsigned long)items.count, totalBytes / (1024ull * 1024ull), (unsigned long)workerCount);
+        if (items.count == 0) ZLog(@"[LowRes] no bundles found, nothing to do");
 
         dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_CONCURRENT, QOS_CLASS_USER_INITIATED, 0);
         dispatch_queue_t queue = dispatch_queue_create("zs.lowres.workers", attr);
@@ -1816,29 +2064,43 @@ done:
                 ZSLRWorker worker;
                 memset(&worker, 0, sizeof(worker));
                 worker.index = wi;
+                NSUInteger handled = 0;
+                const char *exitReason = "queue drained";
+                ZLog(@"[LowRes] worker %lu started", (unsigned long)wi);
                 while (!g_zslrCancel) {
                     NSUInteger allowed = 0;
                     while (!g_zslrCancel) {
                         allowed = zslr_allowed_workers();
                         if (wi < allowed) break;
+                        zslr_wait_log("worker slot throttled");
                         usleep(150000);
                     }
                     if (g_zslrCancel) break;
                     NSDictionary *item = nil;
+                    NSUInteger itemIndex = 0;
+                    NSUInteger itemTotal = 0;
                     os_unfair_lock_lock(&g_zslrLock);
-                    if (g_zslrNextItem < g_zslrItems.count) item = g_zslrItems[g_zslrNextItem++];
+                    if (g_zslrNextItem < g_zslrItems.count) {
+                        itemIndex = g_zslrNextItem;
+                        itemTotal = g_zslrItems.count;
+                        item = g_zslrItems[g_zslrNextItem++];
+                    }
                     if (item) g_zslrStatus.activeWorkers++;
                     os_unfair_lock_unlock(&g_zslrLock);
                     if (!item) break;
-                    [ZSLowRes processItem:item mode:mode worker:&worker];
+                    [ZSLowRes processItem:item mode:mode worker:&worker index:itemIndex total:itemTotal];
+                    handled++;
                     os_unfair_lock_lock(&g_zslrLock);
                     g_zslrStatus.activeWorkers--;
                     os_unfair_lock_unlock(&g_zslrLock);
                 }
+                if (g_zslrCancel) exitReason = "cancelled";
                 zslr_release_worker(&worker);
+                ZLog(@"[LowRes] worker %lu exiting: %s, %lu bundle(s) handled", (unsigned long)wi, exitReason, (unsigned long)handled);
             });
         }
         dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+        ZLog(@"[LowRes] all workers finished, releasing codec contexts");
         zslr_release_parents();
         if (mode == ZSLowResModeTranscode) [ZSLowRes saveLedger];
 
@@ -1848,20 +2110,27 @@ done:
         g_zslrStatus.cancelled = g_zslrCancel;
         g_zslrItems = nil;
         ZSLowResStatus finalStatus = g_zslrStatus;
+        NSUInteger noStream = g_zslrNoStream;
         os_unfair_lock_unlock(&g_zslrLock);
-        ZLog(@"[LowRes] finished: %@", [[ZSLowRes shared] summary]);
+        ZLog(@"[LowRes] finished in %.1fs, %lu bundle(s) had no .resS node: %@", CACurrentMediaTime() - runStart, (unsigned long)noStream, [[ZSLowRes shared] summary]);
         if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(finalStatus); });
     });
     return YES;
 }
 
-+ (void)processItem:(NSDictionary *)item mode:(ZSLowResMode)mode worker:(ZSLRWorker *)worker {
++ (void)processItem:(NSDictionary *)item mode:(ZSLowResMode)mode worker:(ZSLRWorker *)worker index:(NSUInteger)index total:(NSUInteger)total {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *path = item[@"path"];
     NSString *key = item[@"key"];
     uint64_t size = [item[@"size"] unsignedLongLongValue];
     double mtime = [item[@"mtime"] doubleValue];
     BOOL scanOnly = (mode == ZSLowResModeScan);
+    char label[192];
+    snprintf(label, sizeof(label), "w%lu %s", (unsigned long)worker->index, key.UTF8String ?: "?");
+    double started = CACurrentMediaTime();
+
+    ZSLR_LOG(label, "[%lu/%lu] begin: %.1f MB, available %lld MB", (unsigned long)(index + 1), (unsigned long)total, (double)size / 1048576.0,
+             (long long)(zslr_available_memory() / (1024 * 1024)));
 
     if (!scanOnly) {
         os_unfair_lock_lock(&g_zslrLock);
@@ -1874,6 +2143,7 @@ done:
             g_zslrStatus.bundlesSkipped++;
             g_zslrStatus.bundlesDone++;
             os_unfair_lock_unlock(&g_zslrLock);
+            ZSLR_LOG(label, "[%lu/%lu] skipped: ledger state '%s' matches size and mtime", (unsigned long)(index + 1), (unsigned long)total, state.UTF8String ?: "?");
             return;
         }
     }
@@ -1882,7 +2152,10 @@ done:
     NSString *destPath = [destDir stringByAppendingPathComponent:@"__data"];
     NSString *partPath = [destDir stringByAppendingPathComponent:@"__data.part"];
     if (!scanOnly) {
-        [fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSError *dirError = nil;
+        if (![fm createDirectoryAtPath:destDir withIntermediateDirectories:YES attributes:nil error:&dirError]) {
+            ZSLR_LOG(label, "cannot create output directory: %s", dirError.localizedDescription.UTF8String ?: "unknown error");
+        }
         [fm removeItemAtPath:partPath error:nil];
         [fm removeItemAtPath:[partPath stringByAppendingString:@".scratch"] error:nil];
     }
@@ -1891,7 +2164,8 @@ done:
     ZSLRPolicy policy = { kZSLowResMinPixels, kZSLowResMaxPixels, kZSLowResMaxResultBytes };
     ZSLRResult result;
     char err[256] = {0};
-    int rc = zslr_process_bundle(path.fileSystemRepresentation, partPath.fileSystemRepresentation, scanOnly ? 1 : 0, &codec, &policy, &result, err, sizeof(err));
+    int rc = zslr_process_bundle(label, path.fileSystemRepresentation, partPath.fileSystemRepresentation, scanOnly ? 1 : 0, &codec, &policy, &result, err, sizeof(err));
+    const char *failStage = result.stage ?: "unknown";
 
     BOOL changed = NO;
     NSString *ledgerState = nil;
@@ -1902,11 +2176,17 @@ done:
             if ([fm moveItemAtPath:partPath toPath:destPath error:&moveError]) {
                 NSString *infoSource = [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"__info"];
                 NSString *infoDest = [destDir stringByAppendingPathComponent:@"__info"];
-                if ([fm fileExistsAtPath:infoSource] && ![fm fileExistsAtPath:infoDest]) [fm copyItemAtPath:infoSource toPath:infoDest error:nil];
+                if ([fm fileExistsAtPath:infoSource] && ![fm fileExistsAtPath:infoDest]) {
+                    NSError *copyError = nil;
+                    if (![fm copyItemAtPath:infoSource toPath:infoDest error:&copyError]) {
+                        ZSLR_LOG(label, "__info copy failed: %s", copyError.localizedDescription.UTF8String ?: "unknown error");
+                    }
+                }
                 changed = YES;
                 ledgerState = @"done";
             } else {
                 rc = ZSLR_ERR;
+                failStage = "move output";
                 snprintf(err, sizeof(err), "%s", moveError.localizedDescription.UTF8String ?: "move failed");
             }
         } else {
@@ -1927,6 +2207,7 @@ done:
         g_zslrStatus.originalBytes += result.originalBytes;
         g_zslrStatus.newBytes += result.newBytes;
         if (changed) g_zslrStatus.bundlesChanged++;
+        if (result.noStream) g_zslrNoStream++;
         if (ledgerState) {
             g_zslrLedger[key] = @{ @"size": @(size), @"mtime": @(mtime), @"state": ledgerState,
                                    @"before": @(result.originalBytes), @"after": @(result.newBytes), @"textures": @(result.converted) };
@@ -1945,10 +2226,24 @@ done:
     os_unfair_lock_unlock(&g_zslrLock);
     if (flush) [self saveLedger];
 
-    if (rc == ZSLR_ERR) ZLog(@"[LowRes] %@ failed: %s", key, err);
-    else if (rc == ZSLR_DEFERRED) ZLog(@"[LowRes] %@ deferred: not enough memory headroom", key);
-    else if (rc == ZSLR_OK && changed) ZLog(@"[LowRes] %@: %u/%u textures, %llu -> %llu bytes", key, result.converted, result.candidates,
-                                            (unsigned long long)result.originalBytes, (unsigned long long)result.newBytes);
+    double secs = CACurrentMediaTime() - started;
+    unsigned long n = (unsigned long)(index + 1);
+    unsigned long t = (unsigned long)total;
+    if (rc == ZSLR_ERR) {
+        ZSLR_LOG(label, "[%lu/%lu] FAILED at stage '%s': %s (%.1fs)", n, t, failStage, err[0] ? err : "no detail", secs);
+    } else if (rc == ZSLR_DEFERRED) {
+        ZSLR_LOG(label, "[%lu/%lu] deferred: not enough memory headroom (%.1fs)", n, t, secs);
+    } else if (rc == ZSLR_CANCELLED) {
+        ZSLR_LOG(label, "[%lu/%lu] cancelled (%.1fs)", n, t, secs);
+    } else if (scanOnly) {
+        ZSLR_LOG(label, "[%lu/%lu] scan done: %s, %u candidate(s), %llu -> %llu projected bytes (%.1fs)", n, t, result.outcome ?: "?", result.candidates,
+                 (unsigned long long)result.candidateBytes, (unsigned long long)result.newBytes, secs);
+    } else if (changed) {
+        ZSLR_LOG(label, "[%lu/%lu] written: %u/%u texture(s), %llu -> %llu bytes, %u rejected (%.1fs)", n, t, result.converted, result.candidates,
+                 (unsigned long long)result.originalBytes, (unsigned long long)result.newBytes, result.rejected, secs);
+    } else {
+        ZSLR_LOG(label, "[%lu/%lu] no changes: %s (%.1fs)", n, t, result.outcome ?: "?", secs);
+    }
 }
 
 - (void)cancel {
