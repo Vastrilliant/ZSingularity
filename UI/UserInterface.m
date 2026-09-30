@@ -5172,6 +5172,13 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, assign) NSUInteger memoryCycleUnitsDone;
 @property (nonatomic, assign) NSUInteger memoryCycleUnitEstimate;
 @property (nonatomic, assign) CFTimeInterval memoryCycleStart;
+@property (nonatomic, assign) NSUInteger memoryCycleCount;
+@property (nonatomic, assign) NSUInteger memoryCycleOverruns;
+@property (nonatomic, assign) CFTimeInterval memoryCycleWorkAccum;
+@property (nonatomic, assign) CFTimeInterval memoryCycleMaxStep;
+@property (nonatomic, assign) CFTimeInterval memoryLastWork;
+@property (nonatomic, assign) CFTimeInterval memoryLastPeak;
+@property (nonatomic, strong) NSArray<UILabel *> *memoryStatLabels;
 @property (nonatomic, assign) NSUInteger memoryBuildIndex;
 @property (nonatomic, assign) CGFloat memoryBuildHeight;
 @property (nonatomic, assign) CGFloat memoryBuildPanelWidth;
@@ -6962,6 +6969,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.memorySubtextLabel = nil;
     self.memoryInvertSubtextLabel = nil;
     self.memoryInvertFeedLabels = nil;
+    self.memoryStatLabels = nil;
     self.memoryFeedLabels = nil;
     self.memoryFeed = nil;
     self.memoryPendingGroups = nil;
@@ -13816,7 +13824,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UILabel *clockLabel = [[UILabel alloc] init];
     clockLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
     clockLabel.textAlignment = NSTextAlignmentLeft;
-    clockLabel.text = @"0.000000 s";
+    clockLabel.text = @"0.000000s";
     [infoPanel addSubview:clockLabel];
     self.memoryClockLabel = clockLabel;
 
@@ -13989,9 +13997,48 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     double elapsed = MAX(CACurrentMediaTime() - self.memoryPieBegin, 0.0);
     double remaining = cycle - fmod(elapsed, cycle);
     NSInteger totalUs = MAX(MIN((NSInteger)llround(remaining * 1000000.0), (NSInteger)llround(cycle * 1000000.0)), 0);
-    NSString *text = [NSString stringWithFormat:@"%ld.%06ld s", (long)(totalUs / 1000000), (long)(totalUs % 1000000)];
+    NSString *text = [NSString stringWithFormat:@"%ld.%06ld%@", (long)(totalUs / 1000000), (long)(totalUs % 1000000), @"s"];
     if (![label.text isEqualToString:text]) label.text = text;
     if (![self.memoryInvertClockLabel.text isEqualToString:text]) self.memoryInvertClockLabel.text = text;
+    [self zs_updateMemoryStatRows];
+}
+
+- (void)zs_updateMemoryStatRows {
+    NSArray<UILabel *> *labels = self.memoryStatLabels;
+    if (labels.count == 0) return;
+
+    NSUInteger phase = self.memoryCyclePhase;
+    NSArray *groups = self.memoryPendingGroups;
+    NSString *phaseName = phase == 0 ? @"SCAN" : (phase == 1 ? @"BUILD" : @"COMMIT");
+    NSUInteger planned = MAX(self.memoryCycleUnitEstimate, self.memoryCycleUnitsDone);
+    NSString *columns = groups ? [NSString stringWithFormat:@"%lu/%lu", (unsigned long)MIN(self.memoryBuildIndex, groups.count + 1), (unsigned long)(groups.count + 1)] : @"--";
+    NSString *age = self.memorySnapshotDate ? [NSString stringWithFormat:@"%.2fs", MAX(-[self.memorySnapshotDate timeIntervalSinceNow], 0.0)] : @"--";
+    NSString *work = self.memoryLastWork > 0 ? [NSString stringWithFormat:@"%.0fms", self.memoryLastWork * 1000.0] : @"--";
+    NSString *peak = self.memoryLastPeak > 0 ? [NSString stringWithFormat:@"%.0fms", self.memoryLastPeak * 1000.0] : @"--";
+
+    NSArray<NSArray<NSString *> *> *rows = @[
+        @[@"CYCLE", [NSString stringWithFormat:@"#%lu", (unsigned long)self.memoryCycleCount]],
+        @[@"PHASE", phaseName],
+        @[@"STEP", [NSString stringWithFormat:@"%lu/%lu", (unsigned long)self.memoryCycleUnitsDone, (unsigned long)planned]],
+        @[@"COLS", columns],
+        @[@"AGE", age],
+        @[@"WORK", work],
+        @[@"PEAK", peak],
+        @[@"OVER", [NSString stringWithFormat:@"%lu", (unsigned long)self.memoryCycleOverruns]],
+    ];
+
+    UIFont *font = zs_mono_font(8, UIFontWeightRegular);
+    UIColor *keyColor = [UIColor colorWithWhite:1 alpha:0.42];
+    UIColor *valueColor = [UIColor colorWithWhite:0.92 alpha:1];
+    for (NSUInteger i = 0; i < labels.count && i < rows.count; i++) {
+        NSString *key = [NSString stringWithFormat:@"%-5s ", rows[i][0].UTF8String];
+        NSString *plain = [key stringByAppendingString:rows[i][1]];
+        UILabel *label = labels[i];
+        if ([label.attributedText.string isEqualToString:plain]) continue;
+        NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:plain attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: valueColor}];
+        [attributed addAttribute:NSForegroundColorAttributeName value:keyColor range:NSMakeRange(0, key.length)];
+        label.attributedText = attributed;
+    }
 }
 
 - (void)zs_pushMemoryFeed:(NSString *)text {
@@ -14042,6 +14089,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     CGFloat height = frame.size.height;
     CGFloat gap = 14;
     CGFloat sideInset = 20;
+    CGFloat statGap = 12;
     CGFloat innerWidth = MAX(width - sideInset * 2, 40);
 
     CGFloat basePie = MAX(MIN(innerWidth, (height - gap * 4 - 34) * 0.6), 40);
@@ -14049,21 +14097,31 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     pieSide = floor(MAX(pieSide, 40));
 
     UILabel *subtext = self.memorySubtextLabel;
-    NSString *clockTemplate = [NSString stringWithFormat:@"%ld.000000 s", (long)ceil(ZS_MEMORY_SCAN_CYCLE_SECONDS)];
+    NSString *clockTemplate = [NSString stringWithFormat:@"%ld.000000%@", (long)ceil(ZS_MEMORY_SCAN_CYCLE_SECONDS), @"s"];
+    UIFont *statFont = zs_mono_font(8, UIFontWeightRegular);
+    CGFloat statWidth = ceil([@"PHASE COMMIT" sizeWithAttributes:@{NSFontAttributeName: statFont}].width) + 2;
+    BOOL showStats = YES;
     UIFont *clockFont = nil;
     CGFloat columnWidth = 0;
-    for (NSUInteger pass = 0; pass < 3; pass++) {
+    for (NSUInteger pass = 0; pass < 4; pass++) {
         clockFont = zs_mono_font(zs_memory_clamp(pieSide * 0.2, 18, 30), UIFontWeightMedium);
         CGFloat clockWidth = ceil([clockTemplate sizeWithAttributes:@{NSFontAttributeName: clockFont}].width) + 2;
         CGFloat subtextWidth = ceil([subtext sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)].width) + 2;
         columnWidth = MAX(clockWidth, subtextWidth);
-        if (columnWidth + pieSide / 2.0 <= innerWidth) break;
-        CGFloat fitted = floor(MAX(2.0 * (innerWidth - columnWidth), 40));
-        if (fitted >= pieSide) break;
-        pieSide = fitted;
+        CGFloat extra = showStats ? statGap + statWidth : 0;
+        if (columnWidth + pieSide / 2.0 + extra <= innerWidth) break;
+        CGFloat fitted = floor(2.0 * (innerWidth - columnWidth - extra));
+        if (fitted >= 40) {
+            pieSide = MIN(fitted, pieSide);
+        } else if (showStats) {
+            showStats = NO;
+        } else {
+            pieSide = 40;
+            break;
+        }
     }
 
-    CGFloat collectiveWidth = columnWidth + pieSide / 2.0;
+    CGFloat collectiveWidth = columnWidth + pieSide / 2.0 + (showStats ? statGap + statWidth : 0);
     CGFloat columnX = floor((width - collectiveWidth) / 2.0);
     CGFloat pieX = floor(columnX + columnWidth - pieSide / 2.0);
     CGFloat pieY = floor((height - pieSide) / 2.0);
@@ -14130,9 +14188,29 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     }
     self.memoryFeedLabels = labels;
     self.memoryInvertFeedLabels = invertLabels;
+
+    for (UILabel *old in self.memoryStatLabels) [old removeFromSuperview];
+    NSMutableArray<UILabel *> *statLabels = [NSMutableArray array];
+    if (showStats) {
+        CGFloat statLineHeight = ceil(statFont.lineHeight) + 1;
+        NSUInteger statRows = MIN((NSUInteger)8, (NSUInteger)MAX(floor(pieSide / statLineHeight), 0));
+        CGFloat blockHeight = statLineHeight * (CGFloat)statRows;
+        CGFloat statX = pieX + pieSide + statGap;
+        CGFloat statY = pieY + floor((pieSide - blockHeight) / 2.0);
+        for (NSUInteger i = 0; i < statRows; i++) {
+            UILabel *statLabel = [[UILabel alloc] init];
+            statLabel.numberOfLines = 1;
+            statLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+            statLabel.frame = CGRectMake(statX, statY + statLineHeight * (CGFloat)i, statWidth, statLineHeight);
+            [panel addSubview:statLabel];
+            [statLabels addObject:statLabel];
+        }
+    }
+    self.memoryStatLabels = statLabels;
     [panel bringSubviewToFront:invertClip];
 
     [self zs_renderMemoryFeed];
+    [self zs_updateMemoryStatRows];
     [self zs_memoryClockTick];
 }
 
@@ -14518,6 +14596,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryCycleUnitsDone = 0;
     self.memoryCyclePhase = 0;
     self.memoryCycleStart = 0;
+    self.memoryCycleCount = 0;
+    self.memoryCycleOverruns = 0;
+    self.memoryCycleWorkAccum = 0;
+    self.memoryCycleMaxStep = 0;
+    self.memoryLastWork = 0;
+    self.memoryLastPeak = 0;
     [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(zs_memoryAppDidBecomeActive) name:UIApplicationDidBecomeActiveNotification object:nil];
     self.memoryFeed = nil;
@@ -14586,6 +14670,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.memoryUsageRefreshTimer = nil;
     if (!self.memoryFullScreenOpen) return;
 
+    CFTimeInterval stepStart = CACurrentMediaTime();
     BOOL cycleDone = NO;
     if (self.memoryCyclePhase == 0) {
         NSArray<ZSMemoryUsageGroup *> *groups = zs_memory_scan_step(NULL);
@@ -14605,6 +14690,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         cycleDone = YES;
     }
 
+    CFTimeInterval stepDuration = CACurrentMediaTime() - stepStart;
+    self.memoryCycleWorkAccum += stepDuration;
+    self.memoryCycleMaxStep = MAX(self.memoryCycleMaxStep, stepDuration);
     self.memoryCycleUnitsDone++;
     if (cycleDone) [self zs_finishMemoryCycle];
     [self zs_scheduleNextMemoryStep];
@@ -14617,6 +14705,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     NSTimeInterval cycleEnd = self.memoryCycleStart + ZS_MEMORY_SCAN_CYCLE_SECONDS;
     BOOL overran = now - cycleEnd > 1.0;
     self.memoryCycleStart = overran ? now : cycleEnd;
+    self.memoryCycleCount++;
+    if (overran) self.memoryCycleOverruns++;
+    self.memoryLastWork = self.memoryCycleWorkAccum;
+    self.memoryLastPeak = self.memoryCycleMaxStep;
+    self.memoryCycleWorkAccum = 0;
+    self.memoryCycleMaxStep = 0;
 
     self.memoryCycleUnitsDone = 0;
     self.memoryCyclePhase = 0;
