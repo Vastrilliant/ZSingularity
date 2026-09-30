@@ -13767,18 +13767,18 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
-- (void)zs_syncGamePaused {
-    [[FPS120Controller shared] setGamePaused:self.syslogFullScreenOpen || self.memoryFullScreenOpen];
+- (void)zs_syncReducedPanelFPS {
+    [[FPS120Controller shared] setReducedPanelFPS:self.syslogFullScreenOpen || self.memoryFullScreenOpen];
 }
 
 - (void)setSyslogFullScreenOpen:(BOOL)open {
     _syslogFullScreenOpen = open;
-    [self zs_syncGamePaused];
+    [self zs_syncReducedPanelFPS];
 }
 
 - (void)setMemoryFullScreenOpen:(BOOL)open {
     _memoryFullScreenOpen = open;
-    [self zs_syncGamePaused];
+    [self zs_syncReducedPanelFPS];
 }
 
 - (void)zs_openSyslogFullScreenPanel {

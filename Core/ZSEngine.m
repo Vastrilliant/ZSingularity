@@ -884,10 +884,12 @@ static void zs_schedule_particle_apply(void) {
 
 @interface FPS120Controller ()
 @property (nonatomic, assign) BOOL panelOpen;
+@property (nonatomic, assign) BOOL reducedPanelFPS;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
 @property (nonatomic, strong) NSTimer *fpsPollTimer;
 - (void)applyMenuFPS:(NSInteger)fps;
 - (void)applyCombatFPS:(NSInteger)fps;
+- (NSInteger)panelFPS;
 @end
 
 @implementation FPS120Controller
@@ -933,7 +935,7 @@ static void zs_schedule_particle_apply(void) {
 
     NSInteger expected;
     if (self.panelOpen) {
-        expected = 30;
+        expected = [self panelFPS];
     } else {
         int32_t sceneState = 0;
         if (!ZSGlobalScene_Current(&sceneState)) return;
@@ -977,9 +979,10 @@ static void zs_schedule_particle_apply(void) {
     if (!haveBattleState) return;
 
     if (self.panelOpen) {
-        if (self.targetFPS != 30) {
-            self.targetFPS = 30;
-            zs_set_application_target_fps(30);
+        NSInteger panelFPS = [self panelFPS];
+        if (self.targetFPS != panelFPS) {
+            self.targetFPS = panelFPS;
+            zs_set_application_target_fps((int32_t)panelFPS);
         }
         return;
     }
@@ -1041,8 +1044,9 @@ static void zs_schedule_particle_apply(void) {
 - (void)setPanelOpen:(BOOL)open {
     _panelOpen = open;
     if (open) {
-        self.targetFPS = 30;
-        zs_set_application_target_fps(30);
+        NSInteger panelFPS = [self panelFPS];
+        self.targetFPS = panelFPS;
+        zs_set_application_target_fps((int32_t)panelFPS);
         return;
     }
 
@@ -1053,17 +1057,17 @@ static void zs_schedule_particle_apply(void) {
     [self battleStatePoll];
 }
 
-- (void)setGamePaused:(BOOL)paused {
-    static BOOL weSetPaused = NO;
-    if (paused == weSetPaused) return;
-    id appController = [[UIApplication sharedApplication] delegate];
-    if (!appController) return;
-    @try {
-        [appController setValue:@(paused) forKey:@"paused"];
-        weSetPaused = paused;
-    } @catch (NSException *exception) {
-        ZLog(@"[ZSScripts] couldn't set paused on %@: %@", NSStringFromClass([appController class]), exception.reason);
-    }
+- (void)setReducedPanelFPS:(BOOL)reduced {
+    if (_reducedPanelFPS == reduced) return;
+    _reducedPanelFPS = reduced;
+    if (!self.panelOpen) return;
+    NSInteger fps = [self panelFPS];
+    self.targetFPS = fps;
+    zs_set_application_target_fps((int32_t)fps);
+}
+
+- (NSInteger)panelFPS {
+    return self.reducedPanelFPS ? 10 : 30;
 }
 
 - (void)dealloc {
