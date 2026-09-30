@@ -1492,7 +1492,7 @@ static const CGFloat kFillAlpha = 1.0;
           initialSpringVelocity:0.4
                         options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
                      animations:^{
-        [self layoutIfNeeded];
+        [(self.superview ?: self) layoutIfNeeded];
         if (!touching) {
 
             [self updateFillForCurrentValue];
@@ -2473,14 +2473,14 @@ static ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float 
         [row.titleLabel.widthAnchor constraintEqualToConstant:kTitleColumnWidth],
         [row.titleLabel.centerYAnchor constraintEqualToAnchor:row.slider.centerYAnchor],
 
-        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.slider.trailingAnchor],
-        [row.valueLabel.bottomAnchor constraintEqualToAnchor:row.slider.topAnchor constant:3],
+        [row.valueLabel.trailingAnchor constraintEqualToAnchor:row.slider.trailingAnchor constant:-6],
+        [row.valueLabel.bottomAnchor constraintEqualToAnchor:row.slider.track.topAnchor constant:-3],
 
         [row.slider.leadingAnchor constraintEqualToAnchor:row.titleLabel.trailingAnchor constant:4],
         [row.slider.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
     ]];
 
-    NSLayoutConstraint *sliderRowTop = [row.topAnchor constraintEqualToAnchor:row.valueLabel.topAnchor];
+    NSLayoutConstraint *sliderRowTop = [row.topAnchor constraintEqualToAnchor:row.slider.topAnchor constant:-9];
     NSLayoutConstraint *sliderRowBottom = [row.bottomAnchor constraintEqualToAnchor:row.slider.bottomAnchor constant:3];
     sliderRowTop.priority = UILayoutPriorityRequired - 1;
     sliderRowBottom.priority = UILayoutPriorityRequired - 1;
