@@ -14872,6 +14872,13 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
     CGFloat hairline = 1.0 / MAX(overlay.traitCollection.displayScale, 1.0);
     NSUInteger pageCount = 0;
     CGRect infoPanelFrame = CGRectZero;
+    if (!self.extendedCoverMode) {
+        UIView *timerPageView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, pageWidth, height)];
+        timerPageView.backgroundColor = UIColor.clearColor;
+        [contentView addSubview:timerPageView];
+        infoPanelFrame = CGRectMake(leftInset, 0, MAX(pageWidth - leftInset - rightInset, 0), height);
+        pageCount++;
+    }
     for (NSArray<NSString *> *titles in zs_memory_page_titles(self.extendedCoverMode)) {
         NSMutableArray<UIView *> *pageColumns = [NSMutableArray arrayWithCapacity:titles.count];
         for (NSString *title in titles) {
