@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, copy, nullable) void (^lineHandler)(NSString *line);
 
+@property (nonatomic, copy, nullable) void (^linesHandler)(NSArray<NSString *> *lines);
+
 @end
 
 NS_ASSUME_NONNULL_END

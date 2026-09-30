@@ -179,6 +179,7 @@ static void uncaught_exception_handler(NSException *exception) {
 @property (nonatomic, assign) int stdoutCopy;
 @property (nonatomic, assign) int stderrCopy;
 @property (nonatomic, assign) BOOL restoredDescriptors;
+@property (nonatomic, strong) NSMutableData *pendingBytes;
 @end
 
 @implementation ZSyslogController
@@ -247,20 +248,17 @@ static void uncaught_exception_handler(NSException *exception) {
         ZSyslogController *strongSelf = weakSelf;
         if (!strongSelf) return;
 
-        NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (str.length > 0) {
-
-            NSArray<NSString *> *parts = [str componentsSeparatedByCharactersInSet:
-                                           [NSCharacterSet newlineCharacterSet]];
-            for (NSString *part in parts) {
-                if (part.length == 0) continue;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    ZSyslogController *mainSelf = weakSelf;
-                    if (mainSelf.lineHandler) {
-                        mainSelf.lineHandler(part);
-                    }
-                });
-            }
+        NSArray<NSString *> *lines = [strongSelf extractLinesFromData:data];
+        if (lines.count > 0) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ZSyslogController *mainSelf = weakSelf;
+                if (!mainSelf) return;
+                if (mainSelf.linesHandler) {
+                    mainSelf.linesHandler(lines);
+                } else if (mainSelf.lineHandler) {
+                    for (NSString *line in lines) mainSelf.lineHandler(line);
+                }
+            });
         }
 
         int fd = strongSelf.stdoutCopy >= 0 ? strongSelf.stdoutCopy : STDOUT_FILENO;
@@ -278,6 +276,36 @@ static void uncaught_exception_handler(NSException *exception) {
     self.running = YES;
     ZLog(@"[ZSyslogController] started, stdout/stderr now piped through syslog console");
     return YES;
+}
+
+- (NSArray<NSString *> *)extractLinesFromData:(NSData *)data {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    @synchronized (self) {
+        if (!self.pendingBytes) self.pendingBytes = [NSMutableData data];
+        [self.pendingBytes appendData:data];
+
+        const uint8_t *bytes = self.pendingBytes.bytes;
+        NSUInteger length = self.pendingBytes.length;
+        NSUInteger start = 0;
+        for (NSUInteger i = 0; i < length; i++) {
+            if (bytes[i] != '\n' && bytes[i] != '\r') continue;
+            if (i > start) {
+                NSString *line = [[NSString alloc] initWithBytes:bytes + start length:i - start encoding:NSUTF8StringEncoding]
+                    ?: [[NSString alloc] initWithBytes:bytes + start length:i - start encoding:NSISOLatin1StringEncoding];
+                if (line.length > 0) [lines addObject:line];
+            }
+            start = i + 1;
+        }
+        if (start > 0) [self.pendingBytes replaceBytesInRange:NSMakeRange(0, start) withBytes:NULL length:0];
+
+        if (self.pendingBytes.length > 65536) {
+            NSString *line = [[NSString alloc] initWithData:self.pendingBytes encoding:NSUTF8StringEncoding]
+                ?: [[NSString alloc] initWithData:self.pendingBytes encoding:NSISOLatin1StringEncoding];
+            if (line.length > 0) [lines addObject:line];
+            [self.pendingBytes setLength:0];
+        }
+    }
+    return lines;
 }
 
 - (void)stop {
@@ -309,6 +337,9 @@ static void uncaught_exception_handler(NSException *exception) {
     }
 
     self.pipe = nil;
+    @synchronized (self) {
+        self.pendingBytes = nil;
+    }
     self.running = NO;
 }
 

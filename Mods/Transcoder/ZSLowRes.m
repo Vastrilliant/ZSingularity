@@ -1622,14 +1622,15 @@ done:
 
 static const uint32_t kZSLowResMinPixels = 256u * 256u;
 static const uint32_t kZSLowResMaxPixels = 4096u * 4096u;
-static const uint64_t kZSLowResMaxResultBytes = 160ull * 1024ull * 1024ull;
+static const uint64_t kZSLowResMaxResultBytes = 256ull * 1024ull * 1024ull;
 static const double kZSLowResMinPSNR = 27.0;
+static const double kZSLowResRescueWindowDB = 10.0;
 
-static const int64_t kZSLowResFullSpeedAbove = 700ll * 1024 * 1024;
-static const int64_t kZSLowResHalfSpeedAbove = 450ll * 1024 * 1024;
-static const int64_t kZSLowResPauseBelow = 300ll * 1024 * 1024;
-static const int64_t kZSLowResResumeAbove = 380ll * 1024 * 1024;
-static const int64_t kZSLowResReserveBytes = 220ll * 1024 * 1024;
+static const int64_t kZSLowResFullSpeedAbove = 450ll * 1024 * 1024;
+static const int64_t kZSLowResHalfSpeedAbove = 300ll * 1024 * 1024;
+static const int64_t kZSLowResPauseBelow = 170ll * 1024 * 1024;
+static const int64_t kZSLowResResumeAbove = 230ll * 1024 * 1024;
+static const int64_t kZSLowResReserveBytes = 130ll * 1024 * 1024;
 static const NSTimeInterval kZSLowResMemoryWaitLimit = 30.0;
 static const NSTimeInterval kZSLowResWarningPause = 8.0;
 static const useconds_t kZSLowResConstrainedSleep = 25000;
@@ -1642,7 +1643,8 @@ enum {
     kZSLowResEncodeAlphaSRGB = 3,
     kZSLowResEncodeOpaqueLinear = 4,
     kZSLowResEncodeAlphaLinear = 5,
-    kZSLowResContextKinds = 6,
+    kZSLowResRescueOffset = 4,
+    kZSLowResContextKinds = 10,
 };
 
 typedef struct {
@@ -1759,14 +1761,43 @@ static int zslr_codec_reserve(void *user, uint64_t need) {
 }
 
 static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *config) {
-    BOOL srgb = (kind == kZSLowResDecodeSRGB || kind == kZSLowResEncodeOpaqueSRGB || kind == kZSLowResEncodeAlphaSRGB);
+    BOOL rescue = kind >= kZSLowResEncodeOpaqueSRGB + kZSLowResRescueOffset;
+    int base = rescue ? kind - kZSLowResRescueOffset : kind;
+    BOOL srgb = (base == kZSLowResDecodeSRGB || base == kZSLowResEncodeOpaqueSRGB || base == kZSLowResEncodeAlphaSRGB);
     enum astcenc_profile profile = srgb ? ASTCENC_PRF_LDR_SRGB : ASTCENC_PRF_LDR;
-    if (kind == kZSLowResDecodeSRGB || kind == kZSLowResDecodeLinear) {
+    if (base == kZSLowResDecodeSRGB || base == kZSLowResDecodeLinear) {
         return astcenc_config_init(profile, 6, 6, 1, ASTCENC_PRE_FASTEST, ASTCENC_FLG_DECOMPRESS_ONLY, config);
     }
     unsigned int flags = ASTCENC_FLG_SELF_DECOMPRESS_ONLY;
-    if (kind == kZSLowResEncodeAlphaSRGB || kind == kZSLowResEncodeAlphaLinear) flags |= ASTCENC_FLG_USE_ALPHA_WEIGHT;
-    return astcenc_config_init(profile, 8, 8, 1, ASTCENC_PRE_FAST, flags, config);
+    if (base == kZSLowResEncodeAlphaSRGB || base == kZSLowResEncodeAlphaLinear) flags |= ASTCENC_FLG_USE_ALPHA_WEIGHT;
+    return astcenc_config_init(profile, 8, 8, 1, rescue ? ASTCENC_PRE_MEDIUM : ASTCENC_PRE_FASTEST, flags, config);
+}
+
+static void zslr_measure(const uint8_t *ref, const uint8_t *test, size_t pixels, int hasAlpha, double *weighted, double *raw) {
+    double rawSum = 0;
+    double rgbSum = 0;
+    double weightSum = 0;
+    double alphaSum = 0;
+    for (size_t i = 0; i < pixels; i++) {
+        const uint8_t *r = ref + i * 4;
+        const uint8_t *t = test + i * 4;
+        double dr = (double)r[0] - (double)t[0];
+        double dg = (double)r[1] - (double)t[1];
+        double db = (double)r[2] - (double)t[2];
+        double da = (double)r[3] - (double)t[3];
+        double rgbErr = dr * dr + dg * dg + db * db;
+        double w = hasAlpha ? (double)r[3] / 255.0 : 1.0;
+        rawSum += rgbErr + da * da;
+        rgbSum += w * rgbErr;
+        weightSum += w;
+        alphaSum += da * da;
+    }
+    double rawMse = rawSum / ((double)pixels * 4.0);
+    double mseRGB = weightSum > 0 ? rgbSum / (3.0 * weightSum) : 0.0;
+    double mseA = alphaSum / (double)pixels;
+    double mse = (3.0 * mseRGB + mseA) / 4.0;
+    *raw = rawMse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / rawMse);
+    *weighted = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
 }
 
 static struct astcenc_context *zslr_context(ZSLRWorker *worker, int kind) {
@@ -1815,6 +1846,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     int result = -1;
     if (why && whyLen) why[0] = 0;
 
+    double phase = CACurrentMediaTime();
     struct astcenc_context *decoder = zslr_context(worker, srgb ? kZSLowResDecodeSRGB : kZSLowResDecodeLinear);
     if (!decoder) {
         ZSLR_WHY("cannot create ASTC decoder context");
@@ -1835,6 +1867,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         ZSLR_WHY("ASTC decode failed: %s", astcenc_get_error_string(status));
         goto done;
     }
+    double decodeMs = ZSLR_MS(phase);
 
     int hasAlpha = 0;
     for (size_t i = 3; i < rgbaLen; i += 4) {
@@ -1845,11 +1878,6 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     }
     int kind = srgb ? (hasAlpha ? kZSLowResEncodeAlphaSRGB : kZSLowResEncodeOpaqueSRGB)
                     : (hasAlpha ? kZSLowResEncodeAlphaLinear : kZSLowResEncodeOpaqueLinear);
-    struct astcenc_context *encoder = zslr_context(worker, kind);
-    if (!encoder) {
-        ZSLR_WHY("cannot create ASTC encoder context (kind %d)", kind);
-        goto done;
-    }
 
     encoded = (uint8_t *)malloc(encodedLen);
     check = (uint8_t *)malloc(rgbaLen);
@@ -1858,35 +1886,47 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         goto done;
     }
 
-    status = astcenc_compress_image(encoder, &image, &swizzle, encoded, encodedLen, 0);
-    astcenc_compress_reset(encoder);
-    if (status != ASTCENC_SUCCESS) {
-        ZSLR_WHY("ASTC 8x8 encode failed: %s", astcenc_get_error_string(status));
-        goto done;
+    double psnr = 0;
+    double rawPsnr = 0;
+    double encodeMs = 0;
+    int passes = 0;
+    for (;;) {
+        int useKind = passes == 0 ? kind : kind + kZSLowResRescueOffset;
+        struct astcenc_context *encoder = zslr_context(worker, useKind);
+        if (!encoder) {
+            ZSLR_WHY("cannot create ASTC encoder context (kind %d)", useKind);
+            goto done;
+        }
+        phase = CACurrentMediaTime();
+        status = astcenc_compress_image(encoder, &image, &swizzle, encoded, encodedLen, 0);
+        astcenc_compress_reset(encoder);
+        if (status != ASTCENC_SUCCESS) {
+            ZSLR_WHY("ASTC 8x8 encode failed: %s", astcenc_get_error_string(status));
+            goto done;
+        }
+        void *checkSlice = check;
+        struct astcenc_image checkImage = { width, height, 1, ASTCENC_TYPE_U8, &checkSlice };
+        status = astcenc_decompress_image(encoder, encoded, encodedLen, &checkImage, &swizzle, 0);
+        astcenc_decompress_reset(encoder);
+        if (status != ASTCENC_SUCCESS) {
+            ZSLR_WHY("ASTC 8x8 verify decode failed: %s", astcenc_get_error_string(status));
+            goto done;
+        }
+        zslr_measure(rgba, check, pixels, hasAlpha, &psnr, &rawPsnr);
+        encodeMs += ZSLR_MS(phase);
+        passes++;
+        if (psnr >= kZSLowResMinPSNR) break;
+        if (passes >= 2 || psnr < kZSLowResMinPSNR - kZSLowResRescueWindowDB) break;
     }
 
-    void *checkSlice = check;
-    struct astcenc_image checkImage = { width, height, 1, ASTCENC_TYPE_U8, &checkSlice };
-    status = astcenc_decompress_image(encoder, encoded, encodedLen, &checkImage, &swizzle, 0);
-    astcenc_decompress_reset(encoder);
-    if (status != ASTCENC_SUCCESS) {
-        ZSLR_WHY("ASTC 8x8 verify decode failed: %s", astcenc_get_error_string(status));
-        goto done;
-    }
-
-    double sum = 0;
-    for (size_t i = 0; i < rgbaLen; i++) {
-        double d = (double)rgba[i] - (double)check[i];
-        sum += d * d;
-    }
-    double mse = sum / (double)rgbaLen;
-    double psnr = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
     if (psnr < kZSLowResMinPSNR) {
-        ZSLR_WHY("PSNR %.2f dB below %.1f dB (%s, %s)", psnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque");
+        ZSLR_WHY("PSNR %.2f dB (raw %.2f) below %.1f dB after %d pass(es) (%s, %s, decode %.0f ms, encode+check %.0f ms)", psnr, rawPsnr, kZSLowResMinPSNR,
+                 passes, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque", decodeMs, encodeMs);
         result = ZSLR_TRANSCODE_REJECTED;
         goto done;
     }
-    ZSLR_WHY("PSNR %.2f dB (%s, %s)", psnr, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque");
+    ZSLR_WHY("PSNR %.2f dB (raw %.2f), %s pass, %s, %s, decode %.0f ms, encode+check %.0f ms", psnr, rawPsnr, passes == 1 ? "fast" : "rescue",
+             srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque", decodeMs, encodeMs);
     *out = encoded;
     *outLen = encodedLen;
     encoded = NULL;

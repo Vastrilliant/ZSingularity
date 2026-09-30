@@ -5073,6 +5073,158 @@ static UIView *zs_make_title_block(void) {
 
 #pragma mark - Overlay
 
+static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSString **outMessage);
+
+@interface NSObject (ZSSyslogLongPress)
+- (void)handleSyslogFullScreenRowLongPress:(UILongPressGestureRecognizer *)gesture;
+@end
+
+static const CGFloat kZSSyslogIndexColumnWidth = 22;
+
+@interface ZSSyslogCell : UITableViewCell
+@property (nonatomic, strong) UILabel *indexLabel;
+@property (nonatomic, strong) UILabel *messageLabel;
+@property (nonatomic, strong) UILabel *headerLabel;
+@property (nonatomic, strong) NSLayoutConstraint *indexLeading;
+@property (nonatomic, strong) NSLayoutConstraint *textLeading;
+@property (nonatomic, strong) NSLayoutConstraint *textTrailing;
+@end
+
+@implementation ZSSyslogCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (!self) return nil;
+
+    self.backgroundColor = UIColor.clearColor;
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+    self.contentView.backgroundColor = UIColor.clearColor;
+
+    UIFont *rowFont = [UIFont fontWithName:@"Menlo-Regular" size:11]
+        ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
+        ?: [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    UIFont *headerFont = [UIFont fontWithName:@"Menlo-Regular" size:9]
+        ?: [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+
+    UILabel *indexLabel = [[UILabel alloc] init];
+    indexLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    indexLabel.numberOfLines = 1;
+    indexLabel.font = indexFont;
+    indexLabel.textColor = [UIColor colorWithWhite:1 alpha:0.28];
+    indexLabel.textAlignment = NSTextAlignmentRight;
+    [self.contentView addSubview:indexLabel];
+    self.indexLabel = indexLabel;
+
+    UILabel *messageLabel = [[UILabel alloc] init];
+    messageLabel.numberOfLines = 0;
+    messageLabel.font = rowFont;
+    messageLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
+    self.messageLabel = messageLabel;
+
+    UILabel *headerLabel = [[UILabel alloc] init];
+    headerLabel.numberOfLines = 0;
+    headerLabel.textAlignment = NSTextAlignmentLeft;
+    headerLabel.font = headerFont;
+    headerLabel.textColor = [UIColor colorWithWhite:1 alpha:0.32];
+    self.headerLabel = headerLabel;
+
+    UIStackView *textStack = [[UIStackView alloc] initWithArrangedSubviews:@[messageLabel, headerLabel]];
+    textStack.translatesAutoresizingMaskIntoConstraints = NO;
+    textStack.axis = UILayoutConstraintAxisVertical;
+    textStack.spacing = 3;
+    [self.contentView addSubview:textStack];
+
+    self.indexLeading = [indexLabel.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:0];
+    self.textLeading = [textStack.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:0];
+    self.textTrailing = [textStack.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:0];
+    NSLayoutConstraint *bottom = [textStack.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-6];
+    bottom.priority = UILayoutPriorityRequired - 1;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [indexLabel.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+        self.indexLeading,
+        [indexLabel.widthAnchor constraintEqualToConstant:kZSSyslogIndexColumnWidth],
+        [textStack.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+        self.textLeading,
+        self.textTrailing,
+        bottom,
+    ]];
+    return self;
+}
+
+@end
+
+@interface ZSSyslogTableController : NSObject <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, copy) NSArray<NSString *> *lines;
+@property (nonatomic, assign) CGFloat leftInset;
+@property (nonatomic, assign) CGFloat rightInset;
+@property (nonatomic, assign) BOOL atBottom;
+@property (nonatomic, weak) id longPressTarget;
+@property (nonatomic, copy) void (^reachedBottom)(void);
+@end
+
+@implementation ZSSyslogTableController
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _lines = @[];
+        _atBottom = YES;
+    }
+    return self;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return (NSInteger)self.lines.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString * const identifier = @"zs.syslog.cell";
+    ZSSyslogCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) {
+        cell = [[ZSSyslogCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+        if (self.longPressTarget) {
+            UILongPressGestureRecognizer *longPress =
+                [[UILongPressGestureRecognizer alloc] initWithTarget:self.longPressTarget action:@selector(handleSyslogFullScreenRowLongPress:)];
+            longPress.minimumPressDuration = 0.4;
+            [cell.contentView addGestureRecognizer:longPress];
+        }
+    }
+
+    NSUInteger row = (NSUInteger)indexPath.row;
+    NSString *line = row < self.lines.count ? self.lines[row] : @"";
+    NSString *header = nil;
+    NSString *message = nil;
+    zs_parseSyslogLineHeader(line, &header, &message);
+
+    cell.contentView.backgroundColor = (row % 2 == 0) ? [UIColor colorWithWhite:1 alpha:0.045] : UIColor.clearColor;
+    cell.indexLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)(row + 1)];
+    cell.messageLabel.text = message ?: line;
+    cell.headerLabel.text = header;
+    cell.headerLabel.hidden = header.length == 0;
+    cell.indexLeading.constant = self.leftInset;
+    cell.textLeading.constant = self.leftInset + kZSSyslogIndexColumnWidth + 3;
+    cell.textTrailing.constant = -self.rightInset;
+    objc_setAssociatedObject(cell.contentView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
+    return cell;
+}
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    BOOL nowAtBottom;
+    if (scrollView.contentSize.height <= scrollView.bounds.size.height) {
+        nowAtBottom = YES;
+    } else {
+        CGFloat maxY = scrollView.contentSize.height - scrollView.bounds.size.height + scrollView.adjustedContentInset.bottom;
+        nowAtBottom = scrollView.contentOffset.y >= maxY - 48;
+    }
+    BOOL was = self.atBottom;
+    self.atBottom = nowAtBottom;
+    if (nowAtBottom && !was && self.reachedBottom) self.reachedBottom();
+}
+
+@end
+
 @interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate>
 @property (nonatomic, strong) UIVisualEffectView *glassContainer;
 @property (nonatomic, strong) UIVisualEffectView *panelGlass;
@@ -5232,7 +5384,11 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSTimer *syslogInfoRefreshTimer;
 @property (nonatomic, strong) UIScrollView *syslogFullScreenScrollView;
 @property (nonatomic, strong) NSLayoutConstraint *syslogCloseButtonLeadingConstraint;
-@property (nonatomic, strong) UIStackView *syslogFullScreenRowsStack;
+@property (nonatomic, strong) UITableView *syslogTableView;
+@property (nonatomic, strong) ZSSyslogTableController *syslogTableController;
+@property (nonatomic, strong) UILabel *syslogEmptyLabel;
+@property (nonatomic, assign) BOOL syslogRenderScheduled;
+@property (nonatomic, assign) BOOL syslogRenderDeferred;
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
 @property (nonatomic, strong) UIView *syslogCopyToastView;
 
@@ -6430,8 +6586,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     }
 
     __weak typeof(self) weakSelf = self;
-    [ZSyslogController sharedController].lineHandler = ^(NSString *line) {
-        [weakSelf appendSyslogLine:line];
+    [ZSyslogController sharedController].linesHandler = ^(NSArray<NSString *> *lines) {
+        [weakSelf appendSyslogLines:lines];
     };
     BOOL syslogCaptureStarted = [[ZSyslogController sharedController] start];
     if (!syslogCaptureStarted) {
@@ -7032,7 +7188,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.syslogInfoLabel = nil;
     self.syslogFullScreenScrollView = nil;
     self.syslogCloseButtonLeadingConstraint = nil;
-    self.syslogFullScreenRowsStack = nil;
+    self.syslogTableView = nil;
+    self.syslogTableController = nil;
+    self.syslogEmptyLabel = nil;
+    self.syslogRenderScheduled = NO;
+    self.syslogRenderDeferred = NO;
     self.syslogCopyToastView = nil;
 
     self.authRepoLinkField = nil;
@@ -13309,6 +13469,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 - (void)zs_toggleSyslogChannelTapped {
     self.syslogDebugModeEnabled = !self.syslogDebugModeEnabled;
     [self zs_updateSyslogInfoLabel];
+    self.syslogTableController.atBottom = YES;
     [self zs_renderSyslogBuffer];
 
     UIImpactFeedbackGenerator *haptic =
@@ -13448,22 +13609,43 @@ static void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSStr
 
 - (void)appendSyslogLine:(NSString *)line {
     if (!line.length) return;
-    if ([self zs_syslogLineIsBlacklisted:line]) return;
+    [self appendSyslogLines:@[line]];
+}
+
+- (void)appendSyslogLines:(NSArray<NSString *> *)lines {
+    if (lines.count == 0) return;
 
     if (!self.syslogChannelLines) self.syslogChannelLines = [NSMutableArray array];
     if (!self.debugChannelLines) self.debugChannelLines = [NSMutableArray array];
 
-    BOOL isZLogLine = [line containsString:kZLogTag];
-    NSMutableArray<NSString *> *targetBuffer = isZLogLine ? self.debugChannelLines : self.syslogChannelLines;
+    BOOL touchedDisplayed = NO;
+    BOOL touchedSyslog = NO;
+    BOOL touchedDebug = NO;
+    for (NSString *line in lines) {
+        if (!line.length) continue;
+        if ([self zs_syslogLineIsBlacklisted:line]) continue;
 
-    [targetBuffer addObject:line];
-    static const NSUInteger kMaxSyslogLines = 500;
-    if (targetBuffer.count > kMaxSyslogLines) {
-        NSUInteger removeCount = targetBuffer.count - kMaxSyslogLines;
-        [targetBuffer removeObjectsInRange:NSMakeRange(0, removeCount)];
+        BOOL isZLogLine = [line containsString:kZLogTag];
+        if (isZLogLine) {
+            [self.debugChannelLines addObject:line];
+            touchedDebug = YES;
+            if (self.syslogDebugModeEnabled) touchedDisplayed = YES;
+        } else {
+            [self.syslogChannelLines addObject:line];
+            touchedSyslog = YES;
+            if (!self.syslogDebugModeEnabled) touchedDisplayed = YES;
+        }
     }
 
-    [self zs_renderSyslogBuffer];
+    static const NSUInteger kMaxSyslogLines = 2000;
+    if (touchedSyslog && self.syslogChannelLines.count > kMaxSyslogLines) {
+        [self.syslogChannelLines removeObjectsInRange:NSMakeRange(0, self.syslogChannelLines.count - kMaxSyslogLines)];
+    }
+    if (touchedDebug && self.debugChannelLines.count > kMaxSyslogLines) {
+        [self.debugChannelLines removeObjectsInRange:NSMakeRange(0, self.debugChannelLines.count - kMaxSyslogLines)];
+    }
+
+    if (touchedDisplayed) [self zs_scheduleSyslogRender];
 }
 
 - (NSArray<NSString *> *)zs_syslogDisplayLines {
@@ -13550,23 +13732,42 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.syslogInfoLabel = infoLabel;
     [self zs_updateSyslogInfoLabel];
 
-    UIScrollView *scrollView = [[UIScrollView alloc] init];
-    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
-    scrollView.backgroundColor = UIColor.clearColor;
-    scrollView.showsVerticalScrollIndicator = YES;
-    scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    scrollView.alwaysBounceVertical = NO;
-    scrollView.bounces = NO;
-    scrollView.panGestureRecognizer.maximumNumberOfTouches = 1;
-    [overlay addSubview:scrollView];
-    self.syslogFullScreenScrollView = scrollView;
+    ZSSyslogTableController *tableController = [[ZSSyslogTableController alloc] init];
+    tableController.longPressTarget = self;
+    __weak typeof(self) weakSelf = self;
+    tableController.reachedBottom = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.syslogRenderDeferred) return;
+        strongSelf.syslogRenderDeferred = NO;
+        [strongSelf zs_renderSyslogFullScreenRows];
+    };
+    self.syslogTableController = tableController;
 
-    UIStackView *rowsStack = [[UIStackView alloc] init];
-    rowsStack.axis = UILayoutConstraintAxisVertical;
-    rowsStack.spacing = 0;
-    rowsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    [scrollView addSubview:rowsStack];
-    self.syslogFullScreenRowsStack = rowsStack;
+    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    tableView.backgroundColor = UIColor.clearColor;
+    tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    tableView.showsVerticalScrollIndicator = YES;
+    tableView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    tableView.alwaysBounceVertical = NO;
+    tableView.bounces = NO;
+    tableView.allowsSelection = NO;
+    tableView.rowHeight = UITableViewAutomaticDimension;
+    tableView.estimatedRowHeight = 40;
+    tableView.dataSource = tableController;
+    tableView.delegate = tableController;
+    tableView.panGestureRecognizer.maximumNumberOfTouches = 1;
+
+    UILabel *emptyLabel = [[UILabel alloc] init];
+    emptyLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    emptyLabel.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+    emptyLabel.textAlignment = NSTextAlignmentCenter;
+    tableView.backgroundView = emptyLabel;
+    self.syslogEmptyLabel = emptyLabel;
+
+    [overlay addSubview:tableView];
+    self.syslogTableView = tableView;
+    self.syslogFullScreenScrollView = tableView;
 
     self.syslogCloseButtonLeadingConstraint = [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset];
 
@@ -13595,16 +13796,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
-        [scrollView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
-        [scrollView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
-        [scrollView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
-        [scrollView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
-
-        [rowsStack.topAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.topAnchor],
-        [rowsStack.leadingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.leadingAnchor],
-        [rowsStack.trailingAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.trailingAnchor],
-        [rowsStack.bottomAnchor constraintEqualToAnchor:scrollView.contentLayoutGuide.bottomAnchor],
-        [rowsStack.widthAnchor constraintEqualToAnchor:scrollView.frameLayoutGuide.widthAnchor],
+        [tableView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [tableView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [tableView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [tableView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
     ]];
 }
 
@@ -13624,112 +13819,42 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_renderSyslogFullScreenRows {
-    if (!self.syslogFullScreenRowsStack) return;
-
-    for (UIView *sub in self.syslogFullScreenRowsStack.arrangedSubviews) {
-        [self.syslogFullScreenRowsStack removeArrangedSubview:sub];
-        [sub removeFromSuperview];
-    }
+    UITableView *tableView = self.syslogTableView;
+    ZSSyslogTableController *controller = self.syslogTableController;
+    if (!tableView || !controller) return;
 
     NSArray<NSString *> *lines = [self zs_syslogFullScreenFilteredLines];
-    UIFont *rowFont = [UIFont fontWithName:@"Menlo-Regular" size:11]
-        ?: [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
 
     UIEdgeInsets overlaySafeInsets = self.syslogFullScreenOverlay.safeAreaInsets;
     CGFloat logIndent = kZSSyslogFullScreenLeftInset + overlaySafeInsets.left * 0.15;
     self.syslogCloseButtonLeadingConstraint.constant = logIndent;
-    CGFloat indexColumnWidth = 22;
-    CGFloat rowLeadingInset = logIndent + indexColumnWidth + 3;
-    CGFloat rowTrailingInset = 16 + overlaySafeInsets.right * 0.15;
+    controller.leftInset = logIndent;
+    controller.rightInset = 16 + overlaySafeInsets.right * 0.15;
+    controller.lines = lines;
 
-    UIFont *indexFont = [UIFont fontWithName:@"Menlo-Regular" size:10]
-        ?: [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
-    UIFont *headerFont = [UIFont fontWithName:@"Menlo-Regular" size:9]
-        ?: [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+    self.syslogRenderDeferred = NO;
+    BOOL stickToBottom = controller.atBottom;
+    self.syslogEmptyLabel.text = self.syslogSearchField.text.length > 0 ? @"No matching log lines" : @"[syslog] no output yet";
+    self.syslogEmptyLabel.hidden = lines.count > 0;
+    [tableView reloadData];
+    if (stickToBottom && lines.count > 0) [self zs_scrollSyslogFullScreenToBottom];
+}
 
-    NSInteger index = 0;
-    for (NSString *line in lines) {
-        NSString *header = nil;
-        NSString *message = nil;
-        zs_parseSyslogLineHeader(line, &header, &message);
-
-        UIView *rowView = [[UIView alloc] init];
-        rowView.translatesAutoresizingMaskIntoConstraints = NO;
-        rowView.backgroundColor = (index % 2 == 0)
-            ? [UIColor colorWithWhite:1 alpha:0.045]
-            : UIColor.clearColor;
-        rowView.userInteractionEnabled = YES;
-
-        UILabel *indexLabel = [[UILabel alloc] init];
-        indexLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        indexLabel.numberOfLines = 1;
-        indexLabel.font = indexFont;
-        indexLabel.textColor = [UIColor colorWithWhite:1 alpha:0.28];
-        indexLabel.textAlignment = NSTextAlignmentRight;
-        indexLabel.text = [NSString stringWithFormat:@"%ld", (long)(index + 1)];
-        [rowView addSubview:indexLabel];
-
-        UILabel *rowLabel = [[UILabel alloc] init];
-        rowLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        rowLabel.numberOfLines = 0;
-        rowLabel.font = rowFont;
-        rowLabel.textColor = [UIColor colorWithWhite:0.92 alpha:1];
-        rowLabel.text = message ?: line;
-        [rowView addSubview:rowLabel];
-
-        [NSLayoutConstraint activateConstraints:@[
-            [indexLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
-            [indexLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:logIndent],
-            [indexLabel.widthAnchor constraintEqualToConstant:indexColumnWidth],
-
-            [rowLabel.topAnchor constraintEqualToAnchor:rowView.topAnchor constant:6],
-            [rowLabel.leadingAnchor constraintEqualToAnchor:rowView.leadingAnchor constant:rowLeadingInset],
-            [rowLabel.trailingAnchor constraintEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
-        ]];
-
-        if (header.length > 0) {
-            UILabel *headerLabel = [[UILabel alloc] init];
-            headerLabel.translatesAutoresizingMaskIntoConstraints = NO;
-            headerLabel.numberOfLines = 0;
-            headerLabel.textAlignment = NSTextAlignmentLeft;
-            headerLabel.font = headerFont;
-            headerLabel.textColor = [UIColor colorWithWhite:1 alpha:0.32];
-            headerLabel.text = header;
-            [rowView addSubview:headerLabel];
-
-            [NSLayoutConstraint activateConstraints:@[
-                [headerLabel.topAnchor constraintEqualToAnchor:rowLabel.bottomAnchor constant:3],
-                [headerLabel.leadingAnchor constraintEqualToAnchor:rowLabel.leadingAnchor],
-                [headerLabel.trailingAnchor constraintLessThanOrEqualToAnchor:rowView.trailingAnchor constant:-rowTrailingInset],
-                [headerLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6],
-            ]];
-        } else {
-            [rowLabel.bottomAnchor constraintEqualToAnchor:rowView.bottomAnchor constant:-6].active = YES;
+- (void)zs_scheduleSyslogRender {
+    if (!self.syslogFullScreenOpen || self.syslogRenderScheduled) return;
+    self.syslogRenderScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf.syslogRenderScheduled = NO;
+        if (!strongSelf.syslogFullScreenOpen) return;
+        if (!strongSelf.syslogTableController.atBottom) {
+            strongSelf.syslogRenderDeferred = YES;
+            return;
         }
-
-        objc_setAssociatedObject(rowView, "zs_logLineText", line, OBJC_ASSOCIATION_RETAIN);
-
-        UILongPressGestureRecognizer *longPress =
-            [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleSyslogFullScreenRowLongPress:)];
-        longPress.minimumPressDuration = 0.4;
-        [rowView addGestureRecognizer:longPress];
-
-        [self.syslogFullScreenRowsStack addArrangedSubview:rowView];
-        index++;
-    }
-
-    if (lines.count == 0) {
-        UILabel *emptyLabel = [[UILabel alloc] init];
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = NO;
-        emptyLabel.text = self.syslogSearchField.text.length > 0 ? @"No matching log lines" : @"[syslog] no output yet";
-        emptyLabel.font = rowFont;
-        emptyLabel.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-        emptyLabel.textAlignment = NSTextAlignmentCenter;
-        [NSLayoutConstraint activateConstraints:@[
-            [emptyLabel.heightAnchor constraintGreaterThanOrEqualToConstant:40],
-        ]];
-        [self.syslogFullScreenRowsStack addArrangedSubview:emptyLabel];
-    }
+        [strongSelf zs_renderSyslogFullScreenRows];
+    });
 }
 
 - (void)handleSyslogFullScreenRowLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -13813,6 +13938,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_syslogSearchFieldChanged:(UITextField *)field {
+    self.syslogTableController.atBottom = YES;
     [self zs_renderSyslogFullScreenRows];
 }
 
@@ -13863,6 +13989,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     [self.syslogFullScreenOverlay layoutIfNeeded];
     [self zs_updateSyslogInfoLabel];
+    self.syslogTableController.atBottom = YES;
     [self zs_renderSyslogFullScreenRows];
     [self zs_scrollSyslogFullScreenToBottom];
 
@@ -13875,14 +14002,16 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_scrollSyslogFullScreenToBottom {
-    UIScrollView *scrollView = self.syslogFullScreenScrollView;
-    if (!scrollView) return;
+    UITableView *tableView = self.syslogTableView;
+    if (!tableView) return;
+    self.syslogTableController.atBottom = YES;
+    NSInteger count = [tableView numberOfRowsInSection:0];
+    if (count <= 0) return;
     [self.syslogFullScreenOverlay layoutIfNeeded];
-    [scrollView layoutIfNeeded];
-    CGFloat bottomInset = scrollView.adjustedContentInset.bottom;
-    CGFloat y = scrollView.contentSize.height - scrollView.bounds.size.height + bottomInset;
-    y = MAX(y, -scrollView.adjustedContentInset.top);
-    [scrollView setContentOffset:CGPointMake(0, y) animated:NO];
+    [tableView layoutIfNeeded];
+    [tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:count - 1 inSection:0]
+                     atScrollPosition:UITableViewScrollPositionBottom
+                             animated:NO];
 }
 
 - (void)zs_installPinchToExitOnView:(UIView *)view {
@@ -16957,11 +17086,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         overlay.alpha = 1;
     }
 
-    for (UIView *row in [self.syslogFullScreenRowsStack.arrangedSubviews copy]) {
-        [self.syslogFullScreenRowsStack removeArrangedSubview:row];
-        [row removeFromSuperview];
-    }
-    self.syslogFullScreenScrollView.contentOffset = CGPointZero;
+    self.syslogTableController.lines = @[];
+    self.syslogTableController.atBottom = YES;
+    self.syslogRenderDeferred = NO;
+    [self.syslogTableView reloadData];
+    self.syslogTableView.contentOffset = CGPointZero;
 
     [self.memoryFullScreenContentView removeFromSuperview];
     self.memoryFullScreenContentView = nil;
