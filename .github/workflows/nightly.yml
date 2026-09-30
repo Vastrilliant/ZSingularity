@@ -155,7 +155,14 @@ jobs:
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
-          gh release delete nightly --repo "$REPO" --yes --cleanup-tag || true
+          
+          # Delete existing nightly release and wait for completion
+          if gh release view nightly --repo "$REPO" > /dev/null 2>&1; then
+            gh release delete nightly --repo "$REPO" --yes --cleanup-tag
+            sleep 2  # Wait for API to process deletion
+          fi
+          
+          # Create new nightly release
           gh release create nightly ZSingularity.dylib \
             --repo "$REPO" \
             --title "Nightly build ${{ github.run_number }}" \
