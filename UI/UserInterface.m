@@ -2370,6 +2370,130 @@ static const NSInteger kZSWheelLoopCopies = 9;
 
 @end
 
+@interface ZSSectionIndexView : UIView
+@property (nonatomic, copy) void (^onSelect)(NSUInteger index);
+- (void)setTitles:(NSArray<NSString *> *)titles;
+@end
+
+static const CGFloat kZSSectionIndexRowHeight = 16;
+static const CGFloat kZSSectionIndexVerticalPadding = 6;
+
+@implementation ZSSectionIndexView {
+    NSArray<NSString *> *_titles;
+    NSMutableArray<UILabel *> *_labels;
+    NSInteger _activeIndex;
+    UISelectionFeedbackGenerator *_haptic;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (!self) return nil;
+    _titles = @[];
+    _labels = [NSMutableArray array];
+    _activeIndex = -1;
+    self.backgroundColor = UIColor.clearColor;
+    self.multipleTouchEnabled = NO;
+    self.layer.cornerCurve = kCACornerCurveContinuous;
+    return self;
+}
+
+- (void)setTitles:(NSArray<NSString *> *)titles {
+    if ([_titles isEqualToArray:titles]) return;
+    _titles = [titles copy];
+    for (UILabel *label in _labels) [label removeFromSuperview];
+    [_labels removeAllObjects];
+    for (NSString *title in _titles) {
+        UILabel *label = [[UILabel alloc] init];
+        label.text = title;
+        label.textAlignment = NSTextAlignmentCenter;
+        label.font = zs_mono_font(10, UIFontWeightSemibold);
+        label.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+        [self addSubview:label];
+        [_labels addObject:label];
+    }
+    _activeIndex = -1;
+    [self invalidateIntrinsicContentSize];
+    [self setNeedsLayout];
+}
+
+- (CGSize)intrinsicContentSize {
+    if (_labels.count == 0) return CGSizeMake(UIViewNoIntrinsicMetric, 0);
+    return CGSizeMake(UIViewNoIntrinsicMetric, _labels.count * kZSSectionIndexRowHeight + kZSSectionIndexVerticalPadding * 2);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat width = self.bounds.size.width;
+    for (NSUInteger i = 0; i < _labels.count; i++) {
+        _labels[i].frame = CGRectMake(0, kZSSectionIndexVerticalPadding + i * kZSSectionIndexRowHeight, width, kZSSectionIndexRowHeight);
+    }
+    self.layer.cornerRadius = MIN(self.bounds.size.width, self.bounds.size.height) * 0.5;
+}
+
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return CGRectContainsPoint(CGRectInset(self.bounds, -6, 0), point);
+}
+
+- (NSInteger)indexForTouch:(UITouch *)touch {
+    if (_labels.count == 0) return -1;
+    CGFloat y = [touch locationInView:self].y - kZSSectionIndexVerticalPadding;
+    NSInteger index = (NSInteger)floor(y / kZSSectionIndexRowHeight);
+    return MAX(0, MIN(index, (NSInteger)_labels.count - 1));
+}
+
+- (void)zs_applyActiveIndex {
+    UIColor *dim = [UIColor colorWithWhite:1 alpha:0.5];
+    for (NSUInteger i = 0; i < _labels.count; i++) {
+        _labels[i].textColor = ((NSInteger)i == _activeIndex) ? zs_accent_green_color() : dim;
+    }
+}
+
+- (void)zs_setTracking:(BOOL)tracking {
+    [UIView animateWithDuration:0.18
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        self.backgroundColor = tracking ? [UIColor colorWithWhite:1 alpha:0.12] : UIColor.clearColor;
+    } completion:nil];
+}
+
+- (void)zs_selectIndex:(NSInteger)index {
+    if (index < 0 || index == _activeIndex) return;
+    _activeIndex = index;
+    [self zs_applyActiveIndex];
+    [_haptic selectionChanged];
+    [_haptic prepare];
+    if (self.onSelect) self.onSelect((NSUInteger)index);
+}
+
+- (void)zs_endTracking {
+    _activeIndex = -1;
+    [self zs_applyActiveIndex];
+    [self zs_setTracking:NO];
+    _haptic = nil;
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    _haptic = [[UISelectionFeedbackGenerator alloc] init];
+    [_haptic prepare];
+    [self zs_setTracking:YES];
+    [self zs_selectIndex:[self indexForTouch:touches.anyObject]];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self zs_selectIndex:[self indexForTouch:touches.anyObject]];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self zs_endTracking];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self zs_endTracking];
+}
+
+@end
+
 @interface ZSMarqueeLabel : UIView
 @property (nonatomic, copy) NSString *text;
 @property (nonatomic, strong) UIFont *font;
@@ -4961,6 +5085,8 @@ static UIView *zs_make_title_block(void) {
 @property (nonatomic, strong) NSMutableArray<dispatch_block_t> *pendingExperimentalSectionBuilders;
 @property (nonatomic, strong) NSDictionary *pendingCollapsedStates;
 @property (nonatomic, copy) NSArray<UIView *> *developerSectionViews;
+@property (nonatomic, strong) ZSSectionIndexView *sectionIndexView;
+@property (nonatomic, copy) NSArray<NSString *> *sectionIndexSectionNames;
 @property (nonatomic, assign) NSInteger developerUnlockTapCount;
 @property (nonatomic, assign) CFTimeInterval developerUnlockLastTapTime;
 @property (nonatomic, assign) BOOL panelOpen;
@@ -6856,6 +6982,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.pendingExperimentalSectionBuilders = nil;
     self.pendingCollapsedStates = nil;
     self.developerSectionViews = nil;
+    self.sectionIndexView = nil;
+    self.sectionIndexSectionNames = nil;
 
     self.docsPanelGlass = nil;
     self.docsPanel = nil;
@@ -7007,6 +7135,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     if ([touch.view isKindOfClass:[ZSCapsuleSlider class]]) return NO;
     if ([touch.view isKindOfClass:[ZSModeSlider class]]) return NO;
     if ([touch.view isKindOfClass:[ZSWheelPicker class]]) return NO;
+    if ([touch.view isKindOfClass:[ZSSectionIndexView class]]) return NO;
     if ([touch.view isKindOfClass:[UISwitch class]]) return NO;
     if ([touch.view isKindOfClass:[UIButton class]]) return NO;
     return YES;
@@ -7018,7 +7147,10 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 
 #pragma mark Panel
 
-static const CGFloat kPanelWidth = 320;
+static const CGFloat kZSSectionIndexReservedWidth = 26;
+static const CGFloat kZSSectionIndexViewWidth = 22;
+static const CGFloat kZSSectionIndexTrailingInset = 4;
+static const CGFloat kPanelWidth = 346;
 static const CGFloat kPanelPadding = 16;
 
 static const CGFloat kRowSpacing = 4;
@@ -7537,9 +7669,21 @@ static const CGFloat kContentFadeHeight = 22;
     [NSLayoutConstraint activateConstraints:@[
         [self.stack.topAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.topAnchor constant:kPanelPadding],
         [self.stack.leadingAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.leadingAnchor constant:kPanelPadding],
-        [self.stack.trailingAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.trailingAnchor constant:-kPanelPadding],
+        [self.stack.trailingAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.trailingAnchor constant:-(kPanelPadding + kZSSectionIndexReservedWidth)],
         [self.stack.bottomAnchor constraintEqualToAnchor:self.scrollView.contentLayoutGuide.bottomAnchor constant:-kPanelPadding],
-        [self.stack.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-(kPanelPadding * 2)],
+        [self.stack.widthAnchor constraintEqualToAnchor:self.scrollView.frameLayoutGuide.widthAnchor constant:-((kPanelPadding * 2) + kZSSectionIndexReservedWidth)],
+    ]];
+
+    self.sectionIndexView = [[ZSSectionIndexView alloc] init];
+    self.sectionIndexView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.sectionIndexView.onSelect = ^(NSUInteger index) {
+        [weakSelf zs_scrollToSectionAtIndex:index];
+    };
+    [self.contentOverlay addSubview:self.sectionIndexView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.sectionIndexView.trailingAnchor constraintEqualToAnchor:self.contentOverlay.trailingAnchor constant:-kZSSectionIndexTrailingInset],
+        [self.sectionIndexView.centerYAnchor constraintEqualToAnchor:self.contentOverlay.centerYAnchor],
+        [self.sectionIndexView.widthAnchor constraintEqualToConstant:kZSSectionIndexViewWidth],
     ]];
 
     UIImageView *signatureOverlay = zs_make_signature_overlay();
@@ -8833,6 +8977,8 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack addArrangedSubview:socialLinksStack];
     }];
 
+    [self zs_refreshSectionIndex];
+
     [self layoutPanelForWindow:unityView];
 
     zs_gif_tint_preload();
@@ -8926,7 +9072,7 @@ static UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NS
 #pragma mark Docs panel
 
 - (void)buildDocsPanel:(UIView *)unityView {
-    self.docsPanelWidth = self.panelWidth;
+    self.docsPanelWidth = self.panelWidth - kZSSectionIndexReservedWidth;
 
     if (zs_has_liquid_glass()) {
         self.docsPanelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
@@ -9231,6 +9377,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     zs_set_developer_settings_enabled(enabled);
     ZLog(@"[UserInterface] developer settings %@", enabled ? @"enabled" : @"disabled");
     [self zs_applyDeveloperSectionVisibilityRelayout:YES];
+    [self zs_refreshSectionIndex];
 
     UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
     [haptic notificationOccurred:enabled ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
@@ -9278,6 +9425,90 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     }
 }
 
+static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
+    return @[
+        @[@"Display", @"DI"],
+        @[@"Rendering", @"RE"],
+        @[@"Anti-Aliasing", @"AA"],
+        @[@"Post FX", @"FX"],
+        @[@"Particles", @"PA"],
+        @[@"Memory management", @"MM"],
+        @[@"Mods", @"MO"],
+        @[@"Auth", @"AU"],
+        @[@"Developer", @"DV"],
+        @[@"Miscellaneous", @"MS"],
+        @[@"Config", @"CN"],
+    ];
+}
+
+- (UIView *)zs_headerRowForSectionTitle:(NSString *)title {
+    for (UIView *view in self.stack.arrangedSubviews) {
+        if (![objc_getAssociatedObject(view, "zs_isSectionHeader") boolValue]) continue;
+        NSString *viewTitle = objc_getAssociatedObject(view, "zs_sectionTitle");
+        if ([viewTitle isEqualToString:title]) return view;
+    }
+    return nil;
+}
+
+- (void)zs_refreshSectionIndex {
+    if (!self.sectionIndexView) return;
+
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSMutableArray<NSString *> *initials = [NSMutableArray array];
+    for (NSArray<NSString *> *entry in zs_section_index_entries()) {
+        NSString *name = entry[0];
+        if ([name isEqualToString:@"Developer"] && !zs_developer_settings_enabled()) continue;
+
+        UIView *header = [self zs_headerRowForSectionTitle:name];
+        BOOL collapsed = header
+            ? [objc_getAssociatedObject(header, "zs_sectionCollapsed") boolValue]
+            : [self.pendingCollapsedStates[name] boolValue];
+        if (collapsed) continue;
+
+        [names addObject:name];
+        [initials addObject:entry[1]];
+    }
+
+    self.sectionIndexSectionNames = names;
+    [self.sectionIndexView setTitles:initials];
+    self.sectionIndexView.hidden = initials.count == 0;
+}
+
+- (void)zs_scrollToSectionAtIndex:(NSUInteger)index {
+    if (!self.scrollView || !self.stack) return;
+    if (index >= self.sectionIndexSectionNames.count) return;
+    NSString *title = self.sectionIndexSectionNames[index];
+
+    UIView *header = [self zs_headerRowForSectionTitle:title];
+    while (!header && (self.pendingSectionBuilders.count > 0 || [self zs_hasPendingExperimentalSectionBuilders])) {
+        [self zs_runNextPendingSectionBuilder];
+        header = [self zs_headerRowForSectionTitle:title];
+    }
+    if (!header) return;
+
+    [self.stack setNeedsLayout];
+    [self.stack layoutIfNeeded];
+    [self.scrollView layoutIfNeeded];
+
+    UIEdgeInsets inset = self.scrollView.contentInset;
+    CGFloat viewportHeight = self.scrollView.bounds.size.height;
+    CGFloat targetY = CGRectGetMinY([self.scrollView convertRect:header.bounds fromView:header]) - inset.top - kContentFadeHeight;
+
+    while (self.pendingSectionBuilders.count > 0 || [self zs_hasPendingExperimentalSectionBuilders]) {
+        CGFloat reachableY = self.stack.bounds.size.height + (kPanelPadding * 2) - viewportHeight + inset.bottom;
+        if (reachableY >= targetY) break;
+        [self zs_runNextPendingSectionBuilder];
+        [self.stack setNeedsLayout];
+        [self.stack layoutIfNeeded];
+    }
+    [self.scrollView layoutIfNeeded];
+
+    CGFloat minY = -inset.top;
+    CGFloat maxY = MAX(self.scrollView.contentSize.height - viewportHeight + inset.bottom, minY);
+    CGFloat offsetY = MIN(MAX(targetY, minY), maxY);
+    [self.scrollView setContentOffset:CGPointMake(self.scrollView.contentOffset.x, offsetY) animated:NO];
+}
+
 - (void)zs_sectionCollapseToggleTapped:(UIButton *)sender {
     UIView *headerRow = objc_getAssociatedObject(sender, "zs_sectionHeaderRow");
     if (!headerRow) return;
@@ -9292,6 +9523,7 @@ static NSDictionary *zs_load_collapsed_section_states(void) {
     BOOL collapsed = ![objc_getAssociatedObject(headerRow, "zs_sectionCollapsed") boolValue];
     objc_setAssociatedObject(headerRow, "zs_sectionCollapsed", @(collapsed), OBJC_ASSOCIATION_RETAIN);
     zs_save_collapsed_section_state(objc_getAssociatedObject(headerRow, "zs_sectionTitle"), collapsed);
+    [self zs_refreshSectionIndex];
 
     UIView *leadingSeparator = objc_getAssociatedObject(headerRow, "zs_sectionLeadingSeparator");
     leadingSeparator.hidden = collapsed;
