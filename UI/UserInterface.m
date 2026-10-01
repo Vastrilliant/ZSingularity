@@ -2870,6 +2870,8 @@ static __weak UIView *g_zsLowResInfoButtonSeparator;
 static NSInteger g_zsLowResStage;
 static NSUInteger g_zsLowResGeneration;
 static BOOL g_zsLowResReopenPending;
+static BOOL g_zsLowResSwapBusy;
+static __weak UIButton *g_zsLowResCancelButton;
 static __weak UIView *g_zsLowResInfoWrapper;
 static __weak UIView *g_zsLowResProgressWrapper;
 static __weak UIView *g_zsLowResTranscodeWrapper;
@@ -3075,6 +3077,7 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
         [cancel.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
     ]];
 
+    g_zsLowResCancelButton = cancel;
     g_zsLowResBundlePercentLabel = bundlePercent;
     g_zsLowResBundleCountLabel = bundleCount;
     g_zsLowResETALabel = eta;
@@ -3138,6 +3141,49 @@ static void zs_reveal_set_expanded(UIView *wrapper, BOOL expanded) {
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
                      animations:^{ content.alpha = expanded ? 1 : 0; }
                      completion:nil];
+}
+
+static NSString *zs_lowres_swap_shared_folders(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *shared = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
+    if (!shared) return @"Couldn't find the UnityCache/Shared folder.";
+    NSString *lowRes = [ZSLowRes stagingDirectory];
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:lowRes isDirectory:&isDirectory] || !isDirectory) return @"Documents/LowRes doesn't exist.";
+
+    NSMutableArray<NSString *> *visible = [NSMutableArray array];
+    for (NSString *name in [fm contentsOfDirectoryAtPath:lowRes error:nil]) {
+        if ([name hasPrefix:@"."] || [name isEqualToString:@"ledger.json"]) continue;
+        [visible addObject:name];
+    }
+    if (visible.count == 0) return @"Documents/LowRes has no compressed textures to swap in.";
+
+    NSString *source = lowRes;
+    if (visible.count == 1 && [visible.firstObject caseInsensitiveCompare:@"Shared"] == NSOrderedSame) {
+        NSString *candidate = [lowRes stringByAppendingPathComponent:visible.firstObject];
+        BOOL candidateIsDirectory = NO;
+        if ([fm fileExistsAtPath:candidate isDirectory:&candidateIsDirectory] && candidateIsDirectory) source = candidate;
+    }
+
+    NSString *backup = [shared stringByAppendingString:@".backup"];
+    NSError *error = nil;
+    if ([fm fileExistsAtPath:backup]) {
+        if (![fm removeItemAtPath:backup error:&error]) {
+            return [NSString stringWithFormat:@"Couldn't remove the old Shared.backup: %@", error.localizedDescription ?: @"unknown error"];
+        }
+    }
+    if (![fm moveItemAtPath:shared toPath:backup error:&error]) {
+        return [NSString stringWithFormat:@"Couldn't rename Shared to Shared.backup: %@", error.localizedDescription ?: @"unknown error"];
+    }
+    if (![fm moveItemAtPath:source toPath:shared error:&error]) {
+        NSString *reason = error.localizedDescription ?: @"unknown error";
+        NSError *rollbackError = nil;
+        if (![fm moveItemAtPath:backup toPath:shared error:&rollbackError]) {
+            return [NSString stringWithFormat:@"Couldn't move the compressed textures into place: %@. Restoring Shared also failed: %@. Your original files are in Shared.backup.", reason, rollbackError.localizedDescription ?: @"unknown error"];
+        }
+        return [NSString stringWithFormat:@"Couldn't move the compressed textures into place: %@. Shared was restored.", reason];
+    }
+    return nil;
 }
 
 static UIStackView *zs_make_lowres_info_view(id target, SEL action) {
@@ -10663,6 +10709,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResUserCancelled = NO;
     g_zsLowResStage = 3;
     g_zsLowResGeneration++;
+    [self zs_lowResSetActionButtonSwap:NO animated:NO];
     [[ZSMetalTabs shared] setPauseOverlayVisible:YES];
     [self zs_lowResRefreshProgressUI];
     [self zs_lowResSetPanelActive:YES animated:YES];
@@ -10742,9 +10789,79 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 }
 
+- (void)zs_lowResSetActionButtonSwap:(BOOL)swap animated:(BOOL)animated {
+    UIButton *button = g_zsLowResCancelButton;
+    if (!button) return;
+    NSString *title = swap ? @"Swap textures" : @"Cancel";
+    UIColor *color = swap ? zs_accent_green_color() : [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
+    dispatch_block_t apply = ^{
+        [button setTitle:title forState:UIControlStateNormal];
+        [button setTitleColor:color forState:UIControlStateNormal];
+    };
+    if (!animated) {
+        apply();
+        return;
+    }
+    [UIView transitionWithView:button
+                      duration:0.25
+                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
+                    animations:apply
+                    completion:nil];
+}
+
+- (void)zs_lowResConfirmSwap {
+    if (g_zsLowResSwapBusy) return;
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) return;
+    NSString *shared = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
+    BOOL backupExists = shared && [NSFileManager.defaultManager fileExistsAtPath:[shared stringByAppendingString:@".backup"]];
+    NSString *message = @"The current Shared folder will be renamed to Shared.backup, and the compressed textures in Documents/LowRes will take its place as Shared.";
+    if (backupExists) message = [message stringByAppendingString:@"\n\nThe existing Shared.backup will be deleted."];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Swap textures?" message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Swap" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf zs_lowResPerformSwap];
+    }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)zs_lowResPerformSwap {
+    if (g_zsLowResSwapBusy) return;
+    g_zsLowResSwapBusy = YES;
+    g_zsLowResCancelButton.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *failure = zs_lowres_swap_shared_folders();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsLowResSwapBusy = NO;
+            g_zsLowResCancelButton.enabled = YES;
+            UIViewController *presenter = zs_key_window().rootViewController;
+            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+            if (!failure) {
+                g_zsLowResStage = 0;
+                g_zsLowResGeneration++;
+                [weakSelf zs_lowResSetPanelActive:NO animated:YES];
+                [weakSelf zs_lowResSetActionButtonSwap:NO animated:NO];
+            }
+            if (!presenter) return;
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:failure ? @"Swap failed" : @"Textures swapped"
+                                                                           message:failure ?: @"Your previous textures are in Shared.backup. Restart the game so it picks up the swapped files."
+                                                                    preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            [presenter presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
 - (void)lowResCancelTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+    if (g_zsLowResStage == 4) {
+        [self zs_lowResConfirmSwap];
+        return;
+    }
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
     if (!presenter) return;
@@ -10774,6 +10891,14 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             [self zs_lowResBeginCounting];
             return;
         }
+    }
+    if (!cancelled && g_zsLowResStage == 3) {
+        g_zsLowResStage = 4;
+        g_zsLowResGeneration++;
+        [self zs_lowResRefreshProgressUI];
+        g_zsLowResETALabel.text = @"Complete";
+        [self zs_lowResSetActionButtonSwap:YES animated:YES];
+        return;
     }
     g_zsLowResStage = 0;
     g_zsLowResGeneration++;
