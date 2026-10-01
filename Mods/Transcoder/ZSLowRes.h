@@ -39,6 +39,7 @@ typedef struct {
 + (instancetype)shared;
 + (NSString *)stagingDirectory;
 
+- (BOOL)prepareWithCompletion:(void (^)(NSUInteger textures, NSUInteger bundles, BOOL ok))completion;
 - (BOOL)startWithMode:(ZSLowResMode)mode completion:(nullable void (^)(ZSLowResStatus status))completion;
 - (void)cancel;
 - (ZSLowResStatus)status;

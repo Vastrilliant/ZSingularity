@@ -1680,6 +1680,10 @@ static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerSeq[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerTotal[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerDone[ZSLR_MAX_WORKERS];
+static BOOL g_zslrPreparing = NO;
+static NSArray<NSDictionary *> *g_zslrPrepared;
+static NSUInteger g_zslrPreparedTextures = 0;
+static NSMutableArray *g_zslrPrepareWaiters;
 
 static int64_t zslr_available_memory(void) {
     if (@available(iOS 13.0, *)) return (int64_t)os_proc_available_memory();
@@ -2085,16 +2089,16 @@ done:
     return items;
 }
 
-+ (NSArray<NSDictionary *> *)countedItems:(NSArray<NSDictionary *> *)items {
++ (NSArray<NSDictionary *> *)countedItems:(NSArray<NSDictionary *> *)items textures:(NSUInteger *)outTextures {
     os_unfair_lock_lock(&g_zslrLock);
-    g_zslrStatus.preparing = YES;
+    if (g_zslrStatus.running) g_zslrStatus.preparing = YES;
     os_unfair_lock_unlock(&g_zslrLock);
 
     NSUInteger total = items.count;
     NSUInteger *counts = (NSUInteger *)calloc(total ? total : 1, sizeof(NSUInteger));
     BOOL *skipped = (BOOL *)calloc(total ? total : 1, sizeof(BOOL));
     __block NSUInteger next = 0;
-    NSUInteger poolSize = MIN((NSUInteger)4, MAX((NSUInteger)1, g_zslrMaxWorkers));
+    NSUInteger poolSize = MIN((NSUInteger)4, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     ZLog(@"[LowRes] counting candidate textures across %lu bundle(s)", (unsigned long)total);
     double countStart = CACurrentMediaTime();
     g_zslrQuiet = 1;
@@ -2144,13 +2148,19 @@ done:
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
     g_zslrQuiet = 0;
 
+    if (g_zslrCancel) {
+        free(counts);
+        free(skipped);
+        os_unfair_lock_lock(&g_zslrLock);
+        g_zslrStatus.preparing = NO;
+        os_unfair_lock_unlock(&g_zslrLock);
+        return nil;
+    }
+
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:total];
     NSUInteger grand = 0;
     for (NSUInteger i = 0; i < total; i++) {
-        if (skipped[i]) {
-            [result addObject:items[i]];
-            continue;
-        }
+        if (skipped[i] || counts[i] == 0) continue;
         NSMutableDictionary *copy = [items[i] mutableCopy];
         copy[@"cands"] = @(counts[i]);
         grand += counts[i];
@@ -2161,21 +2171,65 @@ done:
     ZLog(@"[LowRes] counted %lu candidate texture(s) in %.1fs", (unsigned long)grand, CACurrentMediaTime() - countStart);
     if (g_zslrLedgerDirty > 0) [self saveLedger];
 
+    if (outTextures) *outTextures = grand;
     os_unfair_lock_lock(&g_zslrLock);
-    g_zslrStatus.texturesTotal = grand;
     g_zslrStatus.preparing = NO;
-    g_zslrTranscodeStart = CACurrentMediaTime();
     os_unfair_lock_unlock(&g_zslrLock);
     return result;
 }
 
-- (BOOL)startWithMode:(ZSLowResMode)mode completion:(void (^)(ZSLowResStatus))completion {
+- (BOOL)prepareWithCompletion:(void (^)(NSUInteger textures, NSUInteger bundles, BOOL ok))completion {
     os_unfair_lock_lock(&g_zslrLock);
     if (g_zslrStatus.running) {
         os_unfair_lock_unlock(&g_zslrLock);
-        ZLog(@"[LowRes] start ignored: a run is already in progress");
         return NO;
     }
+    if (!g_zslrPrepareWaiters) g_zslrPrepareWaiters = [NSMutableArray array];
+    if (completion) [g_zslrPrepareWaiters addObject:[completion copy]];
+    if (g_zslrPreparing) {
+        os_unfair_lock_unlock(&g_zslrLock);
+        return YES;
+    }
+    g_zslrPreparing = YES;
+    g_zslrPrepared = nil;
+    g_zslrPreparedTextures = 0;
+    g_zslrCancel = NO;
+    os_unfair_lock_unlock(&g_zslrLock);
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        [ZSLowRes loadLedger];
+        NSArray<NSDictionary *> *items = [ZSLowRes enumerateBundles];
+        NSUInteger textures = 0;
+        NSArray<NSDictionary *> *pending = [ZSLowRes countedItems:items textures:&textures];
+        os_unfair_lock_lock(&g_zslrLock);
+        g_zslrPrepared = pending;
+        g_zslrPreparedTextures = textures;
+        g_zslrPreparing = NO;
+        NSArray *waiters = [g_zslrPrepareWaiters copy];
+        [g_zslrPrepareWaiters removeAllObjects];
+        os_unfair_lock_unlock(&g_zslrLock);
+        NSUInteger bundles = pending.count;
+        BOOL ok = pending != nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (id entry in waiters) {
+                void (^block)(NSUInteger, NSUInteger, BOOL) = entry;
+                block(textures, bundles, ok);
+            }
+        });
+    });
+    return YES;
+}
+
+- (BOOL)startWithMode:(ZSLowResMode)mode completion:(void (^)(ZSLowResStatus))completion {
+    os_unfair_lock_lock(&g_zslrLock);
+    if (g_zslrStatus.running || g_zslrPreparing) {
+        os_unfair_lock_unlock(&g_zslrLock);
+        ZLog(@"[LowRes] start ignored: a run or preparation is already in progress");
+        return NO;
+    }
+    NSArray<NSDictionary *> *preparedItems = (mode == ZSLowResModeTranscode) ? g_zslrPrepared : nil;
+    __block NSUInteger preparedTextures = g_zslrPreparedTextures;
+    g_zslrPrepared = nil;
     memset(&g_zslrStatus, 0, sizeof(g_zslrStatus));
     g_zslrStatus.running = YES;
     g_zslrStatus.mode = mode;
@@ -2205,14 +2259,25 @@ done:
             } else {
                 ZLog(@"[LowRes] staging directory: %@", [ZSLowRes stagingDirectory]);
             }
-            [ZSLowRes loadLedger];
+            if (!preparedItems) [ZSLowRes loadLedger];
         }
-        NSArray<NSDictionary *> *items = [ZSLowRes enumerateBundles];
+        NSArray<NSDictionary *> *items = preparedItems;
+        if (!items) {
+            items = [ZSLowRes enumerateBundles];
+            if (mode == ZSLowResModeTranscode) {
+                os_unfair_lock_lock(&g_zslrLock);
+                g_zslrStatus.bundlesTotal = items.count;
+                os_unfair_lock_unlock(&g_zslrLock);
+                NSUInteger counted = 0;
+                items = [ZSLowRes countedItems:items textures:&counted] ?: @[];
+                preparedTextures = counted;
+            }
+        }
         if (mode == ZSLowResModeTranscode) {
             os_unfair_lock_lock(&g_zslrLock);
-            g_zslrStatus.bundlesTotal = items.count;
+            g_zslrStatus.texturesTotal = preparedTextures;
+            g_zslrTranscodeStart = CACurrentMediaTime();
             os_unfair_lock_unlock(&g_zslrLock);
-            items = [ZSLowRes countedItems:items];
         }
         unsigned long long totalBytes = 0;
         for (NSDictionary *entry in items) totalBytes += [entry[@"size"] unsignedLongLongValue];

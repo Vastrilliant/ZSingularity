@@ -2851,7 +2851,6 @@ static const CGFloat kZSGroupedCardRowHeight = 40;
 static const CGFloat kZSGroupedCardHorizontalPadding = 14;
 static const CGFloat kZSGroupedCardCornerRadius = 14;
 
-static __weak UIButton *g_zsLowResScanButton;
 static __weak UIButton *g_zsLowResTranscodeButton;
 static NSTimer *g_zsLowResTimer;
 static __weak UIView *g_zsLowResProgressView;
@@ -2864,6 +2863,12 @@ static __weak UIView *g_zsLowResTrack;
 static __weak UIView *g_zsLowResFill;
 static NSLayoutConstraint *g_zsLowResFillWidth;
 static BOOL g_zsLowResUserCancelled;
+static __weak UIStackView *g_zsLowResInfoView;
+static __weak UILabel *g_zsLowResInfoLabel;
+static __weak UIButton *g_zsLowResInfoButton;
+static __weak UIView *g_zsLowResInfoButtonSeparator;
+static NSInteger g_zsLowResStage;
+static NSUInteger g_zsLowResGeneration;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -2997,6 +3002,13 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     container.translatesAutoresizingMaskIntoConstraints = NO;
 
     UIColor *primary = [UIColor colorWithWhite:0.9 alpha:1];
+    UILabel *header = [[UILabel alloc] init];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    header.attributedText = [[NSAttributedString alloc] initWithString:@"COMPRESSION STATUS" attributes:@{
+        NSFontAttributeName: zs_mono_font(10, UIFontWeightSemibold),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.45],
+        NSKernAttributeName: @0.8,
+    }];
     UILabel *bundlePercent = zs_make_lowres_label(@"100%", primary, UIFontWeightSemibold);
     UILabel *bundleCount = zs_make_lowres_label(@"0/0", zs_disclosure_secondary_color(), UIFontWeightMedium);
     UILabel *eta = zs_make_lowres_label(@"ETA --:--:--", zs_disclosure_secondary_color(), UIFontWeightMedium);
@@ -3020,12 +3032,14 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     cancel.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     [cancel addTarget:target action:cancelAction forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *view in @[bundlePercent, bundleCount, eta, percent, textures, track, separator, cancel]) [container addSubview:view];
+    for (UIView *view in @[header, bundlePercent, bundleCount, eta, percent, textures, track, separator, cancel]) [container addSubview:view];
 
     NSLayoutConstraint *fillWidth = [fill.widthAnchor constraintEqualToAnchor:track.widthAnchor multiplier:0.0001];
     [NSLayoutConstraint activateConstraints:@[
+        [header.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [header.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
         [bundlePercent.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [bundlePercent.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
+        [bundlePercent.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:12],
         [bundleCount.leadingAnchor constraintEqualToAnchor:bundlePercent.trailingAnchor constant:8],
         [bundleCount.centerYAnchor constraintEqualToAnchor:bundlePercent.centerYAnchor],
         [eta.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
@@ -3066,6 +3080,52 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     g_zsLowResFill = fill;
     g_zsLowResFillWidth = fillWidth;
     return container;
+}
+
+static NSString *zs_lowres_duration_text(double seconds) {
+    unsigned long total = (unsigned long)llround(seconds);
+    if (total < 60) return @"under a minute";
+    if (total < 3600) return [NSString stringWithFormat:@"%lum %02lus", total / 60, total % 60];
+    return [NSString stringWithFormat:@"%luh %02lum", total / 3600, (total % 3600) / 60];
+}
+
+static UIStackView *zs_make_lowres_info_view(id target, SEL action) {
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 0;
+    stack.clipsToBounds = YES;
+
+    UIView *topSeparator = zs_make_grouped_row_separator();
+
+    UIView *labelHost = [[UIView alloc] init];
+    labelHost.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.numberOfLines = 0;
+    label.font = zs_mono_font(11, UIFontWeightMedium);
+    label.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+    [labelHost addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.topAnchor constraintEqualToAnchor:labelHost.topAnchor constant:12],
+        [label.bottomAnchor constraintEqualToAnchor:labelHost.bottomAnchor constant:-12],
+        [label.leadingAnchor constraintEqualToAnchor:labelHost.leadingAnchor],
+        [label.trailingAnchor constraintEqualToAnchor:labelHost.trailingAnchor],
+    ]];
+
+    UIView *buttonSeparator = zs_make_grouped_row_separator();
+    UIButton *button = zs_make_grouped_action_button(@"Continue", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [button setTitleColor:[UIColor colorWithWhite:1 alpha:0.3] forState:UIControlStateDisabled];
+    [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    [button.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight].active = YES;
+
+    for (UIView *view in @[topSeparator, labelHost, buttonSeparator, button]) [stack addArrangedSubview:view];
+
+    g_zsLowResInfoLabel = label;
+    g_zsLowResInfoButton = button;
+    g_zsLowResInfoButtonSeparator = buttonSeparator;
+    return stack;
 }
 
 static UIControl *zs_make_disclosure_row(NSString *title, NSString *value, id target, SEL action) {
@@ -8167,18 +8227,13 @@ static const CGFloat kContentFadeHeight = 22;
     self.memoryUsageAnalyzeButton = zs_make_grouped_action_button(@"Analyze memory usage", zs_accent_green_color());
     [self.memoryUsageAnalyzeButton addTarget:self action:@selector(memoryUsageAnalyzeTapped:) forControlEvents:UIControlEventTouchUpInside];
 
-    UIButton *lowResScanButton = zs_make_grouped_action_button(@"LowRes: scan textures", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [lowResScanButton addTarget:self action:@selector(lowResScanTapped:) forControlEvents:UIControlEventTouchUpInside];
-    UIButton *lowResTranscodeButton = zs_make_grouped_action_button(@"LowRes: transcode to Documents/LowRes", zs_accent_green_color());
-    [lowResTranscodeButton addTarget:self action:@selector(lowResTranscodeTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [lowResScanButton setTitleColor:[UIColor colorWithWhite:1 alpha:0.3] forState:UIControlStateDisabled];
-    g_zsLowResScanButton = lowResScanButton;
+    UIButton *lowResTranscodeButton = zs_make_grouped_action_button(@"Compress Textures", zs_accent_green_color());
+    [lowResTranscodeButton addTarget:self action:@selector(lowResCompressTapped:) forControlEvents:UIControlEventTouchUpInside];
     g_zsLowResTranscodeButton = lowResTranscodeButton;
 
     UIView *memoryActionsCard = zs_make_grouped_action_card(@[
         memoryCleanupButton,
         self.memoryUsageAnalyzeButton,
-        lowResScanButton,
         lowResTranscodeButton,
     ]);
     memoryActionsCard.layer.borderWidth = 1;
@@ -10151,29 +10206,135 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     });
 }
 
-- (void)lowResScanTapped:(UIButton *)sender {
-    [self zs_lowResToggleWithMode:ZSLowResModeScan];
+- (void)zs_lowResAnimateChanges:(dispatch_block_t)changes {
+    [self.stack layoutIfNeeded];
+    [UIView animateWithDuration:0.46
+                          delay:0
+         usingSpringWithDamping:0.88
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
+        if (changes) changes();
+        [self.stack setNeedsLayout];
+        [self.stack layoutIfNeeded];
+        [self.glassContainer layoutIfNeeded];
+        [self.panel layoutIfNeeded];
+        [self.scrollViewport layoutIfNeeded];
+    } completion:^(BOOL finished) {
+        [self zs_updateSliderGlassVisibility];
+    }];
 }
 
-- (void)lowResTranscodeTapped:(UIButton *)sender {
-    [self zs_lowResToggleWithMode:ZSLowResModeTranscode];
+- (void)zs_lowResSetPanelActive:(BOOL)active animated:(BOOL)animated {
+    dispatch_block_t changes = ^{
+        g_zsLowResInfoView.hidden = active || g_zsLowResStage == 0;
+        g_zsLowResTranscodeButton.hidden = active;
+        g_zsLowResProgressView.hidden = !active;
+    };
+    if (animated) {
+        [self zs_lowResAnimateChanges:changes];
+    } else {
+        changes();
+        [self.stack setNeedsLayout];
+        [self.stack layoutIfNeeded];
+        [self zs_updateSliderGlassVisibility];
+    }
 }
 
-- (void)zs_lowResToggleWithMode:(ZSLowResMode)mode {
+- (void)zs_lowResSetInfoText:(NSString *)text buttonTitle:(NSString *)title buttonColor:(UIColor *)color buttonEnabled:(BOOL)enabled buttonVisible:(BOOL)visible {
+    [UIView transitionWithView:g_zsLowResInfoLabel
+                      duration:0.25
+                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
+                    animations:^{ g_zsLowResInfoLabel.text = text; }
+                    completion:nil];
+    [self zs_lowResAnimateChanges:^{
+        [g_zsLowResInfoButton setTitle:title forState:UIControlStateNormal];
+        [g_zsLowResInfoButton setTitleColor:color forState:UIControlStateNormal];
+        g_zsLowResInfoButton.enabled = enabled;
+        g_zsLowResInfoButton.hidden = !visible;
+        g_zsLowResInfoButtonSeparator.hidden = !visible;
+    }];
+}
+
+- (void)lowResCompressTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
-    ZSLowRes *lowRes = ZSLowRes.shared;
-    if ([lowRes status].running) {
-        [lowRes cancel];
+    if ([ZSLowRes.shared status].running) return;
+    if (g_zsLowResStage != 0) {
+        g_zsLowResStage = 0;
+        g_zsLowResGeneration++;
+        [self zs_lowResSetPanelActive:NO animated:YES];
         return;
     }
-    __weak typeof(self) weakSelf = self;
-    BOOL started = [lowRes startWithMode:mode completion:^(ZSLowResStatus status) {
-        [weakSelf zs_lowResFinishedWithMode:mode cancelled:status.cancelled];
+    g_zsLowResStage = 1;
+    NSUInteger generation = ++g_zsLowResGeneration;
+    UIColor *blue = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
+    g_zsLowResInfoLabel.text = @"Counting Texture2D assets\u2026";
+    [g_zsLowResInfoButton setTitle:@"Continue" forState:UIControlStateNormal];
+    [g_zsLowResInfoButton setTitleColor:blue forState:UIControlStateNormal];
+    g_zsLowResInfoButton.enabled = NO;
+    g_zsLowResInfoButton.hidden = NO;
+    g_zsLowResInfoButtonSeparator.hidden = NO;
+    g_zsLowResInfoView.alpha = 0;
+    [self zs_lowResAnimateChanges:^{
+        g_zsLowResInfoView.hidden = NO;
+        g_zsLowResInfoView.alpha = 1;
     }];
-    if (!started) return;
+    __weak typeof(self) weakSelf = self;
+    BOOL accepted = [ZSLowRes.shared prepareWithCompletion:^(NSUInteger textures, NSUInteger bundles, BOOL ok) {
+        if (generation != g_zsLowResGeneration || g_zsLowResStage != 1) return;
+        [weakSelf zs_lowResShowSummaryWithTextures:textures bundles:bundles ok:ok];
+    }];
+    if (!accepted) {
+        g_zsLowResStage = 0;
+        g_zsLowResGeneration++;
+        [self zs_lowResSetPanelActive:NO animated:YES];
+    }
+}
+
+- (void)zs_lowResShowSummaryWithTextures:(NSUInteger)textures bundles:(NSUInteger)bundles ok:(BOOL)ok {
+    UIColor *blue = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
+    if (!ok || textures == 0) {
+        NSString *text = !ok ? @"Couldn't count Texture2D assets. Close this panel and try again."
+                             : @"No Texture2D assets need compression. Everything eligible is already compressed, or none were found.";
+        [self zs_lowResSetInfoText:text buttonTitle:@"Continue" buttonColor:blue buttonEnabled:NO buttonVisible:NO];
+        return;
+    }
+    NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+    formatter.numberStyle = NSNumberFormatterDecimalStyle;
+    NSString *text = [NSString stringWithFormat:@"Compress Texture2D assets from ASTC 6x6 to 8x8. This will result in a 44%% memory footprint reduction from Texture2D assets.\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?",
+                      [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)], zs_lowres_duration_text((double)textures * 0.25)];
+    [self zs_lowResSetInfoText:text buttonTitle:@"Continue" buttonColor:blue buttonEnabled:YES buttonVisible:YES];
+}
+
+- (void)lowResInfoActionTapped:(UIButton *)sender {
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    if (g_zsLowResStage == 1) {
+        g_zsLowResStage = 2;
+        [self zs_lowResSetInfoText:@"Keep your iDevice turned on and do not close the app to avoid data corruption"
+                       buttonTitle:@"Start Compression"
+                       buttonColor:zs_accent_green_color()
+                     buttonEnabled:YES
+                     buttonVisible:YES];
+        return;
+    }
+    if (g_zsLowResStage != 2) return;
+    __weak typeof(self) weakSelf = self;
+    BOOL started = [ZSLowRes.shared startWithMode:ZSLowResModeTranscode completion:^(ZSLowResStatus status) {
+        [weakSelf zs_lowResFinishedWithCancelled:status.cancelled];
+    }];
+    if (!started) {
+        g_zsLowResStage = 0;
+        g_zsLowResGeneration++;
+        [self zs_lowResSetPanelActive:NO animated:YES];
+        return;
+    }
     g_zsLowResUserCancelled = NO;
-    if (mode == ZSLowResModeTranscode) [self zs_lowResApplyTranscodeUI:YES];
+    g_zsLowResStage = 3;
+    g_zsLowResGeneration++;
+    [self zs_lowResRefreshProgressUI];
+    [self zs_lowResSetPanelActive:YES animated:YES];
     [self zs_lowResStartUITimer];
 }
 
@@ -10181,19 +10342,12 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [g_zsLowResTimer invalidate];
     __weak typeof(self) weakSelf = self;
     g_zsLowResTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
-        ZSLowRes *current = ZSLowRes.shared;
-        ZSLowResStatus st = [current status];
-        if (!st.running) {
+        if (![ZSLowRes.shared status].running) {
             [timer invalidate];
             g_zsLowResTimer = nil;
             return;
         }
-        if (st.mode == ZSLowResModeTranscode) {
-            [weakSelf zs_lowResRefreshProgressUI];
-            return;
-        }
-        NSString *line = [current statusLine];
-        [g_zsLowResScanButton setTitle:line forState:UIControlStateNormal];
+        [weakSelf zs_lowResRefreshProgressUI];
     }];
 }
 
@@ -10201,26 +10355,23 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
     NSUInteger index = inner ? [inner.arrangedSubviews indexOfObject:button] : NSNotFound;
     if (index == NSNotFound) return;
+    UIStackView *info = zs_make_lowres_info_view(self, @selector(lowResInfoActionTapped:));
+    info.hidden = YES;
     UIView *progress = zs_make_lowres_progress_view(self, @selector(lowResCancelTapped:));
     progress.hidden = YES;
-    [inner insertArrangedSubview:progress atIndex:index + 1];
+    [inner insertArrangedSubview:info atIndex:index + 1];
+    [inner insertArrangedSubview:progress atIndex:index + 2];
+    g_zsLowResInfoView = info;
     g_zsLowResProgressView = progress;
+    g_zsLowResStage = 0;
+    g_zsLowResGeneration++;
     ZSLowResStatus st = [ZSLowRes.shared status];
     if (st.running && st.mode == ZSLowResModeTranscode && !g_zsLowResUserCancelled) {
-        [self zs_lowResApplyTranscodeUI:YES];
+        g_zsLowResStage = 3;
+        [self zs_lowResRefreshProgressUI];
+        [self zs_lowResSetPanelActive:YES animated:NO];
         if (!g_zsLowResTimer.isValid) [self zs_lowResStartUITimer];
     }
-}
-
-- (void)zs_lowResApplyTranscodeUI:(BOOL)active {
-    g_zsLowResTranscodeButton.hidden = active;
-    g_zsLowResProgressView.hidden = !active;
-    g_zsLowResScanButton.enabled = !active;
-    g_zsLowResScanButton.alpha = active ? 0.35 : 1.0;
-    if (active) [self zs_lowResRefreshProgressUI];
-    [self.stack setNeedsLayout];
-    [self.stack layoutIfNeeded];
-    [self zs_updateSliderGlassVisibility];
 }
 
 - (void)zs_lowResRefreshProgressUI {
@@ -10236,7 +10387,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResBundlePercentLabel.text = [NSString stringWithFormat:@"%lu%%", (unsigned long)bundleLeft];
     g_zsLowResBundleCountLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)st.bundlesDone, (unsigned long)st.bundlesTotal];
     if (st.preparing) {
-        g_zsLowResETALabel.text = @"Preparing…";
+        g_zsLowResETALabel.text = @"Preparing\u2026";
     } else if (st.etaSeconds < 0) {
         g_zsLowResETALabel.text = @"ETA --:--:--";
     } else {
@@ -10258,30 +10409,33 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
     if (!presenter) return;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Stop transcoding?"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Stop compression?"
                                                                    message:@"Bundles already written stay in Documents/LowRes and will be skipped next time."
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"Keep Going" style:UIAlertActionStyleCancel handler:nil]];
     __weak typeof(self) weakSelf = self;
     [alert addAction:[UIAlertAction actionWithTitle:@"Stop" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
         g_zsLowResUserCancelled = YES;
+        g_zsLowResStage = 0;
+        g_zsLowResGeneration++;
         [ZSLowRes.shared cancel];
-        [weakSelf zs_lowResApplyTranscodeUI:NO];
+        [weakSelf zs_lowResSetPanelActive:NO animated:YES];
     }]];
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)zs_lowResFinishedWithMode:(ZSLowResMode)mode cancelled:(BOOL)cancelled {
+- (void)zs_lowResFinishedWithCancelled:(BOOL)cancelled {
     [g_zsLowResTimer invalidate];
     g_zsLowResTimer = nil;
     g_zsLowResUserCancelled = NO;
-    [g_zsLowResScanButton setTitle:@"LowRes: scan textures" forState:UIControlStateNormal];
-    [self zs_lowResApplyTranscodeUI:NO];
-    if (cancelled && mode == ZSLowResModeTranscode) return;
+    g_zsLowResStage = 0;
+    g_zsLowResGeneration++;
+    [self zs_lowResSetPanelActive:NO animated:YES];
+    if (cancelled) return;
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
     if (!presenter) return;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:mode == ZSLowResModeScan ? @"LowRes scan" : @"LowRes transcode"
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Compression complete"
                                                                    message:[ZSLowRes.shared summary]
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
