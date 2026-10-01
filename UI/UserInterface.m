@@ -5754,6 +5754,22 @@ static id<MTLLibrary> g_zsmtLibrary;
 static id<MTLRenderPipelineState> g_zsmtPipeline;
 static MTLPixelFormat g_zsmtPipelineFormat;
 static __weak CAMetalLayer *g_zsmtLayer;
+static BOOL g_zsmtPauseWanted;
+static NSUInteger g_zsmtPauseToken;
+static NSData *g_zsmtPauseData;
+static int g_zsmtPauseTexW;
+static int g_zsmtPauseTexH;
+static float g_zsmtPausePtW;
+static float g_zsmtPausePtH;
+static int g_zsmtPauseVersion;
+static id<MTLRenderPipelineState> g_zsmtPausePipeline;
+static MTLPixelFormat g_zsmtPausePipelineFormat;
+static id<MTLTexture> r_zsmtPauseTex;
+static int r_zsmtPauseVersion = -1;
+static float r_zsmtPauseAmount;
+static CFTimeInterval r_zsmtPauseLastTime;
+static NSUInteger r_zsmtPauseReportedToken;
+static MTLPixelFormat r_zsmtPauseFailedFormat;
 
 static id<MTLTexture> r_zsmtAtlas;
 static id<MTLTexture> r_zsmtSkin;
@@ -5944,6 +5960,47 @@ static NSString * const kZSMTShaderSource =
 @"        result = pow(max(result, float3(0.0)), float3(2.2));\n"
 @"    }\n"
 @"    return float4(result, dst.a);\n"
+@"}\n"
+@"\n"
+@"struct ZSPauseUniforms {\n"
+@"    float4 viewport;\n"
+@"    float4 params;\n"
+@"    float4 rect;\n"
+@"};\n"
+@"\n"
+@"struct ZSPauseOut {\n"
+@"    float4 position [[position]];\n"
+@"    float2 local;\n"
+@"};\n"
+@"\n"
+@"vertex ZSPauseOut zs_pause_vertex(uint vid [[vertex_id]], constant ZSPauseUniforms &u [[buffer(0)]]) {\n"
+@"    float2 c = float2(float(vid & 1u), float((vid >> 1u) & 1u));\n"
+@"    ZSPauseOut o;\n"
+@"    o.position = float4(c.x * 2.0 - 1.0, 1.0 - c.y * 2.0, 0.0, 1.0);\n"
+@"    o.local = c * u.viewport.xy;\n"
+@"    return o;\n"
+@"}\n"
+@"\n"
+@"fragment float4 zs_pause_fragment(ZSPauseOut in [[stage_in]],\n"
+@"                                  float4 dst [[color(0)]],\n"
+@"                                  constant ZSPauseUniforms &u [[buffer(0)]],\n"
+@"                                  texture2d<float> tex [[texture(0)]]) {\n"
+@"    constexpr sampler smp(coord::normalized, filter::linear, address::clamp_to_edge);\n"
+@"    float amount = u.params.x;\n"
+@"    bool lin = u.params.y > 0.5;\n"
+@"    float dim = u.params.z;\n"
+@"    float3 g = lin ? pow(max(dst.rgb, float3(0.0)), float3(1.0 / 2.2)) : dst.rgb;\n"
+@"    float3 dimmed = g * (1.0 - dim * amount);\n"
+@"    float2 uv = (in.local - u.rect.xy) / max(u.rect.zw, float2(1.0));\n"
+@"    float a = 0.0;\n"
+@"    if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0) {\n"
+@"        a = tex.sample(smp, uv, level(0)).a * amount;\n"
+@"    }\n"
+@"    float3 result = mix(dimmed, float3(1.0), a);\n"
+@"    if (lin) {\n"
+@"        result = pow(max(result, float3(0.0)), float3(2.2));\n"
+@"    }\n"
+@"    return float4(result, dst.a);\n"
 @"}\n";
 
 static BOOL zs_mt_format_is_linear(MTLPixelFormat format) {
@@ -5964,6 +6021,21 @@ static id<MTLRenderPipelineState> zs_mt_make_pipeline(id<MTLLibrary> library, MT
     NSError *error = nil;
     id<MTLRenderPipelineState> state = [library.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
     if (!state) ZLog(@"[MetalTabs] pipeline creation failed: %@", error);
+    return state;
+}
+
+static id<MTLRenderPipelineState> zs_mt_make_pause_pipeline(id<MTLLibrary> library, MTLPixelFormat format) {
+    id<MTLFunction> vertexFunction = [library newFunctionWithName:@"zs_pause_vertex"];
+    id<MTLFunction> fragmentFunction = [library newFunctionWithName:@"zs_pause_fragment"];
+    if (!vertexFunction || !fragmentFunction) return nil;
+    MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+    descriptor.vertexFunction = vertexFunction;
+    descriptor.fragmentFunction = fragmentFunction;
+    descriptor.colorAttachments[0].pixelFormat = format;
+    descriptor.colorAttachments[0].blendingEnabled = NO;
+    NSError *error = nil;
+    id<MTLRenderPipelineState> state = [library.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+    if (!state) ZLog(@"[MetalTabs] pause pipeline creation failed: %@", error);
     return state;
 }
 
@@ -6233,6 +6305,114 @@ static void zs_mt_encode(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable>
     [encoder endEncoding];
 }
 
+static void zs_mt_encode_pause(id<MTLCommandBuffer> commandBuffer, id<CAMetalDrawable> drawable) {
+    BOOL wanted;
+    NSUInteger token;
+    NSData *data;
+    int texW, texH, version;
+    float ptW, ptH;
+    id<MTLLibrary> library;
+    id<MTLRenderPipelineState> pipeline = nil;
+
+    os_unfair_lock_lock(&g_zsmtLock);
+    wanted = g_zsmtPauseWanted;
+    token = g_zsmtPauseToken;
+    data = g_zsmtPauseData;
+    texW = g_zsmtPauseTexW;
+    texH = g_zsmtPauseTexH;
+    ptW = g_zsmtPausePtW;
+    ptH = g_zsmtPausePtH;
+    version = g_zsmtPauseVersion;
+    library = g_zsmtLibrary;
+    os_unfair_lock_unlock(&g_zsmtLock);
+
+    if (!wanted && r_zsmtPauseAmount <= 0.0f) return;
+
+    CAMetalLayer *layer = g_zsmtLayer;
+    if (!layer || drawable.layer != layer) return;
+    id<MTLTexture> target = drawable.texture;
+    if (!target) return;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    float dt = r_zsmtPauseLastTime > 0 ? (float)MIN(MAX(now - r_zsmtPauseLastTime, 0.0), 0.1) : 0.016f;
+    r_zsmtPauseLastTime = now;
+    float amountTarget = wanted ? 1.0f : 0.0f;
+    r_zsmtPauseAmount += (amountTarget - r_zsmtPauseAmount) * (1.0f - expf(-dt * 7.0f));
+    if (fabsf(amountTarget - r_zsmtPauseAmount) < 0.01f) r_zsmtPauseAmount = amountTarget;
+
+    if (!library || data.length == 0 || texW <= 0 || texH <= 0) return;
+    if (r_zsmtPauseAmount <= 0.0f) return;
+
+    MTLPixelFormat format = target.pixelFormat;
+    os_unfair_lock_lock(&g_zsmtLock);
+    if (g_zsmtPausePipelineFormat == format) pipeline = g_zsmtPausePipeline;
+    os_unfair_lock_unlock(&g_zsmtLock);
+    if (!pipeline) {
+        if (r_zsmtPauseFailedFormat == format) return;
+        pipeline = zs_mt_make_pause_pipeline(library, format);
+        if (!pipeline) {
+            r_zsmtPauseFailedFormat = format;
+            return;
+        }
+        os_unfair_lock_lock(&g_zsmtLock);
+        g_zsmtPausePipeline = pipeline;
+        g_zsmtPausePipelineFormat = format;
+        os_unfair_lock_unlock(&g_zsmtLock);
+    }
+
+    if (!r_zsmtPauseTex || r_zsmtPauseVersion != version) {
+        MTLTextureDescriptor *textureDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                                     width:(NSUInteger)texW
+                                                                                                    height:(NSUInteger)texH
+                                                                                                 mipmapped:NO];
+        textureDescriptor.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> texture = [commandBuffer.device newTextureWithDescriptor:textureDescriptor];
+        if (texture && data.length >= (NSUInteger)texW * (NSUInteger)texH * 4) {
+            [texture replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)texW, (NSUInteger)texH) mipmapLevel:0 withBytes:data.bytes bytesPerRow:(NSUInteger)texW * 4];
+            r_zsmtPauseTex = texture;
+            r_zsmtPauseVersion = version;
+        }
+    }
+    if (!r_zsmtPauseTex) return;
+
+    float tw = (float)target.width;
+    float th = (float)target.height;
+    float unit = fminf(tw, th) / 390.0f;
+    float rw = ptW * unit;
+    float rh = ptH * unit;
+    float rx = floorf((tw - rw) * 0.5f);
+    float ry = floorf((th - rh) * 0.5f);
+
+    float uniforms[12] = {
+        tw, th, 0, 0,
+        r_zsmtPauseAmount, zs_mt_format_is_linear(format) ? 1.0f : 0.0f, 0.62f, 0,
+        rx, ry, rw, rh,
+    };
+
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) return;
+    encoder.label = @"ZS Game Paused";
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setVertexBytes:uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentBytes:uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentTexture:r_zsmtPauseTex atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [encoder endEncoding];
+
+    if (wanted && r_zsmtPauseAmount >= 1.0f && r_zsmtPauseReportedToken != token) {
+        r_zsmtPauseReportedToken = token;
+        [drawable addPresentedHandler:^(id<MTLDrawable> presented) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (g_zsmtPauseWanted && g_zsmtPauseToken == token) zs_set_unity_app_paused(YES);
+            });
+        }];
+    }
+}
+
 static void zs_mt_note_drawable(id commandBuffer, id drawable) {
     if (drawable) objc_setAssociatedObject(commandBuffer, kZSMTPendingDrawableKey, drawable, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
@@ -6257,6 +6437,7 @@ static void zs_mt_hook_commit(id self, SEL _cmd) {
     if (drawable) {
         objc_setAssociatedObject(self, kZSMTPendingDrawableKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         zs_mt_encode(self, drawable);
+        zs_mt_encode_pause(self, drawable);
     }
     ((void (*)(id, SEL))g_zsmtOrigCommit)(self, _cmd);
 }
@@ -6337,6 +6518,7 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
 - (void)ensureInstalled;
 - (BOOL)isVisible;
 - (void)setVisible:(BOOL)visible snap:(BOOL)snap;
+- (void)setPauseOverlayVisible:(BOOL)visible;
 - (void)updateWithViewSize:(CGSize)size
                      rects:(NSArray<NSValue *> *)rects
                       keys:(NSArray<NSString *> *)keys
@@ -6438,6 +6620,72 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
         _activeTouch = nil;
         _activeIndex = -1;
     }
+}
+
+- (void)buildPauseTextureIfNeeded {
+    os_unfair_lock_lock(&g_zsmtLock);
+    BOOL built = g_zsmtPauseData != nil;
+    os_unfair_lock_unlock(&g_zsmtLock);
+    if (built) return;
+
+    NSString *title = @"GAME PAUSED";
+    NSString *subtitle = @"Memory Compression in progress";
+    NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+    paragraph.alignment = NSTextAlignmentCenter;
+    NSDictionary *titleAttributes = @{
+        NSFontAttributeName: zs_mono_font(34, UIFontWeightHeavy),
+        NSForegroundColorAttributeName: UIColor.whiteColor,
+        NSKernAttributeName: @3.0,
+        NSParagraphStyleAttributeName: paragraph,
+    };
+    NSDictionary *subtitleAttributes = @{
+        NSFontAttributeName: zs_mono_font(13, UIFontWeightMedium),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.75],
+        NSKernAttributeName: @0.6,
+        NSParagraphStyleAttributeName: paragraph,
+    };
+    CGSize titleSize = [title sizeWithAttributes:titleAttributes];
+    CGSize subtitleSize = [subtitle sizeWithAttributes:subtitleAttributes];
+    CGFloat padding = 14;
+    CGFloat gap = 10;
+    CGFloat width = ceil(MAX(titleSize.width, subtitleSize.width)) + padding * 2;
+    CGFloat height = ceil(titleSize.height + gap + subtitleSize.height) + padding * 2;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 3;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(width, height) format:format];
+    UIImage *image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [title drawInRect:CGRectMake(0, padding, width, titleSize.height) withAttributes:titleAttributes];
+        [subtitle drawInRect:CGRectMake(0, padding + titleSize.height + gap, width, subtitleSize.height) withAttributes:subtitleAttributes];
+    }];
+
+    size_t pixelWidth = 0, pixelHeight = 0;
+    uint8_t *buffer = zs_mt_rgba_buffer(image, &pixelWidth, &pixelHeight);
+    if (!buffer) return;
+    NSData *data = [NSData dataWithBytesNoCopy:buffer length:pixelWidth * pixelHeight * 4 freeWhenDone:YES];
+
+    os_unfair_lock_lock(&g_zsmtLock);
+    g_zsmtPauseData = data;
+    g_zsmtPauseTexW = (int)pixelWidth;
+    g_zsmtPauseTexH = (int)pixelHeight;
+    g_zsmtPausePtW = (float)width;
+    g_zsmtPausePtH = (float)height;
+    g_zsmtPauseVersion++;
+    os_unfair_lock_unlock(&g_zsmtLock);
+}
+
+- (void)setPauseOverlayVisible:(BOOL)visible {
+    if (visible) {
+        [self ensureInstalled];
+        [self buildPauseTextureIfNeeded];
+    }
+    os_unfair_lock_lock(&g_zsmtLock);
+    BOOL changed = g_zsmtPauseWanted != visible;
+    g_zsmtPauseWanted = visible;
+    if (visible && changed) g_zsmtPauseToken++;
+    os_unfair_lock_unlock(&g_zsmtLock);
+    if (!visible && changed) zs_set_unity_app_paused(NO);
 }
 
 - (NSData *)atlasDataForSymbols:(NSArray<NSString *> *)symbols cellPixels:(int *)cellPixels {
@@ -10394,7 +10642,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [haptic impactOccurred];
     if (g_zsLowResStage == 1) {
         g_zsLowResStage = 2;
-        [self zs_lowResSetInfoText:@"Keep your iDevice turned on and do not close the app to avoid data corruption"
+        [self zs_lowResSetInfoText:@"Keep your iDevice turned on and do not close the app to avoid data corruption\n\nYour game will be paused for the duration of this process"
                        buttonTitle:@"Start Compression"
                        buttonColor:zs_accent_green_color()
                      buttonEnabled:YES
@@ -10415,6 +10663,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResUserCancelled = NO;
     g_zsLowResStage = 3;
     g_zsLowResGeneration++;
+    [[ZSMetalTabs shared] setPauseOverlayVisible:YES];
     [self zs_lowResRefreshProgressUI];
     [self zs_lowResSetPanelActive:YES animated:YES];
     [self zs_lowResStartUITimer];
@@ -10515,6 +10764,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_lowResFinishedWithCancelled:(BOOL)cancelled {
+    [[ZSMetalTabs shared] setPauseOverlayVisible:NO];
     [g_zsLowResTimer invalidate];
     g_zsLowResTimer = nil;
     g_zsLowResUserCancelled = NO;

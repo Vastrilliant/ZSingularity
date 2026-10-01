@@ -862,6 +862,42 @@ static BOOL zs_set_application_target_fps(int32_t fps) {
     return YES;
 }
 
+static Ivar zs_find_unity_paused_ivar(id appController) {
+    Ivar exact = NULL;
+    Ivar loose = NULL;
+    for (Class cls = [appController class]; cls && !exact; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = ivar_getName(ivars[i]);
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!name || !type || (type[0] != 'B' && type[0] != 'c')) continue;
+            const char *bare = name[0] == '_' ? name + 1 : name;
+            if (strcmp(bare, "paused") == 0) {
+                exact = ivars[i];
+                break;
+            }
+            if (!loose && strcasecmp(bare, "paused") == 0) loose = ivars[i];
+        }
+        free(ivars);
+    }
+    return exact ?: loose;
+}
+
+BOOL zs_set_unity_app_paused(BOOL paused) {
+    id appController = [[UIApplication sharedApplication] delegate];
+    if (!appController) return NO;
+    Ivar ivar = zs_find_unity_paused_ivar(appController);
+    if (!ivar) {
+        ZLog(@"[ZSScripts] Paused ivar not found on %@", NSStringFromClass([appController class]));
+        return NO;
+    }
+    BOOL *slot = (BOOL *)((uint8_t *)(__bridge void *)appController + ivar_getOffset(ivar));
+    *slot = paused;
+    ZLog(@"[ZSScripts] %s set to %@", ivar_getName(ivar), paused ? @"YES" : @"NO");
+    return YES;
+}
+
 static const int32_t kSceneStateBattle = 1;
 
 static BOOL zs_try_read_is_in_battle(BOOL *outIsBattle) {
