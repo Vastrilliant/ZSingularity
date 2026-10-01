@@ -2875,6 +2875,7 @@ static __weak UIButton *g_zsLowResCancelButton;
 static __weak UIView *g_zsLowResInfoWrapper;
 static __weak UIView *g_zsLowResProgressWrapper;
 static __weak UIView *g_zsLowResTranscodeWrapper;
+static BOOL g_zsLowResPickerShown;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -10678,7 +10679,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
     NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
     formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    NSString *text = [NSString stringWithFormat:@"Compress Texture2D assets from ASTC 6x6 to 8x8. This will result in a 44%% memory footprint reduction from Texture2D assets.\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?",
+    NSString *text = [NSString stringWithFormat:@"Compress texture2D assets save on memory, reduce texture2D assets\u2019 memory footprint up to 75%%\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?",
                       [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)], zs_lowres_duration_text((double)textures * 0.25)];
     [self zs_lowResSetInfoText:text buttonTitle:@"Continue" buttonColor:blue buttonEnabled:YES buttonVisible:YES];
 }
@@ -10696,8 +10697,38 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         return;
     }
     if (g_zsLowResStage != 2) return;
+    [self zs_lowResPresentCodecPicker];
+}
+
+- (void)zs_lowResPresentCodecPicker {
+    if (g_zsLowResPickerShown) return;
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) return;
+    g_zsLowResPickerShown = YES;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Choose Codec"
+                                                                   message:@"Select the ASTC block size the textures will be transcoded into. Larger blocks save more memory but soften fine detail."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) weakSelf = self;
-    BOOL started = [ZSLowRes.shared startWithMode:ZSLowResModeTranscode completion:^(ZSLowResStatus status) {
+    for (NSNumber *entry in @[@8, @10, @12]) {
+        NSUInteger block = entry.unsignedIntegerValue;
+        long percent = lround((1.0 - 36.0 / (double)(block * block)) * 100.0);
+        NSString *title = [NSString stringWithFormat:@"ASTC_%lux%lu (~%ld%% compression)", (unsigned long)block, (unsigned long)block, percent];
+        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            g_zsLowResPickerShown = NO;
+            [weakSelf zs_lowResStartTranscodeWithBlockSize:block];
+        }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        g_zsLowResPickerShown = NO;
+    }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)zs_lowResStartTranscodeWithBlockSize:(NSUInteger)blockSize {
+    if (g_zsLowResStage != 2) return;
+    __weak typeof(self) weakSelf = self;
+    BOOL started = [ZSLowRes.shared startWithMode:ZSLowResModeTranscode blockSize:blockSize completion:^(ZSLowResStatus status) {
         [weakSelf zs_lowResFinishedWithCancelled:status.cancelled];
     }];
     if (!started) {
