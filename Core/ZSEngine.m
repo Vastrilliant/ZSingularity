@@ -6,6 +6,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dispatch/dispatch.h>
 #import <pthread.h>
 #import <math.h>
@@ -980,9 +981,43 @@ static BOOL zs_locate_paused_flag(id appController, id *outOwner, Ivar *outIvar)
     return NO;
 }
 
+static BOOL zs_set_paused_via_property(id appController, BOOL paused) {
+    static const char *kNames[] = { "paused", "Paused" };
+    for (size_t n = 0; n < sizeof(kNames) / sizeof(kNames[0]); n++) {
+        objc_property_t property = NULL;
+        for (Class cls = object_getClass(appController); cls && !property; cls = class_getSuperclass(cls)) {
+            property = class_getProperty(cls, kNames[n]);
+        }
+        if (!property) continue;
+
+        NSString *getterName = [NSString stringWithUTF8String:kNames[n]];
+        NSString *setterName = [NSString stringWithFormat:@"set%@%@:", [[getterName substringToIndex:1] uppercaseString], [getterName substringFromIndex:1]];
+        char *customGetter = property_copyAttributeValue(property, "G");
+        char *customSetter = property_copyAttributeValue(property, "S");
+        if (customGetter) getterName = [NSString stringWithUTF8String:customGetter];
+        if (customSetter) setterName = [NSString stringWithUTF8String:customSetter];
+        free(customGetter);
+        free(customSetter);
+
+        SEL setter = NSSelectorFromString(setterName);
+        SEL getter = NSSelectorFromString(getterName);
+        if (![appController respondsToSelector:setter]) continue;
+
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(appController, setter, paused);
+        BOOL readBack = paused;
+        if ([appController respondsToSelector:getter]) {
+            readBack = ((BOOL (*)(id, SEL))objc_msgSend)(appController, getter);
+        }
+        ZLog(@"[ZSScripts] %s.%@ called with %@, reads back %@", class_getName(object_getClass(appController)), setterName, paused ? @"YES" : @"NO", readBack ? @"YES" : @"NO");
+        return YES;
+    }
+    return NO;
+}
+
 BOOL zs_set_unity_app_paused(BOOL paused) {
     id appController = [[UIApplication sharedApplication] delegate];
     if (!appController) return NO;
+    if (zs_set_paused_via_property(appController, paused)) return YES;
     id owner = nil;
     Ivar ivar = NULL;
     if (!zs_locate_paused_flag(appController, &owner, &ivar)) {
