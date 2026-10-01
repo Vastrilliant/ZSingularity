@@ -541,6 +541,7 @@ static NSAttributedString *zs_render_markdown(NSString *markdownInput, CGFloat c
     NSUInteger lineCount = lines.count;
     BOOL inCodeBlock = NO;
     BOOL sawFirstHeading = NO;
+    NSMutableArray<NSNumber *> *bulletIndentStack = [NSMutableArray array];
 
     void (^appendLine)(NSAttributedString *, NSParagraphStyle *) = ^(NSAttributedString *text, NSParagraphStyle *style) {
         NSMutableAttributedString *line = [text mutableCopy];
@@ -557,6 +558,10 @@ static NSAttributedString *zs_render_markdown(NSString *markdownInput, CGFloat c
     for (NSUInteger lineIndex = 0; lineIndex < lineCount; lineIndex++) {
         NSString *rawLine = lines[lineIndex];
         NSString *line = [rawLine stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if (line.length > 0 && !([line hasPrefix:@"- "] || [line hasPrefix:@"* "])) {
+            [bulletIndentStack removeAllObjects];
+        }
 
         if ([line hasPrefix:@"```"]) {
             inCodeBlock = !inCodeBlock;
@@ -709,10 +714,33 @@ static NSAttributedString *zs_render_markdown(NSString *markdownInput, CGFloat c
         }
 
         if ([line hasPrefix:@"- "] || [line hasPrefix:@"* "]) {
-            NSMutableAttributedString *bullet = [[NSMutableAttributedString alloc] initWithString:@"\u2022  "
+            NSInteger leadingWidth = 0;
+            for (NSUInteger charIndex = 0; charIndex < rawLine.length; charIndex++) {
+                unichar ch = [rawLine characterAtIndex:charIndex];
+                if (ch == ' ') leadingWidth += 1;
+                else if (ch == '\t') leadingWidth += 4;
+                else break;
+            }
+            while (bulletIndentStack.count > 0 && leadingWidth < bulletIndentStack.lastObject.integerValue) {
+                [bulletIndentStack removeLastObject];
+            }
+            if (bulletIndentStack.count == 0 || leadingWidth > bulletIndentStack.lastObject.integerValue) {
+                [bulletIndentStack addObject:@(leadingWidth)];
+            }
+            NSUInteger depth = bulletIndentStack.count - 1;
+
+            NSArray<NSString *> *markers = @[@"\u2022  ", @"\u25E6  ", @"\u25AA  "];
+            NSString *marker = markers[MIN(depth, markers.count - 1)];
+
+            CGFloat markerWidth = [marker sizeWithAttributes:@{NSFontAttributeName: bodyFont}].width;
+            NSMutableParagraphStyle *bulletParagraph = [bodyParagraph mutableCopy];
+            bulletParagraph.firstLineHeadIndent = markerWidth * depth;
+            bulletParagraph.headIndent = markerWidth * (depth + 1);
+
+            NSMutableAttributedString *bullet = [[NSMutableAttributedString alloc] initWithString:marker
                 attributes:@{NSFontAttributeName: bodyFont, NSForegroundColorAttributeName: dimColor}];
             [bullet appendAttributedString:zs_render_markdown_inline([line substringFromIndex:2], bodyFont, bodyColor)];
-            appendLine(bullet, bodyParagraph);
+            appendLine(bullet, bulletParagraph);
             continue;
         }
 
