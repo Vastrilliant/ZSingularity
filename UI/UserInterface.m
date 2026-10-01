@@ -14607,6 +14607,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     tableView.allowsSelection = NO;
     tableView.rowHeight = UITableViewAutomaticDimension;
     tableView.estimatedRowHeight = 40;
+    tableView.insetsContentViewsToSafeArea = NO;
     tableView.dataSource = tableController;
     tableView.delegate = tableController;
     tableView.panGestureRecognizer.maximumNumberOfTouches = 1;
