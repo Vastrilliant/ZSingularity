@@ -1,5 +1,6 @@
 #import "ZSEngine.h"
 #include <string.h>
+#include <strings.h>
 #import "IL2CppIntrospection.h"
 #import "ZTweakLog.h"
 #import <UIKit/UIKit.h>
@@ -862,39 +863,140 @@ static BOOL zs_set_application_target_fps(int32_t fps) {
     return YES;
 }
 
-static Ivar zs_find_unity_paused_ivar(id appController) {
-    Ivar exact = NULL;
-    Ivar loose = NULL;
-    for (Class cls = [appController class]; cls && !exact; cls = class_getSuperclass(cls)) {
+static BOOL zs_ivar_is_flag(Ivar ivar) {
+    const char *type = ivar_getTypeEncoding(ivar);
+    return type && (type[0] == 'B' || type[0] == 'c' || type[0] == 'C');
+}
+
+static BOOL zs_class_chain_has_display_link(Class cls) {
+    for (; cls; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        BOOL has = NO;
+        for (unsigned int i = 0; i < count && !has; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (type && strstr(type, "CADisplayLink")) has = YES;
+        }
+        free(ivars);
+        if (has) return YES;
+    }
+    return NO;
+}
+
+static int zs_paused_name_score(const char *name) {
+    if (!name) return 0;
+    const char *bare = name[0] == '_' ? name + 1 : name;
+    if (strcmp(bare, "paused") == 0) return 4;
+    if (strcasecmp(bare, "paused") == 0) return 3;
+    if (strcasestr(bare, "paused")) return 2;
+    if (strcasestr(bare, "paus")) return 1;
+    return 0;
+}
+
+static BOOL zs_find_paused_ivar_in_object(id object, Ivar *outIvar, int *outScore) {
+    int best = 0;
+    Ivar bestIvar = NULL;
+    for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            if (!zs_ivar_is_flag(ivars[i])) continue;
+            int score = zs_paused_name_score(ivar_getName(ivars[i]));
+            if (score > best) {
+                best = score;
+                bestIvar = ivars[i];
+            }
+        }
+        free(ivars);
+    }
+    if (!bestIvar) return NO;
+    *outIvar = bestIvar;
+    *outScore = best;
+    return YES;
+}
+
+static void zs_log_ivar_names(id object, NSString *label) {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls)) {
         unsigned int count = 0;
         Ivar *ivars = class_copyIvarList(cls, &count);
         for (unsigned int i = 0; i < count; i++) {
             const char *name = ivar_getName(ivars[i]);
             const char *type = ivar_getTypeEncoding(ivars[i]);
-            if (!name || !type || (type[0] != 'B' && type[0] != 'c')) continue;
-            const char *bare = name[0] == '_' ? name + 1 : name;
-            if (strcmp(bare, "paused") == 0) {
-                exact = ivars[i];
-                break;
-            }
-            if (!loose && strcasecmp(bare, "paused") == 0) loose = ivars[i];
+            [names addObject:[NSString stringWithFormat:@"%s(%s)", name ?: "?", type ?: "?"]];
         }
         free(ivars);
     }
-    return exact ?: loose;
+    ZLog(@"[ZSScripts] %@ ivars: %@", label, [names componentsJoinedByString:@", "]);
+}
+
+static BOOL zs_locate_paused_flag(id appController, id *outOwner, Ivar *outIvar) {
+    Ivar ivar = NULL;
+    int score = 0;
+    if (zs_find_paused_ivar_in_object(appController, &ivar, &score) && score >= 3) {
+        *outOwner = appController;
+        *outIvar = ivar;
+        return YES;
+    }
+
+    id bestOwner = nil;
+    Ivar bestIvar = NULL;
+    int bestScore = 0;
+    BOOL bestHoldsLink = NO;
+    for (Class cls = object_getClass(appController); cls; cls = class_getSuperclass(cls)) {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || type[0] != '@') continue;
+            id child = object_getIvar(appController, ivars[i]);
+            if (!child || [child isKindOfClass:[CADisplayLink class]]) continue;
+            Ivar childIvar = NULL;
+            int childScore = 0;
+            if (!zs_find_paused_ivar_in_object(child, &childIvar, &childScore)) continue;
+            BOOL holdsLink = zs_class_chain_has_display_link(object_getClass(child));
+            BOOL better = !bestOwner
+                || (holdsLink && !bestHoldsLink)
+                || (holdsLink == bestHoldsLink && childScore > bestScore);
+            if (better) {
+                bestOwner = child;
+                bestIvar = childIvar;
+                bestScore = childScore;
+                bestHoldsLink = holdsLink;
+            }
+        }
+        free(ivars);
+    }
+    if (bestOwner && (bestHoldsLink || bestScore >= 3)) {
+        *outOwner = bestOwner;
+        *outIvar = bestIvar;
+        return YES;
+    }
+    if (ivar && score >= 2) {
+        *outOwner = appController;
+        *outIvar = ivar;
+        return YES;
+    }
+    return NO;
 }
 
 BOOL zs_set_unity_app_paused(BOOL paused) {
     id appController = [[UIApplication sharedApplication] delegate];
     if (!appController) return NO;
-    Ivar ivar = zs_find_unity_paused_ivar(appController);
-    if (!ivar) {
-        ZLog(@"[ZSScripts] Paused ivar not found on %@", NSStringFromClass([appController class]));
+    id owner = nil;
+    Ivar ivar = NULL;
+    if (!zs_locate_paused_flag(appController, &owner, &ivar)) {
+        static BOOL loggedLayout;
+        ZLog(@"[ZSScripts] Paused ivar not found on %s", class_getName(object_getClass(appController)));
+        if (!loggedLayout) {
+            loggedLayout = YES;
+            zs_log_ivar_names(appController, @"app controller");
+        }
         return NO;
     }
-    BOOL *slot = (BOOL *)((uint8_t *)(__bridge void *)appController + ivar_getOffset(ivar));
+    BOOL *slot = (BOOL *)((uint8_t *)(__bridge void *)owner + ivar_getOffset(ivar));
     *slot = paused;
-    ZLog(@"[ZSScripts] %s set to %@", ivar_getName(ivar), paused ? @"YES" : @"NO");
+    ZLog(@"[ZSScripts] %s.%s set to %@", class_getName(object_getClass(owner)), ivar_getName(ivar), paused ? @"YES" : @"NO");
     return YES;
 }
 
