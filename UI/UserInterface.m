@@ -2869,6 +2869,10 @@ static __weak UIButton *g_zsLowResInfoButton;
 static __weak UIView *g_zsLowResInfoButtonSeparator;
 static NSInteger g_zsLowResStage;
 static NSUInteger g_zsLowResGeneration;
+static BOOL g_zsLowResReopenPending;
+static __weak UIView *g_zsLowResInfoWrapper;
+static __weak UIView *g_zsLowResProgressWrapper;
+static __weak UIView *g_zsLowResTranscodeWrapper;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -3087,6 +3091,53 @@ static NSString *zs_lowres_duration_text(double seconds) {
     if (total < 60) return @"under a minute";
     if (total < 3600) return [NSString stringWithFormat:@"%lum %02lus", total / 60, total % 60];
     return [NSString stringWithFormat:@"%luh %02lum", total / 3600, (total % 3600) / 60];
+}
+
+static void * const kZSRevealContentKey = (void *)&kZSRevealContentKey;
+static void * const kZSRevealFullKey = (void *)&kZSRevealFullKey;
+static void * const kZSRevealZeroKey = (void *)&kZSRevealZeroKey;
+
+static UIView *zs_make_reveal_wrapper(UIView *content, BOOL expanded) {
+    UIView *wrapper = [[UIView alloc] init];
+    wrapper.translatesAutoresizingMaskIntoConstraints = NO;
+    wrapper.clipsToBounds = YES;
+    content.translatesAutoresizingMaskIntoConstraints = NO;
+    [wrapper addSubview:content];
+    NSLayoutConstraint *full = [wrapper.heightAnchor constraintEqualToAnchor:content.heightAnchor];
+    NSLayoutConstraint *zero = [wrapper.heightAnchor constraintEqualToConstant:0];
+    [NSLayoutConstraint activateConstraints:@[
+        [content.topAnchor constraintEqualToAnchor:wrapper.topAnchor],
+        [content.leadingAnchor constraintEqualToAnchor:wrapper.leadingAnchor],
+        [content.trailingAnchor constraintEqualToAnchor:wrapper.trailingAnchor],
+    ]];
+    full.active = expanded;
+    zero.active = !expanded;
+    content.alpha = expanded ? 1 : 0;
+    objc_setAssociatedObject(wrapper, kZSRevealContentKey, content, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(wrapper, kZSRevealFullKey, full, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(wrapper, kZSRevealZeroKey, zero, OBJC_ASSOCIATION_RETAIN);
+    return wrapper;
+}
+
+static void zs_reveal_set_expanded(UIView *wrapper, BOOL expanded) {
+    if (!wrapper) return;
+    UIView *content = objc_getAssociatedObject(wrapper, kZSRevealContentKey);
+    NSLayoutConstraint *full = objc_getAssociatedObject(wrapper, kZSRevealFullKey);
+    NSLayoutConstraint *zero = objc_getAssociatedObject(wrapper, kZSRevealZeroKey);
+    if (expanded) {
+        zero.active = NO;
+        full.active = YES;
+    } else {
+        full.active = NO;
+        zero.active = YES;
+    }
+    NSTimeInterval duration = expanded ? 0.28 : 0.16;
+    NSTimeInterval delay = expanded ? 0.12 : 0;
+    [UIView animateWithDuration:duration
+                          delay:delay
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                     animations:^{ content.alpha = expanded ? 1 : 0; }
+                     completion:nil];
 }
 
 static UIStackView *zs_make_lowres_info_view(id target, SEL action) {
@@ -10227,9 +10278,9 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
 - (void)zs_lowResSetPanelActive:(BOOL)active animated:(BOOL)animated {
     dispatch_block_t changes = ^{
-        g_zsLowResInfoView.hidden = active || g_zsLowResStage == 0;
-        g_zsLowResTranscodeButton.hidden = active;
-        g_zsLowResProgressView.hidden = !active;
+        zs_reveal_set_expanded(g_zsLowResInfoWrapper, !active && g_zsLowResStage != 0);
+        zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, !active);
+        zs_reveal_set_expanded(g_zsLowResProgressWrapper, active);
     };
     if (animated) {
         [self zs_lowResAnimateChanges:changes];
@@ -10247,10 +10298,15 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
                        options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
                     animations:^{ g_zsLowResInfoLabel.text = text; }
                     completion:nil];
-    [self zs_lowResAnimateChanges:^{
+    [UIView transitionWithView:g_zsLowResInfoButton
+                      duration:0.25
+                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
+                    animations:^{
         [g_zsLowResInfoButton setTitle:title forState:UIControlStateNormal];
         [g_zsLowResInfoButton setTitleColor:color forState:UIControlStateNormal];
-        g_zsLowResInfoButton.enabled = enabled;
+    } completion:nil];
+    g_zsLowResInfoButton.enabled = enabled;
+    [self zs_lowResAnimateChanges:^{
         g_zsLowResInfoButton.hidden = !visible;
         g_zsLowResInfoButtonSeparator.hidden = !visible;
     }];
@@ -10259,26 +10315,52 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 - (void)lowResCompressTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
-    if ([ZSLowRes.shared status].running) return;
+    if ([ZSLowRes.shared status].running) {
+        if (!g_zsLowResUserCancelled) return;
+        if (g_zsLowResReopenPending) {
+            g_zsLowResReopenPending = NO;
+            g_zsLowResStage = 0;
+            g_zsLowResGeneration++;
+            [self zs_lowResSetPanelActive:NO animated:YES];
+            return;
+        }
+        g_zsLowResReopenPending = YES;
+        g_zsLowResStage = 5;
+        g_zsLowResGeneration++;
+        [UIView transitionWithView:g_zsLowResInfoLabel duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent animations:^{
+            g_zsLowResInfoLabel.text = @"Finishing the stopped compression\u2026";
+        } completion:nil];
+        g_zsLowResInfoButton.hidden = YES;
+        g_zsLowResInfoButtonSeparator.hidden = YES;
+        [self zs_lowResAnimateChanges:^{
+            zs_reveal_set_expanded(g_zsLowResInfoWrapper, YES);
+        }];
+        return;
+    }
     if (g_zsLowResStage != 0) {
+        g_zsLowResReopenPending = NO;
         g_zsLowResStage = 0;
         g_zsLowResGeneration++;
         [self zs_lowResSetPanelActive:NO animated:YES];
         return;
     }
+    [self zs_lowResBeginCounting];
+}
+
+- (void)zs_lowResBeginCounting {
     g_zsLowResStage = 1;
     NSUInteger generation = ++g_zsLowResGeneration;
     UIColor *blue = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
-    g_zsLowResInfoLabel.text = @"Counting Texture2D assets\u2026";
+    [UIView transitionWithView:g_zsLowResInfoLabel duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent animations:^{
+        g_zsLowResInfoLabel.text = @"Counting Texture2D assets\u2026";
+    } completion:nil];
     [g_zsLowResInfoButton setTitle:@"Continue" forState:UIControlStateNormal];
     [g_zsLowResInfoButton setTitleColor:blue forState:UIControlStateNormal];
     g_zsLowResInfoButton.enabled = NO;
     g_zsLowResInfoButton.hidden = NO;
     g_zsLowResInfoButtonSeparator.hidden = NO;
-    g_zsLowResInfoView.alpha = 0;
     [self zs_lowResAnimateChanges:^{
-        g_zsLowResInfoView.hidden = NO;
-        g_zsLowResInfoView.alpha = 1;
+        zs_reveal_set_expanded(g_zsLowResInfoWrapper, YES);
     }];
     __weak typeof(self) weakSelf = self;
     BOOL accepted = [ZSLowRes.shared prepareWithCompletion:^(NSUInteger textures, NSUInteger bundles, BOOL ok) {
@@ -10356,13 +10438,21 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     NSUInteger index = inner ? [inner.arrangedSubviews indexOfObject:button] : NSNotFound;
     if (index == NSNotFound) return;
     UIStackView *info = zs_make_lowres_info_view(self, @selector(lowResInfoActionTapped:));
-    info.hidden = YES;
     UIView *progress = zs_make_lowres_progress_view(self, @selector(lowResCancelTapped:));
-    progress.hidden = YES;
-    [inner insertArrangedSubview:info atIndex:index + 1];
-    [inner insertArrangedSubview:progress atIndex:index + 2];
+    UIView *infoWrapper = zs_make_reveal_wrapper(info, NO);
+    UIView *progressWrapper = zs_make_reveal_wrapper(progress, NO);
+    [inner removeArrangedSubview:button];
+    [button removeFromSuperview];
+    UIView *buttonWrapper = zs_make_reveal_wrapper(button, YES);
+    [inner insertArrangedSubview:buttonWrapper atIndex:index];
+    [inner insertArrangedSubview:infoWrapper atIndex:index + 1];
+    [inner insertArrangedSubview:progressWrapper atIndex:index + 2];
     g_zsLowResInfoView = info;
     g_zsLowResProgressView = progress;
+    g_zsLowResInfoWrapper = infoWrapper;
+    g_zsLowResProgressWrapper = progressWrapper;
+    g_zsLowResTranscodeWrapper = buttonWrapper;
+    g_zsLowResReopenPending = NO;
     g_zsLowResStage = 0;
     g_zsLowResGeneration++;
     ZSLowResStatus st = [ZSLowRes.shared status];
@@ -10428,6 +10518,13 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [g_zsLowResTimer invalidate];
     g_zsLowResTimer = nil;
     g_zsLowResUserCancelled = NO;
+    if (g_zsLowResReopenPending) {
+        g_zsLowResReopenPending = NO;
+        if (g_zsLowResStage == 5) {
+            [self zs_lowResBeginCounting];
+            return;
+        }
+    }
     g_zsLowResStage = 0;
     g_zsLowResGeneration++;
     [self zs_lowResSetPanelActive:NO animated:YES];
