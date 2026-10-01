@@ -10583,10 +10583,20 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_lowResSetInfoText:(NSString *)text buttonTitle:(NSString *)title buttonColor:(UIColor *)color buttonEnabled:(BOOL)enabled buttonVisible:(BOOL)visible {
+    [self zs_lowResSetInfoText:text attributedText:nil buttonTitle:title buttonColor:color buttonEnabled:enabled buttonVisible:visible];
+}
+
+- (void)zs_lowResSetInfoText:(NSString *)text attributedText:(NSAttributedString *)attributed buttonTitle:(NSString *)title buttonColor:(UIColor *)color buttonEnabled:(BOOL)enabled buttonVisible:(BOOL)visible {
     [UIView transitionWithView:g_zsLowResInfoLabel
                       duration:0.25
                        options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
-                    animations:^{ g_zsLowResInfoLabel.text = text; }
+                    animations:^{
+        if (attributed) {
+            g_zsLowResInfoLabel.attributedText = attributed;
+        } else {
+            g_zsLowResInfoLabel.text = text;
+        }
+    }
                     completion:nil];
     [UIView transitionWithView:g_zsLowResInfoButton
                       duration:0.25
@@ -10674,9 +10684,20 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
     NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
     formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    NSString *text = [NSString stringWithFormat:@"Compress texture2D assets save on memory, reduce texture2D assets\u2019 memory footprint up to 75%%\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?",
-                      [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)], zs_lowres_duration_text((double)textures * 0.25)];
-    [self zs_lowResSetInfoText:text buttonTitle:@"Continue" buttonColor:blue buttonEnabled:YES buttonVisible:YES];
+    NSString *mainText = [NSString stringWithFormat:@"Compress and reduce Texture2D assets\u2019 memory footprint by up to 75%%.\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?\n\n",
+                          [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)], zs_lowres_duration_text((double)textures * 0.25)];
+    NSString *noteText = @"Note: Texture2D assets are only a fraction of the game\u2019s total memory footprint, realistically you should expect to save around 375MB - 750MB of memory\n\nTranscoding to bigger ASTC blocks will also cause a significant Texture quality decrease";
+    UIFont *baseFont = g_zsLowResInfoLabel.font ?: zs_mono_font(11, UIFontWeightMedium);
+    UIColor *baseColor = g_zsLowResInfoLabel.textColor ?: [UIColor colorWithWhite:0.9 alpha:1];
+    NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:mainText attributes:@{
+        NSFontAttributeName: baseFont,
+        NSForegroundColorAttributeName: baseColor,
+    }];
+    [attributed appendAttributedString:[[NSAttributedString alloc] initWithString:noteText attributes:@{
+        NSFontAttributeName: zs_mono_font(MAX(baseFont.pointSize - 2, 8), UIFontWeightMedium),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.5 alpha:1],
+    }]];
+    [self zs_lowResSetInfoText:nil attributedText:attributed buttonTitle:@"Continue" buttonColor:blue buttonEnabled:YES buttonVisible:YES];
 }
 
 - (void)lowResInfoActionTapped:(UIButton *)sender {
