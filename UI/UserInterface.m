@@ -2854,7 +2854,6 @@ static const CGFloat kZSGroupedCardCornerRadius = 14;
 static __weak UIButton *g_zsLowResTranscodeButton;
 static NSTimer *g_zsLowResTimer;
 static __weak UIView *g_zsLowResProgressView;
-static __weak UILabel *g_zsLowResBundlePercentLabel;
 static __weak UILabel *g_zsLowResBundleCountLabel;
 static __weak UILabel *g_zsLowResETALabel;
 static __weak UILabel *g_zsLowResPercentLabel;
@@ -3016,7 +3015,6 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
         NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.45],
         NSKernAttributeName: @0.8,
     }];
-    UILabel *bundlePercent = zs_make_lowres_label(@"100%", primary, UIFontWeightSemibold);
     UILabel *bundleCount = zs_make_lowres_label(@"0/0", zs_disclosure_secondary_color(), UIFontWeightMedium);
     UILabel *eta = zs_make_lowres_label(@"ETA --:--:--", zs_disclosure_secondary_color(), UIFontWeightMedium);
     UILabel *percent = zs_make_lowres_label(@"0%", zs_accent_green_color(), UIFontWeightSemibold);
@@ -3039,22 +3037,20 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     cancel.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
     [cancel addTarget:target action:cancelAction forControlEvents:UIControlEventTouchUpInside];
 
-    for (UIView *view in @[header, bundlePercent, bundleCount, eta, percent, textures, track, separator, cancel]) [container addSubview:view];
+    for (UIView *view in @[header, bundleCount, eta, percent, textures, track, separator, cancel]) [container addSubview:view];
 
     NSLayoutConstraint *fillWidth = [fill.widthAnchor constraintEqualToAnchor:track.widthAnchor multiplier:0.0001];
     [NSLayoutConstraint activateConstraints:@[
         [header.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
         [header.topAnchor constraintEqualToAnchor:container.topAnchor constant:12],
-        [bundlePercent.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [bundlePercent.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:12],
-        [bundleCount.leadingAnchor constraintEqualToAnchor:bundlePercent.trailingAnchor constant:8],
-        [bundleCount.centerYAnchor constraintEqualToAnchor:bundlePercent.centerYAnchor],
+        [bundleCount.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [bundleCount.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:12],
         [eta.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [eta.centerYAnchor constraintEqualToAnchor:bundlePercent.centerYAnchor],
+        [eta.centerYAnchor constraintEqualToAnchor:bundleCount.centerYAnchor],
         [eta.leadingAnchor constraintGreaterThanOrEqualToAnchor:bundleCount.trailingAnchor constant:8],
 
         [percent.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [percent.topAnchor constraintEqualToAnchor:bundlePercent.bottomAnchor constant:14],
+        [percent.topAnchor constraintEqualToAnchor:bundleCount.bottomAnchor constant:14],
         [textures.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
         [textures.centerYAnchor constraintEqualToAnchor:percent.centerYAnchor],
 
@@ -3079,7 +3075,6 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     ]];
 
     g_zsLowResCancelButton = cancel;
-    g_zsLowResBundlePercentLabel = bundlePercent;
     g_zsLowResBundleCountLabel = bundleCount;
     g_zsLowResETALabel = eta;
     g_zsLowResPercentLabel = percent;
@@ -6676,7 +6671,7 @@ static NSData *zs_mt_compose_skin(UIImage *onBlack, UIImage *onWhite, int *width
     if (built) return;
 
     NSString *title = @"GAME PAUSED";
-    NSString *subtitle = @"Memory Compression in progress";
+    NSString *subtitle = @"Texture Compression in progress";
     NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
     paragraph.alignment = NSTextAlignmentCenter;
     NSDictionary *titleAttributes = @{
@@ -10795,13 +10790,8 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     ZSLowResStatus st = [ZSLowRes.shared status];
     double fraction = st.texturesTotal > 0 ? (double)st.texturesProcessed / (double)st.texturesTotal : 0.0;
     NSUInteger percent = (NSUInteger)floor(fraction * 100.0);
-    NSUInteger bundleLeft = 100;
-    if (st.currentBundleTotal > 0) {
-        bundleLeft = 100 - (NSUInteger)floor((double)st.currentBundleProcessed * 100.0 / (double)st.currentBundleTotal);
-    }
     g_zsLowResPercentLabel.text = [NSString stringWithFormat:@"%lu%%", (unsigned long)percent];
     g_zsLowResTexturesLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)st.texturesProcessed, (unsigned long)st.texturesTotal];
-    g_zsLowResBundlePercentLabel.text = [NSString stringWithFormat:@"%lu%%", (unsigned long)bundleLeft];
     g_zsLowResBundleCountLabel.text = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)st.bundlesDone, (unsigned long)st.bundlesTotal];
     if (st.preparing) {
         g_zsLowResETALabel.text = @"Preparing\u2026";
