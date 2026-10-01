@@ -1807,6 +1807,7 @@ float zs_exp_get_default_number(NSString *key) {
 
 static BOOL g_memoryCleanupInFlight;
 static const NSTimeInterval kMemoryCleanupGCDelay = 2.0;
+static const NSTimeInterval kMemoryCleanupSecondGCDelay = 1.0;
 
 static void zs_run_gc_collect(void) {
     void *gc = mt_class("System", "GC", "mscorlib");
@@ -1816,12 +1817,66 @@ static void zs_run_gc_collect(void) {
     [IL2CppBridge invokeMethod:collect onInstance:NULL args:NULL outException:&exc];
 }
 
+static void zs_invoke_static_noargs(const char *ns, const char *klassName, const char *assembly, const char *methodName) {
+    void *klass = mt_class(ns, klassName, assembly);
+    const void *method = mt_method(klass, methodName, 0);
+    if (!method) return;
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
+}
+
+static void zs_invoke_singleton_noargs(const char *ns, const char *klassName, const char *assembly, const char *methodName) {
+    void *instance = mt_get_static_instance(ns, klassName, assembly, "get_Instance");
+    if (!instance) return;
+    const void *method = mt_method([IL2CppBridge classOfInstance:instance], methodName, 0);
+    if (!method) return;
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:method onInstance:instance args:NULL outException:&exc];
+}
+
+static void zs_free_battle_effect_pool(void) {
+    BOOL isBattle = NO;
+    if (!zs_try_read_is_in_battle(&isBattle) || !isBattle) return;
+    void *managerKlass = mt_class("", "BattleEffectManager", "Assembly-CSharp");
+    if (!managerKlass) return;
+    const void *getter = mt_method(managerKlass, "get_Instance", 0);
+    if (!getter) return;
+    void *exc = NULL;
+    void *manager = [IL2CppBridge invokeMethod:getter onInstance:NULL args:NULL outException:&exc];
+    if (exc || !manager) return;
+    int32_t off = [IL2CppBridge fieldOffsetOnClass:managerKlass name:"EffectPool"];
+    if (off < 0) return;
+    void *pool = *(void **)((uint8_t *)manager + off);
+    if (!pool) return;
+    const void *freeAll = mt_method([IL2CppBridge classOfInstance:pool], "FreeAll", 0);
+    if (!freeAll) return;
+    exc = NULL;
+    [IL2CppBridge invokeMethod:freeAll onInstance:pool args:NULL outException:&exc];
+}
+
+static void zs_release_idle_runtime_caches(void) {
+    zs_invoke_singleton_noargs("Addressable", "AsyncInstancePool", "Assembly-CSharp", "ReleaseAllIdle");
+    zs_invoke_singleton_noargs("Addressable", "AsyncAssetCache", "Assembly-CSharp", "ReleaseIdle");
+    zs_invoke_static_noargs("RPGSystem", "RpgMemoryWatchAgent", "Assembly-CSharp", "ReleaseIdleCameraRenderTargets");
+    zs_invoke_static_noargs("TMPro", "TMP_MaterialManager", "TextMeshPro", "CleanupFallbackMaterials");
+    zs_invoke_static_noargs("PerformanceUtils", "IntStringCache", "Assembly-CSharp", "ClearCache");
+
+    BOOL isBattle = NO;
+    if (zs_try_read_is_in_battle(&isBattle) && !isBattle) {
+        zs_clear_guide_portrait_cache();
+    }
+
+    zs_free_battle_effect_pool();
+}
+
 void zs_run_memory_cleanup(void (^completion)(BOOL ran)) {
     if (g_memoryCleanupInFlight) {
         if (completion) completion(NO);
         return;
     }
     g_memoryCleanupInFlight = YES;
+
+    zs_release_idle_runtime_caches();
 
     void *resources = mt_class("UnityEngine", "Resources", "CoreModule");
     const void *unload = mt_method(resources, "UnloadUnusedAssets", 0);
@@ -1832,8 +1887,11 @@ void zs_run_memory_cleanup(void (^completion)(BOOL ran)) {
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMemoryCleanupGCDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         zs_run_gc_collect();
-        g_memoryCleanupInFlight = NO;
-        if (completion) completion(YES);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kMemoryCleanupSecondGCDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            zs_run_gc_collect();
+            g_memoryCleanupInFlight = NO;
+            if (completion) completion(YES);
+        });
     });
 }
 
