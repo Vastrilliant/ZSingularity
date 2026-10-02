@@ -2190,7 +2190,7 @@ static BOOL zslr_metal_prepare(char *why, size_t whyLen) {
                     if (!library) {
                         g_zslrMetalError = error.localizedDescription ?: @"Unable to load embedded Metal library";
                     } else {
-                        id<MTLFunction> function = [library newFunctionWithName:@"zslr_astc_encode_void_extent"];
+                        id<MTLFunction> function = [library newFunctionWithName:@"zslr_astc_encode"];
                         if (!function) {
                             g_zslrMetalError = @"Metal encoder function is missing";
                         } else {
@@ -2297,7 +2297,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u void-extent, %s, decode %.0f ms, encode %.0f ms", block, block, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u endpoint-pair encode, %s, decode %.0f ms, encode %.0f ms", block, block, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
