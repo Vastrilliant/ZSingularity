@@ -2332,6 +2332,49 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     return [documents stringByAppendingPathComponent:@"LowRes"];
 }
 
++ (NSString *)mergeOriginalsIntoDirectory:(NSString *)destination copied:(NSUInteger *)copiedOut {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *root = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
+    BOOL isDirectory = NO;
+    if (!root || ![fm fileExistsAtPath:root isDirectory:&isDirectory] || !isDirectory) return @"Couldn't find the UnityCache/Shared folder.";
+    NSError *error = nil;
+    if (![fm createDirectoryAtPath:destination withIntermediateDirectories:YES attributes:nil error:&error]) {
+        return [NSString stringWithFormat:@"Couldn't create %@: %@", destination.lastPathComponent, error.localizedDescription ?: @"unknown error"];
+    }
+    NSUInteger copied = 0;
+    NSUInteger failed = 0;
+    NSString *firstFailure = nil;
+    NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
+    NSString *rel;
+    while ((rel = [walker nextObject])) {
+        @autoreleasepool {
+            NSString *source = [root stringByAppendingPathComponent:rel];
+            NSString *target = [destination stringByAppendingPathComponent:rel];
+            NSDictionary *attrs = [walker fileAttributes];
+            NSString *type = attrs[NSFileType];
+            if ([type isEqualToString:NSFileTypeDirectory]) {
+                if (![fm fileExistsAtPath:target]) [fm createDirectoryAtPath:target withIntermediateDirectories:YES attributes:nil error:nil];
+            } else if ([type isEqualToString:NSFileTypeRegular]) {
+                NSDictionary *existing = [fm attributesOfItemAtPath:target error:nil];
+                if (existing && [existing[NSFileSize] unsignedLongLongValue] > 0) continue;
+                [fm removeItemAtPath:target error:nil];
+                [fm createDirectoryAtPath:target.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                NSError *copyError = nil;
+                if ([fm copyItemAtPath:source toPath:target error:&copyError]) {
+                    copied++;
+                } else {
+                    failed++;
+                    if (!firstFailure) firstFailure = [NSString stringWithFormat:@"%@: %@", rel, copyError.localizedDescription ?: @"unknown error"];
+                }
+            }
+        }
+    }
+    if (copiedOut) *copiedOut = copied;
+    ZLog(@"[LowRes] filled %lu untouched file(s) from the original Shared into %@, %lu failed", (unsigned long)copied, destination, (unsigned long)failed);
+    if (failed > 0) return [NSString stringWithFormat:@"Couldn't copy %lu untouched file(s) from Shared (%@).", (unsigned long)failed, firstFailure];
+    return nil;
+}
+
 + (NSString *)ledgerPath {
     return [[self stagingDirectory] stringByAppendingPathComponent:@"ledger.json"];
 }
@@ -2690,6 +2733,10 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
         ZLog(@"[LowRes] all workers finished");
         if (mode == ZSLowResModeTranscode) [ZSLowRes saveLedger];
+        if (mode == ZSLowResModeTranscode && !g_zslrCancel) {
+            NSString *mergeError = [ZSLowRes mergeOriginalsIntoDirectory:[ZSLowRes stagingDirectory] copied:NULL];
+            if (mergeError) ZLog(@"[LowRes] %@", mergeError);
+        }
 
         os_unfair_lock_lock(&g_zslrLock);
         g_zslrStatus.running = NO;

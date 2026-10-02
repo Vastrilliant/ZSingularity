@@ -3161,6 +3161,9 @@ static NSString *zs_lowres_swap_shared_folders(void) {
         if ([fm fileExistsAtPath:candidate isDirectory:&candidateIsDirectory] && candidateIsDirectory) source = candidate;
     }
 
+    NSString *mergeError = [ZSLowRes mergeOriginalsIntoDirectory:source copied:NULL];
+    if (mergeError) return mergeError;
+
     NSString *backup = [shared stringByAppendingString:@".backup"];
     NSError *error = nil;
     if ([fm fileExistsAtPath:backup]) {
