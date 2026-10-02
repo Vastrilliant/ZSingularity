@@ -144,7 +144,7 @@ jobs:
         run: |
           clang \
             -dynamiclib \
-            -O2 \
+            -O3 \
             -fobjc-arc \
             -fmodules \
             -isysroot "${{ steps.sdk.outputs.path }}" \

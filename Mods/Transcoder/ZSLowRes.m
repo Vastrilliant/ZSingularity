@@ -17,6 +17,10 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 #import "UnityBundleTools.h"
 #import "ZTweakLog.h"
@@ -25,6 +29,7 @@
 #include "astcenc.h"
 
 #define ZSLR_BLOCK_SIZE 131072u
+#define ZSLR_STRIP_BYTES (1024u * 1024u)
 #define ZSLR_FORMAT_ASTC_6x6 50
 #define ZSLR_FORMAT_ASTC_8x8 51
 #define ZSLR_FORMAT_ASTC_10x10 52
@@ -139,12 +144,15 @@ static int zslr_writer_finish(ZSLRWriter *writer, const ZSLRBundle *source, cons
 static void zslr_writer_abort(ZSLRWriter *writer);
 
 
+typedef int (*ZSLRTaskFn)(void *ctx, uint32_t index, void *worker);
+
 typedef struct {
     void *user;
     int (*reserve)(void *user, uint64_t workingSetBytes);
     int (*tick)(void *user);
     int (*transcode)(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen);
     void (*progress)(void *user, uint32_t delta);
+    void (*parallel)(void *user, uint32_t count, ZSLRTaskFn task, void *ctx);
 } ZSLRCodec;
 
 typedef struct {
@@ -1266,6 +1274,92 @@ done:
     return rc;
 }
 
+#define ZSLR_OUT_NONE 0
+#define ZSLR_OUT_SKIPPED 1
+#define ZSLR_OUT_OK 2
+#define ZSLR_OUT_REJECTED 3
+#define ZSLR_ABORT_CANCEL 1
+#define ZSLR_ABORT_READ 2
+
+typedef struct {
+    const ZSLRCodec *codec;
+    ZSLRBundle *bundle;
+    os_unfair_lock readLock;
+    uint64_t streamBase;
+    const ZSLRTexture *textures;
+    const ZSLRTexture **cands;
+    ZSLRConverted *conv;
+    uint8_t *outcome;
+    uint32_t candCount;
+    const char *label;
+    atomic_int abort;
+    uint32_t failedIndex;
+} ZSLRTranscodeCtx;
+
+static int zslr_transcode_task(void *opaque, uint32_t i, void *worker) {
+    ZSLRTranscodeCtx *c = (ZSLRTranscodeCtx *)opaque;
+    const ZSLRCodec *codec = c->codec;
+    const char *label = c->label;
+    uint32_t candCount = c->candCount;
+    if (c->outcome[i] == ZSLR_OUT_SKIPPED || atomic_load(&c->abort) != 0) return 0;
+    if (codec->tick && codec->tick(codec->user) != 0) {
+        int expected = 0;
+        atomic_compare_exchange_strong(&c->abort, &expected, ZSLR_ABORT_CANCEL);
+        return 1;
+    }
+    const ZSLRTexture *t = c->cands[i];
+    uint8_t *srcBuf = (uint8_t *)malloc(t->streamSize);
+    int readOk = 0;
+    if (srcBuf) {
+        os_unfair_lock_lock(&c->readLock);
+        readOk = zslr_bundle_read(c->bundle, c->streamBase + t->streamOffset, t->streamSize, srcBuf) == 0;
+        os_unfair_lock_unlock(&c->readLock);
+    }
+    if (!readOk) {
+        free(srcBuf);
+        int expected = 0;
+        if (atomic_compare_exchange_strong(&c->abort, &expected, ZSLR_ABORT_READ)) c->failedIndex = i;
+        return 1;
+    }
+    uint32_t newSize = (uint32_t)zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
+    uint8_t *out = NULL;
+    size_t outLen = 0;
+    char why[160] = {0};
+    const char *texName = t->name[0] ? t->name : "<unnamed>";
+    double texStart = CACurrentMediaTime();
+    int tr = codec->transcode(worker, srcBuf, t->streamSize, t->width, t->height, t->colorSpace == 1, &out, &outLen, why, sizeof(why));
+    free(srcBuf);
+    if (tr == 0 && out && outLen != newSize) {
+        snprintf(why, sizeof(why), "output size %zu, expected %u", outLen, newSize);
+        tr = -1;
+    }
+    if (tr == ZSLR_TRANSCODE_REJECTED) {
+        free(out);
+        c->outcome[i] = ZSLR_OUT_REJECTED;
+        ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): rejected, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+                 t->width, t->height, why[0] ? why : "quality", ZSLR_MS(texStart));
+        if (codec->progress) codec->progress(codec->user, 1);
+        return 0;
+    }
+    if (tr != 0 || !out) {
+        free(out);
+        c->outcome[i] = ZSLR_OUT_REJECTED;
+        ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): failed, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+                 t->width, t->height, why[0] ? why : "unknown transcode error", ZSLR_MS(texStart));
+        if (codec->progress) codec->progress(codec->user, 1);
+        return 0;
+    }
+    c->conv[i].texture = (uint32_t)(t - c->textures);
+    c->conv[i].data = out;
+    c->conv[i].length = outLen;
+    c->conv[i].newSize = newSize;
+    c->outcome[i] = ZSLR_OUT_OK;
+    ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+             t->width, t->height, t->streamSize, newSize, why, ZSLR_MS(texStart));
+    if (codec->progress) codec->progress(codec->user, 1);
+    return 0;
+}
+
 static int zslr_process_bundle(const char *label, const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen) {
     memset(result, 0, sizeof(*result));
     result->stage = "open";
@@ -1304,7 +1398,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     ZSLRConverted *conv = NULL;
     ZSLRRegion *regions = NULL;
     uint8_t *chunk = NULL;
-    uint8_t *srcBuf = NULL;
+    uint8_t *outcome = NULL;
     ZSLRWriter writer;
     int writerOpen = 0;
     uint32_t texCount = 0;
@@ -1467,70 +1561,68 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     }
 
     conv = (ZSLRConverted *)calloc(candCount, sizeof(*conv));
-    if (!conv) {
+    outcome = (uint8_t *)calloc(candCount, 1);
+    if (!conv || !outcome) {
         pl_err(err, errLen, "out of memory");
         goto done;
     }
     result->stage = "transcode";
     stageStart = CACurrentMediaTime();
     uint32_t capSkipped = 0;
-    uint64_t resultBytes = 0;
+    uint64_t planned = 0;
     for (uint32_t i = 0; i < candCount; i++) {
         const ZSLRTexture *t = cands[i];
         uint32_t newSize = (uint32_t)zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
-        if (resultBytes + newSize > policy->maxResultBytes) {
+        if (planned + newSize > policy->maxResultBytes) {
+            outcome[i] = ZSLR_OUT_SKIPPED;
             capSkipped++;
             if (codec->progress) codec->progress(codec->user, 1);
             continue;
         }
-        if (codec->tick && codec->tick(codec->user) != 0) {
-            ZSLR_LOG(label, "cancelled before texture %u/%u", i + 1, candCount);
-            rc = ZSLR_CANCELLED;
-            goto done;
-        }
-        free(srcBuf);
-        srcBuf = (uint8_t *)malloc(t->streamSize);
-        if (!srcBuf || zslr_bundle_read(&b, b.nodes[ri].offset + t->streamOffset, t->streamSize, srcBuf) != 0) {
-            pl_err(err, errLen, "cannot read stream of texture %lld (offset %llu, %u bytes)", (long long)t->pathId, (unsigned long long)t->streamOffset, t->streamSize);
-            goto done;
-        }
-        uint8_t *out = NULL;
-        size_t outLen = 0;
-        char why[160] = {0};
-        const char *texName = t->name[0] ? t->name : "<unnamed>";
-        double texStart = CACurrentMediaTime();
-        int tr = codec->transcode(codec->user, srcBuf, t->streamSize, t->width, t->height, t->colorSpace == 1, &out, &outLen, why, sizeof(why));
-        if (tr == 0 && out && outLen != newSize) {
-            snprintf(why, sizeof(why), "output size %zu, expected %u", outLen, newSize);
-            tr = -1;
-        }
-        if (tr == ZSLR_TRANSCODE_REJECTED) {
+        planned += newSize;
+    }
+    ZSLRTranscodeCtx tctx;
+    memset(&tctx, 0, sizeof(tctx));
+    tctx.codec = codec;
+    tctx.bundle = &b;
+    tctx.readLock = OS_UNFAIR_LOCK_INIT;
+    tctx.streamBase = b.nodes[ri].offset;
+    tctx.textures = textures;
+    tctx.cands = cands;
+    tctx.conv = conv;
+    tctx.outcome = outcome;
+    tctx.candCount = candCount;
+    tctx.label = label;
+    atomic_init(&tctx.abort, 0);
+    if (codec->parallel) {
+        codec->parallel(codec->user, candCount, zslr_transcode_task, &tctx);
+    } else {
+        for (uint32_t i = 0; i < candCount; i++) zslr_transcode_task(&tctx, i, codec->user);
+    }
+    int abortState = atomic_load(&tctx.abort);
+    if (abortState == ZSLR_ABORT_CANCEL) {
+        ZSLR_LOG(label, "cancelled during transcode of %u texture(s)", candCount);
+        rc = ZSLR_CANCELLED;
+        goto done;
+    }
+    if (abortState == ZSLR_ABORT_READ) {
+        const ZSLRTexture *bad = cands[tctx.failedIndex];
+        pl_err(err, errLen, "cannot read stream of texture %lld (offset %llu, %u bytes)", (long long)bad->pathId, (unsigned long long)bad->streamOffset, bad->streamSize);
+        goto done;
+    }
+    for (uint32_t i = 0; i < candCount; i++) {
+        if (outcome[i] == ZSLR_OUT_REJECTED) {
             result->rejected++;
-            free(out);
-            ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): rejected, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
-                     t->width, t->height, why[0] ? why : "quality", ZSLR_MS(texStart));
-            if (codec->progress) codec->progress(codec->user, 1);
             continue;
         }
-        if (tr != 0 || !out) {
-            free(out);
-            result->rejected++;
-            ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u): failed, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
-                     t->width, t->height, why[0] ? why : "unknown transcode error", ZSLR_MS(texStart));
-            if (codec->progress) codec->progress(codec->user, 1);
-            continue;
+        if (outcome[i] != ZSLR_OUT_OK) continue;
+        result->originalBytes += cands[i]->streamSize;
+        result->newBytes += conv[i].newSize;
+        if (i != convCount) {
+            conv[convCount] = conv[i];
+            memset(&conv[i], 0, sizeof(conv[i]));
         }
-        conv[convCount].texture = (uint32_t)(t - textures);
-        conv[convCount].data = out;
-        conv[convCount].length = outLen;
-        conv[convCount].newSize = newSize;
         convCount++;
-        resultBytes += newSize;
-        result->originalBytes += t->streamSize;
-        result->newBytes += newSize;
-        ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
-                 t->width, t->height, t->streamSize, newSize, why, ZSLR_MS(texStart));
-        if (codec->progress) codec->progress(codec->user, 1);
     }
     if (capSkipped) {
         ZSLR_LOG(label, "result cap of %llu MB reached, %u texture(s) left unconverted", ZSLR_MB(policy->maxResultBytes), capSkipped);
@@ -1631,7 +1723,7 @@ done:
     free(conv);
     free(regions);
     free(chunk);
-    free(srcBuf);
+    free(outcome);
     free(cands);
     free(textures);
     free(cab);
@@ -1646,7 +1738,8 @@ static const uint32_t kZSLowResMinPixels = 256u * 256u;
 static const uint32_t kZSLowResMaxPixels = 4096u * 4096u;
 static const uint64_t kZSLowResMaxResultBytes = 256ull * 1024ull * 1024ull;
 static const double kZSLowResMinPSNR = 27.0;
-static const double kZSLowResRescueWindowDB = 4.0;
+static const double kZSLowResRescueWindowDB = 2.0;
+static const unsigned int kZSLowResBlockModeLimit = 30;
 
 static const int64_t kZSLowResFullSpeedAbove = 450ll * 1024 * 1024;
 static const int64_t kZSLowResHalfSpeedAbove = 300ll * 1024 * 1024;
@@ -1673,10 +1766,32 @@ enum {
 typedef struct {
     NSUInteger index;
     struct astcenc_context *contexts[kZSLowResContextKinds];
+    uint8_t *rgba;
+    size_t rgbaCap;
+    uint8_t *strip;
+    size_t stripCap;
 } ZSLRWorker;
+
+typedef struct {
+    ZSLRTaskFn task;
+    void *ctx;
+    uint32_t count;
+    atomic_uint next;
+    atomic_uint finished;
+    atomic_int helpers;
+} ZSLRJob;
+
+typedef struct {
+    uint64_t raw;
+    uint64_t rgb;
+    uint64_t weight;
+    uint64_t alpha;
+} ZSLRMeasure;
 
 static os_unfair_lock g_zslrLock = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock g_zslrParentLock = OS_UNFAIR_LOCK_INIT;
+static os_unfair_lock g_zslrJobLock = OS_UNFAIR_LOCK_INIT;
+static ZSLRJob *g_zslrJobs[ZSLR_MAX_WORKERS];
 static ZSLowResStatus g_zslrStatus;
 static volatile BOOL g_zslrCancel = NO;
 static double g_zslrWarningUntil = 0;
@@ -1801,6 +1916,53 @@ static void zslr_codec_progress(void *user, uint32_t delta) {
     os_unfair_lock_unlock(&g_zslrLock);
 }
 
+static void zslr_job_drain(ZSLRJob *job, void *worker) {
+    for (;;) {
+        uint32_t i = atomic_fetch_add(&job->next, 1u);
+        if (i >= job->count) break;
+        job->task(job->ctx, i, worker);
+        atomic_fetch_add(&job->finished, 1u);
+    }
+}
+
+static BOOL zslr_job_help(ZSLRWorker *worker) {
+    ZSLRJob *job = NULL;
+    os_unfair_lock_lock(&g_zslrJobLock);
+    for (int i = 0; i < ZSLR_MAX_WORKERS; i++) {
+        ZSLRJob *candidate = g_zslrJobs[i];
+        if (candidate && atomic_load(&candidate->next) < candidate->count) {
+            atomic_fetch_add(&candidate->helpers, 1);
+            job = candidate;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&g_zslrJobLock);
+    if (!job) return NO;
+    zslr_job_drain(job, worker);
+    atomic_fetch_sub(&job->helpers, 1);
+    return YES;
+}
+
+static void zslr_codec_parallel(void *user, uint32_t count, ZSLRTaskFn task, void *ctx) {
+    ZSLRWorker *owner = (ZSLRWorker *)user;
+    ZSLRJob job;
+    job.task = task;
+    job.ctx = ctx;
+    job.count = count;
+    atomic_init(&job.next, 0u);
+    atomic_init(&job.finished, 0u);
+    atomic_init(&job.helpers, 0);
+    os_unfair_lock_lock(&g_zslrJobLock);
+    g_zslrJobs[owner->index] = &job;
+    os_unfair_lock_unlock(&g_zslrJobLock);
+    zslr_job_drain(&job, owner);
+    while (atomic_load(&job.finished) < count) usleep(200);
+    os_unfair_lock_lock(&g_zslrJobLock);
+    g_zslrJobs[owner->index] = NULL;
+    os_unfair_lock_unlock(&g_zslrJobLock);
+    while (atomic_load(&job.helpers) > 0) usleep(200);
+}
+
 static BOOL zslr_ledger_skips(NSDictionary *item) {
     NSString *key = item[@"key"];
     uint64_t size = [item[@"size"] unsignedLongLongValue];
@@ -1845,15 +2007,62 @@ static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *conf
     }
     unsigned int flags = ASTCENC_FLG_SELF_DECOMPRESS_ONLY;
     if (base == kZSLowResEncodeAlphaSRGB || base == kZSLowResEncodeAlphaLinear) flags |= ASTCENC_FLG_USE_ALPHA_WEIGHT;
-    return astcenc_config_init(profile, zslr_block(), zslr_block(), 1, rescue ? ASTCENC_PRE_MEDIUM : ASTCENC_PRE_FASTEST, flags, config);
+    enum astcenc_error status = astcenc_config_init(profile, zslr_block(), zslr_block(), 1, rescue ? ASTCENC_PRE_FAST : ASTCENC_PRE_FASTEST, flags, config);
+    if (status == ASTCENC_SUCCESS && !rescue && config->tune_block_mode_limit > kZSLowResBlockModeLimit) config->tune_block_mode_limit = kZSLowResBlockModeLimit;
+    return status;
 }
 
-static void zslr_measure(const uint8_t *ref, const uint8_t *test, size_t pixels, int hasAlpha, double *weighted, double *raw) {
-    uint64_t rawSum = 0;
-    uint64_t rgbSum = 0;
-    uint64_t weightSum = 0;
-    uint64_t alphaSum = 0;
-    for (size_t i = 0; i < pixels; i++) {
+static void zslr_measure_accum(const uint8_t *ref, const uint8_t *test, size_t pixels, int hasAlpha, ZSLRMeasure *m) {
+    size_t i = 0;
+    uint64_t raw = 0;
+    uint64_t rgb = 0;
+    uint64_t weight = 0;
+    uint64_t alpha = 0;
+#if defined(__ARM_NEON)
+    uint64x2_t rawAcc = vdupq_n_u64(0);
+    uint64x2_t rgbAcc = vdupq_n_u64(0);
+    uint64x2_t weightAcc = vdupq_n_u64(0);
+    uint64x2_t alphaAcc = vdupq_n_u64(0);
+    const uint32x4_t full = vdupq_n_u32(255);
+    for (; i + 8 <= pixels; i += 8) {
+        uint8x8x4_t r = vld4_u8(ref + i * 4);
+        uint8x8x4_t t = vld4_u8(test + i * 4);
+        int16x8_t dr = vreinterpretq_s16_u16(vsubl_u8(r.val[0], t.val[0]));
+        int16x8_t dg = vreinterpretq_s16_u16(vsubl_u8(r.val[1], t.val[1]));
+        int16x8_t db = vreinterpretq_s16_u16(vsubl_u8(r.val[2], t.val[2]));
+        int16x8_t da = vreinterpretq_s16_u16(vsubl_u8(r.val[3], t.val[3]));
+        int32x4_t eLoS = vmull_s16(vget_low_s16(dr), vget_low_s16(dr));
+        eLoS = vmlal_s16(eLoS, vget_low_s16(dg), vget_low_s16(dg));
+        eLoS = vmlal_s16(eLoS, vget_low_s16(db), vget_low_s16(db));
+        int32x4_t eHiS = vmull_high_s16(dr, dr);
+        eHiS = vmlal_high_s16(eHiS, dg, dg);
+        eHiS = vmlal_high_s16(eHiS, db, db);
+        uint32x4_t eLo = vreinterpretq_u32_s32(eLoS);
+        uint32x4_t eHi = vreinterpretq_u32_s32(eHiS);
+        uint32x4_t aLo = vreinterpretq_u32_s32(vmull_s16(vget_low_s16(da), vget_low_s16(da)));
+        uint32x4_t aHi = vreinterpretq_u32_s32(vmull_high_s16(da, da));
+        uint32x4_t wLo = full;
+        uint32x4_t wHi = full;
+        if (hasAlpha) {
+            uint16x8_t w16 = vmovl_u8(r.val[3]);
+            wLo = vmovl_u16(vget_low_u16(w16));
+            wHi = vmovl_high_u16(w16);
+        }
+        rawAcc = vpadalq_u32(rawAcc, vaddq_u32(eLo, aLo));
+        rawAcc = vpadalq_u32(rawAcc, vaddq_u32(eHi, aHi));
+        rgbAcc = vpadalq_u32(rgbAcc, vmulq_u32(eLo, wLo));
+        rgbAcc = vpadalq_u32(rgbAcc, vmulq_u32(eHi, wHi));
+        weightAcc = vpadalq_u32(weightAcc, wLo);
+        weightAcc = vpadalq_u32(weightAcc, wHi);
+        alphaAcc = vpadalq_u32(alphaAcc, aLo);
+        alphaAcc = vpadalq_u32(alphaAcc, aHi);
+    }
+    raw = vaddvq_u64(rawAcc);
+    rgb = vaddvq_u64(rgbAcc);
+    weight = vaddvq_u64(weightAcc);
+    alpha = vaddvq_u64(alphaAcc);
+#endif
+    for (; i < pixels; i++) {
         const uint8_t *r = ref + i * 4;
         const uint8_t *t = test + i * 4;
         int dr = (int)r[0] - (int)t[0];
@@ -1863,17 +2072,46 @@ static void zslr_measure(const uint8_t *ref, const uint8_t *test, size_t pixels,
         uint32_t rgbErr = (uint32_t)(dr * dr + dg * dg + db * db);
         uint32_t aErr = (uint32_t)(da * da);
         uint32_t w = hasAlpha ? r[3] : 255u;
-        rawSum += (uint64_t)rgbErr + aErr;
-        rgbSum += (uint64_t)w * rgbErr;
-        weightSum += w;
-        alphaSum += aErr;
+        raw += (uint64_t)rgbErr + aErr;
+        rgb += (uint64_t)w * rgbErr;
+        weight += w;
+        alpha += aErr;
     }
-    double rawMse = (double)rawSum / ((double)pixels * 4.0);
-    double mseRGB = weightSum > 0 ? (double)rgbSum / (3.0 * (double)weightSum) : 0.0;
-    double mseA = (double)alphaSum / (double)pixels;
+    m->raw += raw;
+    m->rgb += rgb;
+    m->weight += weight;
+    m->alpha += alpha;
+}
+
+static void zslr_measure_finish(const ZSLRMeasure *m, size_t pixels, double *weighted, double *raw) {
+    double rawMse = (double)m->raw / ((double)pixels * 4.0);
+    double mseRGB = m->weight > 0 ? (double)m->rgb / (3.0 * (double)m->weight) : 0.0;
+    double mseA = (double)m->alpha / (double)pixels;
     double mse = (3.0 * mseRGB + mseA) / 4.0;
     *raw = rawMse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / rawMse);
     *weighted = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
+}
+
+static int zslr_has_alpha(const uint8_t *rgba, size_t pixels) {
+    size_t i = 0;
+#if defined(__ARM_NEON)
+    for (; i + 16 <= pixels; i += 16) {
+        uint8x16x4_t p = vld4q_u8(rgba + i * 4);
+        if (vminvq_u8(p.val[3]) != 255) return 1;
+    }
+#endif
+    for (; i < pixels; i++) {
+        if (rgba[i * 4 + 3] != 255) return 1;
+    }
+    return 0;
+}
+
+static uint8_t *zslr_scratch(uint8_t **buf, size_t *cap, size_t need) {
+    if (*buf && *cap >= need && (*cap <= need * 4 || *cap <= (16u * 1024u * 1024u))) return *buf;
+    free(*buf);
+    *buf = (uint8_t *)malloc(need);
+    *cap = *buf ? need : 0;
+    return *buf;
 }
 
 static struct astcenc_context *zslr_context(ZSLRWorker *worker, int kind) {
@@ -1900,6 +2138,12 @@ static void zslr_release_worker(ZSLRWorker *worker) {
         if (worker->contexts[i]) astcenc_context_free(worker->contexts[i]);
         worker->contexts[i] = NULL;
     }
+    free(worker->rgba);
+    free(worker->strip);
+    worker->rgba = NULL;
+    worker->strip = NULL;
+    worker->rgbaCap = 0;
+    worker->stripCap = 0;
 }
 
 static void zslr_release_parents(void) {
@@ -1911,13 +2155,32 @@ static void zslr_release_parents(void) {
     os_unfair_lock_unlock(&g_zslrParentLock);
 }
 
+static int zslr_verify_strips(struct astcenc_context *context, const struct astcenc_swizzle *swizzle, const uint8_t *encoded, const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t block, uint8_t *strip, uint32_t stripBlockRows, int hasAlpha, ZSLRMeasure *measure, enum astcenc_error *status) {
+    uint32_t blocksX = (width + block - 1) / block;
+    uint32_t blocksY = (height + block - 1) / block;
+    memset(measure, 0, sizeof(*measure));
+    for (uint32_t by = 0; by < blocksY; by += stripBlockRows) {
+        uint32_t rowBlocks = blocksY - by < stripBlockRows ? blocksY - by : stripBlockRows;
+        uint32_t y0 = by * block;
+        uint32_t y1 = (by + rowBlocks) * block;
+        if (y1 > height) y1 = height;
+        uint32_t rows = y1 - y0;
+        void *slice = strip;
+        struct astcenc_image image = { width, rows, 1, ASTCENC_TYPE_U8, &slice };
+        *status = astcenc_decompress_image(context, encoded + (size_t)by * blocksX * 16, (size_t)rowBlocks * blocksX * 16, &image, swizzle, 0);
+        astcenc_decompress_reset(context);
+        if (*status != ASTCENC_SUCCESS) return -1;
+        zslr_measure_accum(rgba + (size_t)y0 * width * 4, strip, (size_t)rows * width, hasAlpha, measure);
+    }
+    return 0;
+}
+
 static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen) {
     ZSLRWorker *worker = (ZSLRWorker *)user;
     size_t pixels = (size_t)width * height;
     size_t rgbaLen = pixels * 4;
-    size_t encodedLen = (size_t)zslr_astc_size(width, height, zslr_block(), zslr_block());
-    uint8_t *rgba = NULL;
-    uint8_t *check = NULL;
+    uint32_t block = zslr_block();
+    size_t encodedLen = (size_t)zslr_astc_size(width, height, block, block);
     uint8_t *encoded = NULL;
     int result = -1;
     if (why && whyLen) why[0] = 0;
@@ -1929,7 +2192,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         return -1;
     }
 
-    rgba = (uint8_t *)malloc(rgbaLen);
+    uint8_t *rgba = zslr_scratch(&worker->rgba, &worker->rgbaCap, rgbaLen);
     if (!rgba) {
         ZSLR_WHY("out of memory allocating %zu byte decode buffer", rgbaLen);
         return -1;
@@ -1941,31 +2204,38 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     astcenc_decompress_reset(decoder);
     if (status != ASTCENC_SUCCESS) {
         ZSLR_WHY("ASTC decode failed: %s", astcenc_get_error_string(status));
-        goto done;
+        return -1;
     }
     double decodeMs = ZSLR_MS(phase);
 
-    int hasAlpha = 0;
-    for (size_t i = 3; i < rgbaLen; i += 4) {
-        if (rgba[i] != 255) {
-            hasAlpha = 1;
-            break;
-        }
-    }
+    int hasAlpha = zslr_has_alpha(rgba, pixels);
     int kind = srgb ? (hasAlpha ? kZSLowResEncodeAlphaSRGB : kZSLowResEncodeOpaqueSRGB)
                     : (hasAlpha ? kZSLowResEncodeAlphaLinear : kZSLowResEncodeOpaqueLinear);
 
+    uint32_t blocksY = (height + block - 1) / block;
+    size_t blockRowBytes = (size_t)block * width * 4;
+    size_t stripBlockRowsWanted = blockRowBytes ? ZSLR_STRIP_BYTES / blockRowBytes : 1;
+    uint32_t stripBlockRows = stripBlockRowsWanted < 1 ? 1u : (uint32_t)stripBlockRowsWanted;
+    if (stripBlockRows > blocksY) stripBlockRows = blocksY;
+    size_t stripRows = (size_t)stripBlockRows * block;
+    if (stripRows > height) stripRows = height;
+    uint8_t *strip = zslr_scratch(&worker->strip, &worker->stripCap, stripRows * width * 4);
+    if (!strip) {
+        ZSLR_WHY("out of memory allocating %zu byte verify buffer", stripRows * width * 4);
+        return -1;
+    }
+
     encoded = (uint8_t *)malloc(encodedLen);
-    check = (uint8_t *)malloc(rgbaLen);
-    if (!encoded || !check) {
-        ZSLR_WHY("out of memory allocating %zu byte encode buffers", encodedLen + rgbaLen);
-        goto done;
+    if (!encoded) {
+        ZSLR_WHY("out of memory allocating %zu byte encode buffer", encodedLen);
+        return -1;
     }
 
     double psnr = 0;
     double rawPsnr = 0;
     double encodeMs = 0;
     int passes = 0;
+    ZSLRMeasure measure;
     for (;;) {
         int useKind = passes == 0 ? kind : kind + kZSLowResRescueOffset;
         struct astcenc_context *encoder = zslr_context(worker, useKind);
@@ -1977,18 +2247,14 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         status = astcenc_compress_image(encoder, &image, &swizzle, encoded, encodedLen, 0);
         astcenc_compress_reset(encoder);
         if (status != ASTCENC_SUCCESS) {
-            ZSLR_WHY("ASTC %ux%u encode failed: %s", zslr_block(), zslr_block(), astcenc_get_error_string(status));
+            ZSLR_WHY("ASTC %ux%u encode failed: %s", block, block, astcenc_get_error_string(status));
             goto done;
         }
-        void *checkSlice = check;
-        struct astcenc_image checkImage = { width, height, 1, ASTCENC_TYPE_U8, &checkSlice };
-        status = astcenc_decompress_image(encoder, encoded, encodedLen, &checkImage, &swizzle, 0);
-        astcenc_decompress_reset(encoder);
-        if (status != ASTCENC_SUCCESS) {
-            ZSLR_WHY("ASTC %ux%u verify decode failed: %s", zslr_block(), zslr_block(), astcenc_get_error_string(status));
+        if (zslr_verify_strips(encoder, &swizzle, encoded, rgba, width, height, block, strip, stripBlockRows, hasAlpha, &measure, &status) != 0) {
+            ZSLR_WHY("ASTC %ux%u verify decode failed: %s", block, block, astcenc_get_error_string(status));
             goto done;
         }
-        zslr_measure(rgba, check, pixels, hasAlpha, &psnr, &rawPsnr);
+        zslr_measure_finish(&measure, pixels, &psnr, &rawPsnr);
         encodeMs += ZSLR_MS(phase);
         passes++;
         if (psnr >= kZSLowResMinPSNR) break;
@@ -2009,8 +2275,6 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     result = 0;
 
 done:
-    free(rgba);
-    free(check);
     free(encoded);
     return result;
 }
@@ -2366,7 +2630,17 @@ done:
                     }
                     if (item) g_zslrStatus.activeWorkers++;
                     os_unfair_lock_unlock(&g_zslrLock);
-                    if (!item) break;
+                    if (!item) {
+                        while (!g_zslrCancel) {
+                            if (zslr_job_help(&worker)) continue;
+                            os_unfair_lock_lock(&g_zslrLock);
+                            BOOL busy = g_zslrStatus.activeWorkers > 0;
+                            os_unfair_lock_unlock(&g_zslrLock);
+                            if (!busy) break;
+                            usleep(1000);
+                        }
+                        break;
+                    }
                     [ZSLowRes processItem:item mode:mode worker:&worker index:itemIndex total:itemTotal];
                     handled++;
                     os_unfair_lock_lock(&g_zslrLock);
@@ -2448,7 +2722,7 @@ done:
         os_unfair_lock_unlock(&g_zslrLock);
     }
 
-    ZSLRCodec codec = { worker, zslr_codec_reserve, zslr_codec_tick, zslr_codec_transcode, zslr_codec_progress };
+    ZSLRCodec codec = { worker, zslr_codec_reserve, zslr_codec_tick, zslr_codec_transcode, zslr_codec_progress, zslr_codec_parallel };
     ZSLRPolicy policy = { kZSLowResMinPixels, kZSLowResMaxPixels, kZSLowResMaxResultBytes };
     ZSLRResult result;
     char err[256] = {0};
