@@ -62,7 +62,7 @@ jobs:
       - name: Compile Metal transcoder
         run: |
           set -euo pipefail
-          xcrun -sdk iphoneos metal -c -O3 -std=metal2.3 -target air64-apple-ios15.0 Mods/Transcoder/ZSLowRes.metal -o ZSLowRes.air
+          xcrun -sdk iphoneos metal -c -O3 -std=metal3.0 -target air64-apple-ios15.0 Mods/Transcoder/ZSLowRes.metal -o ZSLowRes.air
           xcrun -sdk iphoneos metallib ZSLowRes.air -o ZSLowRes.metallib
 
       - name: Compile tweak dylib
