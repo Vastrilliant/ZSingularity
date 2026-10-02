@@ -1512,7 +1512,11 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         goto done;
     }
     if (loc == -2) {
-        pl_err(err, errLen, "more than one serialized node, multi-file bundles are not supported");
+        uint32_t serializedNodes = 0;
+        for (uint32_t i = 0; i < b.nodeCount; i++) {
+            if (b.nodes[i].flags & 4) serializedNodes++;
+        }
+        pl_err(err, errLen, "%u serialized nodes among %u node(s), multi-file bundles are not supported", serializedNodes, b.nodeCount);
         goto done;
     }
     if (loc == 1) {
@@ -1902,6 +1906,7 @@ static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
 static NSUInteger g_zslrLedgerDirty = 0;
 static os_unfair_lock g_zslrCountLock = OS_UNFAIR_LOCK_INIT;
+static const NSInteger kZSLRScanCacheVersion = 2;
 static double g_zslrTranscodeStart = 0;
 static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerSeq[ZSLR_MAX_WORKERS];
@@ -2469,6 +2474,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     NSUInteger *counts = (NSUInteger *)calloc(total ? total : 1, sizeof(NSUInteger));
     BOOL *skipped = (BOOL *)calloc(total ? total : 1, sizeof(BOOL));
     __block NSUInteger next = 0;
+    NSMutableArray<NSDictionary *> *failures = [NSMutableArray array];
     NSUInteger poolSize = MIN((NSUInteger)4, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     ZLog(@"[LowRes] counting candidate textures across %lu bundle(s)", (unsigned long)total);
     double countStart = CACurrentMediaTime();
@@ -2498,8 +2504,17 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                     os_unfair_lock_lock(&g_zslrLock);
                     NSDictionary *cached = g_zslrLedger[scanKey];
                     os_unfair_lock_unlock(&g_zslrLock);
-                    if (cached && [cached[@"size"] unsignedLongLongValue] == size && fabs([cached[@"mtime"] doubleValue] - mtime) < 0.5 && cached[@"cands"]) {
+                    if (cached && [cached[@"v"] integerValue] == kZSLRScanCacheVersion && [cached[@"size"] unsignedLongLongValue] == size && fabs([cached[@"mtime"] doubleValue] - mtime) < 0.5 && cached[@"cands"]) {
                         counts[i] = [cached[@"cands"] unsignedIntegerValue];
+                        NSString *cachedFail = cached[@"fail"];
+                        NSNumber *cachedPartial = cached[@"pfail"];
+                        if (cachedFail.length || cachedPartial.unsignedIntegerValue > 0) {
+                            NSDictionary *record = @{ @"key": item[@"key"] ?: @"?", @"size": @(size), @"fail": cachedFail ?: @"",
+                                                      @"pfail": cachedPartial ?: @0, @"parsed": cached[@"parsed"] ?: @0 };
+                            os_unfair_lock_lock(&g_zslrCountLock);
+                            [failures addObject:record];
+                            os_unfair_lock_unlock(&g_zslrCountLock);
+                        }
                         continue;
                     }
                     ZSLRCodec codec = {0};
@@ -2508,10 +2523,29 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                     char err[256] = {0};
                     int rc = zslr_process_bundle(label, [item[@"path"] fileSystemRepresentation], "", 1, &codec, &policy, &result, err, sizeof(err));
                     counts[i] = rc == ZSLR_OK ? result.candidates : 0;
+                    NSString *failText = nil;
+                    if (rc != ZSLR_OK) {
+                        failText = [NSString stringWithFormat:@"stage '%s': %s", result.stage ?: "unknown", err[0] ? err : "no detail"];
+                    }
+                    NSUInteger partial = rc == ZSLR_OK ? result.parseFailures : 0;
+                    NSUInteger parsed = rc == ZSLR_OK ? result.texturesTotal : 0;
+                    NSMutableDictionary *entry = [@{ @"v": @(kZSLRScanCacheVersion), @"size": @(size), @"mtime": @(mtime), @"cands": @(counts[i]) } mutableCopy];
+                    if (failText) entry[@"fail"] = failText;
+                    if (partial > 0) {
+                        entry[@"pfail"] = @(partial);
+                        entry[@"parsed"] = @(parsed);
+                    }
                     os_unfair_lock_lock(&g_zslrLock);
-                    g_zslrLedger[scanKey] = @{ @"size": @(size), @"mtime": @(mtime), @"cands": @(counts[i]) };
+                    g_zslrLedger[scanKey] = entry;
                     g_zslrLedgerDirty++;
                     os_unfair_lock_unlock(&g_zslrLock);
+                    if (failText || partial > 0) {
+                        NSDictionary *record = @{ @"key": item[@"key"] ?: @"?", @"size": @(size), @"fail": failText ?: @"",
+                                                  @"pfail": @(partial), @"parsed": @(parsed) };
+                        os_unfair_lock_lock(&g_zslrCountLock);
+                        [failures addObject:record];
+                        os_unfair_lock_unlock(&g_zslrCountLock);
+                    }
                 }
             }
         });
@@ -2526,6 +2560,34 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         g_zslrStatus.preparing = NO;
         os_unfair_lock_unlock(&g_zslrLock);
         return nil;
+    }
+
+    if (failures.count > 0) {
+        [failures sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            return [b[@"size"] compare:a[@"size"]];
+        }];
+        NSUInteger failedCount = 0;
+        NSUInteger partialCount = 0;
+        unsigned long long failedBytes = 0;
+        for (NSDictionary *record in failures) {
+            unsigned long long recordSize = [record[@"size"] unsignedLongLongValue];
+            NSString *fail = record[@"fail"];
+            if (fail.length > 0) {
+                failedCount++;
+                failedBytes += recordSize;
+                ZLog(@"[LowRes] bundle parse FAILED: %@ (%.1f MB) at %@", record[@"key"], (double)recordSize / 1048576.0, fail);
+            } else {
+                partialCount++;
+                ZLog(@"[LowRes] bundle parse PARTIAL: %@ (%.1f MB): %lu Texture2D object(s) failed to parse, %lu parsed", record[@"key"], (double)recordSize / 1048576.0,
+                     (unsigned long)[record[@"pfail"] unsignedIntegerValue], (unsigned long)[record[@"parsed"] unsignedIntegerValue]);
+            }
+        }
+        if (failedCount > 0) {
+            ZLog(@"[LowRes] %lu of %lu bundle(s) failed to parse, %.1f MB total", (unsigned long)failedCount, (unsigned long)total, (double)failedBytes / 1048576.0);
+        }
+        if (partialCount > 0) {
+            ZLog(@"[LowRes] %lu bundle(s) parsed with Texture2D object failures", (unsigned long)partialCount);
+        }
     }
 
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:total];
