@@ -2,6 +2,9 @@
 
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
+#import <Metal/Metal.h>
+#import <mach-o/getsect.h>
+#import <mach-o/loader.h>
 #import <os/lock.h>
 #import <os/proc.h>
 #include <ctype.h>
@@ -18,18 +21,14 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <stdatomic.h>
-#if defined(__ARM_NEON)
-#include <arm_neon.h>
-#endif
+#include <dlfcn.h>
 
 #import "UnityBundleTools.h"
 #import "ZTweakLog.h"
 #include "lz4.h"
 #include "lz4hc.h"
-#include "astcenc.h"
 
 #define ZSLR_BLOCK_SIZE 131072u
-#define ZSLR_STRIP_BYTES (1024u * 1024u)
 #define ZSLR_FORMAT_ASTC_6x6 50
 #define ZSLR_FORMAT_ASTC_8x8 51
 #define ZSLR_FORMAT_ASTC_10x10 52
@@ -1517,7 +1516,9 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     for (uint32_t i = 0; i < candCount; i++) {
         const ZSLRTexture *t = cands[i];
         uint64_t ns = zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
-        uint64_t need = (uint64_t)t->width * t->height * 8u + (uint64_t)t->streamSize * 2u + ns;
+        uint64_t blocks = ((uint64_t)t->width + zslr_block() - 1) / zslr_block();
+        blocks *= ((uint64_t)t->height + zslr_block() - 1) / zslr_block();
+        uint64_t need = (uint64_t)t->streamSize * 2u + ns * 2u + blocks * 16u;
         if (need > peakTexture) peakTexture = need;
         result->candidateBytes += t->streamSize;
         projected += ns;
@@ -1738,9 +1739,6 @@ static const uint32_t kZSLowResMinPixels = 256u * 256u;
 static const uint32_t kZSLowResMaxPixels = 4096u * 4096u;
 static const uint64_t kZSLowResMaxResultBytes = 256ull * 1024ull * 1024ull;
 static const double kZSLowResMinPSNR = 27.0;
-static const double kZSLowResRescueWindowDB = 2.0;
-static const unsigned int kZSLowResBlockModeLimit = 30;
-
 static const int64_t kZSLowResFullSpeedAbove = 450ll * 1024 * 1024;
 static const int64_t kZSLowResHalfSpeedAbove = 300ll * 1024 * 1024;
 static const int64_t kZSLowResPauseBelow = 170ll * 1024 * 1024;
@@ -1752,24 +1750,8 @@ static const useconds_t kZSLowResConstrainedSleep = 25000;
 #define ZSLR_MAX_WORKERS 8
 static const NSUInteger kZSLowResMaxWorkers = ZSLR_MAX_WORKERS;
 
-enum {
-    kZSLowResDecodeSRGB = 0,
-    kZSLowResDecodeLinear = 1,
-    kZSLowResEncodeOpaqueSRGB = 2,
-    kZSLowResEncodeAlphaSRGB = 3,
-    kZSLowResEncodeOpaqueLinear = 4,
-    kZSLowResEncodeAlphaLinear = 5,
-    kZSLowResRescueOffset = 4,
-    kZSLowResContextKinds = 10,
-};
-
 typedef struct {
     NSUInteger index;
-    struct astcenc_context *contexts[kZSLowResContextKinds];
-    uint8_t *rgba;
-    size_t rgbaCap;
-    uint8_t *strip;
-    size_t stripCap;
 } ZSLRWorker;
 
 typedef struct {
@@ -1781,15 +1763,7 @@ typedef struct {
     atomic_int helpers;
 } ZSLRJob;
 
-typedef struct {
-    uint64_t raw;
-    uint64_t rgb;
-    uint64_t weight;
-    uint64_t alpha;
-} ZSLRMeasure;
-
 static os_unfair_lock g_zslrLock = OS_UNFAIR_LOCK_INIT;
-static os_unfair_lock g_zslrParentLock = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock g_zslrJobLock = OS_UNFAIR_LOCK_INIT;
 static ZSLRJob *g_zslrJobs[ZSLR_MAX_WORKERS];
 static ZSLowResStatus g_zslrStatus;
@@ -1804,7 +1778,6 @@ static NSArray<NSDictionary *> *g_zslrItems;
 static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
 static NSUInteger g_zslrLedgerDirty = 0;
-static struct astcenc_context *g_zslrParents[kZSLowResContextKinds];
 static os_unfair_lock g_zslrCountLock = OS_UNFAIR_LOCK_INIT;
 static double g_zslrTranscodeStart = 0;
 static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
@@ -1997,286 +1970,182 @@ static BOOL zslr_ledger_has_other_block(void) {
     return other;
 }
 
-static enum astcenc_error zslr_make_config(int kind, struct astcenc_config *config) {
-    BOOL rescue = kind >= kZSLowResEncodeOpaqueSRGB + kZSLowResRescueOffset;
-    int base = rescue ? kind - kZSLowResRescueOffset : kind;
-    BOOL srgb = (base == kZSLowResDecodeSRGB || base == kZSLowResEncodeOpaqueSRGB || base == kZSLowResEncodeAlphaSRGB);
-    enum astcenc_profile profile = srgb ? ASTCENC_PRF_LDR_SRGB : ASTCENC_PRF_LDR;
-    if (base == kZSLowResDecodeSRGB || base == kZSLowResDecodeLinear) {
-        return astcenc_config_init(profile, 6, 6, 1, ASTCENC_PRE_FASTEST, ASTCENC_FLG_DECOMPRESS_ONLY, config);
-    }
-    unsigned int flags = ASTCENC_FLG_SELF_DECOMPRESS_ONLY;
-    if (base == kZSLowResEncodeAlphaSRGB || base == kZSLowResEncodeAlphaLinear) flags |= ASTCENC_FLG_USE_ALPHA_WEIGHT;
-    enum astcenc_error status = astcenc_config_init(profile, zslr_block(), zslr_block(), 1, rescue ? ASTCENC_PRE_FAST : ASTCENC_PRE_FASTEST, flags, config);
-    if (status == ASTCENC_SUCCESS && !rescue && config->tune_block_mode_limit > kZSLowResBlockModeLimit) config->tune_block_mode_limit = kZSLowResBlockModeLimit;
-    return status;
-}
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t block;
+    uint32_t blocksX;
+    uint32_t srgb;
+} ZSLRGPUParams;
 
-static void zslr_measure_accum(const uint8_t *ref, const uint8_t *test, size_t pixels, int hasAlpha, ZSLRMeasure *m) {
-    size_t i = 0;
-    uint64_t raw = 0;
-    uint64_t rgb = 0;
-    uint64_t weight = 0;
-    uint64_t alpha = 0;
-#if defined(__ARM_NEON)
-    uint64x2_t rawAcc = vdupq_n_u64(0);
-    uint64x2_t rgbAcc = vdupq_n_u64(0);
-    uint64x2_t weightAcc = vdupq_n_u64(0);
-    uint64x2_t alphaAcc = vdupq_n_u64(0);
-    const uint32x4_t full = vdupq_n_u32(255);
-    for (; i + 8 <= pixels; i += 8) {
-        uint8x8x4_t r = vld4_u8(ref + i * 4);
-        uint8x8x4_t t = vld4_u8(test + i * 4);
-        int16x8_t dr = vreinterpretq_s16_u16(vsubl_u8(r.val[0], t.val[0]));
-        int16x8_t dg = vreinterpretq_s16_u16(vsubl_u8(r.val[1], t.val[1]));
-        int16x8_t db = vreinterpretq_s16_u16(vsubl_u8(r.val[2], t.val[2]));
-        int16x8_t da = vreinterpretq_s16_u16(vsubl_u8(r.val[3], t.val[3]));
-        int32x4_t eLoS = vmull_s16(vget_low_s16(dr), vget_low_s16(dr));
-        eLoS = vmlal_s16(eLoS, vget_low_s16(dg), vget_low_s16(dg));
-        eLoS = vmlal_s16(eLoS, vget_low_s16(db), vget_low_s16(db));
-        int32x4_t eHiS = vmull_high_s16(dr, dr);
-        eHiS = vmlal_high_s16(eHiS, dg, dg);
-        eHiS = vmlal_high_s16(eHiS, db, db);
-        uint32x4_t eLo = vreinterpretq_u32_s32(eLoS);
-        uint32x4_t eHi = vreinterpretq_u32_s32(eHiS);
-        uint32x4_t aLo = vreinterpretq_u32_s32(vmull_s16(vget_low_s16(da), vget_low_s16(da)));
-        uint32x4_t aHi = vreinterpretq_u32_s32(vmull_high_s16(da, da));
-        uint32x4_t wLo = full;
-        uint32x4_t wHi = full;
-        if (hasAlpha) {
-            uint16x8_t w16 = vmovl_u8(r.val[3]);
-            wLo = vmovl_u16(vget_low_u16(w16));
-            wHi = vmovl_high_u16(w16);
-        }
-        rawAcc = vpadalq_u32(rawAcc, vaddq_u32(eLo, aLo));
-        rawAcc = vpadalq_u32(rawAcc, vaddq_u32(eHi, aHi));
-        rgbAcc = vpadalq_u32(rgbAcc, vmulq_u32(eLo, wLo));
-        rgbAcc = vpadalq_u32(rgbAcc, vmulq_u32(eHi, wHi));
-        weightAcc = vpadalq_u32(weightAcc, wLo);
-        weightAcc = vpadalq_u32(weightAcc, wHi);
-        alphaAcc = vpadalq_u32(alphaAcc, aLo);
-        alphaAcc = vpadalq_u32(alphaAcc, aHi);
-    }
-    raw = vaddvq_u64(rawAcc);
-    rgb = vaddvq_u64(rgbAcc);
-    weight = vaddvq_u64(weightAcc);
-    alpha = vaddvq_u64(alphaAcc);
-#endif
-    for (; i < pixels; i++) {
-        const uint8_t *r = ref + i * 4;
-        const uint8_t *t = test + i * 4;
-        int dr = (int)r[0] - (int)t[0];
-        int dg = (int)r[1] - (int)t[1];
-        int db = (int)r[2] - (int)t[2];
-        int da = (int)r[3] - (int)t[3];
-        uint32_t rgbErr = (uint32_t)(dr * dr + dg * dg + db * db);
-        uint32_t aErr = (uint32_t)(da * da);
-        uint32_t w = hasAlpha ? r[3] : 255u;
-        raw += (uint64_t)rgbErr + aErr;
-        rgb += (uint64_t)w * rgbErr;
-        weight += w;
-        alpha += aErr;
-    }
-    m->raw += raw;
-    m->rgb += rgb;
-    m->weight += weight;
-    m->alpha += alpha;
-}
+static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
+static id<MTLDevice> g_zslrMetalDevice;
+static id<MTLCommandQueue> g_zslrMetalQueue;
+static id<MTLComputePipelineState> g_zslrMetalPipeline;
+static BOOL g_zslrMetalInitialized = NO;
+static NSString *g_zslrMetalError;
 
-static void zslr_measure_finish(const ZSLRMeasure *m, size_t pixels, double *weighted, double *raw) {
-    double rawMse = (double)m->raw / ((double)pixels * 4.0);
-    double mseRGB = m->weight > 0 ? (double)m->rgb / (3.0 * (double)m->weight) : 0.0;
-    double mseA = (double)m->alpha / (double)pixels;
-    double mse = (3.0 * mseRGB + mseA) / 4.0;
-    *raw = rawMse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / rawMse);
-    *weighted = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
-}
-
-static int zslr_has_alpha(const uint8_t *rgba, size_t pixels) {
-    size_t i = 0;
-#if defined(__ARM_NEON)
-    for (; i + 16 <= pixels; i += 16) {
-        uint8x16x4_t p = vld4q_u8(rgba + i * 4);
-        if (vminvq_u8(p.val[3]) != 255) return 1;
-    }
-#endif
-    for (; i < pixels; i++) {
-        if (rgba[i * 4 + 3] != 255) return 1;
-    }
-    return 0;
-}
-
-static uint8_t *zslr_scratch(uint8_t **buf, size_t *cap, size_t need) {
-    if (*buf && *cap >= need && (*cap <= need * 4 || *cap <= (16u * 1024u * 1024u))) return *buf;
-    free(*buf);
-    *buf = (uint8_t *)malloc(need);
-    *cap = *buf ? need : 0;
-    return *buf;
-}
-
-static struct astcenc_context *zslr_context(ZSLRWorker *worker, int kind) {
-    if (worker->contexts[kind]) return worker->contexts[kind];
-    os_unfair_lock_lock(&g_zslrParentLock);
-    if (!g_zslrParents[kind]) {
-        struct astcenc_config config;
-        if (zslr_make_config(kind, &config) == ASTCENC_SUCCESS) {
-            struct astcenc_context *parent = NULL;
-            if (astcenc_context_alloc(&config, 1, &parent, NULL) == ASTCENC_SUCCESS) g_zslrParents[kind] = parent;
+static BOOL zslr_metal_prepare(char *why, size_t whyLen) {
+    os_unfair_lock_lock(&g_zslrMetalLock);
+    if (!g_zslrMetalInitialized) {
+        g_zslrMetalInitialized = YES;
+        NSError *error = nil;
+        g_zslrMetalDevice = MTLCreateSystemDefaultDevice();
+        if (!g_zslrMetalDevice) {
+            g_zslrMetalError = @"Metal device unavailable";
+        } else {
+            Dl_info info;
+            memset(&info, 0, sizeof(info));
+            if (!dladdr((const void *)&zslr_metal_prepare, &info) || !info.dli_fbase) {
+                g_zslrMetalError = @"Unable to locate embedded Metal library";
+            } else {
+                unsigned long librarySize = 0;
+                const void *libraryBytes = getsectiondata((const struct mach_header_64 *)info.dli_fbase, "__DATA", "__zslrmetal", &librarySize);
+                if (!libraryBytes || librarySize == 0) {
+                    g_zslrMetalError = @"Embedded Metal library is missing";
+                } else {
+                    dispatch_data_t data = dispatch_data_create(libraryBytes, librarySize, dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_NONE);
+                    id<MTLLibrary> library = [g_zslrMetalDevice newLibraryWithData:data error:&error];
+                    if (!library) {
+                        g_zslrMetalError = error.localizedDescription ?: @"Unable to load embedded Metal library";
+                    } else {
+                        id<MTLFunction> function = [library newFunctionWithName:@"zslr_astc_encode_void_extent"];
+                        if (!function) {
+                            g_zslrMetalError = @"Metal encoder function is missing";
+                        } else {
+                            g_zslrMetalPipeline = [g_zslrMetalDevice newComputePipelineStateWithFunction:function error:&error];
+                            if (!g_zslrMetalPipeline) g_zslrMetalError = error.localizedDescription ?: @"Unable to create Metal encoder pipeline";
+                            else g_zslrMetalQueue = [g_zslrMetalDevice newCommandQueue];
+                            if (!g_zslrMetalQueue && !g_zslrMetalError) g_zslrMetalError = @"Unable to create Metal command queue";
+                        }
+                    }
+                }
+            }
         }
     }
-    struct astcenc_context *parent = g_zslrParents[kind];
-    os_unfair_lock_unlock(&g_zslrParentLock);
-    if (!parent) return NULL;
-    struct astcenc_context *child = NULL;
-    if (astcenc_context_alloc(NULL, 1, &child, parent) != ASTCENC_SUCCESS) return NULL;
-    worker->contexts[kind] = child;
-    return child;
+    BOOL ready = g_zslrMetalDevice && g_zslrMetalQueue && g_zslrMetalPipeline;
+    NSString *errorText = g_zslrMetalError;
+    os_unfair_lock_unlock(&g_zslrMetalLock);
+    if (!ready) ZSLR_WHY("%s", errorText.UTF8String ?: "Metal transcoder initialization failed");
+    return ready;
 }
 
-static void zslr_release_worker(ZSLRWorker *worker) {
-    for (int i = 0; i < kZSLowResContextKinds; i++) {
-        if (worker->contexts[i]) astcenc_context_free(worker->contexts[i]);
-        worker->contexts[i] = NULL;
-    }
-    free(worker->rgba);
-    free(worker->strip);
-    worker->rgba = NULL;
-    worker->strip = NULL;
-    worker->rgbaCap = 0;
-    worker->stripCap = 0;
+static MTLPixelFormat zslr_source_pixel_format(BOOL srgb) {
+    return srgb ? MTLPixelFormatASTC_6x6_sRGB : MTLPixelFormatASTC_6x6_LDR;
 }
 
-static void zslr_release_parents(void) {
-    os_unfair_lock_lock(&g_zslrParentLock);
-    for (int i = 0; i < kZSLowResContextKinds; i++) {
-        if (g_zslrParents[i]) astcenc_context_free(g_zslrParents[i]);
-        g_zslrParents[i] = NULL;
-    }
-    os_unfair_lock_unlock(&g_zslrParentLock);
-}
-
-static int zslr_verify_strips(struct astcenc_context *context, const struct astcenc_swizzle *swizzle, const uint8_t *encoded, const uint8_t *rgba, uint32_t width, uint32_t height, uint32_t block, uint8_t *strip, uint32_t stripBlockRows, int hasAlpha, ZSLRMeasure *measure, enum astcenc_error *status) {
-    uint32_t blocksX = (width + block - 1) / block;
-    uint32_t blocksY = (height + block - 1) / block;
-    memset(measure, 0, sizeof(*measure));
-    for (uint32_t by = 0; by < blocksY; by += stripBlockRows) {
-        uint32_t rowBlocks = blocksY - by < stripBlockRows ? blocksY - by : stripBlockRows;
-        uint32_t y0 = by * block;
-        uint32_t y1 = (by + rowBlocks) * block;
-        if (y1 > height) y1 = height;
-        uint32_t rows = y1 - y0;
-        void *slice = strip;
-        struct astcenc_image image = { width, rows, 1, ASTCENC_TYPE_U8, &slice };
-        *status = astcenc_decompress_image(context, encoded + (size_t)by * blocksX * 16, (size_t)rowBlocks * blocksX * 16, &image, swizzle, 0);
-        astcenc_decompress_reset(context);
-        if (*status != ASTCENC_SUCCESS) return -1;
-        zslr_measure_accum(rgba + (size_t)y0 * width * 4, strip, (size_t)rows * width, hasAlpha, measure);
-    }
-    return 0;
-}
 
 static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen) {
-    ZSLRWorker *worker = (ZSLRWorker *)user;
-    size_t pixels = (size_t)width * height;
-    size_t rgbaLen = pixels * 4;
-    uint32_t block = zslr_block();
-    size_t encodedLen = (size_t)zslr_astc_size(width, height, block, block);
-    uint8_t *encoded = NULL;
-    int result = -1;
+    (void)user;
+    if (out) *out = NULL;
+    if (outLen) *outLen = 0;
     if (why && whyLen) why[0] = 0;
+    if (!src || !out || !outLen || width == 0 || height == 0) {
+        ZSLR_WHY("invalid Metal transcode input");
+        return -1;
+    }
+    if (!zslr_metal_prepare(why, whyLen)) return -1;
+
+    uint32_t block = zslr_block();
+    uint32_t blocksX = (width + block - 1) / block;
+    uint32_t blocksY = (height + block - 1) / block;
+    size_t blockCount = (size_t)blocksX * blocksY;
+    size_t encodedLen = blockCount * 16;
+    size_t metricLen = blockCount * 4 * sizeof(float);
+    size_t sourceRowBytes = (size_t)((width + 5) / 6) * 16;
+    if (encodedLen == 0 || metricLen / sizeof(float) / 4 != blockCount || sourceRowBytes * ((height + 5) / 6) != srcLen) {
+        ZSLR_WHY("ASTC source or target size mismatch");
+        return -1;
+    }
 
     double phase = CACurrentMediaTime();
-    struct astcenc_context *decoder = zslr_context(worker, srgb ? kZSLowResDecodeSRGB : kZSLowResDecodeLinear);
-    if (!decoder) {
-        ZSLR_WHY("cannot create ASTC decoder context");
+    MTLTextureDescriptor *sourceDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:zslr_source_pixel_format(srgb != 0)
+                                                                                                   width:width
+                                                                                                  height:height
+                                                                                               mipmapped:NO];
+    sourceDescriptor.storageMode = MTLStorageModeShared;
+    sourceDescriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> sourceTexture = [g_zslrMetalDevice newTextureWithDescriptor:sourceDescriptor];
+    if (!sourceTexture) {
+        ZSLR_WHY("Metal cannot allocate ASTC 6x6 source texture");
         return -1;
     }
-
-    uint8_t *rgba = zslr_scratch(&worker->rgba, &worker->rgbaCap, rgbaLen);
-    if (!rgba) {
-        ZSLR_WHY("out of memory allocating %zu byte decode buffer", rgbaLen);
-        return -1;
-    }
-    struct astcenc_swizzle swizzle = { ASTCENC_SWZ_R, ASTCENC_SWZ_G, ASTCENC_SWZ_B, ASTCENC_SWZ_A };
-    void *slice = rgba;
-    struct astcenc_image image = { width, height, 1, ASTCENC_TYPE_U8, &slice };
-    enum astcenc_error status = astcenc_decompress_image(decoder, src, srcLen, &image, &swizzle, 0);
-    astcenc_decompress_reset(decoder);
-    if (status != ASTCENC_SUCCESS) {
-        ZSLR_WHY("ASTC decode failed: %s", astcenc_get_error_string(status));
-        return -1;
-    }
+    [sourceTexture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                     mipmapLevel:0
+                       withBytes:src
+                     bytesPerRow:sourceRowBytes];
     double decodeMs = ZSLR_MS(phase);
 
-    int hasAlpha = zslr_has_alpha(rgba, pixels);
-    int kind = srgb ? (hasAlpha ? kZSLowResEncodeAlphaSRGB : kZSLowResEncodeOpaqueSRGB)
-                    : (hasAlpha ? kZSLowResEncodeAlphaLinear : kZSLowResEncodeOpaqueLinear);
-
-    uint32_t blocksY = (height + block - 1) / block;
-    size_t blockRowBytes = (size_t)block * width * 4;
-    size_t stripBlockRowsWanted = blockRowBytes ? ZSLR_STRIP_BYTES / blockRowBytes : 1;
-    uint32_t stripBlockRows = stripBlockRowsWanted < 1 ? 1u : (uint32_t)stripBlockRowsWanted;
-    if (stripBlockRows > blocksY) stripBlockRows = blocksY;
-    size_t stripRows = (size_t)stripBlockRows * block;
-    if (stripRows > height) stripRows = height;
-    uint8_t *strip = zslr_scratch(&worker->strip, &worker->stripCap, stripRows * width * 4);
-    if (!strip) {
-        ZSLR_WHY("out of memory allocating %zu byte verify buffer", stripRows * width * 4);
+    id<MTLBuffer> outputBuffer = [g_zslrMetalDevice newBufferWithLength:encodedLen options:MTLResourceStorageModeShared];
+    id<MTLBuffer> metricBuffer = [g_zslrMetalDevice newBufferWithLength:metricLen options:MTLResourceStorageModeShared];
+    if (!outputBuffer || !metricBuffer) {
+        ZSLR_WHY("Metal buffer allocation failed for %zu-byte output and %zu-byte metrics", encodedLen, metricLen);
         return -1;
     }
 
-    encoded = (uint8_t *)malloc(encodedLen);
-    if (!encoded) {
-        ZSLR_WHY("out of memory allocating %zu byte encode buffer", encodedLen);
+    ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u };
+    id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+    if (!commandBuffer || !encoder) {
+        ZSLR_WHY("Metal command encoding unavailable");
+        return -1;
+    }
+    [encoder setComputePipelineState:g_zslrMetalPipeline];
+    [encoder setTexture:sourceTexture atIndex:0];
+    [encoder setBuffer:outputBuffer offset:0 atIndex:0];
+    [encoder setBuffer:metricBuffer offset:0 atIndex:1];
+    [encoder setBytes:&params length:sizeof(params) atIndex:2];
+    NSUInteger groupWidth = MAX((NSUInteger)1, g_zslrMetalPipeline.threadExecutionWidth);
+    NSUInteger groupHeight = MAX((NSUInteger)1, g_zslrMetalPipeline.maxTotalThreadsPerThreadgroup / groupWidth);
+    MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
+    MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
+                                       (blocksY + groupHeight - 1) / groupHeight,
+                                       1);
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+    [encoder endEncoding];
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
+    double encodeMs = ZSLR_MS(phase) - decodeMs;
+    if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+        ZSLR_WHY("Metal ASTC kernel failed: %s", commandBuffer.error.localizedDescription.UTF8String ?: "unknown error");
         return -1;
     }
 
-    double psnr = 0;
-    double rawPsnr = 0;
-    double encodeMs = 0;
-    int passes = 0;
-    ZSLRMeasure measure;
-    for (;;) {
-        int useKind = passes == 0 ? kind : kind + kZSLowResRescueOffset;
-        struct astcenc_context *encoder = zslr_context(worker, useKind);
-        if (!encoder) {
-            ZSLR_WHY("cannot create ASTC encoder context (kind %d)", useKind);
-            goto done;
-        }
-        phase = CACurrentMediaTime();
-        status = astcenc_compress_image(encoder, &image, &swizzle, encoded, encodedLen, 0);
-        astcenc_compress_reset(encoder);
-        if (status != ASTCENC_SUCCESS) {
-            ZSLR_WHY("ASTC %ux%u encode failed: %s", block, block, astcenc_get_error_string(status));
-            goto done;
-        }
-        if (zslr_verify_strips(encoder, &swizzle, encoded, rgba, width, height, block, strip, stripBlockRows, hasAlpha, &measure, &status) != 0) {
-            ZSLR_WHY("ASTC %ux%u verify decode failed: %s", block, block, astcenc_get_error_string(status));
-            goto done;
-        }
-        zslr_measure_finish(&measure, pixels, &psnr, &rawPsnr);
-        encodeMs += ZSLR_MS(phase);
-        passes++;
-        if (psnr >= kZSLowResMinPSNR) break;
-        if (passes >= 2 || psnr < kZSLowResMinPSNR - kZSLowResRescueWindowDB) break;
+    const float *metrics = (const float *)metricBuffer.contents;
+    double rawError = 0.0;
+    double rgbWeightedError = 0.0;
+    double alphaWeight = 0.0;
+    double alphaError = 0.0;
+    for (size_t i = 0; i < blockCount; i++) {
+        rawError += metrics[i * 4];
+        rgbWeightedError += metrics[i * 4 + 1];
+        alphaWeight += metrics[i * 4 + 2];
+        alphaError += metrics[i * 4 + 3];
     }
-
+    double pixels = (double)width * (double)height;
+    double rawMse = rawError / (pixels * 4.0);
+    double mseRGB = alphaWeight > 0.0 ? rgbWeightedError / (3.0 * alphaWeight) : 0.0;
+    double mseA = alphaError / pixels;
+    double mse = (3.0 * mseRGB + mseA) / 4.0;
+    double rawPsnr = rawMse <= 0.0 ? 99.0 : -10.0 * log10(rawMse);
+    double psnr = mse <= 0.0 ? 99.0 : -10.0 * log10(mse);
     if (psnr < kZSLowResMinPSNR) {
-        ZSLR_WHY("PSNR %.2f dB (raw %.2f) below %.1f dB after %d pass(es) (%s, %s, decode %.0f ms, encode+check %.0f ms)", psnr, rawPsnr, kZSLowResMinPSNR,
-                 passes, srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque", decodeMs, encodeMs);
-        result = ZSLR_TRANSCODE_REJECTED;
-        goto done;
+        ZSLR_WHY("GPU ASTC %ux%u PSNR %.2f dB (raw %.2f) below %.1f dB (%s, decode %.0f ms, encode+check %.0f ms)",
+                 block, block, psnr, rawPsnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+        return ZSLR_TRANSCODE_REJECTED;
     }
-    ZSLR_WHY("PSNR %.2f dB (raw %.2f), %s pass, %s, %s, decode %.0f ms, encode+check %.0f ms", psnr, rawPsnr, passes == 1 ? "fast" : "rescue",
-             srgb ? "sRGB" : "linear", hasAlpha ? "alpha" : "opaque", decodeMs, encodeMs);
+
+    uint8_t *encoded = (uint8_t *)malloc(encodedLen);
+    if (!encoded) {
+        ZSLR_WHY("out of memory allocating %zu-byte ASTC output", encodedLen);
+        return -1;
+    }
+    memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    encoded = NULL;
-    result = 0;
-
-done:
-    free(encoded);
-    return result;
+    ZSLR_WHY("GPU ASTC %ux%u void-extent, PSNR %.2f dB (raw %.2f), %s, decode %.0f ms, encode+check %.0f ms",
+             block, block, psnr, rawPsnr, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    return 0;
 }
 
 @implementation ZSLowRes
@@ -2648,13 +2517,11 @@ done:
                     os_unfair_lock_unlock(&g_zslrLock);
                 }
                 if (g_zslrCancel) exitReason = "cancelled";
-                zslr_release_worker(&worker);
                 ZLog(@"[LowRes] worker %lu exiting: %s, %lu bundle(s) handled", (unsigned long)wi, exitReason, (unsigned long)handled);
             });
         }
         dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
-        ZLog(@"[LowRes] all workers finished, releasing codec contexts");
-        zslr_release_parents();
+        ZLog(@"[LowRes] all workers finished");
         if (mode == ZSLowResModeTranscode) [ZSLowRes saveLedger];
 
         os_unfair_lock_lock(&g_zslrLock);

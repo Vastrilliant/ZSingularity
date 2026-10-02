@@ -10,7 +10,6 @@ on:
 
 env:
   LZ4_REF: v1.10.0
-  ASTCENC_REF: 5.7.0
 
 jobs:
   release:
@@ -105,40 +104,11 @@ jobs:
         if: steps.lz4-cache.outputs.cache-hit == 'true'
         run: shasum -a 256 -c lz4-checksums.txt
 
-      - name: Cache astcenc sources
-        id: astcenc-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            astcenc-src
-            astcenc-checksums.txt
-          key: astcenc-${{ env.ASTCENC_REF }}
-
-      - name: Fetch astcenc sources
-        if: steps.astcenc-cache.outputs.cache-hit != 'true'
+      - name: Compile Metal transcoder
         run: |
           set -euo pipefail
-          mkdir -p astcenc-src
-          curl -fsSL "https://github.com/ARM-software/astc-encoder/archive/refs/tags/${ASTCENC_REF}.tar.gz" -o astcenc.tar.gz
-          tar -xzf astcenc.tar.gz --strip-components=1 -C astcenc-src --include '*/Source/astcenc*'
-          rm astcenc.tar.gz
-          shasum -a 256 astcenc-src/Source/astcenc*.h astcenc-src/Source/astcenc*.cpp > astcenc-checksums.txt
-          shasum -a 256 -c astcenc-checksums.txt
-
-      - name: Verify cached astcenc checksums
-        if: steps.astcenc-cache.outputs.cache-hit == 'true'
-        run: shasum -a 256 -c astcenc-checksums.txt
-
-      - name: Compile astcenc
-        run: |
-          set -euo pipefail
-          mkdir -p astcenc-obj
-          for f in astcenc-src/Source/astcenc_*.cpp; do
-            clang++ -c -O3 -std=c++14 -stdlib=libc++ -ffp-contract=off -fvisibility=hidden \
-              -isysroot "${{ steps.sdk.outputs.path }}" -arch arm64 -miphoneos-version-min=15.0 \
-              -DASTCENC_NEON=1 -DASTCENC_SSE=0 -DASTCENC_AVX=0 -DASTCENC_POPCNT=0 -DASTCENC_F16C=0 -DASTCENC_SVE=0 \
-              "$f" -o "astcenc-obj/$(basename "$f" .cpp).o"
-          done
+          xcrun -sdk iphoneos metal -c -O3 -std=metal2.3 -target air64-apple-ios15.0 Mods/Transcoder/ZSLowRes.metal -o ZSLowRes.air
+          xcrun -sdk iphoneos metallib ZSLowRes.air -o ZSLowRes.metallib
 
       - name: Compile tweak dylib
         run: |
@@ -168,8 +138,9 @@ jobs:
             -install_name "@rpath/ZSingularity.dylib" \
             -Wl,-ld_classic \
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
+            -Wl,-sectcreate,__DATA,__zslrmetal,ZSLowRes.metallib \
             -I. \
-            -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -Iastcenc-src/Source -INetwork -IDiagnostics -IResources -INotifications \
+            -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
             Mods/BundleTools/UnityBundleTools.m \
             Core/IL2CppIntrospection.m \
             Dumper/ZSDumper.m \
@@ -185,7 +156,6 @@ jobs:
             UI/ZSGifTint.m \
             lz4.c \
             lz4hc.c \
-            astcenc-obj/*.o \
             -o ZSingularity.dylib
 
       - name: Ad-hoc codesign
