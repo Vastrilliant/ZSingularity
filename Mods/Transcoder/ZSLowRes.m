@@ -2380,6 +2380,67 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     return nil;
 }
 
++ (NSString *)restoreMissingFilesIntoDirectory:(NSString *)directory fromBackup:(NSString *)backup restored:(NSUInteger *)restoredOut {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:backup isDirectory:&isDirectory] || !isDirectory) return @"Couldn't find Shared.backup to compare against.";
+    if (![fm fileExistsAtPath:directory isDirectory:&isDirectory] || !isDirectory) return @"Couldn't find the new Shared folder to compare.";
+    NSUInteger compared = 0;
+    NSUInteger restored = 0;
+    NSUInteger failed = 0;
+    unsigned long long restoredBytes = 0;
+    NSString *firstFailure = nil;
+    NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:backup];
+    NSString *rel;
+    while ((rel = [walker nextObject])) {
+        @autoreleasepool {
+            NSString *source = [backup stringByAppendingPathComponent:rel];
+            NSString *target = [directory stringByAppendingPathComponent:rel];
+            NSDictionary *sourceAttrs = [walker fileAttributes];
+            NSString *type = sourceAttrs[NSFileType];
+            NSDictionary *existing = [fm attributesOfItemAtPath:target error:nil];
+            if ([type isEqualToString:NSFileTypeDirectory]) {
+                if (!existing) [fm createDirectoryAtPath:target withIntermediateDirectories:YES attributes:nil error:nil];
+                continue;
+            }
+            compared++;
+            unsigned long long sourceSize = [sourceAttrs[NSFileSize] unsignedLongLongValue];
+            NSError *copyError = nil;
+            BOOL ok = YES;
+            if ([type isEqualToString:NSFileTypeRegular]) {
+                if (existing && ([existing[NSFileSize] unsignedLongLongValue] > 0 || sourceSize == 0)) continue;
+                [fm removeItemAtPath:target error:nil];
+                [fm createDirectoryAtPath:target.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                ok = [fm copyItemAtPath:source toPath:target error:&copyError];
+            } else if ([type isEqualToString:NSFileTypeSymbolicLink]) {
+                if (existing) continue;
+                NSString *destination = [fm destinationOfSymbolicLinkAtPath:source error:&copyError];
+                if (!destination) {
+                    ok = NO;
+                } else {
+                    [fm createDirectoryAtPath:target.stringByDeletingLastPathComponent withIntermediateDirectories:YES attributes:nil error:nil];
+                    ok = [fm createSymbolicLinkAtPath:target withDestinationPath:destination error:&copyError];
+                }
+            } else {
+                continue;
+            }
+            if (ok) {
+                restored++;
+                restoredBytes += sourceSize;
+                ZLog(@"[LowRes] missing from new Shared, restored from backup: %@ (%.1f MB)", rel, (double)sourceSize / 1048576.0);
+            } else {
+                failed++;
+                if (!firstFailure) firstFailure = [NSString stringWithFormat:@"%@: %@", rel, copyError.localizedDescription ?: @"unknown error"];
+                ZLog(@"[LowRes] missing from new Shared and restore FAILED: %@ (%.1f MB): %@", rel, (double)sourceSize / 1048576.0, copyError.localizedDescription ?: @"unknown error");
+            }
+        }
+    }
+    if (restoredOut) *restoredOut = restored;
+    ZLog(@"[LowRes] compared %lu backup file(s) against the new Shared: %lu restored (%.1f MB), %lu failed", (unsigned long)compared, (unsigned long)restored, (double)restoredBytes / 1048576.0, (unsigned long)failed);
+    if (failed > 0) return [NSString stringWithFormat:@"%lu file(s) missing from the new Shared couldn't be restored from Shared.backup (%@).", (unsigned long)failed, firstFailure];
+    return nil;
+}
+
 + (NSString *)ledgerPath {
     return [[self stagingDirectory] stringByAppendingPathComponent:@"ledger.json"];
 }

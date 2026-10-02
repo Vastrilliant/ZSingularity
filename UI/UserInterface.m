@@ -3182,6 +3182,8 @@ static NSString *zs_lowres_swap_shared_folders(void) {
         }
         return [NSString stringWithFormat:@"Couldn't move the compressed textures into place: %@. Shared was restored.", reason];
     }
+    NSString *restoreError = [ZSLowRes restoreMissingFilesIntoDirectory:shared fromBackup:backup restored:NULL];
+    if (restoreError) return [NSString stringWithFormat:@"The compressed textures are in place, but %@ The game may ask to download them again.", restoreError];
     return nil;
 }
 
