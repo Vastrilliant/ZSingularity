@@ -2004,7 +2004,7 @@ static BOOL zslr_metal_prepare(char *why, size_t whyLen) {
                 if (!libraryBytes || librarySize == 0) {
                     g_zslrMetalError = @"Embedded Metal library is missing";
                 } else {
-                    dispatch_data_t data = dispatch_data_create(libraryBytes, librarySize, dispatch_get_main_queue(), DISPATCH_DATA_DESTRUCTOR_NONE);
+                    dispatch_data_t data = dispatch_data_create(libraryBytes, librarySize, dispatch_get_main_queue(), ^{});
                     id<MTLLibrary> library = [g_zslrMetalDevice newLibraryWithData:data error:&error];
                     if (!library) {
                         g_zslrMetalError = error.localizedDescription ?: @"Unable to load embedded Metal library";
