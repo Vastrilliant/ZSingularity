@@ -2875,7 +2875,6 @@ static __weak UIView *g_zsLowResInfoWrapper;
 static __weak UIView *g_zsLowResProgressWrapper;
 static __weak UIView *g_zsLowResTranscodeWrapper;
 static NSInteger g_zsLowResBlockIndex;
-static NSInteger g_zsLowResQualityLevel = ZSLowResQualityDefault;
 static BOOL g_zsLowResCodecExpanded;
 static __weak UIView *g_zsLowResLabelHost;
 static __weak UIView *g_zsLowResConfigView;
@@ -2883,8 +2882,6 @@ static __weak UIView *g_zsLowResCodecContainer;
 static __weak UIControl *g_zsLowResCodecRow;
 static __weak UIView *g_zsLowResCodecOptions;
 static NSLayoutConstraint *g_zsLowResCodecHeight;
-static __weak UISlider *g_zsLowResQualitySlider;
-static __weak UILabel *g_zsLowResQualityValueLabel;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -3204,21 +3201,7 @@ static NSString *zs_lowres_block_title(NSUInteger block, BOOL verbose) {
     return [NSString stringWithFormat:@"ASTC_%lux%lu (~%ld%%)", (unsigned long)block, (unsigned long)block, percent];
 }
 
-static NSString *zs_lowres_quality_text(NSInteger level) {
-    NSString *name;
-    if (level <= ZSLowResQualityMin) {
-        name = @"Fastest";
-    } else if (level >= ZSLowResQualityMax) {
-        name = @"Maximum";
-    } else if (level == ZSLowResQualityDefault) {
-        name = @"Balanced";
-    } else {
-        name = level < ZSLowResQualityDefault ? @"Fast" : @"High";
-    }
-    return [NSString stringWithFormat:@"%ld/%d \u00b7 %@", (long)level, ZSLowResQualityMax, name];
-}
-
-static UIView *zs_make_lowres_config_view(id target, SEL codecAction, SEL qualityChanged, SEL qualityReleased) {
+static UIView *zs_make_lowres_config_view(id target, SEL codecAction) {
     UIStackView *config = [[UIStackView alloc] init];
     config.translatesAutoresizingMaskIntoConstraints = NO;
     config.axis = UILayoutConstraintAxisVertical;
@@ -3244,34 +3227,6 @@ static UIView *zs_make_lowres_config_view(id target, SEL codecAction, SEL qualit
         [codecRow.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
     ]];
 
-    UIView *qualityBlock = [[UIView alloc] init];
-    qualityBlock.translatesAutoresizingMaskIntoConstraints = NO;
-    UILabel *qualityTitle = zs_make_lowres_label(@"Quality", [UIColor colorWithWhite:0.9 alpha:1], UIFontWeightMedium);
-    UILabel *qualityValue = zs_make_lowres_label(zs_lowres_quality_text(g_zsLowResQualityLevel), zs_disclosure_secondary_color(), UIFontWeightLight);
-    qualityValue.textAlignment = NSTextAlignmentRight;
-    UISlider *slider = [[UISlider alloc] init];
-    slider.translatesAutoresizingMaskIntoConstraints = NO;
-    slider.minimumValue = ZSLowResQualityMin;
-    slider.maximumValue = ZSLowResQualityMax;
-    slider.value = (float)g_zsLowResQualityLevel;
-    slider.continuous = YES;
-    slider.minimumTrackTintColor = zs_accent_green_color();
-    slider.maximumTrackTintColor = [UIColor colorWithWhite:1 alpha:0.18];
-    [slider addTarget:target action:qualityChanged forControlEvents:UIControlEventValueChanged];
-    [slider addTarget:target action:qualityReleased forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel];
-    for (UIView *view in @[qualityTitle, qualityValue, slider]) [qualityBlock addSubview:view];
-    [NSLayoutConstraint activateConstraints:@[
-        [qualityTitle.leadingAnchor constraintEqualToAnchor:qualityBlock.leadingAnchor],
-        [qualityTitle.topAnchor constraintEqualToAnchor:qualityBlock.topAnchor constant:12],
-        [qualityValue.trailingAnchor constraintEqualToAnchor:qualityBlock.trailingAnchor],
-        [qualityValue.centerYAnchor constraintEqualToAnchor:qualityTitle.centerYAnchor],
-        [qualityValue.leadingAnchor constraintGreaterThanOrEqualToAnchor:qualityTitle.trailingAnchor constant:10],
-        [slider.leadingAnchor constraintEqualToAnchor:qualityBlock.leadingAnchor],
-        [slider.trailingAnchor constraintEqualToAnchor:qualityBlock.trailingAnchor],
-        [slider.topAnchor constraintEqualToAnchor:qualityTitle.bottomAnchor constant:6],
-        [slider.bottomAnchor constraintEqualToAnchor:qualityBlock.bottomAnchor constant:-4],
-    ]];
-
     UIView *noteHost = [[UIView alloc] init];
     noteHost.translatesAutoresizingMaskIntoConstraints = NO;
     UILabel *note = [[UILabel alloc] init];
@@ -3288,18 +3243,16 @@ static UIView *zs_make_lowres_config_view(id target, SEL codecAction, SEL qualit
         [note.trailingAnchor constraintEqualToAnchor:noteHost.trailingAnchor],
     ]];
 
-    for (UIView *view in @[codecContainer, zs_make_grouped_row_separator(), qualityBlock, noteHost]) [config addArrangedSubview:view];
+    for (UIView *view in @[codecContainer, zs_make_grouped_row_separator(), noteHost]) [config addArrangedSubview:view];
 
     g_zsLowResCodecContainer = codecContainer;
     g_zsLowResCodecRow = codecRow;
     g_zsLowResCodecHeight = codecHeight;
     g_zsLowResCodecOptions = nil;
-    g_zsLowResQualitySlider = slider;
-    g_zsLowResQualityValueLabel = qualityValue;
     return config;
 }
 
-static UIStackView *zs_make_lowres_info_view(id target, SEL action, SEL codecAction, SEL qualityChanged, SEL qualityReleased) {
+static UIStackView *zs_make_lowres_info_view(id target, SEL action, SEL codecAction) {
     UIStackView *stack = [[UIStackView alloc] init];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
@@ -3330,7 +3283,7 @@ static UIStackView *zs_make_lowres_info_view(id target, SEL action, SEL codecAct
     [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
     [button.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight].active = YES;
 
-    UIView *config = zs_make_lowres_config_view(target, codecAction, qualityChanged, qualityReleased);
+    UIView *config = zs_make_lowres_config_view(target, codecAction);
 
     for (UIView *view in @[topSeparator, labelHost, config, buttonSeparator, button]) [stack addArrangedSubview:view];
 
@@ -10834,7 +10787,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     if (g_zsLowResStage != 2) return;
     NSArray<NSNumber *> *blocks = zs_lowres_block_options();
     NSInteger index = MAX((NSInteger)0, MIN((NSInteger)blocks.count - 1, g_zsLowResBlockIndex));
-    [self zs_lowResStartTranscodeWithBlockSize:blocks[index].unsignedIntegerValue quality:(NSUInteger)g_zsLowResQualityLevel];
+    [self zs_lowResStartTranscodeWithBlockSize:blocks[index].unsignedIntegerValue];
 }
 
 - (void)zs_lowResApplyConfigMode:(BOOL)config {
@@ -10855,8 +10808,6 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResCodecRow.alpha = 1;
     g_zsLowResCodecRow.userInteractionEnabled = YES;
     zs_disclosure_row_set_value(g_zsLowResCodecRow, zs_lowres_block_title(blocks[index].unsignedIntegerValue, NO));
-    g_zsLowResQualitySlider.value = (float)g_zsLowResQualityLevel;
-    g_zsLowResQualityValueLabel.text = zs_lowres_quality_text(g_zsLowResQualityLevel);
 
     [UIView transitionWithView:g_zsLowResInfoButton
                       duration:0.25
@@ -10923,24 +10874,10 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [haptic selectionChanged];
 }
 
-- (void)zs_lowResQualityChanged:(UISlider *)slider {
-    NSInteger level = (NSInteger)lroundf(slider.value);
-    level = MAX((NSInteger)ZSLowResQualityMin, MIN((NSInteger)ZSLowResQualityMax, level));
-    if (level == g_zsLowResQualityLevel) return;
-    g_zsLowResQualityLevel = level;
-    g_zsLowResQualityValueLabel.text = zs_lowres_quality_text(level);
-    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
-    [haptic selectionChanged];
-}
-
-- (void)zs_lowResQualityReleased:(UISlider *)slider {
-    [slider setValue:(float)g_zsLowResQualityLevel animated:YES];
-}
-
-- (void)zs_lowResStartTranscodeWithBlockSize:(NSUInteger)blockSize quality:(NSUInteger)quality {
+- (void)zs_lowResStartTranscodeWithBlockSize:(NSUInteger)blockSize {
     if (g_zsLowResStage != 2) return;
     __weak typeof(self) weakSelf = self;
-    BOOL started = [ZSLowRes.shared startWithMode:ZSLowResModeTranscode blockSize:blockSize quality:quality completion:^(ZSLowResStatus status) {
+    BOOL started = [ZSLowRes.shared startWithMode:ZSLowResModeTranscode blockSize:blockSize completion:^(ZSLowResStatus status) {
         [weakSelf zs_lowResFinishedWithCancelled:status.cancelled];
     }];
     if (!started) {
@@ -10976,7 +10913,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
     NSUInteger index = inner ? [inner.arrangedSubviews indexOfObject:button] : NSNotFound;
     if (index == NSNotFound) return;
-    UIStackView *info = zs_make_lowres_info_view(self, @selector(lowResInfoActionTapped:), @selector(zs_lowResCodecRowTapped:), @selector(zs_lowResQualityChanged:), @selector(zs_lowResQualityReleased:));
+    UIStackView *info = zs_make_lowres_info_view(self, @selector(lowResInfoActionTapped:), @selector(zs_lowResCodecRowTapped:));
     UIView *progress = zs_make_lowres_progress_view(self, @selector(lowResCancelTapped:));
     UIView *infoWrapper = zs_make_reveal_wrapper(info, NO);
     UIView *progressWrapper = zs_make_reveal_wrapper(progress, NO);

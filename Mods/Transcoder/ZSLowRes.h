@@ -2,9 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-#define ZSLowResQualityMin 0
-#define ZSLowResQualityMax 10
-#define ZSLowResQualityDefault 5
+#define ZSLowResQualityDefault 2
 
 typedef NS_ENUM(NSInteger, ZSLowResMode) {
     ZSLowResModeScan = 0,
@@ -46,7 +44,7 @@ typedef struct {
 + (nullable NSString *)restoreMissingFilesIntoDirectory:(NSString *)directory fromBackup:(NSString *)backup restored:(nullable NSUInteger *)restoredOut;
 
 - (BOOL)prepareWithCompletion:(void (^)(NSUInteger textures, NSUInteger bundles, BOOL ok))completion;
-- (BOOL)startWithMode:(ZSLowResMode)mode blockSize:(NSUInteger)blockSize quality:(NSUInteger)quality completion:(nullable void (^)(ZSLowResStatus status))completion;
+- (BOOL)startWithMode:(ZSLowResMode)mode blockSize:(NSUInteger)blockSize completion:(nullable void (^)(ZSLowResStatus status))completion;
 - (void)cancel;
 - (ZSLowResStatus)status;
 - (NSString *)statusLine;
