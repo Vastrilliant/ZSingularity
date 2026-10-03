@@ -2068,7 +2068,7 @@ static const NSUInteger kZSLowResMaxRetries = 2;
 static const NSTimeInterval kZSLowResWarningPause = 8.0;
 static const useconds_t kZSLowResConstrainedSleep = 25000;
 #define ZSLR_MAX_WORKERS 8
-static const NSUInteger kZSLowResMaxWorkers = 4;
+static const NSUInteger kZSLowResMaxWorkers = ZSLR_MAX_WORKERS;
 
 typedef struct {
     NSUInteger index;
@@ -2096,7 +2096,7 @@ static double g_zslrLastWaitLog = 0;
 static double g_zslrLastProgressLog = 0;
 static _Atomic uint64_t g_zslrGpuBusyNs;
 static _Atomic uint64_t g_zslrGpuBlocks;
-static volatile uint32_t g_zslrChunkBlocks = 16384u;
+static volatile uint32_t g_zslrChunkBlocks = 2048u;
 static NSUInteger g_zslrNoStream = 0;
 static NSMutableArray<NSDictionary *> *g_zslrItems;
 static _Atomic uint64_t g_zslrBundleReserved;
@@ -2390,13 +2390,13 @@ typedef struct {
 
 static const double kZSLRChunkTargetMs = 4.0;
 static const double kZSLRChunkCapMs = 8.0;
-static const uint32_t kZSLRChunkMinBlocks = 4096u;
-static const uint32_t kZSLRChunkMaxBlocks = 131072u;
+static const uint32_t kZSLRChunkMinBlocks = 256u;
+static const uint32_t kZSLRChunkMaxBlocks = 65536u;
+static double g_zslrChunkCeiling = 65536.0;
 static os_unfair_lock g_zslrChunkLock = OS_UNFAIR_LOCK_INIT;
 static double g_zslrRateSmooth = 0;
 static double g_zslrRateBest = 0;
 #define ZSLR_TRANSCODE_REJECTED 1
-static const double kZSLowResMinPSNR = 27.0;
 
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
@@ -2474,10 +2474,22 @@ static void zslr_note_chunk(id<MTLCommandBuffer> commandBuffer, uint32_t blocks)
         g_zslrRateSmooth = g_zslrRateSmooth > 0.0 ? g_zslrRateSmooth * 0.6 + rate * 0.4 : rate;
         g_zslrRateBest = MAX(g_zslrRateBest * 0.998, g_zslrRateSmooth);
         double next = (double)current;
-        if (ms > kZSLRChunkCapMs) next = (double)current * 0.75;
-        else if (ms < kZSLRChunkTargetMs || g_zslrRateSmooth < 0.9 * g_zslrRateBest) next = (double)current * 1.3;
+        if (ms > kZSLRChunkCapMs) next = (double)current * (kZSLRChunkTargetMs / ms);
+        else if (ms < kZSLRChunkTargetMs || g_zslrRateSmooth < 0.9 * g_zslrRateBest) next = (double)current * 1.2;
+        g_zslrChunkCeiling = MIN(g_zslrChunkCeiling * 1.01 + 1.0, (double)kZSLRChunkMaxBlocks);
+        next = MIN(next, g_zslrChunkCeiling);
         g_zslrChunkBlocks = (uint32_t)MIN(MAX(next, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
     }
+    os_unfair_lock_unlock(&g_zslrChunkLock);
+}
+
+static void zslr_chunk_shrink(void) {
+    os_unfair_lock_lock(&g_zslrChunkLock);
+    uint32_t shrunk = MAX(kZSLRChunkMinBlocks, g_zslrChunkBlocks / 4u);
+    g_zslrChunkBlocks = shrunk;
+    g_zslrChunkCeiling = MAX((double)shrunk * 2.0, (double)kZSLRChunkMinBlocks);
+    g_zslrRateSmooth = 0;
+    g_zslrRateBest = 0;
     os_unfair_lock_unlock(&g_zslrChunkLock);
 }
 
@@ -2605,7 +2617,8 @@ static void zslr_pace_start(void) {
     atomic_store(&g_zslrGpuBusyNs, 0ull);
     atomic_store(&g_zslrGpuBlocks, 0ull);
     os_unfair_lock_lock(&g_zslrChunkLock);
-    g_zslrChunkBlocks = 16384u;
+    g_zslrChunkBlocks = 2048u;
+    g_zslrChunkCeiling = (double)kZSLRChunkMaxBlocks;
     g_zslrRateSmooth = 0;
     g_zslrRateBest = 0;
     os_unfair_lock_unlock(&g_zslrChunkLock);
@@ -2643,10 +2656,11 @@ static void zslr_pace_stop(void) {
 
 typedef struct {
     atomic_int failed;
+    atomic_int interactivity;
     char error[160];
 } ZSLRGPUState;
 
-static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline, id<MTLTexture> sourceTexture, id<MTLBuffer> outputBuffer, id<MTLBuffer> metricBuffer,
+static int zslr_gpu_run_once(int *interactivityOut, id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline, id<MTLTexture> sourceTexture, id<MTLBuffer> outputBuffer, id<MTLBuffer> metricBuffer,
                         uint32_t width, uint32_t height, uint32_t block, uint32_t blocksX, uint32_t blocksY, int srgb, uint32_t quality,
                         char *why, size_t whyLen) {
     NSUInteger groupWidth = MAX((NSUInteger)1, pipeline.threadExecutionWidth);
@@ -2656,6 +2670,7 @@ static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> p
     dispatch_semaphore_t gate = dispatch_semaphore_create(2);
     ZSLRGPUState state;
     atomic_init(&state.failed, 0);
+    atomic_init(&state.interactivity, 0);
     state.error[0] = 0;
     ZSLRGPUState *statePtr = &state;
     int rc = 0;
@@ -2664,7 +2679,6 @@ static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> p
         uint32_t pace = atomic_load(&g_zslrPaceUs);
         if (pace) usleep(pace);
         uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
-        rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
         uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
         ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, quality };
         dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER);
@@ -2691,6 +2705,7 @@ static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> p
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
             if (completed.status != MTLCommandBufferStatusCompleted) {
                 int expected = 0;
+                if (completed.error.code == 14) atomic_store(&statePtr->interactivity, 1);
                 if (atomic_compare_exchange_strong(&statePtr->failed, &expected, 1)) {
                     snprintf(statePtr->error, sizeof(statePtr->error), "%s", completed.error.localizedDescription.UTF8String ?: "unknown error");
                 }
@@ -2707,6 +2722,23 @@ static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> p
     if (rc == 0 && atomic_load(&state.failed) != 0) {
         ZSLR_WHY("Metal ASTC kernel failed: %s", state.error[0] ? state.error : "unknown error");
         rc = -1;
+    }
+    if (interactivityOut) *interactivityOut = atomic_load(&state.interactivity);
+    return rc;
+}
+
+static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline, id<MTLTexture> sourceTexture, id<MTLBuffer> outputBuffer, id<MTLBuffer> metricBuffer,
+                        uint32_t width, uint32_t height, uint32_t block, uint32_t blocksX, uint32_t blocksY, int srgb, uint32_t quality,
+                        char *why, size_t whyLen) {
+    int rc = -1;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        int interactivity = 0;
+        if (why && whyLen) why[0] = 0;
+        rc = zslr_gpu_run_once(&interactivity, queue, pipeline, sourceTexture, outputBuffer, metricBuffer, width, height, block, blocksX, blocksY, srgb, quality, why, whyLen);
+        if (rc == 0 || !interactivity || g_zslrCancel) break;
+        zslr_chunk_shrink();
+        ZLog(@"[LowRes] GPU watchdog interrupted a chunk, shrinking to %u blocks and retrying %ux%u texture (attempt %d)", (unsigned)g_zslrChunkBlocks, width, height, attempt + 2);
+        usleep(30000u * (useconds_t)(attempt + 1));
     }
     return rc;
 }
@@ -2766,18 +2798,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     }
     double encodeMs = ZSLR_MS(phase) - decodeMs;
 
-    const float *metrics = (const float *)metricBuffer.contents;
-    double totalError = 0.0;
-    for (size_t i = 0; i < blockCount; i++) totalError += (double)metrics[i];
     zslr_pool_give_buffer(metricBuffer);
-    double pixels = (double)width * (double)height;
-    double mse = totalError / (pixels * 4.0);
-    double psnr = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
-    if (!(psnr >= kZSLowResMinPSNR)) {
-        zslr_pool_give_buffer(outputBuffer);
-        ZSLR_WHY("GPU ASTC %ux%u q%u PSNR %.2f dB below %.1f dB (%s, decode %.0f ms, encode %.0f ms)", block, block, quality, psnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
-        return ZSLR_TRANSCODE_REJECTED;
-    }
 
     uint8_t *encoded = (uint8_t *)malloc(encodedLen);
     if (!encoded) {
@@ -2789,7 +2810,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     zslr_pool_give_buffer(outputBuffer);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, PSNR %.2f dB, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, psnr, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
@@ -3263,7 +3284,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     memset(g_zslrWorkerSeq, 0, sizeof(g_zslrWorkerSeq));
     memset(g_zslrWorkerTotal, 0, sizeof(g_zslrWorkerTotal));
     memset(g_zslrWorkerDone, 0, sizeof(g_zslrWorkerDone));
-    g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)2, NSProcessInfo.processInfo.activeProcessorCount - 2));
+    g_zslrMaxWorkers = kZSLowResMaxWorkers;
     os_unfair_lock_unlock(&g_zslrLock);
     ZLog(@"[LowRes] %@ requested at ASTC %ux%u, quality %u, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", zslr_block(), zslr_block(), (unsigned)ZSLowResQualityDefault, (long long)(zslr_available_memory() / (1024 * 1024)));
 
