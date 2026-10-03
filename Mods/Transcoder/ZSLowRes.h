@@ -2,7 +2,7 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-#define ZSLowResQualityDefault 5
+#define ZSLowResQualityDefault 3
 
 typedef NS_ENUM(NSInteger, ZSLowResMode) {
     ZSLowResModeScan = 0,

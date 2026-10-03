@@ -929,7 +929,7 @@ static int zslr_flush_block(ZSLRWriter *w, size_t n) {
         w->blockFlags = fl;
         w->capacity = nc;
     }
-    int c = LZ4_compress_default((const char *)w->raw, (char *)w->comp, (int)n, (int)n - 1);
+    int c = LZ4_compress_fast((const char *)w->raw, (char *)w->comp, (int)n, (int)n - 1, 32);
     const uint8_t *out;
     size_t outLen;
     uint16_t flags;
@@ -1043,7 +1043,7 @@ static int zslr_writer_finish(ZSLRWriter *w, const ZSLRBundle *src, const char *
     int bound = LZ4_compressBound((int)infoLen);
     cinfo = (uint8_t *)malloc((size_t)bound);
     if (!cinfo) goto done;
-    int cinfoLen = LZ4_compress_HC((const char *)info, (char *)cinfo, (int)infoLen, bound, LZ4HC_CLEVEL_DEFAULT);
+    int cinfoLen = LZ4_compress_default((const char *)info, (char *)cinfo, (int)infoLen, bound);
     if (cinfoLen <= 0) {
         zslr_seterr(err, errLen, "blocks info compression failed");
         goto done;
@@ -2053,8 +2053,8 @@ done:
 static const uint32_t kZSLowResMinPixels = 256u * 256u;
 static const uint32_t kZSLowResMaxPixels = 4096u * 4096u;
 static const uint64_t kZSLowResMaxResultBytes = UINT64_MAX;
-static const int64_t kZSLowResFullSpeedAbove = 450ll * 1024 * 1024;
-static const int64_t kZSLowResHalfSpeedAbove = 300ll * 1024 * 1024;
+static const int64_t kZSLowResFullSpeedAbove = 300ll * 1024 * 1024;
+static const int64_t kZSLowResHalfSpeedAbove = 200ll * 1024 * 1024;
 static const int64_t kZSLowResPauseBelow = 110ll * 1024 * 1024;
 static const int64_t kZSLowResResumeAbove = 150ll * 1024 * 1024;
 static const int64_t kZSLowResSlowLaneMin = 72ll * 1024 * 1024;
@@ -2066,7 +2066,6 @@ static const NSTimeInterval kZSLowResStallLimit = 45.0;
 static const NSTimeInterval kZSLowResGiveUpLimit = 240.0;
 static const NSUInteger kZSLowResMaxRetries = 2;
 static const NSTimeInterval kZSLowResWarningPause = 8.0;
-static const useconds_t kZSLowResConstrainedSleep = 25000;
 #define ZSLR_MAX_WORKERS 8
 static const NSUInteger kZSLowResMaxWorkers = ZSLR_MAX_WORKERS;
 
@@ -2096,7 +2095,7 @@ static double g_zslrLastWaitLog = 0;
 static double g_zslrLastProgressLog = 0;
 static _Atomic uint64_t g_zslrGpuBusyNs;
 static _Atomic uint64_t g_zslrGpuBlocks;
-static volatile uint32_t g_zslrChunkBlocks = 2048u;
+static volatile uint32_t g_zslrChunkBlocks = 16384u;
 static NSUInteger g_zslrNoStream = 0;
 static NSMutableArray<NSDictionary *> *g_zslrItems;
 static _Atomic uint64_t g_zslrBundleReserved;
@@ -2245,7 +2244,6 @@ static int zslr_codec_acquire(void *user, uint64_t need) {
         if (allowed > 0) {
             uint64_t after = atomic_fetch_add(&g_zslrTextureInflight, need) + need;
             if (avail <= 0 || avail - kZSLowResTextureFloor >= (int64_t)after) {
-                if (allowed == 1 && g_zslrMaxWorkers > 1) usleep(kZSLowResConstrainedSleep);
                 return 0;
             }
             atomic_fetch_sub(&g_zslrTextureInflight, need);
@@ -2388,9 +2386,9 @@ typedef struct {
     uint32_t quality;
 } ZSLRGPUParams;
 
-static const double kZSLRChunkTargetMs = 4.0;
-static const double kZSLRChunkCapMs = 8.0;
-static const uint32_t kZSLRChunkMinBlocks = 256u;
+static const double kZSLRChunkTargetMs = 12.0;
+static const double kZSLRChunkCapMs = 24.0;
+static const uint32_t kZSLRChunkMinBlocks = 1024u;
 static const uint32_t kZSLRChunkMaxBlocks = 65536u;
 static double g_zslrChunkCeiling = 65536.0;
 static os_unfair_lock g_zslrChunkLock = OS_UNFAIR_LOCK_INIT;
@@ -2617,34 +2615,11 @@ static void zslr_pace_start(void) {
     atomic_store(&g_zslrGpuBusyNs, 0ull);
     atomic_store(&g_zslrGpuBlocks, 0ull);
     os_unfair_lock_lock(&g_zslrChunkLock);
-    g_zslrChunkBlocks = 2048u;
+    g_zslrChunkBlocks = 16384u;
     g_zslrChunkCeiling = (double)kZSLRChunkMaxBlocks;
     g_zslrRateSmooth = 0;
     g_zslrRateBest = 0;
     os_unfair_lock_unlock(&g_zslrChunkLock);
-    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
-    dispatch_queue_t queue = dispatch_queue_create("zs.lowres.pace", attr);
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-    dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 50ull * NSEC_PER_MSEC, 10ull * NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(timer, ^{
-        int expected = 0;
-        if (!atomic_compare_exchange_strong(&g_zslrPaceBusy, &expected, 1)) return;
-        double sent = CACurrentMediaTime();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            double latency = (CACurrentMediaTime() - sent) * 1000.0;
-            g_zslrPaceEwma = g_zslrPaceEwma * 0.6 + latency * 0.4;
-            uint32_t pace = 0;
-            if (g_zslrPaceEwma >= 40.0) pace = 12000u;
-            else if (g_zslrPaceEwma >= 22.0) pace = 4000u;
-            uint32_t previous = atomic_exchange(&g_zslrPaceUs, pace);
-            atomic_store(&g_zslrPaceBusy, 0);
-            if ((previous == 0) != (pace == 0)) {
-                ZLog(@"[LowRes] pacing: %u ms delay per GPU chunk (main thread latency %.1f ms)", pace / 1000u, g_zslrPaceEwma);
-            }
-        });
-    });
-    g_zslrPaceTimer = timer;
-    dispatch_resume(timer);
 }
 
 static void zslr_pace_stop(void) {
@@ -2667,7 +2642,7 @@ static int zslr_gpu_run_once(int *interactivityOut, id<MTLCommandQueue> queue, i
     NSUInteger groupHeight = MIN((NSUInteger)4, MAX((NSUInteger)1, pipeline.maxTotalThreadsPerThreadgroup / groupWidth));
     MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
     dispatch_group_t finished = dispatch_group_create();
-    dispatch_semaphore_t gate = dispatch_semaphore_create(2);
+    dispatch_semaphore_t gate = dispatch_semaphore_create(4);
     ZSLRGPUState state;
     atomic_init(&state.failed, 0);
     atomic_init(&state.interactivity, 0);
@@ -2676,8 +2651,6 @@ static int zslr_gpu_run_once(int *interactivityOut, id<MTLCommandQueue> queue, i
     int rc = 0;
     uint32_t rowOffset = 0;
     while (rowOffset < blocksY && atomic_load(&state.failed) == 0) {
-        uint32_t pace = atomic_load(&g_zslrPaceUs);
-        if (pace) usleep(pace);
         uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
         uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
         ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, quality };
