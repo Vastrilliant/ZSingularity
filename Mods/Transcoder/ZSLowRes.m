@@ -178,6 +178,7 @@ typedef struct {
     int noStream;
     const char *stage;
     const char *outcome;
+    const char *zeroReason;
 } ZSLRResult;
 
 #define ZSLR_OK 0
@@ -1584,6 +1585,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
             if (textures[i].imageDataLength != 0) inlineCount++;
         }
         result->noStream = 1;
+        result->zeroReason = texCount == 0 ? "no Texture2D objects" : "no .resS node";
         result->outcome = "no .resS node";
         if (texCount == 0) {
             ZSLR_LOG(label, "no .resS node and no Texture2D objects, nothing to transcode");
@@ -1627,6 +1629,15 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     }
     candCount = kept;
     result->candidates = candCount;
+    if (candCount == 0) {
+        const char *names[] = { "not ASTC 6x6", "mip count not 1", "inline image data", "zero dimensions", "outside pixel limits", "size mismatch", "stream range invalid", "name filter", "stream path mismatch", "overlapping stream" };
+        uint32_t counts[] = { fFormat, fMips, fInline, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap };
+        uint32_t best = 0;
+        for (uint32_t i = 1; i < 10; i++) {
+            if (counts[i] > counts[best]) best = i;
+        }
+        result->zeroReason = texCount == 0 ? "no Texture2D objects" : names[best];
+    }
     ZSLR_LOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, inline %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u)",
              candCount, texCount, fFormat, fMips, fInline, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap);
 
@@ -1906,7 +1917,7 @@ static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
 static NSUInteger g_zslrLedgerDirty = 0;
 static os_unfair_lock g_zslrCountLock = OS_UNFAIR_LOCK_INIT;
-static const NSInteger kZSLRScanCacheVersion = 2;
+static const NSInteger kZSLRScanCacheVersion = 3;
 static double g_zslrTranscodeStart = 0;
 static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerSeq[ZSLR_MAX_WORKERS];
@@ -2480,6 +2491,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         ZLog(@"[LowRes] ledger serialization failed: %@", jsonError.localizedDescription ?: @"unknown error");
         return;
     }
+    [NSFileManager.defaultManager createDirectoryAtPath:[self stagingDirectory] withIntermediateDirectories:YES attributes:nil error:nil];
     NSError *writeError = nil;
     if ([data writeToFile:[self ledgerPath] options:NSDataWritingAtomic error:&writeError]) {
         ZLog(@"[LowRes] ledger saved: %lu entr%@", (unsigned long)copy.count, copy.count == 1 ? @"y" : @"ies");
@@ -2540,6 +2552,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     BOOL *skipped = (BOOL *)calloc(total ? total : 1, sizeof(BOOL));
     __block NSUInteger next = 0;
     NSMutableArray<NSDictionary *> *failures = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSNumber *> *zeroTally = [NSMutableDictionary dictionary];
     NSUInteger poolSize = MIN((NSUInteger)4, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     ZLog(@"[LowRes] counting candidate textures across %lu bundle(s)", (unsigned long)total);
     double countStart = CACurrentMediaTime();
@@ -2571,6 +2584,12 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                     os_unfair_lock_unlock(&g_zslrLock);
                     if (cached && [cached[@"v"] integerValue] == kZSLRScanCacheVersion && [cached[@"size"] unsignedLongLongValue] == size && fabs([cached[@"mtime"] doubleValue] - mtime) < 0.5 && cached[@"cands"]) {
                         counts[i] = [cached[@"cands"] unsignedIntegerValue];
+                        if (counts[i] == 0 && !((NSString *)cached[@"fail"]).length) {
+                            NSString *why = cached[@"why"] ?: @"unknown";
+                            os_unfair_lock_lock(&g_zslrCountLock);
+                            zeroTally[why] = @([zeroTally[why] unsignedIntegerValue] + 1);
+                            os_unfair_lock_unlock(&g_zslrCountLock);
+                        }
                         NSString *cachedFail = cached[@"fail"];
                         NSNumber *cachedPartial = cached[@"pfail"];
                         if (cachedFail.length || cachedPartial.unsignedIntegerValue > 0) {
@@ -2596,6 +2615,14 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                     NSUInteger parsed = rc == ZSLR_OK ? result.texturesTotal : 0;
                     NSMutableDictionary *entry = [@{ @"v": @(kZSLRScanCacheVersion), @"size": @(size), @"mtime": @(mtime), @"cands": @(counts[i]) } mutableCopy];
                     if (failText) entry[@"fail"] = failText;
+                    NSString *zeroWhy = nil;
+                    if (!failText && counts[i] == 0) {
+                        zeroWhy = result.zeroReason ? @(result.zeroReason) : @"unknown";
+                        entry[@"why"] = zeroWhy;
+                        os_unfair_lock_lock(&g_zslrCountLock);
+                        zeroTally[zeroWhy] = @([zeroTally[zeroWhy] unsignedIntegerValue] + 1);
+                        os_unfair_lock_unlock(&g_zslrCountLock);
+                    }
                     if (partial > 0) {
                         entry[@"pfail"] = @(partial);
                         entry[@"parsed"] = @(parsed);
@@ -2653,6 +2680,17 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         if (partialCount > 0) {
             ZLog(@"[LowRes] %lu bundle(s) parsed with Texture2D object failures", (unsigned long)partialCount);
         }
+    }
+
+    NSUInteger ledgerSkipped = 0;
+    for (NSUInteger i = 0; i < total; i++) {
+        if (skipped[i]) ledgerSkipped++;
+    }
+    NSUInteger zeroTotal = 0;
+    for (NSNumber *n in zeroTally.allValues) zeroTotal += n.unsignedIntegerValue;
+    ZLog(@"[LowRes] %lu bundle(s) skipped by ledger, %lu bundle(s) have no candidate textures", (unsigned long)ledgerSkipped, (unsigned long)zeroTotal);
+    for (NSString *why in zeroTally) {
+        ZLog(@"[LowRes] no candidates because %@: %lu bundle(s)", why, (unsigned long)[zeroTally[why] unsignedIntegerValue]);
     }
 
     NSMutableArray<NSDictionary *> *result = [NSMutableArray arrayWithCapacity:total];
