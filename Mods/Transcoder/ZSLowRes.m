@@ -2505,10 +2505,6 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
         NSString *rel;
         while ((rel = [walker nextObject])) {
-            if (walker.level > 3) {
-                [walker skipDescendants];
-                continue;
-            }
             if (![rel.lastPathComponent isEqualToString:@"__data"]) continue;
             NSString *full = [root stringByAppendingPathComponent:rel];
             NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
@@ -2516,6 +2512,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                 unreadable++;
                 continue;
             }
+            if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
             rootCount++;
             rootBytes += [attrs[NSFileSize] unsignedLongLongValue];
             [items addObject:@{
