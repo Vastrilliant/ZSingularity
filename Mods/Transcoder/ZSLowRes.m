@@ -104,6 +104,7 @@ typedef struct {
     uint32_t imageDataLength;
     uint32_t streamPathLength;
     uint64_t streamPathPosition;
+    uint64_t imageDataPosition;
     uint64_t formatPosition;
     uint64_t completeSizePosition;
     uint64_t streamOffsetPosition;
@@ -132,7 +133,7 @@ static void zslr_bundle_close(ZSLRBundle *bundle);
 static int zslr_bundle_read(ZSLRBundle *bundle, uint64_t offset, size_t length, uint8_t *dst);
 static int zslr_bundle_locate(const ZSLRBundle *bundle, int *serializedIndex, int *streamIndex);
 
-static int zslr_scan_textures(const uint8_t *cab, size_t cabLength, ZSLRTexture **textures, uint32_t *count, uint32_t *parseFailures, char *err, size_t errLen);
+static int zslr_scan_textures(const uint8_t *cab, size_t cabLength, ZSLRTexture **textures, uint32_t *count, uint32_t *parseFailures, uint64_t *tablePos, int32_t *objectCount, char *err, size_t errLen);
 
 static uint64_t zslr_astc_size(uint32_t width, uint32_t height, uint32_t blockX, uint32_t blockY);
 static void zslr_patch_texture(uint8_t *cab, const ZSLRTexture *texture, int32_t newFormat, uint32_t newSize);
@@ -233,6 +234,10 @@ static void wr_be32(uint8_t *p, uint32_t v) {
 static void wr_be64(uint8_t *p, uint64_t v) {
     wr_be32(p, (uint32_t)(v >> 32));
     wr_be32(p + 4, (uint32_t)v);
+}
+
+static void wr_le64(uint8_t *p, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
 }
 
 static void wr_le32(uint8_t *p, uint32_t v) {
@@ -515,7 +520,7 @@ static uint64_t zslr_astc_size(uint32_t width, uint32_t height, uint32_t blockX,
 static void zslr_patch_texture(uint8_t *cab, const ZSLRTexture *t, int32_t newFormat, uint32_t newSize) {
     wr_le32(cab + t->formatPosition, (uint32_t)newFormat);
     wr_le32(cab + t->completeSizePosition, newSize);
-    wr_le32(cab + t->streamSizePosition, newSize);
+    if (t->imageDataLength == 0) wr_le32(cab + t->streamSizePosition, newSize);
 }
 
 typedef struct {
@@ -667,6 +672,7 @@ static int zslr_parse_texture(const ZSLRTypeTree *t, const uint8_t *buf, uint64_
                 found |= 64;
             } else if (!strcmp(name, "image data") && w.limit - at >= 4) {
                 out->imageDataLength = rd_le32(buf + at);
+                out->imageDataPosition = at;
                 found |= 128;
             } else if (!strcmp(name, "m_StreamData")) {
                 if (end != j + 7 && end < j + 4) return -1;
@@ -692,7 +698,7 @@ static int zslr_parse_texture(const ZSLRTypeTree *t, const uint8_t *buf, uint64_
     return 0;
 }
 
-static int zslr_scan_textures(const uint8_t *buf, size_t len, ZSLRTexture **outTextures, uint32_t *outCount, uint32_t *outFailures, char *err, size_t errLen) {
+static int zslr_scan_textures(const uint8_t *buf, size_t len, ZSLRTexture **outTextures, uint32_t *outCount, uint32_t *outFailures, uint64_t *outTablePos, int32_t *outObjectCount, char *err, size_t errLen) {
     ZSLRTypeTree *trees = NULL;
     int32_t *classIds = NULL;
     ZSLRTexture *textures = NULL;
@@ -705,6 +711,8 @@ static int zslr_scan_textures(const uint8_t *buf, size_t len, ZSLRTexture **outT
     *outTextures = NULL;
     *outCount = 0;
     if (outFailures) *outFailures = 0;
+    if (outTablePos) *outTablePos = 0;
+    if (outObjectCount) *outObjectCount = 0;
 
     if (len < 64) {
         zslr_seterr(err, errLen, "serialized file too small");
@@ -815,6 +823,8 @@ static int zslr_scan_textures(const uint8_t *buf, size_t len, ZSLRTexture **outT
         zslr_seterr(err, errLen, "implausible object count");
         goto done;
     }
+    if (outTablePos) *outTablePos = (pos + 3) & ~(size_t)3;
+    if (outObjectCount) *outObjectCount = objectCount;
 
     for (int32_t oi = 0; oi < objectCount; oi++) {
         pos = (pos + 3) & ~(size_t)3;
@@ -1243,9 +1253,13 @@ static int pl_write_region(ZSLRWriter *w, const ZSLRRegion *r, int spillFd, uint
     return 0;
 }
 
+static uint32_t zslr_src_len(const ZSLRTexture *t) {
+    return t->imageDataLength ? t->imageDataLength : t->streamSize;
+}
+
 static uint64_t zslr_texture_need(const ZSLRTexture *t) {
     uint64_t ns = zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
-    return (uint64_t)t->streamSize * 2u + ns * 2u;
+    return (uint64_t)zslr_src_len(t) * 2u + ns * 2u;
 }
 
 static int pl_path_matches(const uint8_t *cab, size_t cabLen, const ZSLRTexture *t, const char *nodeName) {
@@ -1296,7 +1310,7 @@ static int pl_verify(const char *outPath, const ZSLRConverted *conv, uint32_t co
         munmap(map, (size_t)st.st_size);
         return -1;
     }
-    if (zslr_bundle_locate(&b, &si, &ri) != 0) {
+    if (zslr_bundle_locate(&b, &si, &ri) < 0) {
         pl_err(err, errLen, "verify: nodes missing");
         goto done;
     }
@@ -1305,7 +1319,7 @@ static int pl_verify(const char *outPath, const ZSLRConverted *conv, uint32_t co
         pl_err(err, errLen, "verify: cab read failed");
         goto done;
     }
-    if (zslr_scan_textures(cab, (size_t)b.nodes[si].size, &tex, &count, NULL, err, errLen) != 0) goto done;
+    if (zslr_scan_textures(cab, (size_t)b.nodes[si].size, &tex, &count, NULL, NULL, NULL, err, errLen) != 0) goto done;
     for (uint32_t i = 0; i < convCount; i++) {
         const ZSLRTexture *orig = &textures[conv[i].texture];
         const ZSLRTexture *found = NULL;
@@ -1315,8 +1329,10 @@ static int pl_verify(const char *outPath, const ZSLRConverted *conv, uint32_t co
                 break;
             }
         }
-        if (!found || found->format != zslr_target_format() || found->streamSize != conv[i].newSize ||
-            found->completeImageSize != conv[i].newSize || found->streamOffset != orig->streamOffset ||
+        int inlineOk = orig->imageDataLength ? (found && found->imageDataLength == conv[i].newSize && found->streamSize == 0)
+                                             : (found && found->streamSize == conv[i].newSize && found->streamOffset == orig->streamOffset);
+        if (!found || !inlineOk || found->format != zslr_target_format() ||
+            found->completeImageSize != conv[i].newSize ||
             found->width != orig->width || found->height != orig->height) {
             pl_err(err, errLen, "verify: texture %lld mismatch", (long long)orig->pathId);
             goto done;
@@ -1345,6 +1361,8 @@ typedef struct {
     ZSLRBundle *bundle;
     os_unfair_lock readLock;
     uint64_t streamBase;
+    const uint8_t *cab;
+    size_t cabLen;
     const ZSLRTexture *textures;
     const ZSLRTexture **cands;
     ZSLRConverted *conv;
@@ -1363,12 +1381,18 @@ static int zslr_transcode_texture(ZSLRTranscodeCtx *c, uint32_t i, void *worker)
     const char *label = c->label;
     uint32_t candCount = c->candCount;
     const ZSLRTexture *t = c->cands[i];
-    uint8_t *srcBuf = (uint8_t *)malloc(t->streamSize);
+    uint32_t srcLen = zslr_src_len(t);
+    uint8_t *srcBuf = (uint8_t *)malloc(srcLen);
     int readOk = 0;
     if (srcBuf) {
-        os_unfair_lock_lock(&c->readLock);
-        readOk = zslr_bundle_read(c->bundle, c->streamBase + t->streamOffset, t->streamSize, srcBuf) == 0;
-        os_unfair_lock_unlock(&c->readLock);
+        if (t->imageDataLength) {
+            memcpy(srcBuf, c->cab + t->imageDataPosition + 4, srcLen);
+            readOk = 1;
+        } else {
+            os_unfair_lock_lock(&c->readLock);
+            readOk = zslr_bundle_read(c->bundle, c->streamBase + t->streamOffset, srcLen, srcBuf) == 0;
+            os_unfair_lock_unlock(&c->readLock);
+        }
     }
     if (!readOk) {
         free(srcBuf);
@@ -1382,7 +1406,7 @@ static int zslr_transcode_texture(ZSLRTranscodeCtx *c, uint32_t i, void *worker)
     char why[160] = {0};
     const char *texName = t->name[0] ? t->name : "<unnamed>";
     double texStart = CACurrentMediaTime();
-    int tr = codec->transcode(worker, srcBuf, t->streamSize, t->width, t->height, t->colorSpace == 1, &out, &outLen, why, sizeof(why));
+    int tr = codec->transcode(worker, srcBuf, srcLen, t->width, t->height, t->colorSpace == 1, &out, &outLen, why, sizeof(why));
     free(srcBuf);
     if (tr == 0 && out && outLen != newSize) {
         snprintf(why, sizeof(why), "output size %zu, expected %u", outLen, newSize);
@@ -1414,7 +1438,7 @@ static int zslr_transcode_texture(ZSLRTranscodeCtx *c, uint32_t i, void *worker)
     c->conv[i].newSize = newSize;
     c->outcome[i] = ZSLR_OUT_OK;
     ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
-             t->width, t->height, t->streamSize, newSize, why, ZSLR_MS(texStart));
+             t->width, t->height, srcLen, newSize, why, ZSLR_MS(texStart));
     if (codec->progress) codec->progress(codec->user, 1);
     return 0;
 }
@@ -1443,6 +1467,144 @@ static int zslr_transcode_task(void *opaque, uint32_t i, void *worker) {
     int r = zslr_transcode_texture(c, i, worker);
     if (acquired && codec->release) codec->release(codec->user, need);
     return r;
+}
+
+typedef struct {
+    uint64_t start;
+    uint32_t size;
+    uint32_t index;
+} ZSLRObjSpan;
+
+static int pl_cmp_spans(const void *a, const void *b) {
+    const ZSLRObjSpan *x = (const ZSLRObjSpan *)a;
+    const ZSLRObjSpan *y = (const ZSLRObjSpan *)b;
+    if (x->start < y->start) return -1;
+    if (x->start > y->start) return 1;
+    return 0;
+}
+
+static int zslr_rebuild_cab(const uint8_t *cab, size_t cabLen, uint64_t tablePos, int32_t objectCount, const ZSLRTexture *textures, const ZSLRConverted *conv, uint32_t convCount, int spillFd, uint8_t *out, char *err, size_t errLen) {
+    int rc = -1;
+    ZSLRObjSpan *spans = NULL;
+    int32_t *convFor = NULL;
+    if (objectCount <= 0 || cabLen < 48) {
+        pl_err(err, errLen, "rebuild: no object table");
+        return -1;
+    }
+    uint64_t dataOffset = rd_be64(cab + 32);
+    uint64_t tableEnd = tablePos + (uint64_t)objectCount * 24u;
+    if (dataOffset > cabLen || tableEnd > dataOffset) {
+        pl_err(err, errLen, "rebuild: object table outside metadata");
+        return -1;
+    }
+    spans = (ZSLRObjSpan *)calloc((size_t)objectCount, sizeof(*spans));
+    convFor = (int32_t *)malloc((size_t)objectCount * sizeof(int32_t));
+    if (!spans || !convFor) {
+        pl_err(err, errLen, "rebuild: out of memory");
+        goto done;
+    }
+    for (int32_t i = 0; i < objectCount; i++) {
+        const uint8_t *e = cab + tablePos + (uint64_t)i * 24u;
+        uint64_t rel = rd_le64(e + 8);
+        uint32_t size = rd_le32(e + 16);
+        if (rel > cabLen - dataOffset || size > cabLen - dataOffset - rel) {
+            pl_err(err, errLen, "rebuild: object %d outside data region", i);
+            goto done;
+        }
+        spans[i].start = rel;
+        spans[i].size = size;
+        spans[i].index = (uint32_t)i;
+        convFor[i] = -1;
+    }
+    qsort(spans, (size_t)objectCount, sizeof(*spans), pl_cmp_spans);
+    for (int32_t i = 1; i < objectCount; i++) {
+        if (spans[i].start < spans[i - 1].start + spans[i - 1].size) {
+            pl_err(err, errLen, "rebuild: overlapping objects");
+            goto done;
+        }
+    }
+    for (uint32_t k = 0; k < convCount; k++) {
+        const ZSLRTexture *t = &textures[conv[k].texture];
+        if (!t->imageDataLength) continue;
+        uint64_t rel = t->objectStart - dataOffset;
+        int32_t lo = 0, hi = objectCount - 1, hit = -1;
+        while (lo <= hi) {
+            int32_t mid = lo + (hi - lo) / 2;
+            if (spans[mid].start == rel) { hit = mid; break; }
+            if (spans[mid].start < rel) lo = mid + 1;
+            else hi = mid - 1;
+        }
+        if (hit < 0) {
+            pl_err(err, errLen, "rebuild: texture %lld has no object entry", (long long)t->pathId);
+            goto done;
+        }
+        convFor[hit] = (int32_t)k;
+    }
+
+    memcpy(out, cab, (size_t)dataOffset);
+    uint64_t firstRel = spans[0].start;
+    memcpy(out + dataOffset, cab + dataOffset, (size_t)firstRel);
+    uint64_t cursor = dataOffset + firstRel;
+    uint64_t lastEnd = dataOffset + firstRel;
+    for (int32_t i = 0; i < objectCount; i++) {
+        uint64_t relCursor = cursor - dataOffset;
+        relCursor = (relCursor + 7) & ~7ULL;
+        if (i == 0) relCursor = firstRel;
+        cursor = dataOffset + relCursor;
+        uint64_t newRel = relCursor;
+        uint32_t newSize = spans[i].size;
+        const uint8_t *src = cab + dataOffset + spans[i].start;
+        if (cursor + spans[i].size > cabLen) {
+            pl_err(err, errLen, "rebuild: object %u does not fit", spans[i].index);
+            goto done;
+        }
+        if (convFor[i] < 0) {
+            memcpy(out + cursor, src, spans[i].size);
+        } else {
+            const ZSLRConverted *cv = &conv[convFor[i]];
+            const ZSLRTexture *t = &textures[cv->texture];
+            uint64_t lenRel = t->imageDataPosition - t->objectStart;
+            uint64_t oldDataEnd = lenRel + 4u + t->imageDataLength;
+            uint64_t oldTail = (oldDataEnd + 3) & ~3ULL;
+            if (oldDataEnd > spans[i].size || oldTail > spans[i].size) {
+                pl_err(err, errLen, "rebuild: texture %lld image data outside object", (long long)t->pathId);
+                goto done;
+            }
+            uint64_t newDataEnd = lenRel + 4u + cv->length;
+            uint64_t newTail = (newDataEnd + 3) & ~3ULL;
+            uint64_t tailLen = spans[i].size - oldTail;
+            newSize = (uint32_t)(newTail + tailLen);
+            if (cursor + newSize > cabLen) {
+                pl_err(err, errLen, "rebuild: texture %lld object grew", (long long)t->pathId);
+                goto done;
+            }
+            memcpy(out + cursor, src, (size_t)lenRel);
+            wr_le32(out + cursor + lenRel, (uint32_t)cv->length);
+            if (zslr_pread_all(spillFd, out + cursor + lenRel + 4u, cv->length, cv->spillOffset) != 0) {
+                pl_err(err, errLen, "rebuild: cannot read converted texture %lld from scratch", (long long)t->pathId);
+                goto done;
+            }
+            memcpy(out + cursor + newTail, src + oldTail, (size_t)tailLen);
+        }
+        uint8_t *e = out + tablePos + (uint64_t)spans[i].index * 24u;
+        wr_le64(e + 8, newRel);
+        wr_le32(e + 16, newSize);
+        cursor += newSize;
+        lastEnd = cursor;
+    }
+    uint64_t origLastEnd = dataOffset + spans[objectCount - 1].start + spans[objectCount - 1].size;
+    if (origLastEnd < cabLen) {
+        uint64_t tail = cabLen - origLastEnd;
+        if (lastEnd + tail > cabLen) {
+            tail = cabLen - lastEnd;
+        }
+        memcpy(out + lastEnd, cab + origLastEnd, (size_t)tail);
+    }
+    rc = 0;
+done:
+    free(spans);
+    free(convFor);
+    return rc;
 }
 
 static int zslr_process_bundle(const char *label, const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen) {
@@ -1480,6 +1642,10 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     uint8_t *cab = NULL;
     ZSLRTexture *textures = NULL;
     const ZSLRTexture **cands = NULL;
+    const ZSLRTexture **inl = NULL;
+    uint8_t *newCab = NULL;
+    uint64_t tablePos = 0;
+    int32_t objectCount = 0;
     ZSLRConverted *conv = NULL;
     ZSLRRegion *regions = NULL;
     uint8_t *chunk = NULL;
@@ -1537,7 +1703,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     for (uint32_t i = 0; i < b.blockCount; i++) {
         if (b.blocks[i].uncompressedSize > maxBlock) maxBlock = b.blocks[i].uncompressedSize;
     }
-    result->workingSetEstimate = (uint64_t)cabLen + maxBlock + 2u * ZSLR_COPY_CHUNK + 2u * ZSLR_BLOCK_SIZE;
+    result->workingSetEstimate = 2u * (uint64_t)cabLen + maxBlock + 2u * ZSLR_COPY_CHUNK + 2u * ZSLR_BLOCK_SIZE;
     if (!scanOnly && codec->reserve) {
         result->stage = "reserve memory";
         double reserveStart = CACurrentMediaTime();
@@ -1575,48 +1741,41 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
 
     result->stage = "scan textures";
     stageStart = CACurrentMediaTime();
-    if (zslr_scan_textures(cab, cabLen, &textures, &texCount, &result->parseFailures, err, errLen) != 0) goto done;
+    if (zslr_scan_textures(cab, cabLen, &textures, &texCount, &result->parseFailures, &tablePos, &objectCount, err, errLen) != 0) goto done;
     result->texturesTotal = texCount;
     ZSLR_LOG(label, "scan: %u Texture2D parsed, %u parse failure(s) (%.0f ms)", texCount, result->parseFailures, ZSLR_MS(stageStart));
 
-    if (loc == 1) {
-        uint32_t inlineCount = 0;
-        for (uint32_t i = 0; i < texCount; i++) {
-            if (textures[i].imageDataLength != 0) inlineCount++;
-        }
-        result->noStream = 1;
-        result->zeroReason = texCount == 0 ? "no Texture2D objects" : "no .resS node";
-        result->outcome = "no .resS node";
-        if (texCount == 0) {
-            ZSLR_LOG(label, "no .resS node and no Texture2D objects, nothing to transcode");
-        } else {
-            ZSLR_LOG(label, "no .resS node: %u Texture2D (%u inline, %u with stream data), nothing to transcode", texCount, inlineCount, texCount - inlineCount);
-        }
-        rc = ZSLR_OK;
-        goto done;
-    }
-
     result->stage = "select candidates";
     cands = (const ZSLRTexture **)malloc(((size_t)texCount + 1) * sizeof(*cands));
-    if (!cands) {
+    inl = (const ZSLRTexture **)malloc(((size_t)texCount + 1) * sizeof(*inl));
+    if (!cands || !inl) {
         pl_err(err, errLen, "out of memory");
         goto done;
     }
-    uint64_t resSize = b.nodes[ri].size;
-    uint32_t fFormat = 0, fMips = 0, fInline = 0, fDims = 0, fPixels = 0, fSize = 0, fRange = 0, fName = 0, fPath = 0, fOverlap = 0;
+    uint64_t resSize = ri >= 0 ? b.nodes[ri].size : 0;
+    const char *resName = ri >= 0 ? b.nodes[ri].path : "";
+    uint32_t inlCount = 0;
+    uint32_t fFormat = 0, fMips = 0, fDims = 0, fPixels = 0, fSize = 0, fRange = 0, fName = 0, fPath = 0, fOverlap = 0;
     for (uint32_t i = 0; i < texCount; i++) {
         const ZSLRTexture *t = &textures[i];
         if (t->format != ZSLR_FORMAT_ASTC_6x6) { fFormat++; continue; }
         if (t->mipCount != 1) { fMips++; continue; }
-        if (t->imageDataLength != 0) { fInline++; continue; }
         if (t->width == 0 || t->height == 0) { fDims++; continue; }
         uint64_t pixels = (uint64_t)t->width * t->height;
         if (pixels < policy->minPixels || pixels > policy->maxPixels) { fPixels++; continue; }
         uint64_t expected = zslr_astc_size(t->width, t->height, 6, 6);
+        if (t->imageDataLength != 0) {
+            if (t->streamSize != 0 || t->imageDataLength != expected || t->completeImageSize != expected) { fSize++; continue; }
+            if (t->imageDataPosition < t->objectStart || t->imageDataPosition + 4u + t->imageDataLength > t->objectStart + t->objectSize) { fRange++; continue; }
+            if (t->name[0] && pl_name_blocked(t->name)) { fName++; continue; }
+            inl[inlCount++] = t;
+            continue;
+        }
+        if (ri < 0) { fRange++; continue; }
         if (t->streamSize != expected || t->completeImageSize != expected) { fSize++; continue; }
         if (t->streamOffset > resSize || t->streamSize > resSize - t->streamOffset) { fRange++; continue; }
         if (t->name[0] && pl_name_blocked(t->name)) { fName++; continue; }
-        if (!pl_path_matches(cab, cabLen, t, b.nodes[ri].path)) { fPath++; continue; }
+        if (!pl_path_matches(cab, cabLen, t, resName)) { fPath++; continue; }
         cands[candCount++] = t;
     }
     qsort(cands, candCount, sizeof(*cands), pl_cmp_candidates);
@@ -1628,18 +1787,25 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         cands[kept++] = cands[i];
     }
     candCount = kept;
+    for (uint32_t i = 0; i < inlCount; i++) cands[candCount++] = inl[i];
     result->candidates = candCount;
     if (candCount == 0) {
-        const char *names[] = { "not ASTC 6x6", "mip count not 1", "inline image data", "zero dimensions", "outside pixel limits", "size mismatch", "stream range invalid", "name filter", "stream path mismatch", "overlapping stream" };
-        uint32_t counts[] = { fFormat, fMips, fInline, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap };
+        const char *names[] = { "not ASTC 6x6", "mip count not 1", "zero dimensions", "outside pixel limits", "size mismatch", "stream range invalid", "name filter", "stream path mismatch", "overlapping stream" };
+        uint32_t counts[] = { fFormat, fMips, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap };
         uint32_t best = 0;
-        for (uint32_t i = 1; i < 10; i++) {
+        for (uint32_t i = 1; i < 9; i++) {
             if (counts[i] > counts[best]) best = i;
         }
         result->zeroReason = texCount == 0 ? "no Texture2D objects" : names[best];
     }
-    ZSLR_LOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, inline %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u)",
-             candCount, texCount, fFormat, fMips, fInline, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap);
+    ZSLR_LOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u; %u inline)",
+             candCount, texCount, fFormat, fMips, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap, inlCount);
+    if (loc == 1 && candCount == 0) {
+        result->noStream = 1;
+        result->outcome = "no .resS node";
+        rc = ZSLR_OK;
+        goto done;
+    }
 
     uint64_t peakTexture = 0;
     uint64_t projected = 0;
@@ -1647,7 +1813,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         const ZSLRTexture *t = cands[i];
         uint64_t need = zslr_texture_need(t);
         if (need > peakTexture) peakTexture = need;
-        result->candidateBytes += t->streamSize;
+        result->candidateBytes += zslr_src_len(t);
         projected += zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
     }
     if (candCount > 0) {
@@ -1704,7 +1870,9 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     tctx.codec = codec;
     tctx.bundle = &b;
     tctx.readLock = OS_UNFAIR_LOCK_INIT;
-    tctx.streamBase = b.nodes[ri].offset;
+    tctx.streamBase = ri >= 0 ? b.nodes[ri].offset : 0;
+    tctx.cab = cab;
+    tctx.cabLen = cabLen;
     tctx.textures = textures;
     tctx.cands = cands;
     tctx.conv = conv;
@@ -1744,7 +1912,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
             continue;
         }
         if (outcome[i] != ZSLR_OUT_OK) continue;
-        result->originalBytes += cands[i]->streamSize;
+        result->originalBytes += zslr_src_len(cands[i]);
         result->newBytes += conv[i].newSize;
         if (i != convCount) {
             conv[convCount] = conv[i];
@@ -1781,8 +1949,13 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     regions[rcount].data = cab;
     regions[rcount].dataLength = cabLen;
     rcount++;
+    uint32_t inlineConverted = 0;
     for (uint32_t i = 0; i < convCount; i++) {
         const ZSLRTexture *t = &textures[conv[i].texture];
+        if (t->imageDataLength != 0) {
+            inlineConverted++;
+            continue;
+        }
         regions[rcount].absolute = b.nodes[ri].offset + t->streamOffset;
         regions[rcount].originalLength = t->streamSize;
         regions[rcount].data = NULL;
@@ -1790,6 +1963,15 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         regions[rcount].spilled = 1;
         regions[rcount].spillOffset = conv[i].spillOffset;
         rcount++;
+    }
+    if (inlineConverted > 0) {
+        newCab = (uint8_t *)calloc(cabLen, 1);
+        if (!newCab) {
+            pl_err(err, errLen, "out of memory rebuilding serialized node");
+            goto done;
+        }
+        if (zslr_rebuild_cab(cab, cabLen, tablePos, objectCount, textures, conv, convCount, spillFd, newCab, err, errLen) != 0) goto done;
+        regions[0].data = newCab;
     }
     qsort(regions, rcount, sizeof(*regions), pl_cmp_regions);
 
@@ -1854,6 +2036,8 @@ done:
     free(chunk);
     free(outcome);
     free(cands);
+    free(inl);
+    free(newCab);
     free(textures);
     free(cab);
     if (bundleOpen) zslr_bundle_close(&b);
@@ -1917,7 +2101,7 @@ static NSUInteger g_zslrNextItem = 0;
 static NSMutableDictionary<NSString *, NSDictionary *> *g_zslrLedger;
 static NSUInteger g_zslrLedgerDirty = 0;
 static os_unfair_lock g_zslrCountLock = OS_UNFAIR_LOCK_INIT;
-static const NSInteger kZSLRScanCacheVersion = 3;
+static const NSInteger kZSLRScanCacheVersion = 4;
 static double g_zslrTranscodeStart = 0;
 static BOOL g_zslrWorkerActive[ZSLR_MAX_WORKERS];
 static NSUInteger g_zslrWorkerSeq[ZSLR_MAX_WORKERS];
@@ -2137,6 +2321,7 @@ static BOOL zslr_ledger_skips(NSDictionary *item) {
     os_unfair_lock_unlock(&g_zslrLock);
     NSString *state = entry[@"state"];
     if (!entry || [entry[@"size"] unsignedLongLongValue] != size || fabs([entry[@"mtime"] doubleValue] - mtime) >= 0.5) return NO;
+    if ([entry[@"iv"] integerValue] < 1) return NO;
     if ([state isEqualToString:@"noop"]) return YES;
     if (![state isEqualToString:@"done"]) return NO;
     uint32_t target = g_zslrTargetBlock;
@@ -3036,7 +3221,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         if (result.noStream) g_zslrNoStream++;
         if (ledgerState) {
             g_zslrLedger[key] = @{ @"size": @(size), @"mtime": @(mtime), @"state": ledgerState,
-                                   @"before": @(result.originalBytes), @"after": @(result.newBytes), @"textures": @(result.converted), @"block": @(zslr_block()) };
+                                   @"before": @(result.originalBytes), @"after": @(result.newBytes), @"textures": @(result.converted), @"block": @(zslr_block()), @"iv": @1 };
             g_zslrLedgerDirty++;
         }
         g_zslrStatus.bundlesDone++;
