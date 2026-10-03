@@ -2874,7 +2874,6 @@ static __weak UIButton *g_zsLowResCancelButton;
 static __weak UIView *g_zsLowResInfoWrapper;
 static __weak UIView *g_zsLowResProgressWrapper;
 static __weak UIView *g_zsLowResTranscodeWrapper;
-static BOOL g_zsLowResPickerShown;
 
 static UIButton *zs_make_grouped_action_button(NSString *title, UIColor *tint) {
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -3085,11 +3084,8 @@ static UIView *zs_make_lowres_progress_view(id target, SEL cancelAction) {
     return container;
 }
 
-static NSString *zs_lowres_duration_text(double seconds) {
-    unsigned long total = (unsigned long)llround(seconds);
-    if (total < 60) return @"under a minute";
-    if (total < 3600) return [NSString stringWithFormat:@"%lum %02lus", total / 60, total % 60];
-    return [NSString stringWithFormat:@"%luh %02lum", total / 3600, (total % 3600) / 60];
+static NSArray<NSNumber *> *zs_lowres_block_options(void) {
+    return @[@8, @10, @12];
 }
 
 static void * const kZSRevealContentKey = (void *)&kZSRevealContentKey;
@@ -10689,8 +10685,8 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
     NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
     formatter.numberStyle = NSNumberFormatterDecimalStyle;
-    NSString *mainText = [NSString stringWithFormat:@"Compress and reduce Texture2D assets\u2019 memory footprint by up to 75%%.\n\nThere are about %@ Texture2D assets scattered across %@ bundles. This will take around %@. Are you sure you want to continue?\n\n",
-                          [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)], zs_lowres_duration_text((double)textures * 0.25)];
+    NSString *mainText = [NSString stringWithFormat:@"Compress and reduce Texture2D assets\u2019 memory footprint by up to 75%%.\n\nThere are about %@ Texture2D assets scattered across %@ bundles. Depending on your device specs, texture compression could take from a few, to several minutes. Are you sure you want to continue?\n\n",
+                          [formatter stringFromNumber:@(textures)], [formatter stringFromNumber:@(bundles)]];
     NSString *noteText = @"Note: Texture2D assets are only a fraction of the game\u2019s total memory footprint, realistically you should expect to save around 375MB - 750MB of memory\n\nTranscoding to bigger ASTC blocks will also cause a significant Texture quality decrease";
     UIFont *baseFont = g_zsLowResInfoLabel.font ?: zs_mono_font(11, UIFontWeightMedium);
     UIColor *baseColor = g_zsLowResInfoLabel.textColor ?: [UIColor colorWithWhite:0.9 alpha:1];
@@ -10718,32 +10714,30 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         return;
     }
     if (g_zsLowResStage != 2) return;
-    [self zs_lowResPresentCodecPicker];
+    [self zs_lowResPresentCodecOptions];
 }
 
-- (void)zs_lowResPresentCodecPicker {
-    if (g_zsLowResPickerShown) return;
-    UIViewController *presenter = zs_key_window().rootViewController;
-    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
-    if (!presenter) return;
-    g_zsLowResPickerShown = YES;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Choose Codec"
-                                                                   message:@"Select the ASTC block size the textures will be transcoded into. Larger blocks save more memory but soften fine detail."
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    __weak typeof(self) weakSelf = self;
-    for (NSNumber *entry in @[@8, @10, @12]) {
+- (void)zs_lowResPresentCodecOptions {
+    UIView *card = zs_enclosing_grouped_card(g_zsLowResInfoButton);
+    if (!card) return;
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
+    for (NSNumber *entry in zs_lowres_block_options()) {
         NSUInteger block = entry.unsignedIntegerValue;
         long percent = lround((1.0 - 36.0 / (double)(block * block)) * 100.0);
-        NSString *title = [NSString stringWithFormat:@"ASTC_%lux%lu (~%ld%% compression)", (unsigned long)block, (unsigned long)block, percent];
-        [alert addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            g_zsLowResPickerShown = NO;
-            [weakSelf zs_lowResStartTranscodeWithBlockSize:block];
-        }]];
+        [titles addObject:[NSString stringWithFormat:@"ASTC_%lux%lu (~%ld%% compression)", (unsigned long)block, (unsigned long)block, percent]];
     }
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
-        g_zsLowResPickerShown = NO;
-    }]];
-    [presenter presentViewController:alert animated:YES completion:nil];
+    [titles addObject:@"Cancel"];
+    [self zs_presentOptionsInCard:card titles:titles selectedIndex:-1 action:@selector(zs_lowResCodecOptionTapped:)];
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+- (void)zs_lowResCodecOptionTapped:(UIControl *)sender {
+    NSArray<NSNumber *> *blocks = zs_lowres_block_options();
+    UIView *card = zs_enclosing_grouped_card(sender);
+    if (card) [self zs_restoreCardFromOptions:card];
+    if (sender.tag < 0 || sender.tag >= (NSInteger)blocks.count) return;
+    [self zs_lowResStartTranscodeWithBlockSize:blocks[sender.tag].unsignedIntegerValue];
 }
 
 - (void)zs_lowResStartTranscodeWithBlockSize:(NSUInteger)blockSize {

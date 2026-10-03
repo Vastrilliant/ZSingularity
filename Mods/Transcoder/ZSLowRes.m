@@ -2157,6 +2157,8 @@ typedef struct {
     uint32_t block;
     uint32_t blocksX;
     uint32_t srgb;
+    uint32_t rowOffset;
+    uint32_t rowCount;
 } ZSLRGPUParams;
 
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
@@ -2262,32 +2264,37 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         return -1;
     }
 
-    ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u };
-    id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-    if (!commandBuffer || !encoder) {
-        ZSLR_WHY("Metal command encoding unavailable");
-        return -1;
-    }
-    [encoder setComputePipelineState:g_zslrMetalPipeline];
-    [encoder setTexture:sourceTexture atIndex:0];
-    [encoder setBuffer:outputBuffer offset:0 atIndex:0];
-    [encoder setBytes:&params length:sizeof(params) atIndex:1];
     NSUInteger groupWidth = MAX((NSUInteger)1, g_zslrMetalPipeline.threadExecutionWidth);
     NSUInteger groupHeight = MAX((NSUInteger)1, g_zslrMetalPipeline.maxTotalThreadsPerThreadgroup / groupWidth);
     MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
-    MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
-                                       (blocksY + groupHeight - 1) / groupHeight,
-                                       1);
-    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-    [encoder endEncoding];
-    [commandBuffer commit];
-    [commandBuffer waitUntilCompleted];
-    double encodeMs = ZSLR_MS(phase) - decodeMs;
-    if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
-        ZSLR_WHY("Metal ASTC kernel failed: %s", commandBuffer.error.localizedDescription.UTF8String ?: "unknown error");
-        return -1;
+    uint32_t rowsPerChunk = MAX((uint32_t)1, (uint32_t)(8192u / MAX(blocksX, 1u)));
+    rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
+    for (uint32_t rowOffset = 0; rowOffset < blocksY; rowOffset += rowsPerChunk) {
+        uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
+        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount };
+        id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
+        if (!commandBuffer || !encoder) {
+            ZSLR_WHY("Metal command encoding unavailable");
+            return -1;
+        }
+        [encoder setComputePipelineState:g_zslrMetalPipeline];
+        [encoder setTexture:sourceTexture atIndex:0];
+        [encoder setBuffer:outputBuffer offset:0 atIndex:0];
+        [encoder setBytes:&params length:sizeof(params) atIndex:1];
+        MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
+                                           (rowCount + groupHeight - 1) / groupHeight,
+                                           1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+        [encoder endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
+            ZSLR_WHY("Metal ASTC kernel failed: %s", commandBuffer.error.localizedDescription.UTF8String ?: "unknown error");
+            return -1;
+        }
     }
+    double encodeMs = ZSLR_MS(phase) - decodeMs;
 
     uint8_t *encoded = (uint8_t *)malloc(encodedLen);
     if (!encoded) {
@@ -2297,7 +2304,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u endpoint-pair encode, %s, decode %.0f ms, encode %.0f ms", block, block, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u multi-mode encode, %s, decode %.0f ms, encode %.0f ms", block, block, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
