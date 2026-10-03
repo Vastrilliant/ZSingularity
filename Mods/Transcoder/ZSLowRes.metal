@@ -1294,7 +1294,7 @@ static float zslr_eval_config(thread const uint *pk, thread const uint *vm,
 }
 
 template <uint BW>
-static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool full,
+static float zslr_encode_block(thread const uint *pk, thread const uint *vm, bool full,
                               constant ZSLRConfig *cfgs, constant uchar *ivT, constant uint *ipwT, constant float *denT,
                               uint cfgCount, uint quality, thread uint *out) {
     const uint N = BW * BW;
@@ -1331,7 +1331,16 @@ static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool
         out[1] = 0xFFFFFFFFu;
         out[2] = q[0] | (q[1] << 16);
         out[3] = q[2] | (q[3] << 16);
-        return;
+        float voidErr = 0.0f;
+        for (uint i = 0; i < N; i++) {
+            if (zslr_vw(vm, i) <= 0.0f) continue;
+            float4 p = zslr_unpack(pk[i]);
+            for (uint c = 0; c < 4; c++) {
+                float d = p[c] * 255.0f - float(q[c] >> 8);
+                voidErr += d * d;
+            }
+        }
+        return voidErr;
     }
 
     bool rgba = lo[3] < 0.998f;
@@ -1474,10 +1483,11 @@ static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool
             }
         }
     }
+    return bestErr;
 }
 
 template <uint BW>
-static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
+static float zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
     const uint N = BW * BW;
     out[0] = 0u;
     out[1] = 0u;
@@ -1517,7 +1527,14 @@ static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
         out[1] = 0xFFFFFFFFu;
         out[2] = q[0] | (q[1] << 16);
         out[3] = q[2] | (q[3] << 16);
-        return;
+        float voidErr = 0.0f;
+        for (uint i = 0; i < N; i++) {
+            for (uint c = 0; c < 4; c++) {
+                float d = px[i * 4 + c] * 255.0f - float(q[c] >> 8);
+                voidErr += d * d;
+            }
+        }
+        return voidErr;
     }
 
     bool rgba = lo[3] < 0.998f;
@@ -1637,6 +1654,7 @@ static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
         }
     }
 
+    float fastErr = 0.0f;
     for (uint i = 0; i < N; i++) {
         float e0 = 0.0f;
         float e1 = 0.0f;
@@ -1646,6 +1664,7 @@ static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
             e1 += (v - float(d1v[c])) * (v - float(d1v[c]));
         }
         lab[i] = e1 < e0 ? 1u : 0u;
+        fastErr += min(e0, e1);
     }
 
     uint node[64];
@@ -1694,11 +1713,12 @@ static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
     for (uint i = 0; i < 64; i++) {
         if (node[i]) out[(127u - i) >> 5] |= 1u << ((127u - i) & 31u);
     }
+    return fastErr;
 }
 
 template <uint BW, bool FAST>
 static void zslr_encode_kernel(texture2d<float, access::sample> source, device uint *encoded,
-                               constant ZSLRGPUParams &params, uint2 gid) {
+                               device float *metrics, constant ZSLRGPUParams &params, uint2 gid) {
     uint blockY = gid.y + params.rowOffset;
     uint blocksY = (params.height + BW - 1) / BW;
     if (gid.x >= params.blocksX || gid.y >= params.rowCount || blockY >= blocksY) return;
@@ -1731,7 +1751,8 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
 
     uint blk[4];
     if (FAST) {
-        zslr_encode_block_fast<BW>(pk, blk);
+        float fastBlockErr = zslr_encode_block_fast<BW>(pk, blk);
+        metrics[blockY * params.blocksX + gid.x] = fastBlockErr;
         uint fastIndex = (blockY * params.blocksX + gid.x) * 4;
         encoded[fastIndex] = blk[0];
         encoded[fastIndex + 1] = blk[1];
@@ -1757,7 +1778,8 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
     }
     bool full = x0 + BW <= params.width && y0 + BW <= params.height;
 
-    zslr_encode_block<BW>(pk, vm, full, cfgs, ivT, ipwT, denT, 10u, params.quality, blk);
+    float blockErr = zslr_encode_block<BW>(pk, vm, full, cfgs, ivT, ipwT, denT, 10u, params.quality, blk);
+    metrics[blockY * params.blocksX + gid.x] = blockErr;
 
     uint outputIndex = (blockY * params.blocksX + gid.x) * 4;
     encoded[outputIndex] = blk[0];
@@ -1770,46 +1792,52 @@ kernel void zslr_astc_encode_8(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<8, false>(source, encoded, params, gid);
+    zslr_encode_kernel<8, false>(source, encoded, metrics, params, gid);
 }
 
 kernel void zslr_astc_encode_10(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<10, false>(source, encoded, params, gid);
+    zslr_encode_kernel<10, false>(source, encoded, metrics, params, gid);
 }
 
 kernel void zslr_astc_encode_12(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<12, false>(source, encoded, params, gid);
+    zslr_encode_kernel<12, false>(source, encoded, metrics, params, gid);
 }
 
 kernel void zslr_astc_encode_fast_8(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<8, true>(source, encoded, params, gid);
+    zslr_encode_kernel<8, true>(source, encoded, metrics, params, gid);
 }
 
 kernel void zslr_astc_encode_fast_10(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<10, true>(source, encoded, params, gid);
+    zslr_encode_kernel<10, true>(source, encoded, metrics, params, gid);
 }
 
 kernel void zslr_astc_encode_fast_12(
     texture2d<float, access::sample> source [[texture(0)]],
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<12, true>(source, encoded, params, gid);
+    zslr_encode_kernel<12, true>(source, encoded, metrics, params, gid);
 }

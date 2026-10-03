@@ -2362,6 +2362,8 @@ static const double kZSLRChunkTargetMs = 120.0;
 static const uint32_t kZSLRChunkMinBlocks = 4096u;
 static const uint32_t kZSLRChunkMaxBlocks = 65536u;
 static volatile uint32_t g_zslrChunkBlocks = 8192u;
+#define ZSLR_TRANSCODE_REJECTED 1
+static const double kZSLowResMinPSNR = 27.0;
 
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
@@ -2478,9 +2480,11 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
                      bytesPerRow:sourceRowBytes];
     double decodeMs = ZSLR_MS(phase);
 
+    size_t metricLen = blockCount * sizeof(float);
     id<MTLBuffer> outputBuffer = [g_zslrMetalDevice newBufferWithLength:encodedLen options:MTLResourceStorageModeShared];
-    if (!outputBuffer) {
-        ZSLR_WHY("Metal buffer allocation failed for %zu-byte output", encodedLen);
+    id<MTLBuffer> metricBuffer = [g_zslrMetalDevice newBufferWithLength:metricLen options:MTLResourceStorageModeShared];
+    if (!outputBuffer || !metricBuffer) {
+        ZSLR_WHY("Metal buffer allocation failed for %zu-byte output and %zu-byte metrics", encodedLen, metricLen);
         return -1;
     }
 
@@ -2506,6 +2510,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         [encoder setTexture:sourceTexture atIndex:0];
         [encoder setBuffer:outputBuffer offset:0 atIndex:0];
         [encoder setBytes:&params length:sizeof(params) atIndex:1];
+        [encoder setBuffer:metricBuffer offset:0 atIndex:2];
         MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
                                            (rowCount + groupHeight - 1) / groupHeight,
                                            1);
@@ -2535,6 +2540,17 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     }
     double encodeMs = ZSLR_MS(phase) - decodeMs;
 
+    const float *metrics = (const float *)metricBuffer.contents;
+    double totalError = 0.0;
+    for (size_t i = 0; i < blockCount; i++) totalError += (double)metrics[i];
+    double pixels = (double)width * (double)height;
+    double mse = totalError / (pixels * 4.0);
+    double psnr = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
+    if (!(psnr >= kZSLowResMinPSNR)) {
+        ZSLR_WHY("GPU ASTC %ux%u q%u PSNR %.2f dB below %.1f dB (%s, decode %.0f ms, encode %.0f ms)", block, block, quality, psnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+        return ZSLR_TRANSCODE_REJECTED;
+    }
+
     uint8_t *encoded = (uint8_t *)malloc(encodedLen);
     if (!encoded) {
         ZSLR_WHY("out of memory allocating %zu-byte ASTC output", encodedLen);
@@ -2543,7 +2559,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, PSNR %.2f dB, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, psnr, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
