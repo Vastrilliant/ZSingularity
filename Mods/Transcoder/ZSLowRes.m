@@ -51,6 +51,8 @@ static int32_t zslr_target_format(void) {
     }
 }
 #define ZSLR_LOG(label, fmt, ...) do { if (!g_zslrQuiet) ZLog(@"[LowRes] %s: " fmt, (label), ##__VA_ARGS__); } while (0)
+static volatile int g_zslrVerbose = 0;
+#define ZSLR_VLOG(label, fmt, ...) do { if (g_zslrVerbose && !g_zslrQuiet) ZLog(@"[LowRes] %s: " fmt, (label), ##__VA_ARGS__); } while (0)
 #define ZSLR_MB(bytes) ((unsigned long long)((bytes) / (1024ull * 1024ull)))
 #define ZSLR_MS(since) ((CACurrentMediaTime() - (since)) * 1000.0)
 #define ZSLR_WHY(...) do { if (why && whyLen) snprintf(why, whyLen, __VA_ARGS__); } while (0)
@@ -190,6 +192,7 @@ typedef struct {
 static int zslr_process_bundle(const char *label, const char *srcPath, const char *outPath, int scanOnly, const ZSLRCodec *codec, const ZSLRPolicy *policy, ZSLRResult *result, char *err, size_t errLen);
 static int64_t zslr_available_memory(void);
 static void zslr_wait_log(const char *what);
+static void zslr_pool_drain(void);
 
 static void zslr_seterr(char *err, size_t errLen, const char *fmt, ...) {
     if (!err || errLen == 0) return;
@@ -1437,7 +1440,7 @@ static int zslr_transcode_texture(ZSLRTranscodeCtx *c, uint32_t i, void *worker)
     c->conv[i].length = outLen;
     c->conv[i].newSize = newSize;
     c->outcome[i] = ZSLR_OUT_OK;
-    ZSLR_LOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
+    ZSLR_VLOG(label, "texture %u/%u %s (path %lld, %ux%u, %u -> %u bytes): converted, %s (%.0f ms)", i + 1, candCount, texName, (long long)t->pathId,
              t->width, t->height, srcLen, newSize, why, ZSLR_MS(texStart));
     if (codec->progress) codec->progress(codec->user, 1);
     return 0;
@@ -1634,7 +1637,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         pl_err(err, errLen, "mmap failed for %zu bytes (errno %d: %s)", fileSize, errno, strerror(errno));
         return ZSLR_ERR;
     }
-    ZSLR_LOG(label, "mapped %llu bytes, parsing container", (unsigned long long)fileSize);
+    ZSLR_VLOG(label, "mapped %llu bytes, parsing container", (unsigned long long)fileSize);
 
     int rc = ZSLR_ERR;
     ZSLRBundle b;
@@ -1665,12 +1668,12 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     result->stage = "container";
     if (zslr_bundle_open(&b, (const uint8_t *)map, fileSize, err, errLen) != 0) goto done;
     bundleOpen = 1;
-    ZSLR_LOG(label, "container ok: format v%u, unity %s, header flags 0x%x, %u block(s), %u node(s), %llu bytes uncompressed (%.0f ms)",
+    ZSLR_VLOG(label, "container ok: format v%u, unity %s, header flags 0x%x, %u block(s), %u node(s), %llu bytes uncompressed (%.0f ms)",
              b.formatVersion, b.unityVersion, b.headerFlags, b.blockCount, b.nodeCount, (unsigned long long)b.totalUncompressed, ZSLR_MS(stageStart));
     for (uint32_t i = 0; i < b.nodeCount && i < 8; i++) {
-        ZSLR_LOG(label, "node %u: %s, %llu bytes, flags 0x%x", i, b.nodes[i].path, (unsigned long long)b.nodes[i].size, b.nodes[i].flags);
+        ZSLR_VLOG(label, "node %u: %s, %llu bytes, flags 0x%x", i, b.nodes[i].path, (unsigned long long)b.nodes[i].size, b.nodes[i].flags);
     }
-    if (b.nodeCount > 8) ZSLR_LOG(label, "%u more node(s) not listed", b.nodeCount - 8);
+    if (b.nodeCount > 8) ZSLR_VLOG(label, "%u more node(s) not listed", b.nodeCount - 8);
 
     result->stage = "locate nodes";
     int loc = zslr_bundle_locate(&b, &si, &ri);
@@ -1687,9 +1690,9 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         goto done;
     }
     if (loc == 1) {
-        ZSLR_LOG(label, "serialized node %s has no .resS sibling", b.nodes[si].path);
+        ZSLR_VLOG(label, "serialized node %s has no .resS sibling", b.nodes[si].path);
     } else {
-        ZSLR_LOG(label, "node pair: serialized %s (%llu bytes), stream %s (%llu bytes)", b.nodes[si].path, (unsigned long long)b.nodes[si].size,
+        ZSLR_VLOG(label, "node pair: serialized %s (%llu bytes), stream %s (%llu bytes)", b.nodes[si].path, (unsigned long long)b.nodes[si].size,
                  b.nodes[ri].path, (unsigned long long)b.nodes[ri].size);
     }
 
@@ -1707,7 +1710,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     if (!scanOnly && codec->reserve) {
         result->stage = "reserve memory";
         double reserveStart = CACurrentMediaTime();
-        ZSLR_LOG(label, "reserving %llu MB working set (available %lld MB)", ZSLR_MB(result->workingSetEstimate), (long long)(zslr_available_memory() / (1024 * 1024)));
+        ZSLR_VLOG(label, "reserving %llu MB working set (available %lld MB)", ZSLR_MB(result->workingSetEstimate), (long long)(zslr_available_memory() / (1024 * 1024)));
         int rr = codec->reserve(codec->user, result->workingSetEstimate);
         if (rr == 2) {
             ZSLR_LOG(label, "reserve aborted: cancelled after %.1fs", ZSLR_MS(reserveStart) / 1000.0);
@@ -1720,7 +1723,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
             goto done;
         }
         reserved = result->workingSetEstimate;
-        ZSLR_LOG(label, "reserve granted after %.1fs", ZSLR_MS(reserveStart) / 1000.0);
+        ZSLR_VLOG(label, "reserve granted after %.1fs", ZSLR_MS(reserveStart) / 1000.0);
         result->stage = "read serialized node";
     }
     stageStart = CACurrentMediaTime();
@@ -1733,7 +1736,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         pl_err(err, errLen, "cannot decompress serialized node (offset %llu, %zu bytes)", (unsigned long long)b.nodes[si].offset, cabLen);
         goto done;
     }
-    ZSLR_LOG(label, "serialized node read: %zu bytes (%.0f ms)", cabLen, ZSLR_MS(stageStart));
+    ZSLR_VLOG(label, "serialized node read: %zu bytes (%.0f ms)", cabLen, ZSLR_MS(stageStart));
     if (reserved && codec->unreserve) {
         codec->unreserve(codec->user, reserved);
         reserved = 0;
@@ -1743,7 +1746,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
     stageStart = CACurrentMediaTime();
     if (zslr_scan_textures(cab, cabLen, &textures, &texCount, &result->parseFailures, &tablePos, &objectCount, err, errLen) != 0) goto done;
     result->texturesTotal = texCount;
-    ZSLR_LOG(label, "scan: %u Texture2D parsed, %u parse failure(s) (%.0f ms)", texCount, result->parseFailures, ZSLR_MS(stageStart));
+    ZSLR_VLOG(label, "scan: %u Texture2D parsed, %u parse failure(s) (%.0f ms)", texCount, result->parseFailures, ZSLR_MS(stageStart));
 
     result->stage = "select candidates";
     cands = (const ZSLRTexture **)malloc(((size_t)texCount + 1) * sizeof(*cands));
@@ -1798,7 +1801,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         }
         result->zeroReason = texCount == 0 ? "no Texture2D objects" : names[best];
     }
-    ZSLR_LOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u; %u inline)",
+    ZSLR_VLOG(label, "candidates: %u of %u Texture2D (skipped: format %u, mips %u, dims %u, pixel limits %u, size mismatch %u, stream range %u, name filter %u, path mismatch %u, overlap %u; %u inline)",
              candCount, texCount, fFormat, fMips, fDims, fPixels, fSize, fRange, fName, fPath, fOverlap, inlCount);
     if (loc == 1 && candCount == 0) {
         result->noStream = 1;
@@ -1817,7 +1820,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         projected += zslr_astc_size(t->width, t->height, zslr_block(), zslr_block());
     }
     if (candCount > 0) {
-        ZSLR_LOG(label, "projected: %llu -> %llu bytes at %ux%u, peak per-texture working set %llu MB, bundle base %llu MB", (unsigned long long)result->candidateBytes,
+        ZSLR_VLOG(label, "projected: %llu -> %llu bytes at %ux%u, peak per-texture working set %llu MB, bundle base %llu MB", (unsigned long long)result->candidateBytes,
                  (unsigned long long)projected, zslr_block(), zslr_block(), ZSLR_MB(peakTexture), ZSLR_MB(result->workingSetEstimate));
     }
 
@@ -1924,7 +1927,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         ZSLR_LOG(label, "result cap of %llu MB reached, %u texture(s) left unconverted", ZSLR_MB(policy->maxResultBytes), capSkipped);
     }
     result->converted = convCount;
-    ZSLR_LOG(label, "transcode pass done: %u converted, %u failed (%.1fs)", convCount, result->rejected, ZSLR_MS(stageStart) / 1000.0);
+    ZSLR_VLOG(label, "transcode pass done: %u converted, %u failed (%.1fs)", convCount, result->rejected, ZSLR_MS(stageStart) / 1000.0);
     if (convCount == 0) {
         result->outcome = "all candidates failed";
         rc = ZSLR_OK;
@@ -1983,7 +1986,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         goto done;
     }
     writerOpen = 1;
-    ZSLR_LOG(label, "rewriting %llu bytes of stream with %u replaced region(s)", (unsigned long long)b.totalUncompressed, rcount);
+    ZSLR_VLOG(label, "rewriting %llu bytes of stream with %u replaced region(s)", (unsigned long long)b.totalUncompressed, rcount);
     uint64_t cursor = 0;
     for (uint32_t i = 0; i < rcount; i++) {
         if (regions[i].absolute < cursor) {
@@ -2005,7 +2008,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         pl_err(err, errLen, "tail copy failed from %llu", (unsigned long long)cursor);
         goto done;
     }
-    ZSLR_LOG(label, "stream rewritten (%.1fs), finalizing container", ZSLR_MS(stageStart) / 1000.0);
+    ZSLR_VLOG(label, "stream rewritten (%.1fs), finalizing container", ZSLR_MS(stageStart) / 1000.0);
     result->stage = "finalize container";
     stageStart = CACurrentMediaTime();
     rc = zslr_writer_finish(&writer, &b, outPath, err, errLen);
@@ -2014,7 +2017,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         rc = ZSLR_ERR;
         goto done;
     }
-    ZSLR_LOG(label, "container finalized (%.1fs), verifying", ZSLR_MS(stageStart) / 1000.0);
+    ZSLR_VLOG(label, "container finalized (%.1fs), verifying", ZSLR_MS(stageStart) / 1000.0);
     result->stage = "verify";
     stageStart = CACurrentMediaTime();
     if (pl_verify(outPath, conv, convCount, textures, err, errLen) != 0) {
@@ -2022,7 +2025,7 @@ static int zslr_process_bundle(const char *label, const char *srcPath, const cha
         rc = ZSLR_ERR;
         goto done;
     }
-    ZSLR_LOG(label, "verified %u converted texture(s) (%.1fs)", convCount, ZSLR_MS(stageStart) / 1000.0);
+    ZSLR_VLOG(label, "verified %u converted texture(s) (%.1fs)", convCount, ZSLR_MS(stageStart) / 1000.0);
     result->wroteOutput = 1;
     result->outcome = "written";
     rc = ZSLR_OK;
@@ -2065,7 +2068,7 @@ static const NSUInteger kZSLowResMaxRetries = 2;
 static const NSTimeInterval kZSLowResWarningPause = 8.0;
 static const useconds_t kZSLowResConstrainedSleep = 25000;
 #define ZSLR_MAX_WORKERS 8
-static const NSUInteger kZSLowResMaxWorkers = ZSLR_MAX_WORKERS;
+static const NSUInteger kZSLowResMaxWorkers = 4;
 
 typedef struct {
     NSUInteger index;
@@ -2090,6 +2093,10 @@ static BOOL g_zslrHoldPaused = NO;
 static NSUInteger g_zslrMaxWorkers = 1;
 static int g_zslrLastState = -1;
 static double g_zslrLastWaitLog = 0;
+static double g_zslrLastProgressLog = 0;
+static _Atomic uint64_t g_zslrGpuBusyNs;
+static _Atomic uint64_t g_zslrGpuBlocks;
+static volatile uint32_t g_zslrChunkBlocks = 16384u;
 static NSUInteger g_zslrNoStream = 0;
 static NSMutableArray<NSDictionary *> *g_zslrItems;
 static _Atomic uint64_t g_zslrBundleReserved;
@@ -2171,7 +2178,10 @@ static NSUInteger zslr_allowed_workers(void) {
         static const char *names[] = { "full speed", "half speed", "single worker", "paused: low memory", "paused: memory warning cooldown", "memory reading unavailable", "single worker: low memory for too long" };
         ZLog(@"[LowRes] throttle: %s, %lu/%lu worker(s) allowed, available %lld MB", names[state], (unsigned long)allowed, (unsigned long)maxWorkers,
              (long long)(avail / (1024 * 1024)));
-        if (state == 3) malloc_zone_pressure_relief(NULL, 0);
+        if (state == 3) {
+            zslr_pool_drain();
+            malloc_zone_pressure_relief(NULL, 0);
+        }
     }
     if (gaveUp) {
         ZLog(@"[LowRes] stopping: available memory stayed below %lld MB for %.0fs (now %lld MB), progress is saved", (long long)(kZSLowResSlowLaneMin / (1024 * 1024)),
@@ -2259,10 +2269,30 @@ static void zslr_codec_release(void *user, uint64_t need) {
 
 static void zslr_codec_progress(void *user, uint32_t delta) {
     ZSLRWorker *worker = (ZSLRWorker *)user;
+    double now = CACurrentMediaTime();
+    BOOL logLine = NO;
+    NSUInteger processed = 0;
+    NSUInteger total = 0;
+    double rate = 0;
+    double elapsed = 0;
     os_unfair_lock_lock(&g_zslrLock);
     g_zslrStatus.texturesProcessed += delta;
     if (worker && worker->index < ZSLR_MAX_WORKERS) g_zslrWorkerDone[worker->index] += delta;
+    if (now - g_zslrLastProgressLog >= 10.0) {
+        g_zslrLastProgressLog = now;
+        processed = g_zslrStatus.texturesProcessed;
+        total = g_zslrStatus.texturesTotal;
+        elapsed = g_zslrTranscodeStart > 0 ? now - g_zslrTranscodeStart : 0;
+        rate = elapsed > 0 ? (double)processed / elapsed : 0;
+        logLine = YES;
+    }
     os_unfair_lock_unlock(&g_zslrLock);
+    if (logLine) {
+        double gpuSeconds = (double)atomic_load(&g_zslrGpuBusyNs) / 1e9;
+        double gpuBlocks = (double)atomic_load(&g_zslrGpuBlocks);
+        ZLog(@"[LowRes] progress: %lu/%lu texture(s), %.1f texture(s)/s, GPU time %.1fs of %.1fs wall, %.1f blocks/ms, chunk %u blocks", (unsigned long)processed, (unsigned long)total, rate,
+             gpuSeconds, elapsed, gpuSeconds > 0 ? gpuBlocks / (gpuSeconds * 1000.0) : 0.0, (unsigned)g_zslrChunkBlocks);
+    }
 }
 
 static void zslr_job_drain(ZSLRJob *job, void *worker) {
@@ -2305,11 +2335,11 @@ static void zslr_codec_parallel(void *user, uint32_t count, ZSLRTaskFn task, voi
     g_zslrJobs[owner->index] = &job;
     os_unfair_lock_unlock(&g_zslrJobLock);
     zslr_job_drain(&job, owner);
-    while (atomic_load(&job.finished) < count) usleep(200);
+    while (atomic_load(&job.finished) < count) usleep(500);
     os_unfair_lock_lock(&g_zslrJobLock);
     g_zslrJobs[owner->index] = NULL;
     os_unfair_lock_unlock(&g_zslrJobLock);
-    while (atomic_load(&job.helpers) > 0) usleep(200);
+    while (atomic_load(&job.helpers) > 0) usleep(500);
 }
 
 static BOOL zslr_ledger_skips(NSDictionary *item) {
@@ -2358,10 +2388,13 @@ typedef struct {
     uint32_t quality;
 } ZSLRGPUParams;
 
-static const double kZSLRChunkTargetMs = 120.0;
+static const double kZSLRChunkTargetMs = 4.0;
+static const double kZSLRChunkCapMs = 8.0;
 static const uint32_t kZSLRChunkMinBlocks = 4096u;
-static const uint32_t kZSLRChunkMaxBlocks = 65536u;
-static volatile uint32_t g_zslrChunkBlocks = 8192u;
+static const uint32_t kZSLRChunkMaxBlocks = 131072u;
+static os_unfair_lock g_zslrChunkLock = OS_UNFAIR_LOCK_INIT;
+static double g_zslrRateSmooth = 0;
+static double g_zslrRateBest = 0;
 #define ZSLR_TRANSCODE_REJECTED 1
 static const double kZSLowResMinPSNR = 27.0;
 
@@ -2369,6 +2402,7 @@ static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
 static id<MTLCommandQueue> g_zslrMetalQueue;
 static id<MTLLibrary> g_zslrMetalLibrary;
+static id<MTLCommandQueue> g_zslrMetalQueues[ZSLR_MAX_WORKERS];
 static id<MTLComputePipelineState> g_zslrMetalPipelines[6];
 static BOOL g_zslrMetalInitialized = NO;
 static NSString *g_zslrMetalError;
@@ -2413,7 +2447,10 @@ static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, BOOL fast,
         if (!function) {
             g_zslrMetalError = @"Metal encoder function is missing";
         } else {
-            g_zslrMetalPipelines[slot] = [g_zslrMetalDevice newComputePipelineStateWithFunction:function error:&error];
+            MTLComputePipelineDescriptor *pipelineDescriptor = [[MTLComputePipelineDescriptor alloc] init];
+            pipelineDescriptor.computeFunction = function;
+            pipelineDescriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
+            g_zslrMetalPipelines[slot] = [g_zslrMetalDevice newComputePipelineStateWithDescriptor:pipelineDescriptor options:MTLPipelineOptionNone reflection:nil error:&error];
             if (!g_zslrMetalPipelines[slot]) g_zslrMetalError = error.localizedDescription ?: @"Unable to create Metal encoder pipeline";
         }
     }
@@ -2425,12 +2462,36 @@ static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, BOOL fast,
 }
 
 static void zslr_note_chunk(id<MTLCommandBuffer> commandBuffer, uint32_t blocks) {
-    double ms = (commandBuffer.GPUEndTime - commandBuffer.GPUStartTime) * 1000.0;
-    if (ms <= 0.0 || blocks == 0) return;
-    double want = kZSLRChunkTargetMs / (ms / (double)blocks);
-    want = MIN(MAX(want, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
-    double next = (double)g_zslrChunkBlocks * 0.5 + want * 0.5;
-    g_zslrChunkBlocks = (uint32_t)MIN(MAX(next, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
+    double seconds = commandBuffer.GPUEndTime - commandBuffer.GPUStartTime;
+    if (seconds <= 0.0 || blocks == 0) return;
+    double ms = seconds * 1000.0;
+    atomic_fetch_add(&g_zslrGpuBusyNs, (uint64_t)(seconds * 1e9));
+    atomic_fetch_add(&g_zslrGpuBlocks, (uint64_t)blocks);
+    os_unfair_lock_lock(&g_zslrChunkLock);
+    uint32_t current = g_zslrChunkBlocks;
+    if ((double)blocks >= 0.9 * (double)current) {
+        double rate = (double)blocks / ms;
+        g_zslrRateSmooth = g_zslrRateSmooth > 0.0 ? g_zslrRateSmooth * 0.6 + rate * 0.4 : rate;
+        g_zslrRateBest = MAX(g_zslrRateBest * 0.998, g_zslrRateSmooth);
+        double next = (double)current;
+        if (ms > kZSLRChunkCapMs) next = (double)current * 0.75;
+        else if (ms < kZSLRChunkTargetMs || g_zslrRateSmooth < 0.9 * g_zslrRateBest) next = (double)current * 1.3;
+        g_zslrChunkBlocks = (uint32_t)MIN(MAX(next, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
+    }
+    os_unfair_lock_unlock(&g_zslrChunkLock);
+}
+
+static id<MTLCommandQueue> zslr_queue_for(void *user) {
+    NSUInteger index = user ? ((ZSLRWorker *)user)->index : 0;
+    if (index >= ZSLR_MAX_WORKERS) index = 0;
+    os_unfair_lock_lock(&g_zslrMetalLock);
+    id<MTLCommandQueue> queue = g_zslrMetalQueues[index];
+    if (!queue) {
+        queue = [g_zslrMetalDevice newCommandQueue] ?: g_zslrMetalQueue;
+        g_zslrMetalQueues[index] = queue;
+    }
+    os_unfair_lock_unlock(&g_zslrMetalLock);
+    return queue;
 }
 
 static MTLPixelFormat zslr_source_pixel_format(BOOL srgb) {
@@ -2438,8 +2499,219 @@ static MTLPixelFormat zslr_source_pixel_format(BOOL srgb) {
 }
 
 
+static os_unfair_lock g_zslrPoolLock = OS_UNFAIR_LOCK_INIT;
+static NSMutableDictionary<NSNumber *, NSMutableArray<id<MTLBuffer>> *> *g_zslrBufferPool;
+static NSMutableDictionary<NSString *, NSMutableArray<id<MTLTexture>> *> *g_zslrTexturePool;
+static uint64_t g_zslrPoolBytes = 0;
+static const uint64_t kZSLRPoolCapBytes = 48ull * 1024ull * 1024ull;
+
+static void zslr_pool_drain(void) {
+    os_unfair_lock_lock(&g_zslrPoolLock);
+    NSMutableDictionary *buffers = g_zslrBufferPool;
+    NSMutableDictionary *textures = g_zslrTexturePool;
+    g_zslrBufferPool = nil;
+    g_zslrTexturePool = nil;
+    g_zslrPoolBytes = 0;
+    os_unfair_lock_unlock(&g_zslrPoolLock);
+    [buffers removeAllObjects];
+    [textures removeAllObjects];
+}
+
+static id<MTLBuffer> zslr_pool_take_buffer(size_t length) {
+    id<MTLBuffer> buffer = nil;
+    os_unfair_lock_lock(&g_zslrPoolLock);
+    NSMutableArray<id<MTLBuffer>> *list = g_zslrBufferPool[@(length)];
+    buffer = list.lastObject;
+    if (buffer) {
+        [list removeLastObject];
+        g_zslrPoolBytes -= MIN(g_zslrPoolBytes, (uint64_t)buffer.allocatedSize);
+    }
+    os_unfair_lock_unlock(&g_zslrPoolLock);
+    if (buffer) return buffer;
+    return [g_zslrMetalDevice newBufferWithLength:length options:MTLResourceStorageModeShared];
+}
+
+static void zslr_pool_give_buffer(id<MTLBuffer> buffer) {
+    if (!buffer) return;
+    uint64_t size = buffer.allocatedSize;
+    NSNumber *key = @(buffer.length);
+    os_unfair_lock_lock(&g_zslrPoolLock);
+    if (g_zslrPoolBytes + size <= kZSLRPoolCapBytes) {
+        if (!g_zslrBufferPool) g_zslrBufferPool = [NSMutableDictionary dictionary];
+        NSMutableArray<id<MTLBuffer>> *list = g_zslrBufferPool[key];
+        if (!list) {
+            list = [NSMutableArray array];
+            g_zslrBufferPool[key] = list;
+        }
+        [list addObject:buffer];
+        g_zslrPoolBytes += size;
+    }
+    os_unfair_lock_unlock(&g_zslrPoolLock);
+}
+
+static NSString *zslr_texture_key(uint32_t width, uint32_t height, BOOL srgb) {
+    return [NSString stringWithFormat:@"%u.%u.%d", width, height, srgb ? 1 : 0];
+}
+
+static id<MTLTexture> zslr_pool_take_texture(uint32_t width, uint32_t height, BOOL srgb) {
+    NSString *key = zslr_texture_key(width, height, srgb);
+    id<MTLTexture> texture = nil;
+    os_unfair_lock_lock(&g_zslrPoolLock);
+    NSMutableArray<id<MTLTexture>> *list = g_zslrTexturePool[key];
+    texture = list.lastObject;
+    if (texture) {
+        [list removeLastObject];
+        g_zslrPoolBytes -= MIN(g_zslrPoolBytes, (uint64_t)texture.allocatedSize);
+    }
+    os_unfair_lock_unlock(&g_zslrPoolLock);
+    if (texture) return texture;
+    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:zslr_source_pixel_format(srgb)
+                                                                                           width:width
+                                                                                          height:height
+                                                                                       mipmapped:NO];
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.usage = MTLTextureUsageShaderRead;
+    return [g_zslrMetalDevice newTextureWithDescriptor:descriptor];
+}
+
+static void zslr_pool_give_texture(id<MTLTexture> texture, uint32_t width, uint32_t height, BOOL srgb) {
+    if (!texture) return;
+    NSString *key = zslr_texture_key(width, height, srgb);
+    uint64_t size = texture.allocatedSize;
+    os_unfair_lock_lock(&g_zslrPoolLock);
+    if (g_zslrPoolBytes + size <= kZSLRPoolCapBytes) {
+        if (!g_zslrTexturePool) g_zslrTexturePool = [NSMutableDictionary dictionary];
+        NSMutableArray<id<MTLTexture>> *list = g_zslrTexturePool[key];
+        if (!list) {
+            list = [NSMutableArray array];
+            g_zslrTexturePool[key] = list;
+        }
+        [list addObject:texture];
+        g_zslrPoolBytes += size;
+    }
+    os_unfair_lock_unlock(&g_zslrPoolLock);
+}
+
+static _Atomic uint32_t g_zslrPaceUs;
+static _Atomic int g_zslrPaceBusy;
+static dispatch_source_t g_zslrPaceTimer;
+static double g_zslrPaceEwma;
+
+static void zslr_pace_start(void) {
+    if (g_zslrPaceTimer) return;
+    g_zslrPaceEwma = 0;
+    atomic_store(&g_zslrPaceUs, 0u);
+    atomic_store(&g_zslrPaceBusy, 0);
+    atomic_store(&g_zslrGpuBusyNs, 0ull);
+    atomic_store(&g_zslrGpuBlocks, 0ull);
+    os_unfair_lock_lock(&g_zslrChunkLock);
+    g_zslrChunkBlocks = 16384u;
+    g_zslrRateSmooth = 0;
+    g_zslrRateBest = 0;
+    os_unfair_lock_unlock(&g_zslrChunkLock);
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+    dispatch_queue_t queue = dispatch_queue_create("zs.lowres.pace", attr);
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, 50ull * NSEC_PER_MSEC, 10ull * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        int expected = 0;
+        if (!atomic_compare_exchange_strong(&g_zslrPaceBusy, &expected, 1)) return;
+        double sent = CACurrentMediaTime();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            double latency = (CACurrentMediaTime() - sent) * 1000.0;
+            g_zslrPaceEwma = g_zslrPaceEwma * 0.6 + latency * 0.4;
+            uint32_t pace = 0;
+            if (g_zslrPaceEwma >= 40.0) pace = 12000u;
+            else if (g_zslrPaceEwma >= 22.0) pace = 4000u;
+            uint32_t previous = atomic_exchange(&g_zslrPaceUs, pace);
+            atomic_store(&g_zslrPaceBusy, 0);
+            if ((previous == 0) != (pace == 0)) {
+                ZLog(@"[LowRes] pacing: %u ms delay per GPU chunk (main thread latency %.1f ms)", pace / 1000u, g_zslrPaceEwma);
+            }
+        });
+    });
+    g_zslrPaceTimer = timer;
+    dispatch_resume(timer);
+}
+
+static void zslr_pace_stop(void) {
+    dispatch_source_t timer = g_zslrPaceTimer;
+    g_zslrPaceTimer = nil;
+    if (timer) dispatch_source_cancel(timer);
+    atomic_store(&g_zslrPaceUs, 0u);
+}
+
+typedef struct {
+    atomic_int failed;
+    char error[160];
+} ZSLRGPUState;
+
+static int zslr_gpu_run(id<MTLCommandQueue> queue, id<MTLComputePipelineState> pipeline, id<MTLTexture> sourceTexture, id<MTLBuffer> outputBuffer, id<MTLBuffer> metricBuffer,
+                        uint32_t width, uint32_t height, uint32_t block, uint32_t blocksX, uint32_t blocksY, int srgb, uint32_t quality,
+                        char *why, size_t whyLen) {
+    NSUInteger groupWidth = MAX((NSUInteger)1, pipeline.threadExecutionWidth);
+    NSUInteger groupHeight = MIN((NSUInteger)4, MAX((NSUInteger)1, pipeline.maxTotalThreadsPerThreadgroup / groupWidth));
+    MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
+    dispatch_group_t finished = dispatch_group_create();
+    dispatch_semaphore_t gate = dispatch_semaphore_create(2);
+    ZSLRGPUState state;
+    atomic_init(&state.failed, 0);
+    state.error[0] = 0;
+    ZSLRGPUState *statePtr = &state;
+    int rc = 0;
+    uint32_t rowOffset = 0;
+    while (rowOffset < blocksY && atomic_load(&state.failed) == 0) {
+        uint32_t pace = atomic_load(&g_zslrPaceUs);
+        if (pace) usleep(pace);
+        uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
+        rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
+        uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
+        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, quality };
+        dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER);
+        id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = commandBuffer ? [commandBuffer computeCommandEncoder] : nil;
+        if (!commandBuffer || !encoder) {
+            dispatch_semaphore_signal(gate);
+            ZSLR_WHY("Metal command encoding unavailable");
+            rc = -1;
+            break;
+        }
+        [encoder setComputePipelineState:pipeline];
+        [encoder setTexture:sourceTexture atIndex:0];
+        [encoder setBuffer:outputBuffer offset:0 atIndex:0];
+        [encoder setBytes:&params length:sizeof(params) atIndex:1];
+        [encoder setBuffer:metricBuffer offset:0 atIndex:2];
+        MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
+                                           (rowCount + groupHeight - 1) / groupHeight,
+                                           1);
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
+        [encoder endEncoding];
+        uint32_t chunkBlocks = rowCount * blocksX;
+        dispatch_group_enter(finished);
+        [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+            if (completed.status != MTLCommandBufferStatusCompleted) {
+                int expected = 0;
+                if (atomic_compare_exchange_strong(&statePtr->failed, &expected, 1)) {
+                    snprintf(statePtr->error, sizeof(statePtr->error), "%s", completed.error.localizedDescription.UTF8String ?: "unknown error");
+                }
+            } else {
+                zslr_note_chunk(completed, chunkBlocks);
+            }
+            dispatch_semaphore_signal(gate);
+            dispatch_group_leave(finished);
+        }];
+        [commandBuffer commit];
+        rowOffset += rowCount;
+    }
+    dispatch_group_wait(finished, DISPATCH_TIME_FOREVER);
+    if (rc == 0 && atomic_load(&state.failed) != 0) {
+        ZSLR_WHY("Metal ASTC kernel failed: %s", state.error[0] ? state.error : "unknown error");
+        rc = -1;
+    }
+    return rc;
+}
+
 static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t srcLen, uint32_t width, uint32_t height, int srgb, uint8_t **out, size_t *outLen, char *why, size_t whyLen) {
-    (void)user;
     if (out) *out = NULL;
     if (outLen) *outLen = 0;
     if (why && whyLen) why[0] = 0;
@@ -2463,13 +2735,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     }
 
     double phase = CACurrentMediaTime();
-    MTLTextureDescriptor *sourceDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:zslr_source_pixel_format(srgb != 0)
-                                                                                                   width:width
-                                                                                                  height:height
-                                                                                               mipmapped:NO];
-    sourceDescriptor.storageMode = MTLStorageModeShared;
-    sourceDescriptor.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> sourceTexture = [g_zslrMetalDevice newTextureWithDescriptor:sourceDescriptor];
+    id<MTLTexture> sourceTexture = zslr_pool_take_texture(width, height, srgb != 0);
     if (!sourceTexture) {
         ZSLR_WHY("Metal cannot allocate ASTC 6x6 source texture");
         return -1;
@@ -2481,82 +2747,46 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     double decodeMs = ZSLR_MS(phase);
 
     size_t metricLen = blockCount * sizeof(float);
-    id<MTLBuffer> outputBuffer = [g_zslrMetalDevice newBufferWithLength:encodedLen options:MTLResourceStorageModeShared];
-    id<MTLBuffer> metricBuffer = [g_zslrMetalDevice newBufferWithLength:metricLen options:MTLResourceStorageModeShared];
+    id<MTLBuffer> outputBuffer = zslr_pool_take_buffer(encodedLen);
+    id<MTLBuffer> metricBuffer = zslr_pool_take_buffer(metricLen);
     if (!outputBuffer || !metricBuffer) {
+        zslr_pool_give_texture(sourceTexture, width, height, srgb != 0);
+        zslr_pool_give_buffer(outputBuffer);
+        zslr_pool_give_buffer(metricBuffer);
         ZSLR_WHY("Metal buffer allocation failed for %zu-byte output and %zu-byte metrics", encodedLen, metricLen);
         return -1;
     }
 
-    NSUInteger groupWidth = MAX((NSUInteger)1, pipeline.threadExecutionWidth);
-    NSUInteger groupHeight = MAX((NSUInteger)1, pipeline.maxTotalThreadsPerThreadgroup / groupWidth);
-    MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
-    id<MTLCommandBuffer> pending = nil;
-    uint32_t pendingBlocks = 0;
-    uint32_t rowOffset = 0;
-    while (rowOffset < blocksY) {
-        uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
-        rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
-        uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
-        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, quality };
-        id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
-        if (!commandBuffer || !encoder) {
-            if (pending) [pending waitUntilCompleted];
-            ZSLR_WHY("Metal command encoding unavailable");
-            return -1;
-        }
-        [encoder setComputePipelineState:pipeline];
-        [encoder setTexture:sourceTexture atIndex:0];
-        [encoder setBuffer:outputBuffer offset:0 atIndex:0];
-        [encoder setBytes:&params length:sizeof(params) atIndex:1];
-        [encoder setBuffer:metricBuffer offset:0 atIndex:2];
-        MTLSize threadgroups = MTLSizeMake((blocksX + groupWidth - 1) / groupWidth,
-                                           (rowCount + groupHeight - 1) / groupHeight,
-                                           1);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
-        [encoder endEncoding];
-        [commandBuffer commit];
-        if (pending) {
-            [pending waitUntilCompleted];
-            if (pending.status != MTLCommandBufferStatusCompleted) {
-                [commandBuffer waitUntilCompleted];
-                ZSLR_WHY("Metal ASTC kernel failed: %s", pending.error.localizedDescription.UTF8String ?: "unknown error");
-                return -1;
-            }
-            zslr_note_chunk(pending, pendingBlocks);
-        }
-        pending = commandBuffer;
-        pendingBlocks = rowCount * blocksX;
-        rowOffset += rowCount;
-    }
-    if (pending) {
-        [pending waitUntilCompleted];
-        if (pending.status != MTLCommandBufferStatusCompleted) {
-            ZSLR_WHY("Metal ASTC kernel failed: %s", pending.error.localizedDescription.UTF8String ?: "unknown error");
-            return -1;
-        }
-        zslr_note_chunk(pending, pendingBlocks);
+    int gpuRc = zslr_gpu_run(zslr_queue_for(user), pipeline, sourceTexture, outputBuffer, metricBuffer, width, height, block, blocksX, blocksY, srgb, quality, why, whyLen);
+    zslr_pool_give_texture(sourceTexture, width, height, srgb != 0);
+    if (gpuRc != 0) {
+        zslr_pool_give_buffer(outputBuffer);
+        zslr_pool_give_buffer(metricBuffer);
+        return -1;
     }
     double encodeMs = ZSLR_MS(phase) - decodeMs;
 
     const float *metrics = (const float *)metricBuffer.contents;
     double totalError = 0.0;
     for (size_t i = 0; i < blockCount; i++) totalError += (double)metrics[i];
+    zslr_pool_give_buffer(metricBuffer);
     double pixels = (double)width * (double)height;
     double mse = totalError / (pixels * 4.0);
     double psnr = mse <= 0.0 ? 99.0 : 10.0 * log10((255.0 * 255.0) / mse);
     if (!(psnr >= kZSLowResMinPSNR)) {
+        zslr_pool_give_buffer(outputBuffer);
         ZSLR_WHY("GPU ASTC %ux%u q%u PSNR %.2f dB below %.1f dB (%s, decode %.0f ms, encode %.0f ms)", block, block, quality, psnr, kZSLowResMinPSNR, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
         return ZSLR_TRANSCODE_REJECTED;
     }
 
     uint8_t *encoded = (uint8_t *)malloc(encodedLen);
     if (!encoded) {
+        zslr_pool_give_buffer(outputBuffer);
         ZSLR_WHY("out of memory allocating %zu-byte ASTC output", encodedLen);
         return -1;
     }
     memcpy(encoded, outputBuffer.contents, encodedLen);
+    zslr_pool_give_buffer(outputBuffer);
     *out = encoded;
     *outLen = encodedLen;
     ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, PSNR %.2f dB, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, psnr, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
@@ -3021,6 +3251,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     g_zslrNextItem = 0;
     g_zslrLastState = -1;
     g_zslrLastWaitLog = 0;
+    g_zslrLastProgressLog = 0;
     g_zslrNoStream = 0;
     g_zslrPausedSince = 0;
     g_zslrGaveUp = NO;
@@ -3032,13 +3263,14 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     memset(g_zslrWorkerSeq, 0, sizeof(g_zslrWorkerSeq));
     memset(g_zslrWorkerTotal, 0, sizeof(g_zslrWorkerTotal));
     memset(g_zslrWorkerDone, 0, sizeof(g_zslrWorkerDone));
-    g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
+    g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)2, NSProcessInfo.processInfo.activeProcessorCount - 2));
     os_unfair_lock_unlock(&g_zslrLock);
     ZLog(@"[LowRes] %@ requested at ASTC %ux%u, quality %u, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", zslr_block(), zslr_block(), (unsigned)ZSLowResQualityDefault, (long long)(zslr_available_memory() / (1024 * 1024)));
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         double runStart = CACurrentMediaTime();
         NSFileManager *fm = NSFileManager.defaultManager;
+        if (mode == ZSLowResModeTranscode) zslr_pace_start();
         if (mode == ZSLowResModeTranscode) {
             NSError *dirError = nil;
             if (![fm createDirectoryAtPath:[ZSLowRes stagingDirectory] withIntermediateDirectories:YES attributes:nil error:&dirError]) {
@@ -3122,7 +3354,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
                             again = g_zslrNextItem < g_zslrItems.count;
                             os_unfair_lock_unlock(&g_zslrLock);
                             if (again || !busy) break;
-                            usleep(1000);
+                            usleep(2000);
                         }
                         if (again) continue;
                         break;
@@ -3140,6 +3372,8 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
             });
         }
         dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+        zslr_pace_stop();
+        zslr_pool_drain();
         ZLog(@"[LowRes] all workers finished");
         if (mode == ZSLowResModeTranscode) [ZSLowRes saveLedger];
         if (mode == ZSLowResModeTranscode && !g_zslrCancel) {
@@ -3172,7 +3406,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     snprintf(label, sizeof(label), "w%lu %s", (unsigned long)worker->index, key.UTF8String ?: "?");
     double started = CACurrentMediaTime();
 
-    ZSLR_LOG(label, "[%lu/%lu] begin: %.1f MB, available %lld MB", (unsigned long)(index + 1), (unsigned long)total, (double)size / 1048576.0,
+    ZSLR_VLOG(label, "[%lu/%lu] begin: %.1f MB, available %lld MB", (unsigned long)(index + 1), (unsigned long)total, (double)size / 1048576.0,
              (long long)(zslr_available_memory() / (1024 * 1024)));
 
     if (!scanOnly) {
@@ -3185,7 +3419,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
             g_zslrStatus.bundlesSkipped++;
             g_zslrStatus.bundlesDone++;
             os_unfair_lock_unlock(&g_zslrLock);
-            ZSLR_LOG(label, "[%lu/%lu] skipped: ledger state '%s' matches size and mtime", (unsigned long)(index + 1), (unsigned long)total, state.UTF8String ?: "?");
+            ZSLR_VLOG(label, "[%lu/%lu] skipped: ledger state '%s' matches size and mtime", (unsigned long)(index + 1), (unsigned long)total, state.UTF8String ?: "?");
             return;
         }
     }
