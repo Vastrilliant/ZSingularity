@@ -2355,16 +2355,25 @@ typedef struct {
     uint32_t srgb;
     uint32_t rowOffset;
     uint32_t rowCount;
+    uint32_t quality;
 } ZSLRGPUParams;
+
+static const uint32_t kZSLRGPUQuality = 1u;
+static const double kZSLRChunkTargetMs = 120.0;
+static const uint32_t kZSLRChunkMinBlocks = 4096u;
+static const uint32_t kZSLRChunkMaxBlocks = 65536u;
+static volatile uint32_t g_zslrChunkBlocks = 8192u;
 
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
 static id<MTLCommandQueue> g_zslrMetalQueue;
-static id<MTLComputePipelineState> g_zslrMetalPipeline;
+static id<MTLLibrary> g_zslrMetalLibrary;
+static id<MTLComputePipelineState> g_zslrMetalPipelines[3];
 static BOOL g_zslrMetalInitialized = NO;
 static NSString *g_zslrMetalError;
 
-static BOOL zslr_metal_prepare(char *why, size_t whyLen) {
+static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, char *why, size_t whyLen) {
+    NSUInteger slot = block == 12 ? 2 : (block == 10 ? 1 : 0);
     os_unfair_lock_lock(&g_zslrMetalLock);
     if (!g_zslrMetalInitialized) {
         g_zslrMetalInitialized = YES;
@@ -2384,29 +2393,42 @@ static BOOL zslr_metal_prepare(char *why, size_t whyLen) {
                     g_zslrMetalError = @"Embedded Metal library is missing";
                 } else {
                     dispatch_data_t data = dispatch_data_create(libraryBytes, librarySize, dispatch_get_main_queue(), ^{});
-                    id<MTLLibrary> library = [g_zslrMetalDevice newLibraryWithData:data error:&error];
-                    if (!library) {
+                    g_zslrMetalLibrary = [g_zslrMetalDevice newLibraryWithData:data error:&error];
+                    if (!g_zslrMetalLibrary) {
                         g_zslrMetalError = error.localizedDescription ?: @"Unable to load embedded Metal library";
                     } else {
-                        id<MTLFunction> function = [library newFunctionWithName:@"zslr_astc_encode"];
-                        if (!function) {
-                            g_zslrMetalError = @"Metal encoder function is missing";
-                        } else {
-                            g_zslrMetalPipeline = [g_zslrMetalDevice newComputePipelineStateWithFunction:function error:&error];
-                            if (!g_zslrMetalPipeline) g_zslrMetalError = error.localizedDescription ?: @"Unable to create Metal encoder pipeline";
-                            else g_zslrMetalQueue = [g_zslrMetalDevice newCommandQueue];
-                            if (!g_zslrMetalQueue && !g_zslrMetalError) g_zslrMetalError = @"Unable to create Metal command queue";
-                        }
+                        g_zslrMetalQueue = [g_zslrMetalDevice newCommandQueue];
+                        if (!g_zslrMetalQueue) g_zslrMetalError = @"Unable to create Metal command queue";
                     }
                 }
             }
         }
     }
-    BOOL ready = g_zslrMetalDevice && g_zslrMetalQueue && g_zslrMetalPipeline;
+    if (!g_zslrMetalError && !g_zslrMetalPipelines[slot]) {
+        NSError *error = nil;
+        NSString *name = [NSString stringWithFormat:@"zslr_astc_encode_%u", block == 12 ? 12u : (block == 10 ? 10u : 8u)];
+        id<MTLFunction> function = [g_zslrMetalLibrary newFunctionWithName:name];
+        if (!function) {
+            g_zslrMetalError = @"Metal encoder function is missing";
+        } else {
+            g_zslrMetalPipelines[slot] = [g_zslrMetalDevice newComputePipelineStateWithFunction:function error:&error];
+            if (!g_zslrMetalPipelines[slot]) g_zslrMetalError = error.localizedDescription ?: @"Unable to create Metal encoder pipeline";
+        }
+    }
+    id<MTLComputePipelineState> pipeline = (g_zslrMetalDevice && g_zslrMetalQueue) ? g_zslrMetalPipelines[slot] : nil;
     NSString *errorText = g_zslrMetalError;
     os_unfair_lock_unlock(&g_zslrMetalLock);
-    if (!ready) ZSLR_WHY("%s", errorText.UTF8String ?: "Metal transcoder initialization failed");
-    return ready;
+    if (!pipeline) ZSLR_WHY("%s", errorText.UTF8String ?: "Metal transcoder initialization failed");
+    return pipeline;
+}
+
+static void zslr_note_chunk(id<MTLCommandBuffer> commandBuffer, uint32_t blocks) {
+    double ms = (commandBuffer.GPUEndTime - commandBuffer.GPUStartTime) * 1000.0;
+    if (ms <= 0.0 || blocks == 0) return;
+    double want = kZSLRChunkTargetMs / (ms / (double)blocks);
+    want = MIN(MAX(want, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
+    double next = (double)g_zslrChunkBlocks * 0.5 + want * 0.5;
+    g_zslrChunkBlocks = (uint32_t)MIN(MAX(next, (double)kZSLRChunkMinBlocks), (double)kZSLRChunkMaxBlocks);
 }
 
 static MTLPixelFormat zslr_source_pixel_format(BOOL srgb) {
@@ -2423,9 +2445,10 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         ZSLR_WHY("invalid Metal transcode input");
         return -1;
     }
-    if (!zslr_metal_prepare(why, whyLen)) return -1;
-
     uint32_t block = zslr_block();
+    id<MTLComputePipelineState> pipeline = zslr_metal_prepare(block, why, whyLen);
+    if (!pipeline) return -1;
+
     uint32_t blocksX = (width + block - 1) / block;
     uint32_t blocksY = (height + block - 1) / block;
     size_t blockCount = (size_t)blocksX * blocksY;
@@ -2460,21 +2483,25 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         return -1;
     }
 
-    NSUInteger groupWidth = MAX((NSUInteger)1, g_zslrMetalPipeline.threadExecutionWidth);
-    NSUInteger groupHeight = MAX((NSUInteger)1, g_zslrMetalPipeline.maxTotalThreadsPerThreadgroup / groupWidth);
+    NSUInteger groupWidth = MAX((NSUInteger)1, pipeline.threadExecutionWidth);
+    NSUInteger groupHeight = MAX((NSUInteger)1, pipeline.maxTotalThreadsPerThreadgroup / groupWidth);
     MTLSize threadsPerGroup = MTLSizeMake(groupWidth, groupHeight, 1);
-    uint32_t rowsPerChunk = MAX((uint32_t)1, (uint32_t)(8192u / MAX(blocksX, 1u)));
-    rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
-    for (uint32_t rowOffset = 0; rowOffset < blocksY; rowOffset += rowsPerChunk) {
+    id<MTLCommandBuffer> pending = nil;
+    uint32_t pendingBlocks = 0;
+    uint32_t rowOffset = 0;
+    while (rowOffset < blocksY) {
+        uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
+        rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
         uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
-        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount };
+        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, kZSLRGPUQuality };
         id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
         if (!commandBuffer || !encoder) {
+            if (pending) [pending waitUntilCompleted];
             ZSLR_WHY("Metal command encoding unavailable");
             return -1;
         }
-        [encoder setComputePipelineState:g_zslrMetalPipeline];
+        [encoder setComputePipelineState:pipeline];
         [encoder setTexture:sourceTexture atIndex:0];
         [encoder setBuffer:outputBuffer offset:0 atIndex:0];
         [encoder setBytes:&params length:sizeof(params) atIndex:1];
@@ -2484,11 +2511,26 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerGroup];
         [encoder endEncoding];
         [commandBuffer commit];
-        [commandBuffer waitUntilCompleted];
-        if (commandBuffer.status != MTLCommandBufferStatusCompleted) {
-            ZSLR_WHY("Metal ASTC kernel failed: %s", commandBuffer.error.localizedDescription.UTF8String ?: "unknown error");
+        if (pending) {
+            [pending waitUntilCompleted];
+            if (pending.status != MTLCommandBufferStatusCompleted) {
+                [commandBuffer waitUntilCompleted];
+                ZSLR_WHY("Metal ASTC kernel failed: %s", pending.error.localizedDescription.UTF8String ?: "unknown error");
+                return -1;
+            }
+            zslr_note_chunk(pending, pendingBlocks);
+        }
+        pending = commandBuffer;
+        pendingBlocks = rowCount * blocksX;
+        rowOffset += rowCount;
+    }
+    if (pending) {
+        [pending waitUntilCompleted];
+        if (pending.status != MTLCommandBufferStatusCompleted) {
+            ZSLR_WHY("Metal ASTC kernel failed: %s", pending.error.localizedDescription.UTF8String ?: "unknown error");
             return -1;
         }
+        zslr_note_chunk(pending, pendingBlocks);
     }
     double encodeMs = ZSLR_MS(phase) - decodeMs;
 
@@ -2500,7 +2542,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u multi-mode encode, %s, decode %.0f ms, encode %.0f ms", block, block, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u multi-mode encode q%u, %s, decode %.0f ms, encode %.0f ms", block, block, kZSLRGPUQuality, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
