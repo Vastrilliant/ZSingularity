@@ -2358,7 +2358,7 @@ typedef struct {
     uint32_t quality;
 } ZSLRGPUParams;
 
-static const uint32_t kZSLRGPUQuality = 1u;
+static volatile uint32_t g_zslrQuality = ZSLowResQualityDefault;
 static const double kZSLRChunkTargetMs = 120.0;
 static const uint32_t kZSLRChunkMinBlocks = 4096u;
 static const uint32_t kZSLRChunkMaxBlocks = 65536u;
@@ -2368,12 +2368,12 @@ static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
 static id<MTLCommandQueue> g_zslrMetalQueue;
 static id<MTLLibrary> g_zslrMetalLibrary;
-static id<MTLComputePipelineState> g_zslrMetalPipelines[3];
+static id<MTLComputePipelineState> g_zslrMetalPipelines[6];
 static BOOL g_zslrMetalInitialized = NO;
 static NSString *g_zslrMetalError;
 
-static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, char *why, size_t whyLen) {
-    NSUInteger slot = block == 12 ? 2 : (block == 10 ? 1 : 0);
+static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, BOOL fast, char *why, size_t whyLen) {
+    NSUInteger slot = (block == 12 ? 2 : (block == 10 ? 1 : 0)) + (fast ? 3 : 0);
     os_unfair_lock_lock(&g_zslrMetalLock);
     if (!g_zslrMetalInitialized) {
         g_zslrMetalInitialized = YES;
@@ -2406,7 +2406,8 @@ static id<MTLComputePipelineState> zslr_metal_prepare(uint32_t block, char *why,
     }
     if (!g_zslrMetalError && !g_zslrMetalPipelines[slot]) {
         NSError *error = nil;
-        NSString *name = [NSString stringWithFormat:@"zslr_astc_encode_%u", block == 12 ? 12u : (block == 10 ? 10u : 8u)];
+        uint32_t nameBlock = block == 12 ? 12u : (block == 10 ? 10u : 8u);
+        NSString *name = fast ? [NSString stringWithFormat:@"zslr_astc_encode_fast_%u", nameBlock] : [NSString stringWithFormat:@"zslr_astc_encode_%u", nameBlock];
         id<MTLFunction> function = [g_zslrMetalLibrary newFunctionWithName:name];
         if (!function) {
             g_zslrMetalError = @"Metal encoder function is missing";
@@ -2446,7 +2447,8 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         return -1;
     }
     uint32_t block = zslr_block();
-    id<MTLComputePipelineState> pipeline = zslr_metal_prepare(block, why, whyLen);
+    uint32_t quality = MIN(g_zslrQuality, (uint32_t)ZSLowResQualityMax);
+    id<MTLComputePipelineState> pipeline = zslr_metal_prepare(block, quality == 0, why, whyLen);
     if (!pipeline) return -1;
 
     uint32_t blocksX = (width + block - 1) / block;
@@ -2493,7 +2495,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
         uint32_t rowsPerChunk = MAX((uint32_t)1, g_zslrChunkBlocks / MAX(blocksX, 1u));
         rowsPerChunk = MAX(rowsPerChunk, (uint32_t)groupHeight);
         uint32_t rowCount = MIN(rowsPerChunk, blocksY - rowOffset);
-        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, kZSLRGPUQuality };
+        ZSLRGPUParams params = { width, height, block, blocksX, srgb ? 1u : 0u, rowOffset, rowCount, quality };
         id<MTLCommandBuffer> commandBuffer = [g_zslrMetalQueue commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [commandBuffer computeCommandEncoder];
         if (!commandBuffer || !encoder) {
@@ -2542,7 +2544,7 @@ static int zslr_codec_transcode_inner(void *user, const uint8_t *src, size_t src
     memcpy(encoded, outputBuffer.contents, encodedLen);
     *out = encoded;
     *outLen = encodedLen;
-    ZSLR_WHY("GPU ASTC %ux%u multi-mode encode q%u, %s, decode %.0f ms, encode %.0f ms", block, block, kZSLRGPUQuality, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
+    ZSLR_WHY("GPU ASTC %ux%u %s encode q%u, %s, decode %.0f ms, encode %.0f ms", block, block, quality == 0 ? "fast" : "multi-mode", quality, srgb ? "sRGB" : "linear", decodeMs, encodeMs);
     return 0;
 }
 
@@ -2984,7 +2986,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     return YES;
 }
 
-- (BOOL)startWithMode:(ZSLowResMode)mode blockSize:(NSUInteger)blockSize completion:(void (^)(ZSLowResStatus))completion {
+- (BOOL)startWithMode:(ZSLowResMode)mode blockSize:(NSUInteger)blockSize quality:(NSUInteger)quality completion:(void (^)(ZSLowResStatus))completion {
     os_unfair_lock_lock(&g_zslrLock);
     if (g_zslrStatus.running || g_zslrPreparing) {
         os_unfair_lock_unlock(&g_zslrLock);
@@ -2998,6 +3000,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     g_zslrStatus.running = YES;
     g_zslrStatus.mode = mode;
     g_zslrTargetBlock = (blockSize == 10 || blockSize == 12) ? (uint32_t)blockSize : 8;
+    g_zslrQuality = (uint32_t)MIN(quality, (NSUInteger)ZSLowResQualityMax);
     g_zslrCancel = NO;
     g_zslrHoldPaused = NO;
     g_zslrWarningUntil = 0;
@@ -3017,7 +3020,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     memset(g_zslrWorkerDone, 0, sizeof(g_zslrWorkerDone));
     g_zslrMaxWorkers = MIN(kZSLowResMaxWorkers, MAX((NSUInteger)1, NSProcessInfo.processInfo.activeProcessorCount));
     os_unfair_lock_unlock(&g_zslrLock);
-    ZLog(@"[LowRes] %@ requested at ASTC %ux%u, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", zslr_block(), zslr_block(), (long long)(zslr_available_memory() / (1024 * 1024)));
+    ZLog(@"[LowRes] %@ requested at ASTC %ux%u, quality %u/%u, available memory %lld MB", mode == ZSLowResModeScan ? @"scan" : @"transcode", zslr_block(), zslr_block(), g_zslrQuality, (unsigned)ZSLowResQualityMax, (long long)(zslr_available_memory() / (1024 * 1024)));
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         double runStart = CACurrentMediaTime();

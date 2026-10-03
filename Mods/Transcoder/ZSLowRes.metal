@@ -12,6 +12,33 @@ struct ZSLRGPUParams {
     uint quality;
 };
 
+struct ZSLRTuning {
+    uchar cfgCount;
+    uchar sPasses;
+    uchar sIterA;
+    uchar sIterB;
+    uchar rPasses;
+    uchar rIterA;
+    uchar rIterB;
+    uchar refineMax;
+    float refineRatio;
+    float exitErr;
+};
+
+constant ZSLRTuning kZSLRTunings[11] = {
+{1,1,1,1,0,0,0,0,1.0f,1e30f},
+{1,1,1,1,0,0,0,0,1.0f,1e30f},
+{2,0,0,1,1,2,2,1,1.0f,16.0f},
+{3,0,0,1,1,2,3,1,1.0f,12.0f},
+{5,0,0,1,2,3,3,1,1.0f,8.0f},
+{10,0,0,1,2,3,4,1,1.0f,4.0f},
+{10,0,0,1,2,3,5,1,1.0f,3.0f},
+{10,0,0,1,3,4,5,2,1.10f,2.5f},
+{10,0,0,1,3,4,6,2,1.15f,2.0f},
+{10,0,0,1,3,4,6,2,1.20f,1.5f},
+{10,0,0,1,3,4,6,2,1.25f,1.0f}
+};
+
 struct ZSLRConfig {
     uchar wx;
     uchar wy;
@@ -1351,33 +1378,17 @@ static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool
         init1[c] = clamp(mean[c] + axis[c] * tmax, 0.0f, 1.0f);
     }
 
-    uint sPasses = 1u;
-    uint sIterA = 2u;
-    uint sIterB = 2u;
-    uint rPasses = 3u;
-    uint rIterA = 4u;
-    uint rIterB = 6u;
-    uint refineMax = 2u;
-    float refineRatio = 1e30f;
-    float exitErr = -1.0f;
-    if (quality == 1u) {
-        sPasses = 0u;
-        sIterA = 0u;
-        sIterB = 1u;
-        refineRatio = 1.25f;
-        exitErr = 1.0f;
-    } else if (quality >= 2u) {
-        sPasses = 0u;
-        sIterA = 0u;
-        sIterB = 1u;
-        rPasses = 2u;
-        rIterA = 3u;
-        rIterB = 4u;
-        refineMax = 1u;
-        exitErr = 4.0f;
-    }
-    float exitTotal = exitErr * count * float(dims);
-    bool keep = quality != 0u;
+    ZSLRTuning tune = kZSLRTunings[min(quality, 10u)];
+    uint sPasses = tune.sPasses;
+    uint sIterA = tune.sIterA;
+    uint sIterB = tune.sIterB;
+    uint rPasses = tune.rPasses;
+    uint rIterA = tune.rIterA;
+    uint rIterB = tune.rIterB;
+    uint refineMax = tune.refineMax;
+    float refineRatio = tune.refineRatio;
+    float exitTotal = tune.exitErr * count * float(dims);
+    cfgCount = min(cfgCount, uint(tune.cfgCount));
 
     float scores[16];
     float bestErr = 1e30f;
@@ -1398,14 +1409,14 @@ static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool
                                          cfgs[ci].wx, cfgs[ci].wy, cfgs[ci].bits, levels, dims,
                                          init0, init1, sPasses, sIterA, sIterB, tmpEp, tmpGrid);
         scores[ci] = err;
-        if (keep && err < bestErr) {
+        if (err < bestErr) {
             bestErr = err;
             bestCfg = ci;
             bestLevels = levels;
             for (uint i = 0; i < dims * 2u; i++) bestEp[i] = tmpEp[i];
             for (uint j = 0; j < cfgs[ci].wx * cfgs[ci].wy; j++) bestGridBytes[j] = tmpGrid[j];
         }
-        if (keep && err <= exitTotal) {
+        if (err <= exitTotal) {
             done = true;
             break;
         }
@@ -1466,6 +1477,226 @@ static void zslr_encode_block(thread const uint *pk, thread const uint *vm, bool
 }
 
 template <uint BW>
+static void zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
+    const uint N = BW * BW;
+    out[0] = 0u;
+    out[1] = 0u;
+    out[2] = 0u;
+    out[3] = 0u;
+
+    float px[N * 4];
+    for (uint i = 0; i < N; i++) {
+        float4 p = zslr_unpack(pk[i]);
+        px[i * 4] = p.x;
+        px[i * 4 + 1] = p.y;
+        px[i * 4 + 2] = p.z;
+        px[i * 4 + 3] = p.w;
+    }
+
+    float lo[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float hi[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float mean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint i = 0; i < N; i++) {
+        for (uint c = 0; c < 4; c++) {
+            float v = px[i * 4 + c];
+            lo[c] = min(lo[c], v);
+            hi[c] = max(hi[c], v);
+            mean[c] += v;
+        }
+    }
+    float range = 0.0f;
+    for (uint c = 0; c < 4; c++) {
+        mean[c] /= float(N);
+        range = max(range, hi[c] - lo[c]);
+    }
+
+    if (range <= 1.5f / 255.0f) {
+        uint q[4];
+        for (uint c = 0; c < 4; c++) q[c] = uint(round(clamp(mean[c], 0.0f, 1.0f) * 65535.0f));
+        out[0] = 0xFFFFFDFCu;
+        out[1] = 0xFFFFFFFFu;
+        out[2] = q[0] | (q[1] << 16);
+        out[3] = q[2] | (q[3] << 16);
+        return;
+    }
+
+    bool rgba = lo[3] < 0.998f;
+    uint dims = rgba ? 4u : 3u;
+
+    float cov[16];
+    for (uint i = 0; i < 16; i++) cov[i] = 0.0f;
+    for (uint i = 0; i < N; i++) {
+        float d[4];
+        for (uint c = 0; c < dims; c++) d[c] = px[i * 4 + c] - mean[c];
+        for (uint a = 0; a < dims; a++) {
+            for (uint b = 0; b < dims; b++) cov[a * 4 + b] += d[a] * d[b];
+        }
+    }
+    float axis[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint c = 0; c < dims; c++) axis[c] = hi[c] - lo[c];
+    for (uint it = 0; it < 6; it++) {
+        float nv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float len = 0.0f;
+        for (uint a = 0; a < dims; a++) {
+            for (uint b = 0; b < dims; b++) nv[a] += cov[a * 4 + b] * axis[b];
+            len += nv[a] * nv[a];
+        }
+        len = sqrt(len);
+        if (len < 1e-12f) break;
+        for (uint a = 0; a < dims; a++) axis[a] = nv[a] / len;
+    }
+
+    float proj[N];
+    uint lab[N];
+    float tmin = 1e30f;
+    float tmax = -1e30f;
+    for (uint i = 0; i < N; i++) {
+        float t = 0.0f;
+        for (uint c = 0; c < dims; c++) t += (px[i * 4 + c] - mean[c]) * axis[c];
+        proj[i] = t;
+        tmin = min(tmin, t);
+        tmax = max(tmax, t);
+    }
+    uint ones = 0;
+    for (uint i = 0; i < N; i++) {
+        lab[i] = proj[i] > 0.0f ? 1u : 0u;
+        ones += lab[i];
+    }
+    if (ones == 0u || ones == N) {
+        float mid = 0.5f * (tmin + tmax);
+        for (uint i = 0; i < N; i++) lab[i] = proj[i] > mid ? 1u : 0u;
+    }
+
+    float c0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float c1[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint it = 0; it <= 4; it++) {
+        float s0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float s1[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        uint n0 = 0;
+        uint n1 = 0;
+        for (uint i = 0; i < N; i++) {
+            if (lab[i]) {
+                n1++;
+                for (uint c = 0; c < dims; c++) s1[c] += px[i * 4 + c];
+            } else {
+                n0++;
+                for (uint c = 0; c < dims; c++) s0[c] += px[i * 4 + c];
+            }
+        }
+        if (n0 == 0u || n1 == 0u) {
+            for (uint c = 0; c < dims; c++) {
+                c0[c] = lo[c];
+                c1[c] = hi[c];
+            }
+            break;
+        }
+        for (uint c = 0; c < dims; c++) {
+            c0[c] = s0[c] / float(n0);
+            c1[c] = s1[c] / float(n1);
+        }
+        if (it == 4u) break;
+        bool changed = false;
+        for (uint i = 0; i < N; i++) {
+            float d0 = 0.0f;
+            float d1 = 0.0f;
+            for (uint c = 0; c < dims; c++) {
+                float v = px[i * 4 + c];
+                d0 += (v - c0[c]) * (v - c0[c]);
+                d1 += (v - c1[c]) * (v - c1[c]);
+            }
+            uint nl = d1 < d0 ? 1u : 0u;
+            if (nl != lab[i]) changed = true;
+            lab[i] = nl;
+        }
+        if (!changed) break;
+    }
+
+    uint i0[4] = { 0u, 0u, 0u, 0u };
+    uint i1[4] = { 0u, 0u, 0u, 0u };
+    uint d0v[4] = { 0u, 0u, 0u, 0u };
+    uint d1v[4] = { 0u, 0u, 0u, 0u };
+    for (uint c = 0; c < dims; c++) {
+        uint v0 = uint(round(clamp(c0[c], 0.0f, 1.0f) * 255.0f));
+        uint v1 = uint(round(clamp(c1[c], 0.0f, 1.0f) * 255.0f));
+        if (rgba) {
+            i0[c] = kZSLREnc48[v0];
+            i1[c] = kZSLREnc48[v1];
+            d0v[c] = kZSLRDec48[i0[c]];
+            d1v[c] = kZSLRDec48[i1[c]];
+        } else {
+            i0[c] = kZSLREnc192[v0];
+            i1[c] = kZSLREnc192[v1];
+            d0v[c] = kZSLRDec192[i0[c]];
+            d1v[c] = kZSLRDec192[i1[c]];
+        }
+    }
+    if (d1v[0] + d1v[1] + d1v[2] < d0v[0] + d0v[1] + d0v[2]) {
+        for (uint c = 0; c < dims; c++) {
+            uint t = i0[c]; i0[c] = i1[c]; i1[c] = t;
+            t = d0v[c]; d0v[c] = d1v[c]; d1v[c] = t;
+        }
+    }
+
+    for (uint i = 0; i < N; i++) {
+        float e0 = 0.0f;
+        float e1 = 0.0f;
+        for (uint c = 0; c < dims; c++) {
+            float v = px[i * 4 + c] * 255.0f;
+            e0 += (v - float(d0v[c])) * (v - float(d0v[c]));
+            e1 += (v - float(d1v[c])) * (v - float(d1v[c]));
+        }
+        lab[i] = e1 < e0 ? 1u : 0u;
+    }
+
+    uint node[64];
+    for (uint i = 0; i < 64; i++) node[i] = 0u;
+    if (BW == 8u) {
+        for (uint i = 0; i < 64; i++) node[i] = lab[i];
+    } else {
+        float num[64];
+        float den[64];
+        for (uint i = 0; i < 64; i++) {
+            num[i] = 0.0f;
+            den[i] = 0.0f;
+        }
+        uint ds = (1024u + BW / 2u) / (BW - 1u);
+        for (uint t = 0; t < BW; t++) {
+            for (uint s = 0; s < BW; s++) {
+                uint gs = ((ds * s) * 7u + 32u) >> 6;
+                uint gt = ((ds * t) * 7u + 32u) >> 6;
+                uint js = gs >> 4;
+                uint jt = gt >> 4;
+                uint fs = gs & 15u;
+                uint ft = gt & 15u;
+                uint v0 = js + 8u * jt;
+                uint w11 = (fs * ft + 8u) >> 4;
+                uint w10 = ft - w11;
+                uint w01 = fs - w11;
+                uint w00 = 16u - fs - ft + w11;
+                float target = float(lab[t * BW + s]);
+                if (w00) { num[v0] += float(w00) * target; den[v0] += float(w00); }
+                if (w01) { num[v0 + 1u] += float(w01) * target; den[v0 + 1u] += float(w01); }
+                if (w10) { num[v0 + 8u] += float(w10) * target; den[v0 + 8u] += float(w10); }
+                if (w11) { num[v0 + 9u] += float(w11) * target; den[v0 + 9u] += float(w11); }
+            }
+        }
+        for (uint i = 0; i < 64; i++) node[i] = (den[i] > 0.0f && num[i] / den[i] >= 0.5f) ? 1u : 0u;
+    }
+
+    uint vals[8];
+    for (uint c = 0; c < dims; c++) {
+        vals[c * 2] = i0[c];
+        vals[c * 2 + 1] = i1[c];
+    }
+    zslr_put(out, 0, 11, 0x544u);
+    zslr_put(out, 13, 4, rgba ? 12u : 8u);
+    zslr_put_trits(out, 17, vals, dims * 2u, rgba ? 4u : 6u);
+    for (uint i = 0; i < 64; i++) {
+        if (node[i]) out[(127u - i) >> 5] |= 1u << ((127u - i) & 31u);
+    }
+}
+
+template <uint BW, bool FAST>
 static void zslr_encode_kernel(texture2d<float, access::sample> source, device uint *encoded,
                                constant ZSLRGPUParams &params, uint2 gid) {
     uint blockY = gid.y + params.rowOffset;
@@ -1498,6 +1729,17 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
         }
     }
 
+    uint blk[4];
+    if (FAST) {
+        zslr_encode_block_fast<BW>(pk, blk);
+        uint fastIndex = (blockY * params.blocksX + gid.x) * 4;
+        encoded[fastIndex] = blk[0];
+        encoded[fastIndex + 1] = blk[1];
+        encoded[fastIndex + 2] = blk[2];
+        encoded[fastIndex + 3] = blk[3];
+        return;
+    }
+
     constant ZSLRConfig *cfgs = kZSLRConfigs8;
     constant uchar *ivT = kZSLRIv8;
     constant uint *ipwT = kZSLRIpw8;
@@ -1515,7 +1757,6 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
     }
     bool full = x0 + BW <= params.width && y0 + BW <= params.height;
 
-    uint blk[4];
     zslr_encode_block<BW>(pk, vm, full, cfgs, ivT, ipwT, denT, 10u, params.quality, blk);
 
     uint outputIndex = (blockY * params.blocksX + gid.x) * 4;
@@ -1530,7 +1771,7 @@ kernel void zslr_astc_encode_8(
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<8>(source, encoded, params, gid);
+    zslr_encode_kernel<8, false>(source, encoded, params, gid);
 }
 
 kernel void zslr_astc_encode_10(
@@ -1538,7 +1779,7 @@ kernel void zslr_astc_encode_10(
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<10>(source, encoded, params, gid);
+    zslr_encode_kernel<10, false>(source, encoded, params, gid);
 }
 
 kernel void zslr_astc_encode_12(
@@ -1546,5 +1787,29 @@ kernel void zslr_astc_encode_12(
     device uint *encoded [[buffer(0)]],
     constant ZSLRGPUParams &params [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]) {
-    zslr_encode_kernel<12>(source, encoded, params, gid);
+    zslr_encode_kernel<12, false>(source, encoded, params, gid);
+}
+
+kernel void zslr_astc_encode_fast_8(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<8, true>(source, encoded, params, gid);
+}
+
+kernel void zslr_astc_encode_fast_10(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<10, true>(source, encoded, params, gid);
+}
+
+kernel void zslr_astc_encode_fast_12(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<12, true>(source, encoded, params, gid);
 }
