@@ -237,6 +237,8 @@ static BOOL ZSAEReadStringValue(ZSAEReader *reader, NSString **out) {
     NSString *value = [[NSString alloc] initWithBytes:bytes length:length encoding:NSUTF8StringEncoding];
     if (!value) value = [[NSString alloc] initWithBytes:bytes length:length encoding:NSWindowsCP1252StringEncoding];
     reader->pos += length;
+    uint64_t aligned = ZSAEAlign4(reader->pos, reader->start);
+    reader->pos = aligned > reader->limit ? reader->limit : aligned;
     if (out) *out = value;
     return YES;
 }
@@ -1581,7 +1583,17 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
     BOOL ok = ZSAEParseSerializedFile(serializedData, &assets, INT64_MIN, NULL, error);
     [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
     if (!ok) return @[];
-    return assets ?: @[];
+    return [(assets ?: @[]) sortedArrayUsingComparator:^NSComparisonResult(ZSAssetExplorerAsset *a, ZSAssetExplorerAsset *b) {
+        NSString *nameA = a.assetName.length > 0 ? a.assetName : (a.typeName ?: @"");
+        NSString *nameB = b.assetName.length > 0 ? b.assetName : (b.typeName ?: @"");
+        NSComparisonResult result = [nameA compare:nameB options:NSCaseInsensitiveSearch | NSNumericSearch];
+        if (result != NSOrderedSame) return result;
+        result = [(a.typeName ?: @"") caseInsensitiveCompare:(b.typeName ?: @"")];
+        if (result != NSOrderedSame) return result;
+        if (a.pathID < b.pathID) return NSOrderedAscending;
+        if (a.pathID > b.pathID) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
 }
 
 @end
