@@ -761,17 +761,24 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
-static void zs_style_pill_icon_button_flat(UIButton *button, UIImage *image, UIColor *tintColor) {
+static void zs_style_arrow_only_button(UIButton *button, UIImage *image, UIColor *tintColor, BOOL dropShadow) {
     zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
-    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
-    button.layer.borderWidth = 1;
-    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
-    button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.cornerRadius = 15;
-    button.clipsToBounds = YES;
+    button.backgroundColor = UIColor.clearColor;
+    button.layer.borderWidth = 0;
+    button.layer.cornerRadius = 0;
+    button.clipsToBounds = NO;
+    button.layer.masksToBounds = NO;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    if (dropShadow) {
+        button.layer.shadowColor = UIColor.blackColor.CGColor;
+        button.layer.shadowOpacity = 0.65;
+        button.layer.shadowRadius = 3;
+        button.layer.shadowOffset = CGSizeMake(0, 1.5);
+    } else {
+        button.layer.shadowOpacity = 0;
+    }
 }
 
 static UIImage *zs_mods_doctor_button_icon(NSString *sfSymbolName, CGFloat pointSize) {
@@ -6092,6 +6099,7 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIStackView *assetExplorerControlsStack;
 @property (nonatomic, strong) UIButton *assetExplorerFilterButton;
 @property (nonatomic, strong) UIButton *assetExplorerSortButton;
+@property (nonatomic, strong) UIButton *assetExplorerShareButton;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerBundle *> *assetExplorerDisplayedBundles;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerDisplayedAssets;
 @property (nonatomic, copy) NSString *assetExplorerFilterKind;
@@ -8204,6 +8212,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerControlsStack = nil;
     self.assetExplorerFilterButton = nil;
     self.assetExplorerSortButton = nil;
+    self.assetExplorerShareButton = nil;
     self.assetExplorerFilterKind = nil;
     self.assetExplorerSortKind = nil;
     self.assetExplorerSortBySize = NO;
@@ -15849,7 +15858,16 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     sortButton.tag = 0;
     self.assetExplorerSortButton = sortButton;
 
-    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[filterButton, sortButton]];
+    UIButton *shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    shareButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(shareButton, [UIImage systemImageNamed:@"square.and.arrow.up" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.9]);
+    [shareButton addTarget:self action:@selector(zs_assetExplorerShareBundleTapped) forControlEvents:UIControlEventTouchUpInside];
+    shareButton.hidden = YES;
+    shareButton.enabled = NO;
+    shareButton.alpha = 0.35;
+    self.assetExplorerShareButton = shareButton;
+
+    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[shareButton, filterButton, sortButton]];
     controlsStack.translatesAutoresizingMaskIntoConstraints = NO;
     controlsStack.axis = UILayoutConstraintAxisHorizontal;
     controlsStack.alignment = UIStackViewAlignmentCenter;
@@ -15860,13 +15878,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIImage *nextImage = [UIImage systemImageNamed:@"chevron.right" withConfiguration:symbolConfig];
     UIButton *prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     prevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_flat(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_arrow_only_button(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9], NO);
     [prevButton addTarget:self action:@selector(zs_assetExplorerTexturePrevTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTexturePrevButton = prevButton;
 
     UIButton *nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     nextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_flat(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_arrow_only_button(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9], NO);
     [nextButton addTarget:self action:@selector(zs_assetExplorerTextureNextTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTextureNextButton = nextButton;
 
@@ -15890,13 +15908,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UIButton *pagePrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     pagePrevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_flat(pagePrevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_arrow_only_button(pagePrevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9], YES);
     [pagePrevButton addTarget:self action:@selector(zs_assetExplorerPagePrevTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerPagePrevButton = pagePrevButton;
 
     UIButton *pageNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     pageNextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_flat(pageNextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_arrow_only_button(pageNextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9], YES);
     [pageNextButton addTarget:self action:@selector(zs_assetExplorerPageNextTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerPageNextButton = pageNextButton;
 
@@ -15949,6 +15967,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [searchContainer.widthAnchor constraintEqualToConstant:150],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
+        [shareButton.widthAnchor constraintEqualToConstant:30],
+        [shareButton.heightAnchor constraintEqualToConstant:30],
         [filterButton.widthAnchor constraintEqualToConstant:30],
         [filterButton.heightAnchor constraintEqualToConstant:30],
         [sortButton.widthAnchor constraintEqualToConstant:30],
@@ -16423,6 +16443,68 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     }];
 }
 
+- (void)zs_assetExplorerShareBundleTapped {
+    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
+    NSArray<ZSAssetExplorerAsset *> *assets = self.assetExplorerAssets;
+    if (!bundle || assets.count == 0 || self.assetExplorerTextureOpen) return;
+
+    NSDictionary<NSString *, NSNumber *> *counts = [self zs_assetExplorerKindCounts];
+    NSMutableArray<NSDictionary *> *kinds = [NSMutableArray array];
+    for (NSString *kind in [self zs_assetExplorerSortedKinds:counts]) {
+        [kinds addObject:@{@"kind": kind, @"count": counts[kind]}];
+    }
+    NSDictionary *payload = @{
+        @"bundle": bundle.displayName ?: @"",
+        @"cab": bundle.cabIdentifier ?: @"",
+        @"totalAssets": @(assets.count),
+        @"kindCount": @(kinds.count),
+        @"kinds": kinds,
+    };
+
+    NSString *baseName = bundle.displayName.length > 0 ? bundle.displayName : (bundle.cabIdentifier.length > 0 ? bundle.cabIdentifier : @"Bundle");
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-_. "];
+    NSMutableString *safeName = [NSMutableString string];
+    for (NSUInteger i = 0; i < baseName.length; i++) {
+        unichar c = [baseName characterAtIndex:i];
+        [safeName appendString:[allowed characterIsMember:c] ? [NSString stringWithCharacters:&c length:1] : @"_"];
+    }
+    NSString *fileName = [[safeName stringByAppendingString:@"_asset_kinds"] stringByAppendingPathExtension:@"json"];
+
+    UIButton *sourceButton = self.assetExplorerShareButton;
+    sourceButton.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
+        NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSAssetExport-%@", NSUUID.UUID.UUIDString]];
+        NSString *path = [directory stringByAppendingPathComponent:fileName];
+        BOOL written = NO;
+        if (json.length > 0 && [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil]) {
+            written = [json writeToFile:path atomically:YES];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf zs_assetExplorerSyncControls];
+            if (!written || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerSelectedBundle != bundle) {
+                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
+                return;
+            }
+            UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+            activityVC.popoverPresentationController.sourceView = sourceButton;
+            activityVC.popoverPresentationController.sourceRect = sourceButton.bounds;
+            activityVC.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
+            };
+            UIViewController *presenter = zs_key_window().rootViewController;
+            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+            [presenter presentViewController:activityVC animated:YES completion:nil];
+            UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [haptic impactOccurred];
+        });
+    });
+}
+
 - (void)zs_assetExplorerResetViewState {
     self.assetExplorerSearchField.text = @"";
     self.assetExplorerFilterKind = nil;
@@ -16548,6 +16630,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerControlsStack.hidden = textureOpen;
     self.assetExplorerFilterButton.hidden = !inBundle;
     self.assetExplorerSortButton.hidden = NO;
+    BOOL canShare = inBundle && self.assetExplorerAssets.count > 0;
+    self.assetExplorerShareButton.hidden = !inBundle;
+    self.assetExplorerShareButton.enabled = canShare;
+    self.assetExplorerShareButton.alpha = canShare ? 1 : 0.35;
     NSString *placeholder = inBundle ? @"Search assets" : @"Search bundles";
     self.assetExplorerSearchField.attributedPlaceholder =
         [[NSAttributedString alloc] initWithString:placeholder
@@ -16718,6 +16804,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     cell.detailTextLabel.adjustsFontSizeToFitWidth = YES;
     cell.detailTextLabel.minimumScaleFactor = 0.5;
     cell.accessoryType = self.assetExplorerSelectedBundle ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
     UIView *selected = [[UIView alloc] init];
     selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
@@ -16734,7 +16821,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
         cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
-        cell.accessoryType = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID] ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        BOOL previewable = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID];
+        cell.accessoryType = previewable ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        if (!previewable) {
+            cell.textLabel.textColor = [UIColor colorWithWhite:1 alpha:0.28];
+            cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.16];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        }
     }
     return cell;
 }
