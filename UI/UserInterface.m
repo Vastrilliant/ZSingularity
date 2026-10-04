@@ -3267,7 +3267,7 @@ static UIColor *zs_lowres_original_folder_color(void) {
 }
 
 static UIImage *zs_lowres_folder_image(void) {
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:44 weight:UIImageSymbolWeightRegular];
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:32 weight:UIImageSymbolWeightRegular];
     return [[UIImage systemImageNamed:@"folder.fill" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
@@ -3282,12 +3282,12 @@ static UIView *zs_make_lowres_folder_slot(NSString *name, UIImageView * __strong
     [slot addSubview:icon];
     [slot addSubview:label];
     [NSLayoutConstraint activateConstraints:@[
-        [slot.widthAnchor constraintEqualToConstant:64],
+        [slot.widthAnchor constraintEqualToConstant:52],
         [icon.topAnchor constraintEqualToAnchor:slot.topAnchor],
         [icon.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
-        [icon.widthAnchor constraintEqualToConstant:56],
-        [icon.heightAnchor constraintEqualToConstant:48],
-        [label.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:6],
+        [icon.widthAnchor constraintEqualToConstant:40],
+        [icon.heightAnchor constraintEqualToConstant:32],
+        [label.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:3],
         [label.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
         [label.bottomAnchor constraintEqualToAnchor:slot.bottomAnchor],
     ]];
@@ -3298,10 +3298,10 @@ static UIView *zs_make_lowres_folder_slot(NSString *name, UIImageView * __strong
 static NSAttributedString *zs_lowres_swap_legend(void) {
     NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
     paragraph.alignment = NSTextAlignmentCenter;
-    paragraph.lineSpacing = 2;
+    paragraph.lineSpacing = 1;
     NSString *text = @"Green is the transcoded folder\nBlue is the original folder\n\nClick the swap icon to switch between them, you must restart the game for changes to take effect";
     NSMutableAttributedString *legend = [[NSMutableAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName: zs_mono_font(10, UIFontWeightMedium),
+        NSFontAttributeName: zs_mono_font(9, UIFontWeightMedium),
         NSForegroundColorAttributeName: zs_disclosure_secondary_color(),
         NSParagraphStyleAttributeName: paragraph,
     }];
@@ -3321,7 +3321,7 @@ static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
 
     UIButton *swap = [UIButton buttonWithType:UIButtonTypeSystem];
     swap.translatesAutoresizingMaskIntoConstraints = NO;
-    UIImageSymbolConfiguration *swapConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+    UIImageSymbolConfiguration *swapConfig = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
     [swap setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right" withConfiguration:swapConfig] forState:UIControlStateNormal];
     swap.tintColor = [UIColor colorWithWhite:0.9 alpha:1];
     [swap addTarget:target action:swapAction forControlEvents:UIControlEventTouchUpInside];
@@ -3335,19 +3335,19 @@ static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
 
     [NSLayoutConstraint activateConstraints:@[
         [leftSlot.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [leftSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
+        [leftSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:10],
         [rightSlot.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [rightSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
+        [rightSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:10],
 
         [swap.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
         [swap.centerYAnchor constraintEqualToAnchor:leftIcon.centerYAnchor],
-        [swap.widthAnchor constraintEqualToConstant:44],
-        [swap.heightAnchor constraintEqualToConstant:44],
+        [swap.widthAnchor constraintEqualToConstant:36],
+        [swap.heightAnchor constraintEqualToConstant:36],
 
-        [legend.topAnchor constraintEqualToAnchor:leftSlot.bottomAnchor constant:16],
+        [legend.topAnchor constraintEqualToAnchor:leftSlot.bottomAnchor constant:8],
         [legend.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
         [legend.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
-        [legend.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-12],
+        [legend.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-8],
     ]];
 
     g_zsLowResSwapLeftSlot = leftSlot;
@@ -11250,18 +11250,22 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
     CGFloat distance = CGRectGetMidX(rightSlot.frame) - CGRectGetMidX(leftSlot.frame);
     __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:0.5
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
+    UICubicTimingParameters *easeOut = [[UICubicTimingParameters alloc] initWithControlPoint1:CGPointMake(0.05, 0.85) controlPoint2:CGPointMake(0.15, 1.0)];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:0.24 timingParameters:easeOut];
+    [animator addAnimations:^{
         leftIcon.transform = CGAffineTransformMakeTranslation(distance, 0);
         rightIcon.transform = CGAffineTransformMakeTranslation(-distance, 0);
-    } completion:^(BOOL finished) {
+    }];
+    [animator addCompletion:^(UIViewAnimatingPosition position) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
         leftIcon.transform = CGAffineTransformIdentity;
         rightIcon.transform = CGAffineTransformIdentity;
         [weakSelf zs_lowResApplySwapState:state];
+        [CATransaction commit];
         g_zsLowResSwapBusy = NO;
     }];
+    [animator startAnimation];
 }
 
 - (void)lowResCancelTapped:(UIButton *)sender {
