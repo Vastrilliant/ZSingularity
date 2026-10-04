@@ -19,6 +19,7 @@
 #import "ZSUpdater.h"
 
 #import "UnityBundleTools.h"
+#import "AssetExplorer.h"
 #import "IL2CppIntrospection.h"
 #import "Dumper/ZSDumper.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
@@ -5814,7 +5815,7 @@ static const CGFloat kZSSyslogIndexColumnWidth = 22;
 
 @end
 
-@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate, UIContextMenuInteractionDelegate>
+@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate, UIContextMenuInteractionDelegate, UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UIVisualEffectView *glassContainer;
 @property (nonatomic, strong) UIVisualEffectView *panelGlass;
 @property (nonatomic, strong) UIVisualEffectView *handleGlass;
@@ -6003,6 +6004,17 @@ static const CGFloat kZSSyslogIndexColumnWidth = 22;
 @property (nonatomic, strong) UIButton *memoryUsageAnalyzeButton;
 @property (nonatomic, strong) NSTimer *memoryUsageRefreshTimer;
 @property (nonatomic, assign) BOOL memoryFullScreenOpen;
+@property (nonatomic, assign) BOOL assetExplorerFullScreenOpen;
+@property (nonatomic, strong) UIView *assetExplorerFullScreenOverlay;
+@property (nonatomic, strong) UITableView *assetExplorerTableView;
+@property (nonatomic, strong) UILabel *assetExplorerTitleLabel;
+@property (nonatomic, strong) UILabel *assetExplorerStatusLabel;
+@property (nonatomic, strong) UIButton *assetExplorerBackButton;
+@property (nonatomic, strong) UIButton *assetExplorerCloseButton;
+@property (nonatomic, strong) NSArray<ZSAssetExplorerBundle *> *assetExplorerBundles;
+@property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerAssets;
+@property (nonatomic, strong) ZSAssetExplorerBundle *assetExplorerSelectedBundle;
+@property (nonatomic, assign) NSUInteger assetExplorerGeneration;
 @property (nonatomic, strong) UIView *memoryFullScreenOverlay;
 @property (nonatomic, strong) UIScrollView *memoryFullScreenScrollView;
 @property (nonatomic, strong) UIView *memoryFullScreenContentView;
@@ -7826,6 +7838,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
+    self.assetExplorerFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
     [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
@@ -8067,6 +8080,18 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.browseFieldsContainer = nil;
 
     self.memoryUsageAnalyzeButton = nil;
+    [self.assetExplorerFullScreenOverlay removeFromSuperview];
+    self.assetExplorerFullScreenOverlay = nil;
+    self.assetExplorerTableView = nil;
+    self.assetExplorerTitleLabel = nil;
+    self.assetExplorerStatusLabel = nil;
+    self.assetExplorerBackButton = nil;
+    self.assetExplorerCloseButton = nil;
+    self.assetExplorerBundles = nil;
+    self.assetExplorerAssets = nil;
+    self.assetExplorerSelectedBundle = nil;
+    self.assetExplorerGeneration += 1;
+    self.assetExplorerFullScreenOpen = NO;
     [NSNotificationCenter.defaultCenter removeObserver:self name:UIApplicationDidBecomeActiveNotification object:nil];
     [self.memoryUsageRefreshTimer invalidate];
     self.memoryUsageRefreshTimer = nil;
@@ -8628,6 +8653,7 @@ static const CGFloat kContentFadeHeight = 22;
     [self buildDocsPanel:unityView];
     [self zs_buildSyslogFullScreenPanelIfNeeded];
     [self zs_buildMemoryFullScreenPanelIfNeeded];
+    [self zs_buildAssetExplorerFullScreenPanelIfNeeded];
 
     [self zs_restackPinChrome];
 
@@ -9096,11 +9122,15 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
+    UIButton *assetExplorerButton = zs_make_grouped_action_button(@"Asset Explorer", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [assetExplorerButton addTarget:self action:@selector(assetExplorerTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIView *miscCard = zs_make_grouped_action_card(@[
         customGreetingRow,
         uidRedactorRow,
         disableLiquidGlassRow,
         disableEnkephalinRow,
+        assetExplorerButton,
     ]);
     miscCard.layer.borderWidth = 1;
     miscCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -15374,7 +15404,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_syncReducedPanelFPS {
-    [[FPS120Controller shared] setReducedPanelFPS:self.syslogFullScreenOpen || self.memoryFullScreenOpen];
+    [[FPS120Controller shared] setReducedPanelFPS:self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen];
 }
 
 - (void)setSyslogFullScreenOpen:(BOOL)open {
@@ -15384,6 +15414,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)setMemoryFullScreenOpen:(BOOL)open {
     _memoryFullScreenOpen = open;
+    [self zs_syncReducedPanelFPS];
+}
+
+- (void)setAssetExplorerFullScreenOpen:(BOOL)open {
+    _assetExplorerFullScreenOpen = open;
     [self zs_syncReducedPanelFPS];
 }
 
@@ -15443,13 +15478,16 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     pinch.enabled = YES;
     if (self.memoryPopupScrim || self.pinchDismissInFlight) return;
     if (self.extendedCoverMode && self.panelOpen) {
-        UIView *coverOverlay = self.memoryFullScreenOpen ? self.memoryFullScreenOverlay : (self.syslogFullScreenOpen ? self.syslogFullScreenOverlay : nil);
+        UIView *coverOverlay = self.memoryFullScreenOpen ? self.memoryFullScreenOverlay : (self.assetExplorerFullScreenOpen ? self.assetExplorerFullScreenOverlay : (self.syslogFullScreenOpen ? self.syslogFullScreenOverlay : nil));
         [self zs_pinchDismissCoverOverlay:coverOverlay];
         return;
     }
     if (self.memoryFullScreenOpen) {
         [self zs_playPinchDismissOnOverlay:self.memoryFullScreenOverlay];
         [self zs_closeMemoryFullScreenPanelTapped];
+    } else if (self.assetExplorerFullScreenOpen) {
+        [self zs_playPinchDismissOnOverlay:self.assetExplorerFullScreenOverlay];
+        [self zs_closeAssetExplorerFullScreenPanelTapped];
     } else if (self.syslogFullScreenOpen) {
         [self zs_playPinchDismissOnOverlay:self.syslogFullScreenOverlay];
         [self zs_closeSyslogFullScreenPanelTapped];
@@ -15503,6 +15541,261 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+}
+
+#pragma mark Asset explorer full-screen viewer
+
+- (void)assetExplorerTapped {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    [self zs_openAssetExplorerFullScreenPanel];
+}
+
+- (void)zs_buildAssetExplorerFullScreenPanelIfNeeded {
+    if (self.assetExplorerFullScreenOverlay) return;
+    if (!self.extendedContentClip) return;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:CGRectZero];
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
+    overlay.hidden = YES;
+    overlay.userInteractionEnabled = YES;
+    [self.extendedContentClip addSubview:overlay];
+    zs_force_dark(overlay);
+    self.assetExplorerFullScreenOverlay = overlay;
+    [self zs_installPinchToExitOnView:overlay];
+
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    UIImage *closeImage = [UIImage systemImageNamed:@"xmark" withConfiguration:symbolConfig];
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(closeButton, closeImage, [UIColor colorWithWhite:1 alpha:0.85]);
+    [closeButton addTarget:self action:@selector(zs_closeAssetExplorerFullScreenPanelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:closeButton];
+    self.assetExplorerCloseButton = closeButton;
+
+    UIImage *backImage = [UIImage systemImageNamed:@"chevron.left" withConfiguration:symbolConfig];
+    UIButton *backButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    backButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(backButton, backImage, [UIColor colorWithWhite:1 alpha:0.85]);
+    [backButton addTarget:self action:@selector(zs_assetExplorerBackTapped) forControlEvents:UIControlEventTouchUpInside];
+    backButton.hidden = YES;
+    [overlay addSubview:backButton];
+    self.assetExplorerBackButton = backButton;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = @"Asset Explorer";
+    titleLabel.font = zs_mono_font(12, UIFontWeightSemibold);
+    titleLabel.textColor = [UIColor colorWithWhite:0.96 alpha:1];
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.6;
+    [overlay addSubview:titleLabel];
+    self.assetExplorerTitleLabel = titleLabel;
+
+    UILabel *statusLabel = [[UILabel alloc] init];
+    statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    statusLabel.text = @"Scanning…";
+    statusLabel.font = zs_mono_font(9, UIFontWeightRegular);
+    statusLabel.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+    statusLabel.textAlignment = NSTextAlignmentRight;
+    statusLabel.adjustsFontSizeToFitWidth = YES;
+    statusLabel.minimumScaleFactor = 0.6;
+    [statusLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [overlay addSubview:statusLabel];
+    self.assetExplorerStatusLabel = statusLabel;
+
+    UITableView *tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    tableView.backgroundColor = UIColor.clearColor;
+    tableView.separatorColor = [UIColor colorWithWhite:1 alpha:0.08];
+    tableView.separatorInset = UIEdgeInsetsMake(0, kPanelPadding, 0, kPanelPadding);
+    tableView.showsVerticalScrollIndicator = NO;
+    tableView.showsHorizontalScrollIndicator = NO;
+    tableView.rowHeight = 48;
+    tableView.estimatedRowHeight = 48;
+    tableView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    tableView.dataSource = self;
+    tableView.delegate = self;
+    [overlay addSubview:tableView];
+    self.assetExplorerTableView = tableView;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
+        [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [closeButton.widthAnchor constraintEqualToConstant:30],
+        [closeButton.heightAnchor constraintEqualToConstant:30],
+
+        [backButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [backButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [backButton.widthAnchor constraintEqualToConstant:30],
+        [backButton.heightAnchor constraintEqualToConstant:30],
+
+        [titleLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:backButton.trailingAnchor constant:10],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:statusLabel.leadingAnchor constant:-10],
+
+        [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [statusLabel.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+        [statusLabel.widthAnchor constraintLessThanOrEqualToConstant:180],
+
+        [tableView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [tableView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [tableView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [tableView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
+    ]];
+}
+
+- (void)zs_assetExplorerLoadBundles {
+    self.assetExplorerGeneration += 1;
+    NSUInteger generation = self.assetExplorerGeneration;
+    self.assetExplorerSelectedBundle = nil;
+    self.assetExplorerAssets = @[];
+    self.assetExplorerCloseButton.hidden = NO;
+    self.assetExplorerTitleLabel.text = @"Asset Explorer";
+    self.assetExplorerStatusLabel.text = @"Scanning…";
+    self.assetExplorerBackButton.hidden = YES;
+    self.assetExplorerTableView.hidden = NO;
+    [self.assetExplorerTableView reloadData];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSArray<ZSAssetExplorerBundle *> *bundles = [ZSAssetExplorer cachedBundles:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerGeneration != generation) return;
+            strongSelf.assetExplorerBundles = bundles ?: @[];
+            strongSelf.assetExplorerStatusLabel.text = error ? error.localizedDescription : [NSString stringWithFormat:@"%lu bundle%@", (unsigned long)strongSelf.assetExplorerBundles.count, strongSelf.assetExplorerBundles.count == 1 ? @"" : @"s"];
+            [strongSelf.assetExplorerTableView reloadData];
+        });
+    });
+}
+
+- (void)zs_openAssetExplorerFullScreenPanel {
+    if (!self.panelOpen) return;
+    if (self.assetExplorerFullScreenOpen) return;
+
+    [self zs_buildAssetExplorerFullScreenPanelIfNeeded];
+    if (!self.assetExplorerFullScreenOverlay) return;
+
+    if (self.docsLanguageDropdownOpen) {
+        [self zs_closeDocsLanguageDropdownAnimated:NO];
+    }
+    if (self.syslogFullScreenOpen) {
+        [self.syslogSearchField resignFirstResponder];
+        self.syslogFullScreenOpen = NO;
+        [self zs_syncSyslogButtonState];
+    }
+    if (self.memoryFullScreenOpen) {
+        [self zs_endMemoryAnalysis];
+    }
+
+    self.docsActiveKey = nil;
+    self.assetExplorerFullScreenOpen = YES;
+    self.docsPanelOpen = YES;
+    [self positionPanelAnimated:!self.extendedCoverEntering];
+    [self zs_assetExplorerLoadBundles];
+}
+
+- (void)zs_closeAssetExplorerFullScreenPanelTapped {
+    if (!self.assetExplorerFullScreenOpen) return;
+    [self closeDocsPanel];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerBackTapped {
+    if (!self.assetExplorerSelectedBundle) return;
+    self.assetExplorerGeneration += 1;
+    self.assetExplorerSelectedBundle = nil;
+    self.assetExplorerAssets = @[];
+    self.assetExplorerCloseButton.hidden = NO;
+    self.assetExplorerTitleLabel.text = @"Asset Explorer";
+    self.assetExplorerStatusLabel.text = [NSString stringWithFormat:@"%lu bundle%@", (unsigned long)self.assetExplorerBundles.count, self.assetExplorerBundles.count == 1 ? @"" : @"s"];
+    self.assetExplorerBackButton.hidden = YES;
+    self.assetExplorerTableView.hidden = NO;
+    [self.assetExplorerTableView reloadData];
+    [self.assetExplorerTableView setContentOffset:CGPointZero animated:NO];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerOpenBundle:(ZSAssetExplorerBundle *)bundle {
+    if (!bundle || self.assetExplorerSelectedBundle) return;
+    self.assetExplorerGeneration += 1;
+    NSUInteger generation = self.assetExplorerGeneration;
+    self.assetExplorerSelectedBundle = bundle;
+    self.assetExplorerAssets = @[];
+    self.assetExplorerCloseButton.hidden = YES;
+    self.assetExplorerTitleLabel.text = bundle.displayName;
+    self.assetExplorerStatusLabel.text = @"Reading…";
+    self.assetExplorerBackButton.hidden = NO;
+    self.assetExplorerTableView.hidden = NO;
+    [self.assetExplorerTableView reloadData];
+
+    __weak typeof(self) weakSelf = self;
+    NSString *bundlePath = [bundle.filePath copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSArray<ZSAssetExplorerAsset *> *assets = [ZSAssetExplorer assetsForBundleAtPath:bundlePath error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerGeneration != generation) return;
+            strongSelf.assetExplorerAssets = assets ?: @[];
+            strongSelf.assetExplorerStatusLabel.text = error ? error.localizedDescription : [NSString stringWithFormat:@"%lu asset%@", (unsigned long)strongSelf.assetExplorerAssets.count, strongSelf.assetExplorerAssets.count == 1 ? @"" : @"s"];
+            [strongSelf.assetExplorerTableView reloadData];
+        });
+    });
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (tableView != self.assetExplorerTableView) return 0;
+    return self.assetExplorerSelectedBundle ? (NSInteger)self.assetExplorerAssets.count : (NSInteger)self.assetExplorerBundles.count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString * const identifier = @"zs.asset.explorer.cell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+
+    cell.backgroundColor = UIColor.clearColor;
+    cell.contentView.backgroundColor = UIColor.clearColor;
+    cell.textLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    cell.textLabel.textColor = [UIColor colorWithWhite:0.94 alpha:1];
+    cell.textLabel.numberOfLines = 1;
+    cell.textLabel.adjustsFontSizeToFitWidth = YES;
+    cell.textLabel.minimumScaleFactor = 0.65;
+    cell.detailTextLabel.font = zs_mono_font(9, UIFontWeightRegular);
+    cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.38];
+    cell.detailTextLabel.numberOfLines = 1;
+    cell.detailTextLabel.adjustsFontSizeToFitWidth = YES;
+    cell.detailTextLabel.minimumScaleFactor = 0.5;
+    cell.accessoryType = self.assetExplorerSelectedBundle ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
+    cell.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
+    UIView *selected = [[UIView alloc] init];
+    selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    cell.selectedBackgroundView = selected;
+
+    if (!self.assetExplorerSelectedBundle) {
+        ZSAssetExplorerBundle *bundle = indexPath.row < self.assetExplorerBundles.count ? self.assetExplorerBundles[(NSUInteger)indexPath.row] : nil;
+        cell.textLabel.text = bundle.displayName ?: @"CAB-???????";
+        cell.detailTextLabel.text = bundle.cabIdentifier ?: @"";
+    } else {
+        ZSAssetExplorerAsset *asset = indexPath.row < self.assetExplorerAssets.count ? self.assetExplorerAssets[(NSUInteger)indexPath.row] : nil;
+        NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
+        cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
+    }
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView != self.assetExplorerTableView) return;
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if (self.assetExplorerSelectedBundle) return;
+    if (indexPath.row >= self.assetExplorerBundles.count) return;
+    [self zs_assetExplorerOpenBundle:self.assetExplorerBundles[(NSUInteger)indexPath.row]];
 }
 
 #pragma mark Memory full-screen viewer
@@ -17481,7 +17774,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     CGFloat y = [self zs_handleRestingY];
     CGRect frame = handleElement.frame;
     handleElement.frame = CGRectMake(frame.origin.x, y, frame.size.width, frame.size.height);
-    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
+    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen;
     [self zs_layoutPinnedTabsWithHandleY:y localX:frame.origin.x visible:!fullScreenOpen];
 }
 
@@ -18221,7 +18514,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     CGFloat panelW = self.panelWidth > 0 ? self.panelWidth : kPanelWidth;
     BOOL docsVisible = self.docsPanelOpen && self.docsPanel != nil;
-    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen;
+    BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen;
     BOOL fullScreenChanged = fullScreenOpen != self.panelFullScreenLayoutActive;
     self.panelFullScreenLayoutActive = fullScreenOpen;
     BOOL leftCornersFlatChanged = docsVisible != self.panelLeftCornersFlat;
@@ -18278,6 +18571,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             prepareOverlay(self.docsContentOverlay, !fullScreenOpen);
             prepareOverlay(self.syslogFullScreenOverlay, self.syslogFullScreenOpen);
             prepareOverlay(self.memoryFullScreenOverlay, self.memoryFullScreenOpen);
+            prepareOverlay(self.assetExplorerFullScreenOverlay, self.assetExplorerFullScreenOpen);
         }];
     }
 
@@ -18495,7 +18789,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     self.docsContentOverlay.hidden = YES;
     self.syslogFullScreenOverlay.hidden = YES;
     self.memoryFullScreenOverlay.hidden = YES;
-    for (UIView *overlay in @[self.syslogFullScreenOverlay ?: [NSNull null], self.memoryFullScreenOverlay ?: [NSNull null]]) {
+    self.assetExplorerFullScreenOverlay.hidden = YES;
+    for (UIView *overlay in @[self.syslogFullScreenOverlay ?: [NSNull null], self.memoryFullScreenOverlay ?: [NSNull null], self.assetExplorerFullScreenOverlay ?: [NSNull null]]) {
         if (![overlay isKindOfClass:[UIView class]]) continue;
         overlay.transform = CGAffineTransformIdentity;
         overlay.alpha = 1;
@@ -18511,6 +18806,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     self.memoryFullScreenContentView = nil;
     self.memoryFullScreenScrollView.contentOffset = CGPointZero;
     self.memoryFullScreenStatusLabel.text = @"Scanning…";
+    self.assetExplorerGeneration += 1;
+    self.assetExplorerBundles = @[];
+    self.assetExplorerAssets = @[];
+    self.assetExplorerSelectedBundle = nil;
 }
 
 #pragma mark Post FX continuous reapply

@@ -97,6 +97,7 @@ jobs:
             -I. \
             -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
             Mods/BundleTools/UnityBundleTools.m \
+            Mods/BundleTools/AssetExplorer.m \
             Core/IL2CppIntrospection.m \
             Dumper/ZSDumper.m \
             Core/ZSDumpTypeRegistry.m \
