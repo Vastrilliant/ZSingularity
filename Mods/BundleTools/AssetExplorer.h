@@ -43,15 +43,16 @@ typedef NS_ENUM(NSInteger, ZSAssetExplorerErrorCode) {
 @end
 
 typedef UIImage * _Nullable (^ZSAssetExplorerPageProvider)(NSInteger page, NSError * _Nullable * _Nullable error);
+typedef UIImage * _Nullable (^ZSAssetExplorerLiveFrameProvider)(NSTimeInterval elapsed);
 
 @interface ZSAssetExplorerVisual : NSObject
 @property (nonatomic, copy, nullable) NSString *name;
 @property (nonatomic, copy) NSString *summary;
 @property (nonatomic, copy) NSArray<NSString *> *pageLabels;
 @property (nonatomic, copy, nullable) ZSAssetExplorerPageProvider imageProvider;
-@property (nonatomic, copy, nullable) NSString *text;
-@property (nonatomic, copy, nullable) NSData *exportData;
-@property (nonatomic, copy, nullable) NSString *fileExtension;
+@property (nonatomic, copy, nullable) ZSAssetExplorerLiveFrameProvider liveFrameProvider;
+@property (nonatomic, assign) NSInteger livePageIndex;
+- (BOOL)isLivePage:(NSInteger)page;
 - (nullable UIImage *)imageAtPage:(NSInteger)page error:(NSError * _Nullable * _Nullable)error;
 @end
 
@@ -60,7 +61,6 @@ typedef UIImage * _Nullable (^ZSAssetExplorerPageProvider)(NSInteger page, NSErr
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error;
 + (nullable ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error;
 + (BOOL)hasVisualPreviewForClassID:(int32_t)classID;
-+ (BOOL)classID:(int32_t)a sharesPreviewGroupWithClassID:(int32_t)b;
 + (nullable ZSAssetExplorerVisual *)visualForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path error:(NSError **)error;
 @end
 

@@ -761,24 +761,17 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
-static void zs_style_arrow_only_button(UIButton *button, UIImage *image, UIColor *tintColor, BOOL dropShadow) {
+static void zs_style_pill_icon_button_flat(UIButton *button, UIImage *image, UIColor *tintColor) {
     zs_clear_button_configuration(button);
     [button setImage:image forState:UIControlStateNormal];
     if (tintColor) button.tintColor = tintColor;
-    button.backgroundColor = UIColor.clearColor;
-    button.layer.borderWidth = 0;
-    button.layer.cornerRadius = 0;
-    button.clipsToBounds = NO;
-    button.layer.masksToBounds = NO;
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+    button.layer.borderWidth = 1;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
+    button.layer.cornerRadius = 15;
+    button.clipsToBounds = YES;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-    if (dropShadow) {
-        button.layer.shadowColor = UIColor.blackColor.CGColor;
-        button.layer.shadowOpacity = 0.65;
-        button.layer.shadowRadius = 3;
-        button.layer.shadowOffset = CGSizeMake(0, 1.5);
-    } else {
-        button.layer.shadowOpacity = 0;
-    }
 }
 
 static UIImage *zs_mods_doctor_button_icon(NSString *sfSymbolName, CGFloat pointSize) {
@@ -6086,7 +6079,6 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIButton *assetExplorerTextureBackButton;
 @property (nonatomic, strong) UIButton *assetExplorerTextureExportButton;
 @property (nonatomic, strong) UIImageView *assetExplorerTextureImageView;
-@property (nonatomic, strong) UITextView *assetExplorerTextView;
 @property (nonatomic, strong) UILabel *assetExplorerTextureMessageLabel;
 @property (nonatomic, strong) UILabel *assetExplorerTextureCaptionLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *assetExplorerTextureSpinner;
@@ -6100,7 +6092,6 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIStackView *assetExplorerControlsStack;
 @property (nonatomic, strong) UIButton *assetExplorerFilterButton;
 @property (nonatomic, strong) UIButton *assetExplorerSortButton;
-@property (nonatomic, strong) UIButton *assetExplorerShareButton;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerBundle *> *assetExplorerDisplayedBundles;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerDisplayedAssets;
 @property (nonatomic, copy) NSString *assetExplorerFilterKind;
@@ -6118,6 +6109,10 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIButton *assetExplorerTextureNextButton;
 @property (nonatomic, strong) UILabel *assetExplorerTexturePositionLabel;
 @property (nonatomic, strong) ZSAssetExplorerVisual *assetExplorerVisual;
+@property (nonatomic, strong) dispatch_source_t assetExplorerLiveTimer;
+@property (nonatomic, assign) NSUInteger assetExplorerLiveToken;
+@property (nonatomic, assign) BOOL assetExplorerLivePaused;
+@property (nonatomic, assign) NSTimeInterval assetExplorerLiveElapsed;
 @property (nonatomic, assign) NSInteger assetExplorerPageIndex;
 @property (nonatomic, strong) UIStackView *assetExplorerPageStack;
 @property (nonatomic, strong) UIButton *assetExplorerPagePrevButton;
@@ -8200,7 +8195,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerTextureBackButton = nil;
     self.assetExplorerTextureExportButton = nil;
     self.assetExplorerTextureImageView = nil;
-    self.assetExplorerTextView = nil;
     self.assetExplorerTextureMessageLabel = nil;
     self.assetExplorerTextureCaptionLabel = nil;
     self.assetExplorerTextureSpinner = nil;
@@ -8214,7 +8208,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerControlsStack = nil;
     self.assetExplorerFilterButton = nil;
     self.assetExplorerSortButton = nil;
-    self.assetExplorerShareButton = nil;
     self.assetExplorerFilterKind = nil;
     self.assetExplorerSortKind = nil;
     self.assetExplorerSortBySize = NO;
@@ -15563,6 +15556,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)setAssetExplorerFullScreenOpen:(BOOL)open {
     _assetExplorerFullScreenOpen = open;
+    if (!open) [self zs_assetExplorerStopLive];
     [self zs_syncReducedPanelFPS];
 }
 
@@ -15789,25 +15783,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     textureImageView.translatesAutoresizingMaskIntoConstraints = NO;
     textureImageView.contentMode = UIViewContentModeScaleAspectFit;
     textureImageView.backgroundColor = UIColor.clearColor;
+    textureImageView.userInteractionEnabled = YES;
+    [textureImageView addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_assetExplorerPreviewTapped)]];
     textureImageView.hidden = YES;
     [overlay addSubview:textureImageView];
     self.assetExplorerTextureImageView = textureImageView;
-
-    UITextView *textView = [[UITextView alloc] init];
-    textView.translatesAutoresizingMaskIntoConstraints = NO;
-    textView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
-    textView.layer.cornerRadius = 10;
-    textView.layer.cornerCurve = kCACornerCurveContinuous;
-    textView.editable = NO;
-    textView.selectable = YES;
-    textView.font = zs_mono_font(10, UIFontWeightRegular);
-    textView.textColor = [UIColor colorWithWhite:1 alpha:0.88];
-    textView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
-    textView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    textView.alwaysBounceVertical = YES;
-    textView.hidden = YES;
-    [overlay addSubview:textView];
-    self.assetExplorerTextView = textView;
 
     UILabel *textureCaption = [[UILabel alloc] init];
     textureCaption.translatesAutoresizingMaskIntoConstraints = NO;
@@ -15876,16 +15856,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     sortButton.tag = 0;
     self.assetExplorerSortButton = sortButton;
 
-    UIButton *shareButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    shareButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_as_native_glass(shareButton, [UIImage systemImageNamed:@"square.and.arrow.up" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.9]);
-    [shareButton addTarget:self action:@selector(zs_assetExplorerShareBundleTapped) forControlEvents:UIControlEventTouchUpInside];
-    shareButton.hidden = YES;
-    shareButton.enabled = NO;
-    shareButton.alpha = 0.35;
-    self.assetExplorerShareButton = shareButton;
-
-    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[shareButton, filterButton, sortButton]];
+    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[filterButton, sortButton]];
     controlsStack.translatesAutoresizingMaskIntoConstraints = NO;
     controlsStack.axis = UILayoutConstraintAxisHorizontal;
     controlsStack.alignment = UIStackViewAlignmentCenter;
@@ -15896,13 +15867,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIImage *nextImage = [UIImage systemImageNamed:@"chevron.right" withConfiguration:symbolConfig];
     UIButton *prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     prevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_arrow_only_button(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9], NO);
+    zs_style_pill_icon_button_flat(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [prevButton addTarget:self action:@selector(zs_assetExplorerTexturePrevTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTexturePrevButton = prevButton;
 
     UIButton *nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     nextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_arrow_only_button(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9], NO);
+    zs_style_pill_icon_button_flat(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [nextButton addTarget:self action:@selector(zs_assetExplorerTextureNextTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTextureNextButton = nextButton;
 
@@ -15926,13 +15897,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UIButton *pagePrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     pagePrevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_arrow_only_button(pagePrevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9], YES);
+    zs_style_pill_icon_button_flat(pagePrevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [pagePrevButton addTarget:self action:@selector(zs_assetExplorerPagePrevTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerPagePrevButton = pagePrevButton;
 
     UIButton *pageNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     pageNextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_arrow_only_button(pageNextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9], YES);
+    zs_style_pill_icon_button_flat(pageNextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [pageNextButton addTarget:self action:@selector(zs_assetExplorerPageNextTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerPageNextButton = pageNextButton;
 
@@ -15985,8 +15956,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [searchContainer.widthAnchor constraintEqualToConstant:150],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
-        [shareButton.widthAnchor constraintEqualToConstant:30],
-        [shareButton.heightAnchor constraintEqualToConstant:30],
         [filterButton.widthAnchor constraintEqualToConstant:30],
         [filterButton.heightAnchor constraintEqualToConstant:30],
         [sortButton.widthAnchor constraintEqualToConstant:30],
@@ -16014,11 +15983,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [textureImageView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
         [textureImageView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
         [textureImageView.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
-
-        [textView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
-        [textView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
-        [textView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
-        [textView.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
 
         [textureMessage.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
         [textureMessage.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
@@ -16133,14 +16097,16 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerTextureBackButton.hidden = !visible;
     self.assetExplorerTextureExportButton.hidden = !visible;
     self.assetExplorerTextureImageView.hidden = !visible;
-    self.assetExplorerTextView.hidden = YES;
-    self.assetExplorerTextView.text = @"";
     self.assetExplorerTextureCaptionLabel.hidden = !visible;
     self.assetExplorerBackdropView.hidden = !visible;
     self.assetExplorerTexturePagerStack.hidden = !visible;
     if (visible) [self.assetExplorerSearchField resignFirstResponder];
     [self zs_assetExplorerSyncControls];
     if (!visible) {
+        [self zs_assetExplorerStopLive];
+        self.assetExplorerLivePaused = NO;
+        self.assetExplorerLiveElapsed = 0;
+        self.assetExplorerTextureImageView.alpha = 1;
         self.assetExplorerVisual = nil;
         self.assetExplorerPageIndex = 0;
         self.assetExplorerPageStack.hidden = YES;
@@ -16160,7 +16126,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     NSMutableArray<ZSAssetExplorerAsset *> *textures = [NSMutableArray array];
     for (ZSAssetExplorerAsset *candidate in self.assetExplorerDisplayedAssets) {
-        if ([ZSAssetExplorer hasVisualPreviewForClassID:candidate.classID] && [ZSAssetExplorer classID:asset.classID sharesPreviewGroupWithClassID:candidate.classID]) [textures addObject:candidate];
+        if ([ZSAssetExplorer hasVisualPreviewForClassID:candidate.classID]) [textures addObject:candidate];
     }
     NSUInteger index = [textures indexOfObjectIdenticalTo:asset];
     if (index == NSNotFound) {
@@ -16182,13 +16148,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.assetExplorerGeneration += 1;
     NSUInteger generation = self.assetExplorerGeneration;
+    [self zs_assetExplorerStopLive];
+    self.assetExplorerLivePaused = NO;
+    self.assetExplorerLiveElapsed = 0;
+    self.assetExplorerTextureImageView.alpha = 1;
     self.assetExplorerVisual = nil;
     self.assetExplorerPageIndex = 0;
     self.assetExplorerTextureImageView.image = nil;
-    self.assetExplorerTextureImageView.hidden = NO;
-    self.assetExplorerTextView.hidden = YES;
-    self.assetExplorerTextView.text = @"";
-    self.assetExplorerBackdropView.hidden = NO;
     self.assetExplorerTextureMessageLabel.hidden = YES;
     self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
     [self.assetExplorerTextureSpinner startAnimating];
@@ -16204,8 +16170,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
         ZSAssetExplorerVisual *visual = [ZSAssetExplorer visualForPathID:pathID classID:classID inBundleAtPath:bundlePath error:&error];
-        BOOL isText = visual.text.length > 0;
-        UIImage *image = (visual && !isText) ? [visual imageAtPage:0 error:&error] : nil;
+        UIImage *image = visual ? [visual imageAtPage:0 error:&error] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerTextureOpen || strongSelf.assetExplorerGeneration != generation) return;
@@ -16213,23 +16178,14 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
             if (visual) {
                 strongSelf.assetExplorerVisual = visual;
                 strongSelf.assetExplorerPageIndex = 0;
-                NSString *summary = visual.summary.length > 0 ? visual.summary : visual.name;
-                if (isText) summary = [NSString stringWithFormat:@"%@  •  %@", asset.typeName ?: @"Asset", summary ?: @""];
-                strongSelf.assetExplorerTextureCaptionLabel.text = summary;
+                strongSelf.assetExplorerTextureCaptionLabel.text = visual.summary.length > 0 ? visual.summary : visual.name;
                 [strongSelf zs_assetExplorerSyncPagePager];
             }
-            if (isText) {
-                strongSelf.assetExplorerTextureImageView.hidden = YES;
-                strongSelf.assetExplorerBackdropView.hidden = YES;
-                strongSelf.assetExplorerTextView.text = visual.text;
-                strongSelf.assetExplorerTextView.hidden = NO;
-                [strongSelf.assetExplorerTextView setContentOffset:CGPointZero animated:NO];
-                strongSelf.assetExplorerTextureExportButton.enabled = YES;
-                strongSelf.assetExplorerTextureExportButton.alpha = 1;
-            } else if (image) {
+            if (image) {
                 strongSelf.assetExplorerTextureImageView.image = image;
                 strongSelf.assetExplorerTextureExportButton.enabled = YES;
                 strongSelf.assetExplorerTextureExportButton.alpha = 1;
+                [strongSelf zs_assetExplorerStartLiveFromElapsed:0];
             } else {
                 strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this asset.";
                 strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
@@ -16244,6 +16200,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.assetExplorerGeneration += 1;
     NSUInteger generation = self.assetExplorerGeneration;
+    [self zs_assetExplorerStopLive];
+    self.assetExplorerLivePaused = NO;
+    self.assetExplorerLiveElapsed = 0;
+    self.assetExplorerTextureImageView.alpha = 1;
     self.assetExplorerTextureImageView.image = nil;
     self.assetExplorerTextureMessageLabel.hidden = YES;
     [self.assetExplorerTextureSpinner startAnimating];
@@ -16263,12 +16223,90 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
                 strongSelf.assetExplorerTextureImageView.image = image;
                 strongSelf.assetExplorerTextureExportButton.enabled = YES;
                 strongSelf.assetExplorerTextureExportButton.alpha = 1;
+                [strongSelf zs_assetExplorerStartLiveFromElapsed:0];
             } else {
                 strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this page.";
                 strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
             }
         });
     });
+}
+
+static dispatch_queue_t zs_asset_explorer_live_queue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        queue = dispatch_queue_create("zs.assetexplorer.live", attributes);
+    });
+    return queue;
+}
+
+- (void)zs_assetExplorerStopLive {
+    self.assetExplorerLiveToken += 1;
+    dispatch_source_t timer = self.assetExplorerLiveTimer;
+    self.assetExplorerLiveTimer = nil;
+    if (timer) dispatch_source_cancel(timer);
+}
+
+- (void)zs_assetExplorerStartLiveFromElapsed:(NSTimeInterval)startElapsed {
+    [self zs_assetExplorerStopLive];
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    NSInteger page = self.assetExplorerPageIndex;
+    if (!visual || ![visual isLivePage:page] || self.assetExplorerLivePaused || !self.assetExplorerTextureOpen) return;
+
+    NSUInteger token = self.assetExplorerLiveToken;
+    ZSAssetExplorerLiveFrameProvider provider = visual.liveFrameProvider;
+    dispatch_queue_t queue = zs_asset_explorer_live_queue();
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    uint64_t interval = NSEC_PER_SEC / 30;
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), interval, interval / 10);
+
+    __weak typeof(self) weakSelf = self;
+    __block BOOL pending = NO;
+    __block CFTimeInterval origin = CACurrentMediaTime() - startElapsed;
+    dispatch_source_set_event_handler(timer, ^{
+        if (pending) return;
+        NSTimeInterval elapsed = CACurrentMediaTime() - origin;
+        UIImage *frame = provider(elapsed);
+        if (!frame) return;
+        pending = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            BOOL current = strongSelf && strongSelf.assetExplorerLiveToken == token;
+            if (current) {
+                if (strongSelf.assetExplorerFullScreenOpen && strongSelf.assetExplorerTextureOpen && strongSelf.assetExplorerVisual == visual && strongSelf.assetExplorerPageIndex == page) {
+                    strongSelf.assetExplorerTextureImageView.image = frame;
+                    strongSelf.assetExplorerLiveElapsed = elapsed;
+                } else {
+                    [strongSelf zs_assetExplorerStopLive];
+                }
+            }
+            dispatch_async(queue, ^{
+                pending = NO;
+            });
+        });
+    });
+    self.assetExplorerLiveTimer = timer;
+    dispatch_resume(timer);
+}
+
+- (void)zs_assetExplorerPreviewTapped {
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    if (!self.assetExplorerTextureOpen || !visual || ![visual isLivePage:self.assetExplorerPageIndex] || !self.assetExplorerTextureImageView.image) return;
+    if (self.assetExplorerLiveTimer) {
+        self.assetExplorerLivePaused = YES;
+        [self zs_assetExplorerStopLive];
+        [UIView animateWithDuration:0.15 animations:^{
+            self.assetExplorerTextureImageView.alpha = 0.55;
+        }];
+    } else {
+        self.assetExplorerLivePaused = NO;
+        [UIView animateWithDuration:0.15 animations:^{
+            self.assetExplorerTextureImageView.alpha = 1;
+        }];
+        [self zs_assetExplorerStartLiveFromElapsed:self.assetExplorerLiveElapsed];
+    }
 }
 
 - (void)zs_assetExplorerSyncPagePager {
@@ -16331,11 +16369,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_assetExplorerTextureExportTapped {
     UIImage *image = self.assetExplorerTextureImageView.image;
-    ZSAssetExplorerVisual *textVisual = self.assetExplorerVisual;
-    BOOL isTextExport = textVisual.text.length > 0;
-    NSData *textData = isTextExport ? (textVisual.exportData ?: [textVisual.text dataUsingEncoding:NSUTF8StringEncoding]) : nil;
     NSInteger index = self.assetExplorerTextureIndex;
-    if ((!image && !isTextExport) || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
+    if (!image || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
 
     ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
     NSString *baseName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"%@_%lld", asset.typeName.length > 0 ? asset.typeName : @"Asset", (long long)asset.pathID];
@@ -16355,10 +16390,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIButton *sourceButton = self.assetExplorerTextureExportButton;
     sourceButton.enabled = NO;
     __weak typeof(self) weakSelf = self;
-    NSString *fileExtension = isTextExport ? (textVisual.fileExtension.length > 0 ? textVisual.fileExtension : @"txt") : @"png";
-    NSString *fileName = [safeName stringByAppendingPathExtension:fileExtension];
+    NSString *fileName = [safeName stringByAppendingPathExtension:@"png"];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSData *png = isTextExport ? textData : UIImagePNGRepresentation(image);
+        NSData *png = UIImagePNGRepresentation(image);
         NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSAssetExport-%@", NSUUID.UUID.UUIDString]];
         NSString *path = [directory stringByAppendingPathComponent:fileName];
         BOOL written = NO;
@@ -16368,7 +16402,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            if (strongSelf.assetExplorerTextureImageView.image || isTextExport) {
+            if (strongSelf.assetExplorerTextureImageView.image) {
                 sourceButton.enabled = YES;
             }
             if (!written || !strongSelf.assetExplorerTextureOpen) {
@@ -16485,68 +16519,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     return [counts.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
         return [a caseInsensitiveCompare:b];
     }];
-}
-
-- (void)zs_assetExplorerShareBundleTapped {
-    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
-    NSArray<ZSAssetExplorerAsset *> *assets = self.assetExplorerAssets;
-    if (!bundle || assets.count == 0 || self.assetExplorerTextureOpen) return;
-
-    NSDictionary<NSString *, NSNumber *> *counts = [self zs_assetExplorerKindCounts];
-    NSMutableArray<NSDictionary *> *kinds = [NSMutableArray array];
-    for (NSString *kind in [self zs_assetExplorerSortedKinds:counts]) {
-        [kinds addObject:@{@"kind": kind, @"count": counts[kind]}];
-    }
-    NSDictionary *payload = @{
-        @"bundle": bundle.displayName ?: @"",
-        @"cab": bundle.cabIdentifier ?: @"",
-        @"totalAssets": @(assets.count),
-        @"kindCount": @(kinds.count),
-        @"kinds": kinds,
-    };
-
-    NSString *baseName = bundle.displayName.length > 0 ? bundle.displayName : (bundle.cabIdentifier.length > 0 ? bundle.cabIdentifier : @"Bundle");
-    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
-    [allowed addCharactersInString:@"-_. "];
-    NSMutableString *safeName = [NSMutableString string];
-    for (NSUInteger i = 0; i < baseName.length; i++) {
-        unichar c = [baseName characterAtIndex:i];
-        [safeName appendString:[allowed characterIsMember:c] ? [NSString stringWithCharacters:&c length:1] : @"_"];
-    }
-    NSString *fileName = [[safeName stringByAppendingString:@"_asset_kinds"] stringByAppendingPathExtension:@"json"];
-
-    UIButton *sourceButton = self.assetExplorerShareButton;
-    sourceButton.enabled = NO;
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSData *json = [NSJSONSerialization dataWithJSONObject:payload options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:nil];
-        NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSAssetExport-%@", NSUUID.UUID.UUIDString]];
-        NSString *path = [directory stringByAppendingPathComponent:fileName];
-        BOOL written = NO;
-        if (json.length > 0 && [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil]) {
-            written = [json writeToFile:path atomically:YES];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            [strongSelf zs_assetExplorerSyncControls];
-            if (!written || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerSelectedBundle != bundle) {
-                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
-                return;
-            }
-            UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
-            activityVC.popoverPresentationController.sourceView = sourceButton;
-            activityVC.popoverPresentationController.sourceRect = sourceButton.bounds;
-            activityVC.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
-                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
-            };
-            UIViewController *presenter = zs_key_window().rootViewController;
-            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
-            [presenter presentViewController:activityVC animated:YES completion:nil];
-            UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-            [haptic impactOccurred];
-        });
-    });
 }
 
 - (void)zs_assetExplorerResetViewState {
@@ -16674,10 +16646,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerControlsStack.hidden = textureOpen;
     self.assetExplorerFilterButton.hidden = !inBundle;
     self.assetExplorerSortButton.hidden = NO;
-    BOOL canShare = inBundle && self.assetExplorerAssets.count > 0;
-    self.assetExplorerShareButton.hidden = !inBundle;
-    self.assetExplorerShareButton.enabled = canShare;
-    self.assetExplorerShareButton.alpha = canShare ? 1 : 0.35;
     NSString *placeholder = inBundle ? @"Search assets" : @"Search bundles";
     self.assetExplorerSearchField.attributedPlaceholder =
         [[NSAttributedString alloc] initWithString:placeholder
@@ -16848,7 +16816,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     cell.detailTextLabel.adjustsFontSizeToFitWidth = YES;
     cell.detailTextLabel.minimumScaleFactor = 0.5;
     cell.accessoryType = self.assetExplorerSelectedBundle ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
-    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
     cell.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
     UIView *selected = [[UIView alloc] init];
     selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
@@ -16865,13 +16832,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
         cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
-        BOOL previewable = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID];
-        cell.accessoryType = previewable ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
-        if (!previewable) {
-            cell.textLabel.textColor = [UIColor colorWithWhite:1 alpha:0.28];
-            cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.16];
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-        }
+        cell.accessoryType = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID] ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     }
     return cell;
 }
