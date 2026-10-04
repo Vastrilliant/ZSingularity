@@ -6083,6 +6083,17 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, copy) NSString *assetExplorerFilterKind;
 @property (nonatomic, copy) NSString *assetExplorerSortKind;
 @property (nonatomic, assign) BOOL assetExplorerBundleSortDescending;
+@property (nonatomic, assign) BOOL assetExplorerSortBySize;
+@property (nonatomic, assign) BOOL assetExplorerSizeAscending;
+@property (nonatomic, assign) BOOL assetExplorerBundleSortBySize;
+@property (nonatomic, assign) BOOL assetExplorerBundleSizeAscending;
+@property (nonatomic, strong) NSDictionary<NSString *, NSNumber *> *assetExplorerBundleSizes;
+@property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerTextureAssets;
+@property (nonatomic, assign) NSInteger assetExplorerTextureIndex;
+@property (nonatomic, strong) UIStackView *assetExplorerTexturePagerStack;
+@property (nonatomic, strong) UIButton *assetExplorerTexturePrevButton;
+@property (nonatomic, strong) UIButton *assetExplorerTextureNextButton;
+@property (nonatomic, strong) UILabel *assetExplorerTexturePositionLabel;
 @property (nonatomic, copy) NSString *assetExplorerStatusMessage;
 @property (nonatomic, strong) UIView *memoryFullScreenOverlay;
 @property (nonatomic, strong) UIScrollView *memoryFullScreenScrollView;
@@ -8174,6 +8185,14 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerSortButton = nil;
     self.assetExplorerFilterKind = nil;
     self.assetExplorerSortKind = nil;
+    self.assetExplorerSortBySize = NO;
+    self.assetExplorerSizeAscending = NO;
+    self.assetExplorerBundleSizes = nil;
+    self.assetExplorerTextureAssets = nil;
+    self.assetExplorerTexturePagerStack = nil;
+    self.assetExplorerTexturePrevButton = nil;
+    self.assetExplorerTextureNextButton = nil;
+    self.assetExplorerTexturePositionLabel = nil;
     self.assetExplorerStatusMessage = nil;
     self.assetExplorerSelectedBundle = nil;
     self.assetExplorerGeneration += 1;
@@ -15802,6 +15821,47 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:controlsStack];
     self.assetExplorerControlsStack = controlsStack;
 
+    UIImage *nextImage = [UIImage systemImageNamed:@"chevron.right" withConfiguration:symbolConfig];
+    UIButton *prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    prevButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [prevButton addTarget:self action:@selector(zs_assetExplorerTexturePrevTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.assetExplorerTexturePrevButton = prevButton;
+
+    UIButton *nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    nextButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [nextButton addTarget:self action:@selector(zs_assetExplorerTextureNextTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.assetExplorerTextureNextButton = nextButton;
+
+    UILabel *positionLabel = [[UILabel alloc] init];
+    positionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    positionLabel.font = zs_mono_font(10, UIFontWeightMedium);
+    positionLabel.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+    positionLabel.textAlignment = NSTextAlignmentCenter;
+    positionLabel.adjustsFontSizeToFitWidth = YES;
+    positionLabel.minimumScaleFactor = 0.6;
+    self.assetExplorerTexturePositionLabel = positionLabel;
+
+    UIStackView *pagerStack = [[UIStackView alloc] initWithArrangedSubviews:@[prevButton, positionLabel, nextButton]];
+    pagerStack.translatesAutoresizingMaskIntoConstraints = NO;
+    pagerStack.axis = UILayoutConstraintAxisHorizontal;
+    pagerStack.alignment = UIStackViewAlignmentCenter;
+    pagerStack.spacing = 6;
+    pagerStack.hidden = YES;
+    [overlay addSubview:pagerStack];
+    self.assetExplorerTexturePagerStack = pagerStack;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [prevButton.widthAnchor constraintEqualToConstant:30],
+        [prevButton.heightAnchor constraintEqualToConstant:30],
+        [nextButton.widthAnchor constraintEqualToConstant:30],
+        [nextButton.heightAnchor constraintEqualToConstant:30],
+        [positionLabel.widthAnchor constraintGreaterThanOrEqualToConstant:44],
+        [pagerStack.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [pagerStack.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+    ]];
+
     [NSLayoutConstraint activateConstraints:@[
         [backdrop.topAnchor constraintEqualToAnchor:overlay.topAnchor],
         [backdrop.bottomAnchor constraintEqualToAnchor:overlay.bottomAnchor],
@@ -15950,9 +16010,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerTextureImageView.hidden = !visible;
     self.assetExplorerTextureCaptionLabel.hidden = !visible;
     self.assetExplorerBackdropView.hidden = !visible;
+    self.assetExplorerTexturePagerStack.hidden = !visible;
     if (visible) [self.assetExplorerSearchField resignFirstResponder];
     [self zs_assetExplorerSyncControls];
     if (!visible) {
+        self.assetExplorerTextureAssets = nil;
+        self.assetExplorerTextureIndex = 0;
         [self.assetExplorerTextureSpinner stopAnimating];
         self.assetExplorerTextureMessageLabel.hidden = YES;
         self.assetExplorerTextureMessageLabel.text = nil;
@@ -15965,13 +16028,35 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
     if (!asset || !bundle || asset.classID != 28 || self.assetExplorerTextureOpen) return;
 
+    NSMutableArray<ZSAssetExplorerAsset *> *textures = [NSMutableArray array];
+    for (ZSAssetExplorerAsset *candidate in self.assetExplorerDisplayedAssets) {
+        if (candidate.classID == 28) [textures addObject:candidate];
+    }
+    NSUInteger index = [textures indexOfObjectIdenticalTo:asset];
+    if (index == NSNotFound) {
+        textures = [NSMutableArray arrayWithObject:asset];
+        index = 0;
+    }
+
+    [self zs_assetExplorerSetTextureModeVisible:YES];
+    self.assetExplorerTextureAssets = textures;
+    self.assetExplorerTextureIndex = (NSInteger)index;
+    [self zs_assetExplorerLoadTextureAtCurrentIndex];
+}
+
+- (void)zs_assetExplorerLoadTextureAtCurrentIndex {
+    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
+    NSInteger index = self.assetExplorerTextureIndex;
+    if (!bundle || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
+    ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
+
     self.assetExplorerGeneration += 1;
     NSUInteger generation = self.assetExplorerGeneration;
-    [self zs_assetExplorerSetTextureModeVisible:YES];
     self.assetExplorerTextureImageView.image = nil;
     self.assetExplorerTextureMessageLabel.hidden = YES;
     self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : @"Texture2D";
     [self.assetExplorerTextureSpinner startAnimating];
+    [self zs_assetExplorerSyncTexturePager];
 
     __weak typeof(self) weakSelf = self;
     NSString *bundlePath = [bundle.filePath copy];
@@ -15996,10 +16081,47 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     });
 }
 
+- (void)zs_assetExplorerSyncTexturePager {
+    NSInteger count = (NSInteger)self.assetExplorerTextureAssets.count;
+    NSInteger index = self.assetExplorerTextureIndex;
+    self.assetExplorerTexturePositionLabel.text = count > 0 ? [NSString stringWithFormat:@"%ld/%ld", (long)(index + 1), (long)count] : @"";
+    BOOL hasPrevious = index > 0;
+    BOOL hasNext = index + 1 < count;
+    self.assetExplorerTexturePrevButton.enabled = hasPrevious;
+    self.assetExplorerTexturePrevButton.alpha = hasPrevious ? 1 : 0.35;
+    self.assetExplorerTextureNextButton.enabled = hasNext;
+    self.assetExplorerTextureNextButton.alpha = hasNext ? 1 : 0.35;
+}
+
+- (void)zs_assetExplorerStepTexture:(NSInteger)delta {
+    if (!self.assetExplorerTextureOpen) return;
+    NSInteger target = self.assetExplorerTextureIndex + delta;
+    if (target < 0 || target >= (NSInteger)self.assetExplorerTextureAssets.count) return;
+    self.assetExplorerTextureIndex = target;
+    [self zs_assetExplorerLoadTextureAtCurrentIndex];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerTexturePrevTapped {
+    [self zs_assetExplorerStepTexture:-1];
+}
+
+- (void)zs_assetExplorerTextureNextTapped {
+    [self zs_assetExplorerStepTexture:1];
+}
+
 - (void)zs_assetExplorerTextureBackTapped {
     if (!self.assetExplorerTextureOpen) return;
     self.assetExplorerGeneration += 1;
+    NSInteger currentIndex = self.assetExplorerTextureIndex;
+    ZSAssetExplorerAsset *current = currentIndex >= 0 && currentIndex < (NSInteger)self.assetExplorerTextureAssets.count ? self.assetExplorerTextureAssets[(NSUInteger)currentIndex] : nil;
     [self zs_assetExplorerSetTextureModeVisible:NO];
+    NSUInteger row = current ? [self.assetExplorerDisplayedAssets indexOfObjectIdenticalTo:current] : NSNotFound;
+    if (row != NSNotFound) {
+        [self.assetExplorerTableView layoutIfNeeded];
+        [self.assetExplorerTableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:(NSInteger)row inSection:0] atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+    }
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 }
@@ -16082,6 +16204,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerSearchField.text = @"";
     self.assetExplorerFilterKind = nil;
     self.assetExplorerSortKind = nil;
+    self.assetExplorerSortBySize = NO;
+    self.assetExplorerSizeAscending = NO;
     [self zs_assetExplorerSyncControls];
 }
 
@@ -16098,6 +16222,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (self.assetExplorerSelectedBundle) {
         NSString *filterKind = self.assetExplorerFilterKind;
         NSString *sortKind = self.assetExplorerSortKind;
+        BOOL bySize = self.assetExplorerSortBySize;
+        BOOL sizeAscending = self.assetExplorerSizeAscending;
         NSMutableArray<ZSAssetExplorerAsset *> *matches = [NSMutableArray array];
         for (ZSAssetExplorerAsset *asset in self.assetExplorerAssets) {
             NSString *kind = asset.typeName.length > 0 ? asset.typeName : @"Unknown";
@@ -16118,6 +16244,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
                 BOOL aMatch = [(a.typeName.length > 0 ? a.typeName : @"Unknown") isEqualToString:sortKind];
                 BOOL bMatch = [(b.typeName.length > 0 ? b.typeName : @"Unknown") isEqualToString:sortKind];
                 if (aMatch != bMatch) return aMatch ? NSOrderedAscending : NSOrderedDescending;
+            }
+            if (bySize && a.objectSize != b.objectSize) {
+                BOOL aLarger = a.objectSize > b.objectSize;
+                return (aLarger == !sizeAscending) ? NSOrderedAscending : NSOrderedDescending;
             }
             NSString *nameA = [strongSelf zs_assetExplorerNameForAsset:a];
             NSString *nameB = [strongSelf zs_assetExplorerNameForAsset:b];
@@ -16142,10 +16272,29 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
             [matches addObject:bundle];
         }
         BOOL descending = self.assetExplorerBundleSortDescending;
+        BOOL bySize = self.assetExplorerBundleSortBySize;
+        BOOL sizeAscending = self.assetExplorerBundleSizeAscending;
+        NSMutableDictionary<NSString *, NSNumber *> *sizes = nil;
+        if (bySize) {
+            sizes = [NSMutableDictionary dictionary];
+            for (ZSAssetExplorerBundle *bundle in self.assetExplorerBundles) {
+                NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:bundle.filePath error:nil];
+                sizes[bundle.filePath] = attributes[NSFileSize] ?: @0;
+            }
+        }
+        self.assetExplorerBundleSizes = sizes;
         self.assetExplorerDisplayedBundles = [matches sortedArrayUsingComparator:^NSComparisonResult(ZSAssetExplorerBundle *a, ZSAssetExplorerBundle *b) {
+            if (bySize) {
+                unsigned long long sizeA = sizes[a.filePath].unsignedLongLongValue;
+                unsigned long long sizeB = sizes[b.filePath].unsignedLongLongValue;
+                if (sizeA != sizeB) {
+                    BOOL aLarger = sizeA > sizeB;
+                    return (aLarger == !sizeAscending) ? NSOrderedAscending : NSOrderedDescending;
+                }
+            }
             NSComparisonResult result = [a.displayName compare:b.displayName options:NSCaseInsensitiveSearch | NSNumericSearch];
             if (result == NSOrderedSame) result = [a.cabIdentifier caseInsensitiveCompare:b.cabIdentifier];
-            if (descending) {
+            if (descending && !bySize) {
                 if (result == NSOrderedAscending) return NSOrderedDescending;
                 if (result == NSOrderedDescending) return NSOrderedAscending;
             }
@@ -16191,17 +16340,47 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     NSMutableArray<UIMenuElement *> *sortItems = [NSMutableArray array];
     BOOL sortActive = NO;
+    BOOL sizeActive = inBundle ? self.assetExplorerSortBySize : self.assetExplorerBundleSortBySize;
+    BOOL sizeAscending = inBundle ? self.assetExplorerSizeAscending : self.assetExplorerBundleSizeAscending;
+    NSString *sizeTitle = sizeActive ? (sizeAscending ? @"Size · Smallest first" : @"Size · Largest first") : @"Size";
+    UIImage *sizeImage = sizeActive ? [UIImage systemImageNamed:(sizeAscending ? @"arrow.up" : @"arrow.down")] : nil;
+    UIAction *sizeAction = [UIAction actionWithTitle:sizeTitle image:sizeImage identifier:nil handler:^(__kindof UIAction *selected) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (strongSelf.assetExplorerSelectedBundle) {
+            if (strongSelf.assetExplorerSortBySize) {
+                strongSelf.assetExplorerSizeAscending = !strongSelf.assetExplorerSizeAscending;
+            } else {
+                strongSelf.assetExplorerSortBySize = YES;
+                strongSelf.assetExplorerSizeAscending = NO;
+            }
+        } else {
+            if (strongSelf.assetExplorerBundleSortBySize) {
+                strongSelf.assetExplorerBundleSizeAscending = !strongSelf.assetExplorerBundleSizeAscending;
+            } else {
+                strongSelf.assetExplorerBundleSortBySize = YES;
+                strongSelf.assetExplorerBundleSizeAscending = NO;
+            }
+        }
+        [strongSelf zs_assetExplorerRefreshListResettingScroll:YES];
+        [strongSelf zs_assetExplorerRebuildMenus];
+    }];
+    sizeAction.state = sizeActive ? UIMenuElementStateOn : UIMenuElementStateOff;
+
     if (inBundle) {
-        sortActive = self.assetExplorerSortKind.length > 0;
-        UIAction *alphabetical = [UIAction actionWithTitle:@"Alphabetical" image:nil identifier:nil handler:^(__kindof UIAction *action) {
+        sortActive = self.assetExplorerSortKind.length > 0 || self.assetExplorerSortBySize;
+        UIAction *alphabetical = [UIAction actionWithTitle:@"Alphabetical" image:nil identifier:nil handler:^(__kindof UIAction *selected) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
             strongSelf.assetExplorerSortKind = nil;
+            strongSelf.assetExplorerSortBySize = NO;
+            strongSelf.assetExplorerSizeAscending = NO;
             [strongSelf zs_assetExplorerRefreshListResettingScroll:YES];
             [strongSelf zs_assetExplorerRebuildMenus];
         }];
         alphabetical.state = sortActive ? UIMenuElementStateOff : UIMenuElementStateOn;
         [sortItems addObject:alphabetical];
+        [sortItems addObject:sizeAction];
 
         NSDictionary<NSString *, NSNumber *> *counts = [self zs_assetExplorerKindCounts];
         NSMutableArray<UIMenuElement *> *kindItems = [NSMutableArray array];
@@ -16221,24 +16400,24 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
             [sortItems addObject:[UIMenu menuWithTitle:@"Kind first" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:kindItems]];
         }
     } else {
-        sortActive = self.assetExplorerBundleSortDescending;
-        UIAction *ascending = [UIAction actionWithTitle:@"Name (A–Z)" image:nil identifier:nil handler:^(__kindof UIAction *action) {
+        BOOL descending = self.assetExplorerBundleSortDescending;
+        sortActive = descending || self.assetExplorerBundleSortBySize;
+        NSString *nameTitle = self.assetExplorerBundleSortBySize ? @"Name" : (descending ? @"Name · Z–A" : @"Name · A–Z");
+        UIAction *nameAction = [UIAction actionWithTitle:nameTitle image:nil identifier:nil handler:^(__kindof UIAction *selected) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            strongSelf.assetExplorerBundleSortDescending = NO;
+            if (strongSelf.assetExplorerBundleSortBySize) {
+                strongSelf.assetExplorerBundleSortBySize = NO;
+                strongSelf.assetExplorerBundleSizeAscending = NO;
+                strongSelf.assetExplorerBundleSortDescending = NO;
+            } else {
+                strongSelf.assetExplorerBundleSortDescending = !strongSelf.assetExplorerBundleSortDescending;
+            }
             [strongSelf zs_assetExplorerRefreshListResettingScroll:YES];
             [strongSelf zs_assetExplorerRebuildMenus];
         }];
-        ascending.state = sortActive ? UIMenuElementStateOff : UIMenuElementStateOn;
-        UIAction *descending = [UIAction actionWithTitle:@"Name (Z–A)" image:nil identifier:nil handler:^(__kindof UIAction *action) {
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            strongSelf.assetExplorerBundleSortDescending = YES;
-            [strongSelf zs_assetExplorerRefreshListResettingScroll:YES];
-            [strongSelf zs_assetExplorerRebuildMenus];
-        }];
-        descending.state = sortActive ? UIMenuElementStateOn : UIMenuElementStateOff;
-        [sortItems addObjectsFromArray:@[ascending, descending]];
+        nameAction.state = self.assetExplorerBundleSortBySize ? UIMenuElementStateOff : UIMenuElementStateOn;
+        [sortItems addObjectsFromArray:@[nameAction, sizeAction]];
     }
 
     NSInteger desiredSortStyle = sortActive ? 1 : 0;
@@ -16324,7 +16503,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (!self.assetExplorerSelectedBundle) {
         ZSAssetExplorerBundle *bundle = indexPath.row < self.assetExplorerDisplayedBundles.count ? self.assetExplorerDisplayedBundles[(NSUInteger)indexPath.row] : nil;
         cell.textLabel.text = bundle.displayName ?: @"CAB-???????";
-        cell.detailTextLabel.text = bundle.cabIdentifier ?: @"";
+        NSNumber *bundleSize = bundle.filePath ? self.assetExplorerBundleSizes[bundle.filePath] : nil;
+        NSString *cabText = bundle.cabIdentifier ?: @"";
+        cell.detailTextLabel.text = bundleSize ? [NSString stringWithFormat:@"%@  •  %@", cabText, [NSByteCountFormatter stringFromByteCount:bundleSize.longLongValue countStyle:NSByteCountFormatterCountStyleFile]] : cabText;
     } else {
         ZSAssetExplorerAsset *asset = indexPath.row < self.assetExplorerDisplayedAssets.count ? self.assetExplorerDisplayedAssets[(NSUInteger)indexPath.row] : nil;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
