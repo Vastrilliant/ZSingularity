@@ -52,6 +52,9 @@ typedef UIImage * _Nullable (^ZSAssetExplorerLiveFrameProvider)(NSTimeInterval e
 @property (nonatomic, copy, nullable) ZSAssetExplorerPageProvider imageProvider;
 @property (nonatomic, copy, nullable) ZSAssetExplorerLiveFrameProvider liveFrameProvider;
 @property (nonatomic, assign) NSInteger livePageIndex;
+@property (nonatomic, copy, nullable) NSString *text;
+@property (nonatomic, copy, nullable) NSData *exportData;
+@property (nonatomic, copy, nullable) NSString *fileExtension;
 - (BOOL)isLivePage:(NSInteger)page;
 - (nullable UIImage *)imageAtPage:(NSInteger)page error:(NSError * _Nullable * _Nullable)error;
 @end
@@ -61,6 +64,7 @@ typedef UIImage * _Nullable (^ZSAssetExplorerLiveFrameProvider)(NSTimeInterval e
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error;
 + (nullable ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error;
 + (BOOL)hasVisualPreviewForClassID:(int32_t)classID;
++ (BOOL)classID:(int32_t)a sharesPreviewGroupWithClassID:(int32_t)b;
 + (nullable ZSAssetExplorerVisual *)visualForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path error:(NSError **)error;
 @end
 
