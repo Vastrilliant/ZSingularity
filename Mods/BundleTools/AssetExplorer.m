@@ -2860,8 +2860,274 @@ static ZSAssetExplorerVisual *ZSAEBuildGameObjectVisual(ZSAEContext *context, ZS
     return visual;
 }
 
+static void ZSAETimelineCollect(ZSAEContext *context, ZSAEObject *track, NSUInteger depth, NSMutableArray<NSDictionary *> *rows, NSMutableSet<NSString *> *seen) {
+    NSDictionary *fields = track.fields;
+    NSArray *clipList = ZSAEArray(fields[@"m_Clips"]);
+    if (!clipList || !fields[@"m_Muted"] || rows.count >= 64) return;
+
+    NSMutableArray<NSDictionary *> *clips = [NSMutableArray array];
+    NSUInteger index = 0;
+    for (id entry in clipList) {
+        NSDictionary *clip = ZSAEDict(entry);
+        index++;
+        if (!clip || clip[@"m_Start"] == nil) continue;
+        NSString *clipName = ZSAEString(clip[@"m_DisplayName"]);
+        if (clipName.length == 0) clipName = [NSString stringWithFormat:@"Clip %lu", (unsigned long)index];
+        double duration = ZSAEDouble(clip[@"m_Duration"]);
+        double start = ZSAEDouble(clip[@"m_Start"]);
+        if (!isfinite(start) || !isfinite(duration) || duration < 0) continue;
+        [clips addObject:@{
+            @"s": @(start),
+            @"d": @(duration),
+            @"n": clipName,
+            @"ei": @(isfinite(ZSAEDouble(clip[@"m_EaseInDuration"])) ? ZSAEDouble(clip[@"m_EaseInDuration"]) : 0),
+            @"eo": @(isfinite(ZSAEDouble(clip[@"m_EaseOutDuration"])) ? ZSAEDouble(clip[@"m_EaseOutDuration"]) : 0),
+        }];
+    }
+
+    NSDictionary *infinite = ZSAEDict(fields[@"m_InfiniteClip"]);
+    BOOL hasInfinite = infinite && ZSAEInt(infinite[@"m_PathID"]) != 0;
+    NSString *trackName = ZSAEString(fields[@"m_Name"]);
+    if (clips.count > 0 || hasInfinite || depth == 0) {
+        [rows addObject:@{
+            @"name": trackName.length > 0 ? trackName : @"Track",
+            @"clips": clips,
+            @"muted": @(ZSAEInt(fields[@"m_Muted"]) != 0),
+            @"infinite": @(hasInfinite),
+            @"depth": @(depth),
+        }];
+    }
+
+    if (depth >= 4) return;
+    for (id child in ZSAEArray(fields[@"m_Children"])) {
+        NSDictionary *reference = ZSAEDict(child);
+        if (!reference || ZSAEInt(reference[@"m_PathID"]) == 0) continue;
+        NSString *identity = [NSString stringWithFormat:@"%lld:%lld", (long long)ZSAEInt(reference[@"m_FileID"]), (long long)ZSAEInt(reference[@"m_PathID"])];
+        if ([seen containsObject:identity]) continue;
+        [seen addObject:identity];
+        ZSAEObject *childObject = ZSAEResolvePPtr(context, track, reference, NULL);
+        if (childObject && childObject.classID == 114) ZSAETimelineCollect(context, childObject, depth + 1, rows, seen);
+    }
+}
+
+static double ZSAETimelineTickStep(double total) {
+    static const double steps[] = {0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600};
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        if (total / steps[i] <= 12) return steps[i];
+    }
+    return 1200;
+}
+
+static NSString *ZSAETimelineSeconds(double value) {
+    if (value == floor(value)) return [NSString stringWithFormat:@"%.0fs", value];
+    return [NSString stringWithFormat:@"%.2fs", value];
+}
+
+static UIImage *ZSAERenderTimeline(NSArray<NSDictionary *> *rows, double total) {
+    const CGFloat margin = 24;
+    const CGFloat contentWidth = 1200;
+    const CGFloat axisHeight = 34;
+    const CGFloat headerHeight = 26;
+    const CGFloat laneHeight = 38;
+    const CGFloat clipHeight = 32;
+    const CGFloat rowGap = 14;
+    const NSUInteger maxClipsPerRow = 300;
+    double span = total * 1.02;
+    CGFloat pps = contentWidth / span;
+
+    NSMutableArray<NSArray<NSNumber *> *> *laneAssignments = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *laneCounts = [NSMutableArray array];
+    CGFloat totalHeight = axisHeight + margin;
+    for (NSDictionary *row in rows) {
+        NSArray *clips = row[@"clips"];
+        NSUInteger limit = MIN(clips.count, maxClipsPerRow);
+        NSMutableArray<NSNumber *> *assignments = [NSMutableArray arrayWithCapacity:limit];
+        NSMutableArray<NSNumber *> *laneEnds = [NSMutableArray array];
+        NSMutableArray<NSNumber *> *order = [NSMutableArray arrayWithCapacity:limit];
+        for (NSUInteger i = 0; i < limit; i++) {
+            [order addObject:@(i)];
+            [assignments addObject:@0];
+        }
+        [order sortUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            double sa = [clips[a.unsignedIntegerValue][@"s"] doubleValue];
+            double sb = [clips[b.unsignedIntegerValue][@"s"] doubleValue];
+            return sa < sb ? NSOrderedAscending : (sa > sb ? NSOrderedDescending : NSOrderedSame);
+        }];
+        for (NSNumber *clipIndex in order) {
+            NSDictionary *clip = clips[clipIndex.unsignedIntegerValue];
+            double start = [clip[@"s"] doubleValue];
+            double end = start + [clip[@"d"] doubleValue];
+            NSUInteger lane = NSNotFound;
+            for (NSUInteger l = 0; l < laneEnds.count; l++) {
+                if (laneEnds[l].doubleValue <= start + 1e-6) {
+                    lane = l;
+                    break;
+                }
+            }
+            if (lane == NSNotFound) {
+                lane = laneEnds.count;
+                [laneEnds addObject:@(end)];
+            } else {
+                laneEnds[lane] = @(end);
+            }
+            assignments[clipIndex.unsignedIntegerValue] = @(lane);
+        }
+        NSUInteger laneCount = MAX((NSUInteger)1, laneEnds.count);
+        [laneAssignments addObject:assignments];
+        [laneCounts addObject:@(laneCount)];
+        totalHeight += headerHeight + laneCount * laneHeight + rowGap;
+    }
+
+    CGSize size = CGSizeMake(contentWidth + margin * 2, totalHeight);
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 2;
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+
+    UIFont *tickFont = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+    UIFont *headerFont = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightSemibold];
+    UIFont *clipFont = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightSemibold];
+    UIFont *clipSubFont = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightRegular];
+
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *rendererContext) {
+        CGContextRef ctx = rendererContext.CGContext;
+        [[UIColor colorWithWhite:0.09 alpha:1] setFill];
+        CGContextFillRect(ctx, CGRectMake(0, 0, size.width, size.height));
+
+        double tickStep = ZSAETimelineTickStep(span);
+        NSDictionary *tickAttributes = @{NSFontAttributeName: tickFont, NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.5]};
+        for (double t = 0; t <= span + 1e-9; t += tickStep) {
+            CGFloat x = margin + t * pps;
+            [[UIColor colorWithWhite:1 alpha:0.08] setFill];
+            CGContextFillRect(ctx, CGRectMake(x, axisHeight - 6, 1, size.height - axisHeight + 6));
+            [ZSAETimelineSeconds(t) drawAtPoint:CGPointMake(x + 3, 6) withAttributes:tickAttributes];
+        }
+        [[UIColor colorWithWhite:1 alpha:0.2] setFill];
+        CGContextFillRect(ctx, CGRectMake(margin, axisHeight - 6, contentWidth, 1));
+
+        CGFloat y = axisHeight;
+        for (NSUInteger r = 0; r < rows.count; r++) {
+            NSDictionary *row = rows[r];
+            NSArray *clips = row[@"clips"];
+            BOOL muted = [row[@"muted"] boolValue];
+            NSUInteger depth = [row[@"depth"] unsignedIntegerValue];
+            UIColor *base = [UIColor colorWithHue:fmod(0.58 + 0.13 * r, 1.0) saturation:0.55 brightness:muted ? 0.45 : 0.85 alpha:1];
+
+            NSString *title = row[@"name"];
+            NSString *meta = [NSString stringWithFormat:@"%@%@%@", [row[@"infinite"] boolValue] ? @"  •  infinite clip" : @"", muted ? @"  •  muted" : @"", clips.count > maxClipsPerRow ? [NSString stringWithFormat:@"  •  showing %lu of %lu", (unsigned long)maxClipsPerRow, (unsigned long)clips.count] : @""];
+            NSString *headerText = [NSString stringWithFormat:@"%@%@", title, meta];
+            CGFloat indent = MIN(depth, (NSUInteger)4) * 14;
+            [base setFill];
+            CGContextFillRect(ctx, CGRectMake(margin + indent, y + 5, 3, 14));
+            [headerText drawAtPoint:CGPointMake(margin + indent + 10, y + 4) withAttributes:@{NSFontAttributeName: headerFont, NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:muted ? 0.45 : 0.9]}];
+            y += headerHeight;
+
+            NSArray<NSNumber *> *assignments = laneAssignments[r];
+            NSUInteger laneCount = laneCounts[r].unsignedIntegerValue;
+            for (NSUInteger l = 0; l < laneCount; l++) {
+                [[UIColor colorWithWhite:1 alpha:0.035] setFill];
+                CGContextFillRect(ctx, CGRectMake(margin, y + l * laneHeight, contentWidth, laneHeight - 3));
+            }
+
+            for (NSUInteger i = 0; i < assignments.count; i++) {
+                NSDictionary *clip = clips[i];
+                double start = [clip[@"s"] doubleValue];
+                double duration = [clip[@"d"] doubleValue];
+                CGFloat x = margin + start * pps;
+                CGFloat w = MAX(duration * pps, 2);
+                CGFloat cy = y + assignments[i].unsignedIntegerValue * laneHeight + 1;
+                CGRect rect = CGRectMake(x, cy, w, clipHeight);
+                UIBezierPath *path = [UIBezierPath bezierPathWithRoundedRect:rect cornerRadius:4];
+                [[base colorWithAlphaComponent:muted ? 0.35 : 0.8] setFill];
+                [path fill];
+
+                CGContextSaveGState(ctx);
+                [path addClip];
+                for (NSUInteger j = 0; j < assignments.count; j++) {
+                    if (j == i) continue;
+                    NSDictionary *other = clips[j];
+                    double os = [other[@"s"] doubleValue];
+                    double oe = os + [other[@"d"] doubleValue];
+                    double lo = MAX(start, os);
+                    double hi = MIN(start + duration, oe);
+                    if (hi - lo > 1e-6) {
+                        [[UIColor colorWithWhite:1 alpha:0.28] setFill];
+                        CGContextFillRect(ctx, CGRectMake(margin + lo * pps, cy, MAX((hi - lo) * pps, 1), clipHeight));
+                    }
+                }
+                double easeIn = MIN([clip[@"ei"] doubleValue], duration);
+                double easeOut = MIN([clip[@"eo"] doubleValue], duration);
+                [[UIColor colorWithWhite:0 alpha:0.35] setFill];
+                if (easeIn > 0) {
+                    UIBezierPath *tri = [UIBezierPath bezierPath];
+                    [tri moveToPoint:CGPointMake(x, cy)];
+                    [tri addLineToPoint:CGPointMake(x + easeIn * pps, cy)];
+                    [tri addLineToPoint:CGPointMake(x, cy + clipHeight)];
+                    [tri closePath];
+                    [tri fill];
+                }
+                if (easeOut > 0) {
+                    UIBezierPath *tri = [UIBezierPath bezierPath];
+                    [tri moveToPoint:CGPointMake(x + w, cy)];
+                    [tri addLineToPoint:CGPointMake(x + w - easeOut * pps, cy)];
+                    [tri addLineToPoint:CGPointMake(x + w, cy + clipHeight)];
+                    [tri closePath];
+                    [tri fill];
+                }
+                CGContextRestoreGState(ctx);
+
+                [[UIColor colorWithWhite:1 alpha:0.4] setStroke];
+                path.lineWidth = 1;
+                [path stroke];
+
+                if (w > 28) {
+                    CGContextSaveGState(ctx);
+                    CGContextClipToRect(ctx, CGRectInset(rect, 4, 0));
+                    [clip[@"n"] drawAtPoint:CGPointMake(x + 5, cy + 3) withAttributes:@{NSFontAttributeName: clipFont, NSForegroundColorAttributeName: UIColor.whiteColor}];
+                    NSString *range = [NSString stringWithFormat:@"%@ → %@", ZSAETimelineSeconds(start), ZSAETimelineSeconds(start + duration)];
+                    [range drawAtPoint:CGPointMake(x + 5, cy + 18) withAttributes:@{NSFontAttributeName: clipSubFont, NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.75]}];
+                    CGContextRestoreGState(ctx);
+                }
+            }
+            y += laneCount * laneHeight + rowGap;
+        }
+    }];
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildTimelineVisual(ZSAEContext *context, ZSAEObject *object) {
+    NSMutableArray<NSDictionary *> *rows = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    ZSAETimelineCollect(context, object, 0, rows, seen);
+    if (rows.count == 0) return nil;
+
+    double total = 0;
+    NSUInteger clipCount = 0;
+    for (NSDictionary *row in rows) {
+        for (NSDictionary *clip in row[@"clips"]) {
+            total = MAX(total, [clip[@"s"] doubleValue] + [clip[@"d"] doubleValue]);
+            clipCount++;
+        }
+    }
+    if (clipCount == 0) return nil;
+    if (total <= 0) total = 1;
+
+    NSArray<NSDictionary *> *captured = [rows copy];
+    double capturedTotal = total;
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    NSString *name = ZSAEString(object.fields[@"m_Name"]);
+    visual.name = name;
+    visual.summary = [NSString stringWithFormat:@"%@  •  Timeline  •  %lu %@  •  %lu %@  •  %@", name.length > 0 ? name : @"Track", (unsigned long)clipCount, clipCount == 1 ? @"clip" : @"clips", (unsigned long)captured.count, captured.count == 1 ? @"track" : @"tracks", ZSAETimelineSeconds(total)];
+    visual.pageLabels = @[@"Timeline"];
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        return ZSAERenderTimeline(captured, capturedTotal);
+    };
+    return visual;
+}
+
 static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourVisual(ZSAEContext *context, ZSAEObject *object, NSError **error) {
     NSDictionary *fields = object.fields;
+    ZSAssetExplorerVisual *timelineVisual = ZSAEBuildTimelineVisual(context, object);
+    if (timelineVisual) return timelineVisual;
     NSMutableArray<ZSAEObject *> *targets = [NSMutableArray array];
     NSMutableArray<NSString *> *labels = [NSMutableArray array];
     NSMutableSet<NSString *> *seen = [NSMutableSet set];
