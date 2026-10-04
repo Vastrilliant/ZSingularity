@@ -6086,6 +6086,7 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIButton *assetExplorerTextureBackButton;
 @property (nonatomic, strong) UIButton *assetExplorerTextureExportButton;
 @property (nonatomic, strong) UIImageView *assetExplorerTextureImageView;
+@property (nonatomic, strong) UITextView *assetExplorerTextView;
 @property (nonatomic, strong) UILabel *assetExplorerTextureMessageLabel;
 @property (nonatomic, strong) UILabel *assetExplorerTextureCaptionLabel;
 @property (nonatomic, strong) UIActivityIndicatorView *assetExplorerTextureSpinner;
@@ -8199,6 +8200,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerTextureBackButton = nil;
     self.assetExplorerTextureExportButton = nil;
     self.assetExplorerTextureImageView = nil;
+    self.assetExplorerTextView = nil;
     self.assetExplorerTextureMessageLabel = nil;
     self.assetExplorerTextureCaptionLabel = nil;
     self.assetExplorerTextureSpinner = nil;
@@ -15791,6 +15793,22 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:textureImageView];
     self.assetExplorerTextureImageView = textureImageView;
 
+    UITextView *textView = [[UITextView alloc] init];
+    textView.translatesAutoresizingMaskIntoConstraints = NO;
+    textView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
+    textView.layer.cornerRadius = 10;
+    textView.layer.cornerCurve = kCACornerCurveContinuous;
+    textView.editable = NO;
+    textView.selectable = YES;
+    textView.font = zs_mono_font(10, UIFontWeightRegular);
+    textView.textColor = [UIColor colorWithWhite:1 alpha:0.88];
+    textView.textContainerInset = UIEdgeInsetsMake(10, 10, 10, 10);
+    textView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    textView.alwaysBounceVertical = YES;
+    textView.hidden = YES;
+    [overlay addSubview:textView];
+    self.assetExplorerTextView = textView;
+
     UILabel *textureCaption = [[UILabel alloc] init];
     textureCaption.translatesAutoresizingMaskIntoConstraints = NO;
     textureCaption.font = zs_mono_font(9, UIFontWeightRegular);
@@ -15997,6 +16015,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [textureImageView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
         [textureImageView.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
 
+        [textView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [textView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [textView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+        [textView.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
+
         [textureMessage.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
         [textureMessage.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
         [textureMessage.leadingAnchor constraintGreaterThanOrEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
@@ -16110,6 +16133,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerTextureBackButton.hidden = !visible;
     self.assetExplorerTextureExportButton.hidden = !visible;
     self.assetExplorerTextureImageView.hidden = !visible;
+    self.assetExplorerTextView.hidden = YES;
+    self.assetExplorerTextView.text = @"";
     self.assetExplorerTextureCaptionLabel.hidden = !visible;
     self.assetExplorerBackdropView.hidden = !visible;
     self.assetExplorerTexturePagerStack.hidden = !visible;
@@ -16135,7 +16160,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     NSMutableArray<ZSAssetExplorerAsset *> *textures = [NSMutableArray array];
     for (ZSAssetExplorerAsset *candidate in self.assetExplorerDisplayedAssets) {
-        if ([ZSAssetExplorer hasVisualPreviewForClassID:candidate.classID]) [textures addObject:candidate];
+        if ([ZSAssetExplorer hasVisualPreviewForClassID:candidate.classID] && [ZSAssetExplorer classID:asset.classID sharesPreviewGroupWithClassID:candidate.classID]) [textures addObject:candidate];
     }
     NSUInteger index = [textures indexOfObjectIdenticalTo:asset];
     if (index == NSNotFound) {
@@ -16160,6 +16185,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerVisual = nil;
     self.assetExplorerPageIndex = 0;
     self.assetExplorerTextureImageView.image = nil;
+    self.assetExplorerTextureImageView.hidden = NO;
+    self.assetExplorerTextView.hidden = YES;
+    self.assetExplorerTextView.text = @"";
+    self.assetExplorerBackdropView.hidden = NO;
     self.assetExplorerTextureMessageLabel.hidden = YES;
     self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
     [self.assetExplorerTextureSpinner startAnimating];
@@ -16175,7 +16204,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
         ZSAssetExplorerVisual *visual = [ZSAssetExplorer visualForPathID:pathID classID:classID inBundleAtPath:bundlePath error:&error];
-        UIImage *image = visual ? [visual imageAtPage:0 error:&error] : nil;
+        BOOL isText = visual.text.length > 0;
+        UIImage *image = (visual && !isText) ? [visual imageAtPage:0 error:&error] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerTextureOpen || strongSelf.assetExplorerGeneration != generation) return;
@@ -16183,10 +16213,20 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
             if (visual) {
                 strongSelf.assetExplorerVisual = visual;
                 strongSelf.assetExplorerPageIndex = 0;
-                strongSelf.assetExplorerTextureCaptionLabel.text = visual.summary.length > 0 ? visual.summary : visual.name;
+                NSString *summary = visual.summary.length > 0 ? visual.summary : visual.name;
+                if (isText) summary = [NSString stringWithFormat:@"%@  •  %@", asset.typeName ?: @"Asset", summary ?: @""];
+                strongSelf.assetExplorerTextureCaptionLabel.text = summary;
                 [strongSelf zs_assetExplorerSyncPagePager];
             }
-            if (image) {
+            if (isText) {
+                strongSelf.assetExplorerTextureImageView.hidden = YES;
+                strongSelf.assetExplorerBackdropView.hidden = YES;
+                strongSelf.assetExplorerTextView.text = visual.text;
+                strongSelf.assetExplorerTextView.hidden = NO;
+                [strongSelf.assetExplorerTextView setContentOffset:CGPointZero animated:NO];
+                strongSelf.assetExplorerTextureExportButton.enabled = YES;
+                strongSelf.assetExplorerTextureExportButton.alpha = 1;
+            } else if (image) {
                 strongSelf.assetExplorerTextureImageView.image = image;
                 strongSelf.assetExplorerTextureExportButton.enabled = YES;
                 strongSelf.assetExplorerTextureExportButton.alpha = 1;
@@ -16291,8 +16331,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_assetExplorerTextureExportTapped {
     UIImage *image = self.assetExplorerTextureImageView.image;
+    ZSAssetExplorerVisual *textVisual = self.assetExplorerVisual;
+    BOOL isTextExport = textVisual.text.length > 0;
+    NSData *textData = isTextExport ? (textVisual.exportData ?: [textVisual.text dataUsingEncoding:NSUTF8StringEncoding]) : nil;
     NSInteger index = self.assetExplorerTextureIndex;
-    if (!image || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
+    if ((!image && !isTextExport) || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
 
     ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
     NSString *baseName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"%@_%lld", asset.typeName.length > 0 ? asset.typeName : @"Asset", (long long)asset.pathID];
@@ -16312,9 +16355,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIButton *sourceButton = self.assetExplorerTextureExportButton;
     sourceButton.enabled = NO;
     __weak typeof(self) weakSelf = self;
-    NSString *fileName = [safeName stringByAppendingPathExtension:@"png"];
+    NSString *fileExtension = isTextExport ? (textVisual.fileExtension.length > 0 ? textVisual.fileExtension : @"txt") : @"png";
+    NSString *fileName = [safeName stringByAppendingPathExtension:fileExtension];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSData *png = UIImagePNGRepresentation(image);
+        NSData *png = isTextExport ? textData : UIImagePNGRepresentation(image);
         NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSAssetExport-%@", NSUUID.UUID.UUIDString]];
         NSString *path = [directory stringByAppendingPathComponent:fileName];
         BOOL written = NO;
@@ -16324,7 +16368,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            if (strongSelf.assetExplorerTextureImageView.image) {
+            if (strongSelf.assetExplorerTextureImageView.image || isTextExport) {
                 sourceButton.enabled = YES;
             }
             if (!written || !strongSelf.assetExplorerTextureOpen) {
