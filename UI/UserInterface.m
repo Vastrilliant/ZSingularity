@@ -761,6 +761,19 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
+static void zs_style_pill_icon_button_flat(UIButton *button, UIImage *image, UIColor *tintColor) {
+    zs_clear_button_configuration(button);
+    [button setImage:image forState:UIControlStateNormal];
+    if (tintColor) button.tintColor = tintColor;
+    button.backgroundColor = [UIColor colorWithWhite:0.16 alpha:1.0];
+    button.layer.borderWidth = 1;
+    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.24].CGColor;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
+    button.layer.cornerRadius = 15;
+    button.clipsToBounds = YES;
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+}
+
 static UIImage *zs_mods_doctor_button_icon(NSString *sfSymbolName, CGFloat pointSize) {
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize weight:UIImageSymbolWeightSemibold];
     return [UIImage systemImageNamed:sfSymbolName withConfiguration:config];
@@ -6064,6 +6077,7 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIButton *assetExplorerCloseButton;
 @property (nonatomic, assign) BOOL assetExplorerTextureOpen;
 @property (nonatomic, strong) UIButton *assetExplorerTextureBackButton;
+@property (nonatomic, strong) UIButton *assetExplorerTextureExportButton;
 @property (nonatomic, strong) UIImageView *assetExplorerTextureImageView;
 @property (nonatomic, strong) UILabel *assetExplorerTextureMessageLabel;
 @property (nonatomic, strong) UILabel *assetExplorerTextureCaptionLabel;
@@ -8169,6 +8183,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerCloseButton = nil;
     self.assetExplorerTextureOpen = NO;
     self.assetExplorerTextureBackButton = nil;
+    self.assetExplorerTextureExportButton = nil;
     self.assetExplorerTextureImageView = nil;
     self.assetExplorerTextureMessageLabel = nil;
     self.assetExplorerTextureCaptionLabel = nil;
@@ -15738,6 +15753,16 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:textureBackButton];
     self.assetExplorerTextureBackButton = textureBackButton;
 
+    UIButton *textureExportButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    textureExportButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(textureExportButton, [UIImage systemImageNamed:@"square.and.arrow.up" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.85]);
+    [textureExportButton addTarget:self action:@selector(zs_assetExplorerTextureExportTapped) forControlEvents:UIControlEventTouchUpInside];
+    textureExportButton.hidden = YES;
+    textureExportButton.enabled = NO;
+    textureExportButton.alpha = 0.35;
+    [overlay addSubview:textureExportButton];
+    self.assetExplorerTextureExportButton = textureExportButton;
+
     UIImageView *textureImageView = [[UIImageView alloc] init];
     textureImageView.translatesAutoresizingMaskIntoConstraints = NO;
     textureImageView.contentMode = UIViewContentModeScaleAspectFit;
@@ -15824,13 +15849,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     UIImage *nextImage = [UIImage systemImageNamed:@"chevron.right" withConfiguration:symbolConfig];
     UIButton *prevButton = [UIButton buttonWithType:UIButtonTypeSystem];
     prevButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_as_native_glass(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_pill_icon_button_flat(prevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [prevButton addTarget:self action:@selector(zs_assetExplorerTexturePrevTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTexturePrevButton = prevButton;
 
     UIButton *nextButton = [UIButton buttonWithType:UIButtonTypeSystem];
     nextButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_pill_icon_button_as_native_glass(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    zs_style_pill_icon_button_flat(nextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
     [nextButton addTarget:self action:@selector(zs_assetExplorerTextureNextTapped) forControlEvents:UIControlEventTouchUpInside];
     self.assetExplorerTextureNextButton = nextButton;
 
@@ -15886,6 +15911,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [textureBackButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:8],
         [textureBackButton.widthAnchor constraintEqualToConstant:30],
         [textureBackButton.heightAnchor constraintEqualToConstant:30],
+
+        [textureExportButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [textureExportButton.leadingAnchor constraintEqualToAnchor:textureBackButton.trailingAnchor constant:8],
+        [textureExportButton.widthAnchor constraintEqualToConstant:30],
+        [textureExportButton.heightAnchor constraintEqualToConstant:30],
 
         [textureCaption.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
         [textureCaption.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
@@ -16007,6 +16037,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerBackButton.hidden = visible || self.assetExplorerSelectedBundle == nil;
     self.assetExplorerCloseButton.hidden = visible ? NO : (self.assetExplorerSelectedBundle != nil);
     self.assetExplorerTextureBackButton.hidden = !visible;
+    self.assetExplorerTextureExportButton.hidden = !visible;
     self.assetExplorerTextureImageView.hidden = !visible;
     self.assetExplorerTextureCaptionLabel.hidden = !visible;
     self.assetExplorerBackdropView.hidden = !visible;
@@ -16056,6 +16087,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerTextureMessageLabel.hidden = YES;
     self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : @"Texture2D";
     [self.assetExplorerTextureSpinner startAnimating];
+    self.assetExplorerTextureExportButton.enabled = NO;
+    self.assetExplorerTextureExportButton.alpha = 0.35;
     [self zs_assetExplorerSyncTexturePager];
 
     __weak typeof(self) weakSelf = self;
@@ -16071,6 +16104,8 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
             [strongSelf.assetExplorerTextureSpinner stopAnimating];
             if (texture.image) {
                 strongSelf.assetExplorerTextureImageView.image = texture.image;
+                strongSelf.assetExplorerTextureExportButton.enabled = YES;
+                strongSelf.assetExplorerTextureExportButton.alpha = 1;
                 NSString *name = texture.name.length > 0 ? texture.name : (assetName.length > 0 ? assetName : @"Texture2D");
                 strongSelf.assetExplorerTextureCaptionLabel.text = [NSString stringWithFormat:@"%@  •  %ldx%ld  •  %@", name, (long)texture.width, (long)texture.height, texture.formatName];
             } else {
@@ -16101,6 +16136,58 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [self zs_assetExplorerLoadTextureAtCurrentIndex];
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerTextureExportTapped {
+    UIImage *image = self.assetExplorerTextureImageView.image;
+    NSInteger index = self.assetExplorerTextureIndex;
+    if (!image || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
+
+    ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
+    NSString *baseName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"Texture2D_%lld", (long long)asset.pathID];
+    NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
+    [allowed addCharactersInString:@"-_. "];
+    NSMutableString *safeName = [NSMutableString string];
+    for (NSUInteger i = 0; i < baseName.length; i++) {
+        unichar c = [baseName characterAtIndex:i];
+        [safeName appendString:[allowed characterIsMember:c] ? [NSString stringWithCharacters:&c length:1] : @"_"];
+    }
+
+    UIButton *sourceButton = self.assetExplorerTextureExportButton;
+    sourceButton.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    NSString *fileName = [safeName stringByAppendingPathExtension:@"png"];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *png = UIImagePNGRepresentation(image);
+        NSString *directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSAssetExport-%@", NSUUID.UUID.UUIDString]];
+        NSString *path = [directory stringByAppendingPathComponent:fileName];
+        BOOL written = NO;
+        if (png.length > 0 && [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil]) {
+            written = [png writeToFile:path atomically:YES];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (strongSelf.assetExplorerTextureImageView.image) {
+                sourceButton.enabled = YES;
+            }
+            if (!written || !strongSelf.assetExplorerTextureOpen) {
+                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
+                return;
+            }
+            UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+            activityVC.popoverPresentationController.sourceView = sourceButton;
+            activityVC.popoverPresentationController.sourceRect = sourceButton.bounds;
+            activityVC.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+                [NSFileManager.defaultManager removeItemAtPath:directory error:nil];
+            };
+            UIViewController *presenter = zs_key_window().rootViewController;
+            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+            [presenter presentViewController:activityVC animated:YES completion:nil];
+            UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+            [haptic impactOccurred];
+        });
+    });
 }
 
 - (void)zs_assetExplorerTexturePrevTapped {
