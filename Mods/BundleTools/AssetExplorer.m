@@ -812,7 +812,100 @@ static BOOL ZSAEParseUnityFSForSerializedPath(NSString *path, NSString **outSeri
     return YES;
 }
 
-static BOOL ZSAEParseSerializedFile(NSData *data, NSArray<ZSAssetExplorerAsset *> **outAssets, int64_t wantedPathID, ZSAETextureRecord **outRecord, NSError **error) {
+static BOOL ZSAETypeIsSigned(NSString *type) {
+    return [type isEqualToString:@"int"] || [type isEqualToString:@"SInt8"] || [type isEqualToString:@"SInt16"] ||
+           [type isEqualToString:@"SInt32"] || [type isEqualToString:@"SInt64"] || [type isEqualToString:@"short"] ||
+           [type isEqualToString:@"long long"] || [type isEqualToString:@"char"];
+}
+
+static id ZSAEReadValue(const ZSAETypeTree *tree, ZSAEReader *reader, uint32_t index, NSUInteger *budget, NSUInteger depth) {
+    if (!tree || index >= tree->count || !reader || !budget || depth > 48 || *budget == 0) return nil;
+    (*budget)--;
+
+    const ZSAETypeNode *node = &tree->nodes[index];
+    uint32_t end = ZSAESubtreeEnd(tree, index);
+    NSString *nodeType = ZSAEStringFromOffset(tree->strings, tree->stringSize, node->typeOffset);
+    BOOL align = (node->metaFlags & 0x4000) != 0;
+    id result = nil;
+
+    if ([nodeType isEqualToString:@"string"]) {
+        NSString *value = nil;
+        if (!ZSAEReadStringValue(reader, &value)) return nil;
+        result = value ?: @"";
+    } else if ([nodeType isEqualToString:@"TypelessData"]) {
+        uint32_t size = 0;
+        if (!ZSAEReadU32LE(reader, &size) || !ZSAEReaderCanRead(reader, size)) return nil;
+        result = [NSData dataWithBytes:reader->base + reader->pos length:size];
+        reader->pos += size;
+    } else if (node->flags & 1) {
+        uint32_t count = 0;
+        if (!ZSAEReadU32LE(reader, &count)) return nil;
+        uint32_t elementIndex = index + 2;
+        if (elementIndex >= end) return nil;
+        uint32_t elementEnd = ZSAESubtreeEnd(tree, elementIndex);
+        if (elementEnd == elementIndex + 1 && tree->nodes[elementIndex].byteSize > 0) {
+            uint64_t bytes = (uint64_t)count * (uint64_t)tree->nodes[elementIndex].byteSize;
+            if (!ZSAEReaderCanRead(reader, bytes)) return nil;
+            result = bytes <= (64u << 20) ? [NSData dataWithBytes:reader->base + reader->pos length:(NSUInteger)bytes] : [NSData data];
+            reader->pos += bytes;
+        } else {
+            if (count > 2000000) return nil;
+            NSMutableArray *items = [NSMutableArray arrayWithCapacity:MIN((NSUInteger)count, (NSUInteger)4096)];
+            for (uint32_t i = 0; i < count; i++) {
+                id item = ZSAEReadValue(tree, reader, elementIndex, budget, depth + 1);
+                if (!item) return nil;
+                [items addObject:item];
+            }
+            result = items;
+        }
+    } else if (end > index + 1) {
+        NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+        uint32_t child = index + 1;
+        while (child < end) {
+            NSString *name = ZSAEStringFromOffset(tree->strings, tree->stringSize, tree->nodes[child].nameOffset);
+            id value = ZSAEReadValue(tree, reader, child, budget, depth + 1);
+            if (!value) return nil;
+            if (name.length > 0 && !fields[name]) fields[name] = value;
+            child = ZSAESubtreeEnd(tree, child);
+        }
+        result = (fields.count == 1 && fields[@"Array"]) ? fields[@"Array"] : fields;
+    } else {
+        int32_t size = node->byteSize;
+        if (size < 0 || !ZSAEReaderCanRead(reader, (uint64_t)size)) return nil;
+        const uint8_t *raw = reader->base + reader->pos;
+        if (size == 0) {
+            result = @0;
+        } else if ([nodeType isEqualToString:@"float"] && size == 4) {
+            float number = 0;
+            memcpy(&number, raw, 4);
+            result = @(number);
+        } else if ([nodeType isEqualToString:@"double"] && size == 8) {
+            double number = 0;
+            memcpy(&number, raw, 8);
+            result = @(number);
+        } else if (size <= 8) {
+            uint64_t value = 0;
+            for (int32_t i = 0; i < size; i++) value |= ((uint64_t)raw[i]) << (8 * i);
+            if (ZSAETypeIsSigned(nodeType)) {
+                int shift = 64 - 8 * size;
+                result = @((int64_t)(value << shift) >> shift);
+            } else {
+                result = @(value);
+            }
+        } else {
+            result = [NSData dataWithBytes:raw length:(NSUInteger)size];
+        }
+        reader->pos += (uint64_t)size;
+    }
+
+    if (align) {
+        uint64_t aligned = ZSAEAlign4(reader->pos, reader->start);
+        reader->pos = aligned > reader->limit ? reader->limit : aligned;
+    }
+    return reader->pos <= reader->limit ? result : nil;
+}
+
+static BOOL ZSAEParseSerializedFile(NSData *data, NSArray<ZSAssetExplorerAsset *> **outAssets, int64_t wantedPathID, ZSAETextureRecord **outRecord, NSDictionary **outObject, int32_t *outObjectClassID, NSArray<NSString *> **outExternals, NSError **error) {
     const uint8_t *bytes = data.bytes;
     size_t length = data.length;
     if (!bytes || length < 48) {
@@ -940,8 +1033,10 @@ static BOOL ZSAEParseSerializedFile(NSData *data, NSArray<ZSAssetExplorerAsset *
         return NO;
     }
 
-    NSMutableArray<ZSAssetExplorerAsset *> *assets = [NSMutableArray arrayWithCapacity:outRecord ? 0 : (NSUInteger)objectCount];
+    NSMutableArray<ZSAssetExplorerAsset *> *assets = [NSMutableArray arrayWithCapacity:(outRecord || outObject) ? 0 : (NSUInteger)objectCount];
     BOOL textureProblem = NO;
+    BOOL objectFound = NO;
+    BOOL objectProblem = NO;
     for (int32_t i = 0; i < objectCount; i++) {
         pos = (pos + 3) & ~((size_t)3);
         if (length - pos < 24) {
@@ -956,6 +1051,25 @@ static BOOL ZSAEParseSerializedFile(NSData *data, NSArray<ZSAssetExplorerAsset *
         if (typeIndex < 0 || typeIndex >= typeCount) continue;
 
         ZSAETypeTree *tree = &types[typeIndex];
+        if (outObject) {
+            if (objectFound || pathID != wantedPathID) continue;
+            objectFound = YES;
+            uint64_t objectStart = dataOffset + byteStart;
+            if (byteStart > length - dataOffset || objectStart > length || byteSize > length - objectStart) {
+                objectProblem = YES;
+                continue;
+            }
+            ZSAEReader objectReader = { bytes, objectStart, objectStart + byteSize, objectStart };
+            NSUInteger objectBudget = 4000000;
+            id value = ZSAEReadValue(tree, &objectReader, 0, &objectBudget, 0);
+            if ([value isKindOfClass:[NSDictionary class]]) {
+                *outObject = value;
+                if (outObjectClassID) *outObjectClassID = tree->classID;
+            } else {
+                objectProblem = YES;
+            }
+            continue;
+        }
         if (outRecord) {
             if (pathID != wantedPathID) continue;
             uint64_t objectStart = dataOffset + byteStart;
@@ -991,8 +1105,47 @@ static BOOL ZSAEParseSerializedFile(NSData *data, NSArray<ZSAssetExplorerAsset *
         [assets addObject:asset];
     }
 
+    if (outObject && *outObject && outExternals) {
+        NSMutableArray<NSString *> *externals = [NSMutableArray array];
+        size_t cursor = pos;
+        if (length - cursor >= 4) {
+            int32_t scriptCount = ZSAEReadI32LEBytes(bytes + cursor);
+            cursor += 4;
+            if (scriptCount >= 0 && (uint64_t)scriptCount * 12u <= length - cursor) {
+                cursor += (size_t)scriptCount * 12u;
+                if (length - cursor >= 4) {
+                    int32_t externalCount = ZSAEReadI32LEBytes(bytes + cursor);
+                    cursor += 4;
+                    for (int32_t e = 0; e < externalCount && e < 4096; e++) {
+                        while (cursor < length && bytes[cursor] != 0) cursor++;
+                        if (cursor >= length) break;
+                        cursor++;
+                        if (length - cursor < 20) break;
+                        cursor += 20;
+                        size_t pathStart = cursor;
+                        while (cursor < length && bytes[cursor] != 0) cursor++;
+                        if (cursor >= length) break;
+                        NSString *externalPath = [[NSString alloc] initWithBytes:bytes + pathStart length:cursor - pathStart encoding:NSUTF8StringEncoding];
+                        cursor++;
+                        [externals addObject:externalPath ?: @""];
+                    }
+                }
+            }
+        }
+        *outExternals = externals;
+    }
+
     for (int32_t i = 0; i < typeCount; i++) free(types[i].nodes);
     free(types);
+
+    if (outObject) {
+        if (objectProblem || !*outObject) {
+            if (error) *error = ZSAEError(objectFound ? ZSAssetExplorerErrorTextureDecodeFailed : ZSAssetExplorerErrorAssetNotFound,
+                                          objectFound ? @"This object couldn't be read." : @"The asset wasn't found in the bundle.");
+            return NO;
+        }
+        return YES;
+    }
 
     if (outRecord) {
         if (textureProblem) {
@@ -1381,18 +1534,10 @@ static BOOL ZSAEDecodeTexture(ZSAETextureRecord *record, NSData *pixels, NSMutab
     return YES;
 }
 
-static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
+static UIImage *ZSAEImageFromTopDownRGBA(NSData *topDown, int32_t width, int32_t height) {
     size_t rowBytes = (size_t)width * 4;
-    NSMutableData *flipped = [NSMutableData dataWithLength:rowBytes * (size_t)height];
-    if (!flipped) return nil;
-    const uint8_t *src = rgba.bytes;
-    uint8_t *dst = flipped.mutableBytes;
-    for (int32_t y = 0; y < height; y++) {
-        memcpy(dst + (size_t)y * rowBytes, src + (size_t)(height - 1 - y) * rowBytes, rowBytes);
-    }
-
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)flipped);
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)topDown);
     CGImageRef cgImage = CGImageCreate((size_t)width, (size_t)height, 8, 32, rowBytes, colorSpace,
                                        kCGBitmapByteOrderDefault | kCGImageAlphaLast,
                                        provider, NULL, false, kCGRenderingIntentDefault);
@@ -1403,6 +1548,541 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
     return image;
 }
 
+static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
+    size_t rowBytes = (size_t)width * 4;
+    NSMutableData *flipped = [NSMutableData dataWithLength:rowBytes * (size_t)height];
+    if (!flipped) return nil;
+    const uint8_t *src = rgba.bytes;
+    uint8_t *dst = flipped.mutableBytes;
+    for (int32_t y = 0; y < height; y++) {
+        memcpy(dst + (size_t)y * rowBytes, src + (size_t)(height - 1 - y) * rowBytes, rowBytes);
+    }
+    return ZSAEImageFromTopDownRGBA(flipped, width, height);
+}
+
+@interface ZSAESession : NSObject
+@property (nonatomic, strong) ZSAEBundle *bundle;
+@property (nonatomic, strong) NSData *serializedData;
+@property (nonatomic, copy) NSString *serializedPath;
+@end
+
+@implementation ZSAESession
+- (void)dealloc {
+    if (_serializedPath.length > 0) [[NSFileManager defaultManager] removeItemAtPath:_serializedPath error:nil];
+}
+@end
+
+@interface ZSAEObject : NSObject
+@property (nonatomic, strong) NSDictionary *fields;
+@property (nonatomic, assign) int32_t classID;
+@property (nonatomic, copy) NSArray<NSString *> *externals;
+@property (nonatomic, strong) ZSAESession *session;
+@end
+
+@implementation ZSAEObject
+@end
+
+@interface ZSAEContext : NSObject
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSAESession *> *sessions;
+@property (nonatomic, copy) NSArray<ZSAssetExplorerBundle *> *cachedBundles;
+@end
+
+@implementation ZSAEContext
+@end
+
+static int64_t ZSAEInt(id value) {
+    return [value isKindOfClass:[NSNumber class]] ? [(NSNumber *)value longLongValue] : 0;
+}
+
+static double ZSAEDouble(id value) {
+    return [value isKindOfClass:[NSNumber class]] ? [(NSNumber *)value doubleValue] : 0;
+}
+
+static NSDictionary *ZSAEDict(id value) {
+    return [value isKindOfClass:[NSDictionary class]] ? value : nil;
+}
+
+static NSArray *ZSAEArray(id value) {
+    return [value isKindOfClass:[NSArray class]] ? value : nil;
+}
+
+static NSString *ZSAEString(id value) {
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+static ZSAESession *ZSAEOpenSession(NSString *bundlePath, NSError **error) {
+    ZSAEBundle *bundle = nil;
+    if (!ZSAEOpenBundle(bundlePath, &bundle, error)) return nil;
+
+    ZSAEBundleNode *cabNode = ZSAEFindSerializedNode(bundle);
+    if (!cabNode) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"No serialized CAB node was found in the bundle.");
+        return nil;
+    }
+
+    NSString *serializedPath = nil;
+    if (!ZSAEReadFileNodeData(bundle.fileData, cabNode.offset, cabNode.size,
+                              bundle.blockData.bytes, bundle.blockCount,
+                              &serializedPath, error) || serializedPath.length == 0) {
+        return nil;
+    }
+
+    NSError *mapError = nil;
+    NSData *serializedData = [NSData dataWithContentsOfFile:serializedPath options:NSDataReadingMappedIfSafe error:&mapError];
+    if (!serializedData) {
+        [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
+        if (error) *error = mapError ?: ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't map the serialized file.");
+        return nil;
+    }
+
+    ZSAESession *session = [ZSAESession new];
+    session.bundle = bundle;
+    session.serializedData = serializedData;
+    session.serializedPath = serializedPath;
+    return session;
+}
+
+static ZSAEObject *ZSAEReadObject(ZSAESession *session, int64_t pathID, NSError **error) {
+    NSDictionary *fields = nil;
+    int32_t classID = 0;
+    NSArray<NSString *> *externals = nil;
+    if (!ZSAEParseSerializedFile(session.serializedData, nil, pathID, NULL, &fields, &classID, &externals, error)) return nil;
+    ZSAEObject *object = [ZSAEObject new];
+    object.fields = fields;
+    object.classID = classID;
+    object.externals = externals ?: @[];
+    object.session = session;
+    return object;
+}
+
+static ZSAEObject *ZSAEResolvePPtr(ZSAEContext *context, ZSAEObject *owner, id pointer, NSError **error) {
+    NSDictionary *reference = ZSAEDict(pointer);
+    int64_t pathID = ZSAEInt(reference[@"m_PathID"]);
+    int64_t fileID = ZSAEInt(reference[@"m_FileID"]);
+    if (!reference || pathID == 0) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"The asset has an empty reference.");
+        return nil;
+    }
+
+    ZSAESession *session = owner.session;
+    if (fileID != 0) {
+        NSArray<NSString *> *externals = owner.externals;
+        if (fileID < 1 || fileID > (int64_t)externals.count) {
+            if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"The asset points to an unknown external file.");
+            return nil;
+        }
+        NSString *cab = externals[(NSUInteger)(fileID - 1)].lastPathComponent;
+        if (!context.cachedBundles) context.cachedBundles = [ZSAssetExplorer cachedBundles:nil] ?: @[];
+        NSString *bundlePath = nil;
+        for (ZSAssetExplorerBundle *candidate in context.cachedBundles) {
+            if ([candidate.cabIdentifier caseInsensitiveCompare:cab] == NSOrderedSame) {
+                bundlePath = candidate.filePath;
+                break;
+            }
+        }
+        if (bundlePath.length == 0) {
+            if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, [NSString stringWithFormat:@"This asset depends on %@, which isn't in the cache.", cab]);
+            return nil;
+        }
+        session = context.sessions[bundlePath];
+        if (!session) {
+            session = ZSAEOpenSession(bundlePath, error);
+            if (!session) return nil;
+            context.sessions[bundlePath] = session;
+        }
+    }
+    return ZSAEReadObject(session, pathID, error);
+}
+
+static NSData *ZSAELoadPixels(ZSAESession *session, NSData *inlineData, NSString *streamPath, uint64_t streamOffset, uint64_t streamSize, NSError **error) {
+    if (inlineData.length > 0) return inlineData;
+    if (streamSize == 0) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"The asset has no pixel data.");
+        return nil;
+    }
+    ZSAEBundle *bundle = session.bundle;
+    NSString *streamName = streamPath.lastPathComponent;
+    ZSAEBundleNode *streamNode = nil;
+    for (ZSAEBundleNode *node in bundle.nodes) {
+        if (streamName.length > 0 && [node.path isEqualToString:streamName]) {
+            streamNode = node;
+            break;
+        }
+    }
+    if (!streamNode) {
+        for (ZSAEBundleNode *node in bundle.nodes) {
+            if ((node.flags & 4) == 0 && [node.path hasSuffix:@".resS"]) {
+                streamNode = node;
+                break;
+            }
+        }
+    }
+    if (!streamNode || streamOffset > streamNode.size || streamSize > streamNode.size - streamOffset) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The streamed pixel data wasn't found in the bundle.");
+        return nil;
+    }
+    return ZSAEReadBundleRange(bundle, streamNode.offset + streamOffset, streamSize, error);
+}
+
+static BOOL ZSAEDecodeTextureObject(ZSAEObject *object, ZSAETextureRecord **outRecord, NSMutableData **outRGBA, NSError **error) {
+    if (object.classID != 28) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"The referenced object isn't a Texture2D.");
+        return NO;
+    }
+    NSDictionary *fields = object.fields;
+    ZSAETextureRecord *record = [ZSAETextureRecord new];
+    record.name = ZSAEString(fields[@"m_Name"]);
+    record.width = (int32_t)ZSAEInt(fields[@"m_Width"]);
+    record.height = (int32_t)ZSAEInt(fields[@"m_Height"]);
+    record.format = (int32_t)ZSAEInt(fields[@"m_TextureFormat"]);
+    record.mipCount = (int32_t)ZSAEInt(fields[@"m_MipCount"]);
+    NSData *inlineData = [fields[@"image data"] isKindOfClass:[NSData class]] ? fields[@"image data"] : nil;
+    NSDictionary *stream = ZSAEDict(fields[@"m_StreamData"]);
+    NSData *pixels = ZSAELoadPixels(object.session, inlineData, ZSAEString(stream[@"path"]),
+                                    (uint64_t)ZSAEInt(stream[@"offset"]), (uint64_t)ZSAEInt(stream[@"size"]), error);
+    if (!pixels) return NO;
+    NSMutableData *rgba = nil;
+    if (!ZSAEDecodeTexture(record, pixels, &rgba, error)) return NO;
+    if (outRecord) *outRecord = record;
+    if (outRGBA) *outRGBA = rgba;
+    return YES;
+}
+
+static BOOL ZSAEFormatLayout(int32_t format, uint64_t *blockWidth, uint64_t *blockHeight, uint64_t *blockBytes) {
+    uint64_t width = 4, height = 4, bytes = 16;
+    switch (format) {
+        case 1: case 63: width = 1; height = 1; bytes = 1; break;
+        case 3: width = 1; height = 1; bytes = 3; break;
+        case 4: case 5: case 14: width = 1; height = 1; bytes = 4; break;
+        case 10: case 34: case 45: case 46: bytes = 8; break;
+        case 12: case 47: case 48: case 54: break;
+        case 49: case 55: width = 5; height = 5; break;
+        case 50: case 56: width = 6; height = 6; break;
+        case 51: case 57: width = 8; height = 8; break;
+        case 52: case 58: width = 10; height = 10; break;
+        case 53: case 59: width = 12; height = 12; break;
+        default: return NO;
+    }
+    if (blockWidth) *blockWidth = width;
+    if (blockHeight) *blockHeight = height;
+    if (blockBytes) *blockBytes = bytes;
+    return YES;
+}
+
+static uint64_t ZSAEDataSize(int32_t format, int32_t width, int32_t height, int32_t depth, int32_t mips, BOOL volume) {
+    uint64_t blockWidth = 0, blockHeight = 0, blockBytes = 0;
+    if (!ZSAEFormatLayout(format, &blockWidth, &blockHeight, &blockBytes)) return 0;
+    if (mips < 1) mips = 1;
+    uint64_t total = 0;
+    for (int32_t level = 0; level < mips && level < 24; level++) {
+        uint64_t levelWidth = (uint64_t)MAX(width >> level, 1);
+        uint64_t levelHeight = (uint64_t)MAX(height >> level, 1);
+        uint64_t blocks = ((levelWidth + blockWidth - 1) / blockWidth) * ((levelHeight + blockHeight - 1) / blockHeight) * blockBytes;
+        uint64_t layers = volume ? (uint64_t)MAX(depth >> level, 1) : (uint64_t)MAX(depth, 1);
+        total += blocks * layers;
+    }
+    return total;
+}
+
+static BOOL ZSAEFormatMatches(int32_t format, int32_t width, int32_t height, int32_t depth, int32_t mips, BOOL volume, uint64_t length) {
+    uint64_t full = ZSAEDataSize(format, width, height, depth, mips, volume);
+    if (full != 0 && full == length) return YES;
+    uint64_t base = ZSAEDataSize(format, width, height, depth, 1, volume);
+    return base != 0 && base == length;
+}
+
+static int32_t ZSAEInferFormat(int32_t raw, int32_t width, int32_t height, int32_t depth, int32_t mips, BOOL volume, uint64_t length) {
+    static const int32_t candidates[] = {48, 49, 50, 51, 52, 53, 47, 46, 45, 34, 4, 14, 5, 3, 63, 1, 12, 10};
+    int32_t hinted = 0;
+    switch (raw) {
+        case 1: case 5: hinted = 63; break;
+        case 3: case 7: hinted = 3; break;
+        case 4: case 8: hinted = 4; break;
+        case 57: case 59: hinted = 14; break;
+        default: break;
+    }
+    int32_t ordered[2] = { hinted, raw };
+    for (int i = 0; i < 2; i++) {
+        if (ordered[i] > 0 && ZSAEFormatMatches(ordered[i], width, height, depth, mips, volume, length)) return ordered[i];
+    }
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (ZSAEFormatMatches(candidates[i], width, height, depth, mips, volume, length)) return candidates[i];
+    }
+    return 0;
+}
+
+static NSData *ZSAETopDownCrop(NSData *bottomUp, int32_t textureWidth, int32_t x, int32_t y, int32_t width, int32_t height) {
+    size_t rowBytes = (size_t)width * 4;
+    NSMutableData *output = [NSMutableData dataWithLength:rowBytes * (size_t)height];
+    if (!output) return nil;
+    const uint8_t *source = bottomUp.bytes;
+    uint8_t *destination = output.mutableBytes;
+    for (int32_t row = 0; row < height; row++) {
+        const uint8_t *from = source + ((size_t)(y + height - 1 - row) * (size_t)textureWidth + (size_t)x) * 4;
+        memcpy(destination + (size_t)row * rowBytes, from, rowBytes);
+    }
+    return output;
+}
+
+static NSData *ZSAETransformTopDown(NSData *source, int32_t *width, int32_t *height, int rotation) {
+    if (rotation < 1 || rotation > 4) return source;
+    int32_t w = *width;
+    int32_t h = *height;
+    int32_t outWidth = rotation == 3 ? h : w;
+    int32_t outHeight = rotation == 3 ? w : h;
+    NSMutableData *output = [NSMutableData dataWithLength:(size_t)outWidth * (size_t)outHeight * 4];
+    if (!output) return source;
+    const uint32_t *from = source.bytes;
+    uint32_t *to = output.mutableBytes;
+    for (int32_t y = 0; y < outHeight; y++) {
+        for (int32_t x = 0; x < outWidth; x++) {
+            int32_t sx = 0, sy = 0;
+            switch (rotation) {
+                case 1: sx = w - 1 - x; sy = y; break;
+                case 2: sx = x; sy = h - 1 - y; break;
+                case 3: sx = y; sy = h - 1 - x; break;
+                default: sx = w - 1 - x; sy = h - 1 - y; break;
+            }
+            to[(size_t)y * (size_t)outWidth + (size_t)x] = from[(size_t)sy * (size_t)w + (size_t)sx];
+        }
+    }
+    *width = outWidth;
+    *height = outHeight;
+    return output;
+}
+
+static NSString *ZSAECubeFaceName(NSInteger face) {
+    static NSString * const names[6] = {@"+X", @"-X", @"+Y", @"-Y", @"+Z", @"-Z"};
+    return names[((face % 6) + 6) % 6];
+}
+
+static UIImage *ZSAEFaceSheet(NSArray<NSData *> *faces, int32_t width, int32_t height) {
+    int32_t step = MAX(1, (MAX(width, height) + 511) / 512);
+    int32_t cellWidth = (width + step - 1) / step;
+    int32_t cellHeight = (height + step - 1) / step;
+    int32_t gap = 6;
+    int32_t sheetWidth = cellWidth * 3 + gap * 2;
+    int32_t sheetHeight = cellHeight * 2 + gap;
+    NSMutableData *sheet = [NSMutableData dataWithLength:(size_t)sheetWidth * (size_t)sheetHeight * 4];
+    if (!sheet) return nil;
+    uint32_t *destination = sheet.mutableBytes;
+    for (NSUInteger face = 0; face < faces.count && face < 6; face++) {
+        const uint32_t *source = faces[face].bytes;
+        int32_t originX = (int32_t)(face % 3) * (cellWidth + gap);
+        int32_t originY = (int32_t)(face / 3) * (cellHeight + gap);
+        for (int32_t y = 0; y < cellHeight; y++) {
+            int32_t sourceRow = height - 1 - MIN(y * step, height - 1);
+            for (int32_t x = 0; x < cellWidth; x++) {
+                int32_t sourceColumn = MIN(x * step, width - 1);
+                destination[(size_t)(originY + y) * (size_t)sheetWidth + (size_t)(originX + x)] = source[(size_t)sourceRow * (size_t)width + (size_t)sourceColumn];
+            }
+        }
+    }
+    return ZSAEImageFromTopDownRGBA(sheet, sheetWidth, sheetHeight);
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildSpriteVisual(ZSAEContext *context, ZSAEObject *sprite, NSError **error) {
+    NSDictionary *fields = sprite.fields;
+    NSDictionary *source = ZSAEDict(fields[@"m_RD"]);
+    ZSAEObject *sourceOwner = sprite;
+
+    NSDictionary *atlasPointer = ZSAEDict(fields[@"m_SpriteAtlas"]);
+    id key = fields[@"m_RenderDataKey"];
+    if (atlasPointer && ZSAEInt(atlasPointer[@"m_PathID"]) != 0 && key) {
+        ZSAEObject *atlas = ZSAEResolvePPtr(context, sprite, atlasPointer, NULL);
+        for (id entry in ZSAEArray(atlas.fields[@"m_RenderDataMap"])) {
+            NSDictionary *pair = ZSAEDict(entry);
+            if (pair && [pair[@"first"] isEqual:key]) {
+                NSDictionary *data = ZSAEDict(pair[@"second"]);
+                if (data) {
+                    source = data;
+                    sourceOwner = atlas;
+                }
+                break;
+            }
+        }
+    }
+
+    NSDictionary *texturePointer = ZSAEDict(source[@"texture"]);
+    NSDictionary *rect = ZSAEDict(source[@"textureRect"]);
+    if (!texturePointer || !rect || ZSAEInt(texturePointer[@"m_PathID"]) == 0) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"This sprite's texture isn't available. It may be packed into a SpriteAtlas that isn't cached.");
+        return nil;
+    }
+
+    ZSAEObject *textureObject = ZSAEResolvePPtr(context, sourceOwner, texturePointer, error);
+    if (!textureObject) return nil;
+    ZSAETextureRecord *record = nil;
+    NSMutableData *rgba = nil;
+    if (!ZSAEDecodeTextureObject(textureObject, &record, &rgba, error)) return nil;
+
+    int32_t textureWidth = record.width;
+    int32_t textureHeight = record.height;
+    int32_t x = (int32_t)floor(ZSAEDouble(rect[@"x"]));
+    int32_t y = (int32_t)floor(ZSAEDouble(rect[@"y"]));
+    int32_t w = (int32_t)ceil(ZSAEDouble(rect[@"width"]));
+    int32_t h = (int32_t)ceil(ZSAEDouble(rect[@"height"]));
+    x = MAX(0, MIN(x, textureWidth - 1));
+    y = MAX(0, MIN(y, textureHeight - 1));
+    w = MAX(1, MIN(w, textureWidth - x));
+    h = MAX(1, MIN(h, textureHeight - y));
+
+    NSData *crop = ZSAETopDownCrop(rgba, textureWidth, x, y, w, h);
+    if (!crop) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"Couldn't allocate memory for the sprite.");
+        return nil;
+    }
+    uint32_t settings = (uint32_t)ZSAEInt(source[@"settingsRaw"]);
+    int rotation = (settings & 1) ? (int)((settings >> 2) & 0xF) : 0;
+    crop = ZSAETransformTopDown(crop, &w, &h, rotation);
+
+    UIImage *image = ZSAEImageFromTopDownRGBA(crop, w, h);
+    if (!image) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"Couldn't build an image from the sprite.");
+        return nil;
+    }
+
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = ZSAEString(fields[@"m_Name"]);
+    NSString *textureName = record.name.length > 0 ? record.name : @"texture";
+    visual.summary = [NSString stringWithFormat:@"Sprite  •  %dx%d  •  %@  •  %@", w, h, textureName, ZSAETextureFormatName(record.format)];
+    visual.pageLabels = @[@"Sprite"];
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        return image;
+    };
+    return visual;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildAtlasVisual(ZSAEContext *context, ZSAEObject *atlas, NSError **error) {
+    NSMutableArray<NSDictionary *> *collected = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (id entry in ZSAEArray(atlas.fields[@"m_RenderDataMap"])) {
+        NSDictionary *data = ZSAEDict(ZSAEDict(entry)[@"second"]);
+        NSDictionary *pointer = ZSAEDict(data[@"texture"]);
+        if (!pointer || ZSAEInt(pointer[@"m_PathID"]) == 0) continue;
+        NSString *identity = [NSString stringWithFormat:@"%lld:%lld", ZSAEInt(pointer[@"m_FileID"]), ZSAEInt(pointer[@"m_PathID"])];
+        if ([seen containsObject:identity]) continue;
+        [seen addObject:identity];
+        [collected addObject:pointer];
+    }
+    if (collected.count == 0) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"This atlas has no packed texture pages in the bundle.");
+        return nil;
+    }
+
+    NSArray<NSDictionary *> *pages = [collected copy];
+    NSMutableArray<NSString *> *labels = [NSMutableArray array];
+    for (NSUInteger i = 0; i < pages.count; i++) [labels addObject:[NSString stringWithFormat:@"Page %lu", (unsigned long)(i + 1)]];
+    NSUInteger spriteCount = ZSAEArray(atlas.fields[@"m_PackedSprites"]).count;
+
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = ZSAEString(atlas.fields[@"m_Name"]);
+    visual.summary = [NSString stringWithFormat:@"SpriteAtlas  •  %lu sprite%@  •  %lu page%@",
+                      (unsigned long)spriteCount, spriteCount == 1 ? @"" : @"s",
+                      (unsigned long)pages.count, pages.count == 1 ? @"" : @"s"];
+    visual.pageLabels = labels;
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        if (page < 0 || page >= (NSInteger)pages.count) return nil;
+        ZSAEObject *textureObject = ZSAEResolvePPtr(context, atlas, pages[(NSUInteger)page], providerError);
+        if (!textureObject) return nil;
+        ZSAETextureRecord *record = nil;
+        NSMutableData *rgba = nil;
+        if (!ZSAEDecodeTextureObject(textureObject, &record, &rgba, providerError)) return nil;
+        return ZSAEImageFromRGBA(rgba, record.width, record.height);
+    };
+    return visual;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildSliceVisual(ZSAEObject *object, NSError **error) {
+    NSDictionary *fields = object.fields;
+    int32_t classID = object.classID;
+    int32_t width = (int32_t)ZSAEInt(fields[@"m_Width"]);
+    int32_t height = (int32_t)ZSAEInt(fields[@"m_Height"]);
+    if (height <= 0) height = width;
+    int32_t mips = (int32_t)ZSAEInt(fields[@"m_MipCount"]);
+    BOOL volume = classID == 117;
+    int32_t depth = 6;
+    if (classID == 187 || classID == 117) depth = (int32_t)ZSAEInt(fields[@"m_Depth"]);
+    else if (classID == 188) depth = (int32_t)ZSAEInt(fields[@"m_CubemapCount"]) * 6;
+    if (width <= 0 || width > 16384 || height <= 0 || height > 16384 || depth <= 0 || depth > 4096) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"The texture has invalid dimensions.");
+        return nil;
+    }
+
+    NSData *inlineData = [fields[@"image data"] isKindOfClass:[NSData class]] ? fields[@"image data"] : nil;
+    NSDictionary *stream = ZSAEDict(fields[@"m_StreamData"]);
+    NSData *pixels = ZSAELoadPixels(object.session, inlineData, ZSAEString(stream[@"path"]),
+                                    (uint64_t)ZSAEInt(stream[@"offset"]), (uint64_t)ZSAEInt(stream[@"size"]), error);
+    if (!pixels) return nil;
+
+    int32_t format = 0;
+    if (classID == 89) format = (int32_t)ZSAEInt(fields[@"m_TextureFormat"]);
+    else format = ZSAEInferFormat((int32_t)ZSAEInt(fields[@"m_Format"]), width, height, depth, mips, volume, pixels.length);
+    if (format == 0 || !ZSAEFormatLayout(format, NULL, NULL, NULL)) {
+        if (error) {
+            *error = ZSAEError(ZSAssetExplorerErrorTextureUnsupported,
+                               classID == 89 ? [NSString stringWithFormat:@"%@ textures can't be previewed yet.", ZSAETextureFormatName((int32_t)ZSAEInt(fields[@"m_TextureFormat"]))]
+                                             : @"The pixel format of this texture couldn't be determined.");
+        }
+        return nil;
+    }
+
+    uint64_t stride = volume ? ZSAEDataSize(format, width, height, 1, 1, NO) : (uint64_t)pixels.length / (uint64_t)depth;
+    if (stride == 0 || stride * (uint64_t)depth > (uint64_t)pixels.length) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"The texture data is shorter than its dimensions require.");
+        return nil;
+    }
+
+    BOOL hasSheet = classID == 89;
+    NSMutableArray<NSString *> *labels = [NSMutableArray array];
+    if (hasSheet) [labels addObject:@"All faces"];
+    for (int32_t i = 0; i < depth; i++) {
+        if (classID == 89) [labels addObject:ZSAECubeFaceName(i)];
+        else if (classID == 188) [labels addObject:[NSString stringWithFormat:@"Cube %d  %@", i / 6 + 1, ZSAECubeFaceName(i)]];
+        else if (classID == 187) [labels addObject:[NSString stringWithFormat:@"Slice %d", i + 1]];
+        else [labels addObject:[NSString stringWithFormat:@"Layer %d", i + 1]];
+    }
+
+    NSString *kindName = classID == 89 ? @"Cubemap" : (classID == 187 ? @"Texture2DArray" : (classID == 117 ? @"Texture3D" : @"CubemapArray"));
+    NSString *dimensions = volume ? [NSString stringWithFormat:@"%dx%dx%d", width, height, depth] : [NSString stringWithFormat:@"%dx%d", width, height];
+
+    NSMutableData *(^decodeSlice)(NSInteger, NSError **) = ^NSMutableData *(NSInteger slice, NSError **sliceError) {
+        uint64_t offset = (uint64_t)MAX(slice, 0) * stride;
+        if (slice < 0 || offset + stride > (uint64_t)pixels.length) {
+            if (sliceError) *sliceError = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"That slice is outside the texture data.");
+            return nil;
+        }
+        NSData *data = [pixels subdataWithRange:NSMakeRange((NSUInteger)offset, (NSUInteger)stride)];
+        ZSAETextureRecord *record = [ZSAETextureRecord new];
+        record.width = width;
+        record.height = height;
+        record.format = format;
+        NSMutableData *rgba = nil;
+        if (!ZSAEDecodeTexture(record, data, &rgba, sliceError)) return nil;
+        return rgba;
+    };
+
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = ZSAEString(fields[@"m_Name"]);
+    visual.summary = [NSString stringWithFormat:@"%@  •  %@  •  %@", kindName, dimensions, ZSAETextureFormatName(format)];
+    visual.pageLabels = labels;
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        if (hasSheet && page == 0) {
+            NSMutableArray<NSData *> *faces = [NSMutableArray array];
+            for (NSInteger face = 0; face < 6; face++) {
+                NSMutableData *rgba = decodeSlice(face, providerError);
+                if (!rgba) return nil;
+                [faces addObject:rgba];
+            }
+            return ZSAEFaceSheet(faces, width, height);
+        }
+        NSMutableData *rgba = decodeSlice(hasSheet ? page - 1 : page, providerError);
+        if (!rgba) return nil;
+        return ZSAEImageFromRGBA(rgba, width, height);
+    };
+    return visual;
+}
+
 @implementation ZSAssetExplorerBundle
 @end
 
@@ -1410,6 +2090,20 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
 @end
 
 @implementation ZSAssetExplorerTexture
+@end
+
+@implementation ZSAssetExplorerVisual
+
+- (UIImage *)imageAtPage:(NSInteger)page error:(NSError **)error {
+    if (page < 0 || page >= (NSInteger)self.pageLabels.count || !self.imageProvider) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"That page doesn't exist.");
+        return nil;
+    }
+    UIImage *image = self.imageProvider(page, error);
+    if (!image && error && !*error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"Couldn't build an image for this page.");
+    return image;
+}
+
 @end
 
 @implementation ZSAssetExplorer
@@ -1508,7 +2202,7 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
     }
 
     ZSAETextureRecord *record = nil;
-    BOOL parsed = ZSAEParseSerializedFile(serializedData, nil, pathID, &record, error);
+    BOOL parsed = ZSAEParseSerializedFile(serializedData, nil, pathID, &record, NULL, NULL, NULL, error);
     [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
     if (!parsed || !record) return nil;
 
@@ -1561,6 +2255,62 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
     return texture;
 }
 
++ (BOOL)hasVisualPreviewForClassID:(int32_t)classID {
+    switch (classID) {
+        case 28:
+        case 89:
+        case 117:
+        case 187:
+        case 188:
+        case 213:
+        case 687078895:
+            return YES;
+        default:
+            return NO;
+    }
+}
+
++ (ZSAssetExplorerVisual *)visualForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path error:(NSError **)error {
+    if (classID == 28) {
+        ZSAssetExplorerTexture *texture = [self textureForPathID:pathID inBundleAtPath:path error:error];
+        if (!texture) return nil;
+        UIImage *image = texture.image;
+        ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+        visual.name = texture.name;
+        visual.summary = [NSString stringWithFormat:@"%@  •  %ldx%ld  •  %@", texture.name.length > 0 ? texture.name : @"Texture2D",
+                          (long)texture.width, (long)texture.height, texture.formatName];
+        visual.pageLabels = @[@"Texture"];
+        visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+            return image;
+        };
+        return visual;
+    }
+
+    ZSAEContext *context = [ZSAEContext new];
+    context.sessions = [NSMutableDictionary dictionary];
+    ZSAESession *session = ZSAEOpenSession(path, error);
+    if (!session) return nil;
+    context.sessions[path] = session;
+
+    ZSAEObject *object = ZSAEReadObject(session, pathID, error);
+    if (!object) return nil;
+
+    switch (object.classID) {
+        case 213:
+            return ZSAEBuildSpriteVisual(context, object, error);
+        case 687078895:
+            return ZSAEBuildAtlasVisual(context, object, error);
+        case 89:
+        case 117:
+        case 187:
+        case 188:
+            return ZSAEBuildSliceVisual(object, error);
+        default:
+            if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureUnsupported, @"This asset kind can't be previewed.");
+            return nil;
+    }
+}
+
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error {
     NSString *serializedPath = nil;
     NSString *cab = nil;
@@ -1580,7 +2330,7 @@ static UIImage *ZSAEImageFromRGBA(NSData *rgba, int32_t width, int32_t height) {
     }
 
     NSArray<ZSAssetExplorerAsset *> *assets = nil;
-    BOOL ok = ZSAEParseSerializedFile(serializedData, &assets, INT64_MIN, NULL, error);
+    BOOL ok = ZSAEParseSerializedFile(serializedData, &assets, INT64_MIN, NULL, NULL, NULL, NULL, error);
     [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
     if (!ok) return @[];
     return [(assets ?: @[]) sortedArrayUsingComparator:^NSComparisonResult(ZSAssetExplorerAsset *a, ZSAssetExplorerAsset *b) {

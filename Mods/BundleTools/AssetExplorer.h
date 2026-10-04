@@ -42,10 +42,22 @@ typedef NS_ENUM(NSInteger, ZSAssetExplorerErrorCode) {
 @property (nonatomic, copy) NSString *formatName;
 @end
 
+typedef UIImage * _Nullable (^ZSAssetExplorerPageProvider)(NSInteger page, NSError * _Nullable * _Nullable error);
+
+@interface ZSAssetExplorerVisual : NSObject
+@property (nonatomic, copy, nullable) NSString *name;
+@property (nonatomic, copy) NSString *summary;
+@property (nonatomic, copy) NSArray<NSString *> *pageLabels;
+@property (nonatomic, copy, nullable) ZSAssetExplorerPageProvider imageProvider;
+- (nullable UIImage *)imageAtPage:(NSInteger)page error:(NSError * _Nullable * _Nullable)error;
+@end
+
 @interface ZSAssetExplorer : NSObject
 + (NSArray<ZSAssetExplorerBundle *> *)cachedBundles:(NSError **)error;
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error;
 + (nullable ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error;
++ (BOOL)hasVisualPreviewForClassID:(int32_t)classID;
++ (nullable ZSAssetExplorerVisual *)visualForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path error:(NSError **)error;
 @end
 
 NS_ASSUME_NONNULL_END

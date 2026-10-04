@@ -6108,6 +6108,12 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UIButton *assetExplorerTexturePrevButton;
 @property (nonatomic, strong) UIButton *assetExplorerTextureNextButton;
 @property (nonatomic, strong) UILabel *assetExplorerTexturePositionLabel;
+@property (nonatomic, strong) ZSAssetExplorerVisual *assetExplorerVisual;
+@property (nonatomic, assign) NSInteger assetExplorerPageIndex;
+@property (nonatomic, strong) UIStackView *assetExplorerPageStack;
+@property (nonatomic, strong) UIButton *assetExplorerPagePrevButton;
+@property (nonatomic, strong) UIButton *assetExplorerPageNextButton;
+@property (nonatomic, strong) UILabel *assetExplorerPageLabel;
 @property (nonatomic, copy) NSString *assetExplorerStatusMessage;
 @property (nonatomic, strong) UIView *memoryFullScreenOverlay;
 @property (nonatomic, strong) UIScrollView *memoryFullScreenScrollView;
@@ -8208,6 +8214,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerTexturePrevButton = nil;
     self.assetExplorerTextureNextButton = nil;
     self.assetExplorerTexturePositionLabel = nil;
+    self.assetExplorerVisual = nil;
+    self.assetExplorerPageStack = nil;
+    self.assetExplorerPagePrevButton = nil;
+    self.assetExplorerPageNextButton = nil;
+    self.assetExplorerPageLabel = nil;
     self.assetExplorerStatusMessage = nil;
     self.assetExplorerSelectedBundle = nil;
     self.assetExplorerGeneration += 1;
@@ -15877,6 +15888,46 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:pagerStack];
     self.assetExplorerTexturePagerStack = pagerStack;
 
+    UIButton *pagePrevButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    pagePrevButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_flat(pagePrevButton, backImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [pagePrevButton addTarget:self action:@selector(zs_assetExplorerPagePrevTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.assetExplorerPagePrevButton = pagePrevButton;
+
+    UIButton *pageNextButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    pageNextButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_flat(pageNextButton, nextImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [pageNextButton addTarget:self action:@selector(zs_assetExplorerPageNextTapped) forControlEvents:UIControlEventTouchUpInside];
+    self.assetExplorerPageNextButton = pageNextButton;
+
+    UILabel *pageLabel = [[UILabel alloc] init];
+    pageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    pageLabel.font = zs_mono_font(10, UIFontWeightMedium);
+    pageLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+    pageLabel.textAlignment = NSTextAlignmentCenter;
+    pageLabel.adjustsFontSizeToFitWidth = YES;
+    pageLabel.minimumScaleFactor = 0.6;
+    self.assetExplorerPageLabel = pageLabel;
+
+    UIStackView *pageStack = [[UIStackView alloc] initWithArrangedSubviews:@[pagePrevButton, pageLabel, pageNextButton]];
+    pageStack.translatesAutoresizingMaskIntoConstraints = NO;
+    pageStack.axis = UILayoutConstraintAxisHorizontal;
+    pageStack.alignment = UIStackViewAlignmentCenter;
+    pageStack.spacing = 8;
+    pageStack.hidden = YES;
+    [overlay addSubview:pageStack];
+    self.assetExplorerPageStack = pageStack;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [pagePrevButton.widthAnchor constraintEqualToConstant:30],
+        [pagePrevButton.heightAnchor constraintEqualToConstant:30],
+        [pageNextButton.widthAnchor constraintEqualToConstant:30],
+        [pageNextButton.heightAnchor constraintEqualToConstant:30],
+        [pageLabel.widthAnchor constraintGreaterThanOrEqualToConstant:110],
+        [pageStack.centerXAnchor constraintEqualToAnchor:textureImageView.centerXAnchor],
+        [pageStack.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
+    ]];
+
     [NSLayoutConstraint activateConstraints:@[
         [prevButton.widthAnchor constraintEqualToConstant:30],
         [prevButton.heightAnchor constraintEqualToConstant:30],
@@ -16045,6 +16096,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (visible) [self.assetExplorerSearchField resignFirstResponder];
     [self zs_assetExplorerSyncControls];
     if (!visible) {
+        self.assetExplorerVisual = nil;
+        self.assetExplorerPageIndex = 0;
+        self.assetExplorerPageStack.hidden = YES;
         self.assetExplorerTextureAssets = nil;
         self.assetExplorerTextureIndex = 0;
         [self.assetExplorerTextureSpinner stopAnimating];
@@ -16057,11 +16111,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
 - (void)zs_assetExplorerOpenTextureForAsset:(ZSAssetExplorerAsset *)asset {
     ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
-    if (!asset || !bundle || asset.classID != 28 || self.assetExplorerTextureOpen) return;
+    if (!asset || !bundle || ![ZSAssetExplorer hasVisualPreviewForClassID:asset.classID] || self.assetExplorerTextureOpen) return;
 
     NSMutableArray<ZSAssetExplorerAsset *> *textures = [NSMutableArray array];
     for (ZSAssetExplorerAsset *candidate in self.assetExplorerDisplayedAssets) {
-        if (candidate.classID == 28) [textures addObject:candidate];
+        if ([ZSAssetExplorer hasVisualPreviewForClassID:candidate.classID]) [textures addObject:candidate];
     }
     NSUInteger index = [textures indexOfObjectIdenticalTo:asset];
     if (index == NSNotFound) {
@@ -16083,37 +16137,114 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.assetExplorerGeneration += 1;
     NSUInteger generation = self.assetExplorerGeneration;
+    self.assetExplorerVisual = nil;
+    self.assetExplorerPageIndex = 0;
     self.assetExplorerTextureImageView.image = nil;
     self.assetExplorerTextureMessageLabel.hidden = YES;
-    self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : @"Texture2D";
+    self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
     [self.assetExplorerTextureSpinner startAnimating];
     self.assetExplorerTextureExportButton.enabled = NO;
     self.assetExplorerTextureExportButton.alpha = 0.35;
     [self zs_assetExplorerSyncTexturePager];
+    [self zs_assetExplorerSyncPagePager];
 
     __weak typeof(self) weakSelf = self;
     NSString *bundlePath = [bundle.filePath copy];
     int64_t pathID = asset.pathID;
-    NSString *assetName = [asset.assetName copy];
+    int32_t classID = asset.classID;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
-        ZSAssetExplorerTexture *texture = [ZSAssetExplorer textureForPathID:pathID inBundleAtPath:bundlePath error:&error];
+        ZSAssetExplorerVisual *visual = [ZSAssetExplorer visualForPathID:pathID classID:classID inBundleAtPath:bundlePath error:&error];
+        UIImage *image = visual ? [visual imageAtPage:0 error:&error] : nil;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerTextureOpen || strongSelf.assetExplorerGeneration != generation) return;
             [strongSelf.assetExplorerTextureSpinner stopAnimating];
-            if (texture.image) {
-                strongSelf.assetExplorerTextureImageView.image = texture.image;
+            if (visual) {
+                strongSelf.assetExplorerVisual = visual;
+                strongSelf.assetExplorerPageIndex = 0;
+                strongSelf.assetExplorerTextureCaptionLabel.text = visual.summary.length > 0 ? visual.summary : visual.name;
+                [strongSelf zs_assetExplorerSyncPagePager];
+            }
+            if (image) {
+                strongSelf.assetExplorerTextureImageView.image = image;
                 strongSelf.assetExplorerTextureExportButton.enabled = YES;
                 strongSelf.assetExplorerTextureExportButton.alpha = 1;
-                NSString *name = texture.name.length > 0 ? texture.name : (assetName.length > 0 ? assetName : @"Texture2D");
-                strongSelf.assetExplorerTextureCaptionLabel.text = [NSString stringWithFormat:@"%@  •  %ldx%ld  •  %@", name, (long)texture.width, (long)texture.height, texture.formatName];
             } else {
-                strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this texture.";
+                strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this asset.";
                 strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
             }
         });
     });
+}
+
+- (void)zs_assetExplorerLoadPage:(NSInteger)page {
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    if (!visual) return;
+
+    self.assetExplorerGeneration += 1;
+    NSUInteger generation = self.assetExplorerGeneration;
+    self.assetExplorerTextureImageView.image = nil;
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    [self.assetExplorerTextureSpinner startAnimating];
+    self.assetExplorerTextureExportButton.enabled = NO;
+    self.assetExplorerTextureExportButton.alpha = 0.35;
+    [self zs_assetExplorerSyncPagePager];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        UIImage *image = [visual imageAtPage:page error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerTextureOpen || strongSelf.assetExplorerGeneration != generation) return;
+            [strongSelf.assetExplorerTextureSpinner stopAnimating];
+            if (image) {
+                strongSelf.assetExplorerTextureImageView.image = image;
+                strongSelf.assetExplorerTextureExportButton.enabled = YES;
+                strongSelf.assetExplorerTextureExportButton.alpha = 1;
+            } else {
+                strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this page.";
+                strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
+            }
+        });
+    });
+}
+
+- (void)zs_assetExplorerSyncPagePager {
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    NSInteger count = visual ? (NSInteger)visual.pageLabels.count : 0;
+    NSInteger index = self.assetExplorerPageIndex;
+    BOOL show = self.assetExplorerTextureOpen && count > 1;
+    self.assetExplorerPageStack.hidden = !show;
+    if (!show) return;
+    NSString *label = index >= 0 && index < count ? visual.pageLabels[(NSUInteger)index] : @"";
+    self.assetExplorerPageLabel.text = [NSString stringWithFormat:@"%@  •  %ld/%ld", label, (long)(index + 1), (long)count];
+    BOOL hasPrevious = index > 0;
+    BOOL hasNext = index + 1 < count;
+    self.assetExplorerPagePrevButton.enabled = hasPrevious;
+    self.assetExplorerPagePrevButton.alpha = hasPrevious ? 1 : 0.35;
+    self.assetExplorerPageNextButton.enabled = hasNext;
+    self.assetExplorerPageNextButton.alpha = hasNext ? 1 : 0.35;
+}
+
+- (void)zs_assetExplorerStepPage:(NSInteger)delta {
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    if (!self.assetExplorerTextureOpen || !visual) return;
+    NSInteger target = self.assetExplorerPageIndex + delta;
+    if (target < 0 || target >= (NSInteger)visual.pageLabels.count) return;
+    self.assetExplorerPageIndex = target;
+    [self zs_assetExplorerLoadPage:target];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerPagePrevTapped {
+    [self zs_assetExplorerStepPage:-1];
+}
+
+- (void)zs_assetExplorerPageNextTapped {
+    [self zs_assetExplorerStepPage:1];
 }
 
 - (void)zs_assetExplorerSyncTexturePager {
@@ -16144,7 +16275,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (!image || !self.assetExplorerTextureOpen || index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return;
 
     ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
-    NSString *baseName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"Texture2D_%lld", (long long)asset.pathID];
+    NSString *baseName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"%@_%lld", asset.typeName.length > 0 ? asset.typeName : @"Asset", (long long)asset.pathID];
+    ZSAssetExplorerVisual *exportVisual = self.assetExplorerVisual;
+    NSInteger exportPage = self.assetExplorerPageIndex;
+    if (exportVisual.pageLabels.count > 1 && exportPage >= 0 && exportPage < (NSInteger)exportVisual.pageLabels.count) {
+        baseName = [baseName stringByAppendingFormat:@"_%@", exportVisual.pageLabels[(NSUInteger)exportPage]];
+    }
     NSMutableCharacterSet *allowed = [NSMutableCharacterSet alphanumericCharacterSet];
     [allowed addCharactersInString:@"-_. "];
     NSMutableString *safeName = [NSMutableString string];
@@ -16598,7 +16734,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
         cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
-        cell.accessoryType = asset.classID == 28 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
+        cell.accessoryType = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID] ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     }
     return cell;
 }
@@ -16609,7 +16745,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (self.assetExplorerSelectedBundle) {
         if (self.assetExplorerTextureOpen || indexPath.row >= self.assetExplorerDisplayedAssets.count) return;
         ZSAssetExplorerAsset *asset = self.assetExplorerDisplayedAssets[(NSUInteger)indexPath.row];
-        if (asset.classID == 28) [self zs_assetExplorerOpenTextureForAsset:asset];
+        if ([ZSAssetExplorer hasVisualPreviewForClassID:asset.classID]) [self zs_assetExplorerOpenTextureForAsset:asset];
         return;
     }
     if (indexPath.row >= self.assetExplorerDisplayedBundles.count) return;
