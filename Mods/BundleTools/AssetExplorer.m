@@ -1882,15 +1882,53 @@ static UIImage *ZSAEFaceSheet(NSArray<NSData *> *faces, int32_t width, int32_t h
     return ZSAEImageFromTopDownRGBA(sheet, sheetWidth, sheetHeight);
 }
 
-static ZSAssetExplorerVisual *ZSAEBuildSpriteVisual(ZSAEContext *context, ZSAEObject *sprite, NSError **error) {
+@interface ZSAESpriteImage : NSObject
+@property (nonatomic, strong) UIImage *image;
+@property (nonatomic, assign) int32_t width;
+@property (nonatomic, assign) int32_t height;
+@property (nonatomic, assign) double offsetX;
+@property (nonatomic, assign) double offsetY;
+@property (nonatomic, assign) double rectWidth;
+@property (nonatomic, assign) double rectHeight;
+@property (nonatomic, assign) double pivotX;
+@property (nonatomic, assign) double pivotY;
+@property (nonatomic, assign) double pixelsPerUnit;
+@property (nonatomic, copy) NSString *textureName;
+@property (nonatomic, copy) NSString *formatName;
+@end
+
+@implementation ZSAESpriteImage
+@end
+
+static NSString *ZSAESpriteGroupKey(ZSAEObject *sprite) {
+    NSDictionary *fields = sprite.fields;
+    NSDictionary *atlasPointer = ZSAEDict(fields[@"m_SpriteAtlas"]);
+    if (atlasPointer && ZSAEInt(atlasPointer[@"m_PathID"]) != 0 && fields[@"m_RenderDataKey"]) {
+        return [NSString stringWithFormat:@"a:%lld:%lld", (long long)ZSAEInt(atlasPointer[@"m_FileID"]), (long long)ZSAEInt(atlasPointer[@"m_PathID"])];
+    }
+    NSDictionary *texturePointer = ZSAEDict(ZSAEDict(fields[@"m_RD"])[@"texture"]);
+    return [NSString stringWithFormat:@"t:%lld:%lld", (long long)ZSAEInt(texturePointer[@"m_FileID"]), (long long)ZSAEInt(texturePointer[@"m_PathID"])];
+}
+
+static ZSAESpriteImage *ZSAEMakeSpriteImage(ZSAEContext *context, ZSAEObject *sprite, NSMutableDictionary *cache, NSError **error) {
     NSDictionary *fields = sprite.fields;
     NSDictionary *source = ZSAEDict(fields[@"m_RD"]);
     ZSAEObject *sourceOwner = sprite;
+    NSMutableDictionary *atlasCache = cache[@"atlases"];
+    NSMutableDictionary *textureCache = cache[@"textures"];
 
     NSDictionary *atlasPointer = ZSAEDict(fields[@"m_SpriteAtlas"]);
     id key = fields[@"m_RenderDataKey"];
     if (atlasPointer && ZSAEInt(atlasPointer[@"m_PathID"]) != 0 && key) {
-        ZSAEObject *atlas = ZSAEResolvePPtr(context, sprite, atlasPointer, NULL);
+        NSString *atlasKey = [NSString stringWithFormat:@"%p:%lld:%lld", sprite.session, (long long)ZSAEInt(atlasPointer[@"m_FileID"]), (long long)ZSAEInt(atlasPointer[@"m_PathID"])];
+        ZSAEObject *atlas = atlasCache[atlasKey];
+        if (!atlas) {
+            atlas = ZSAEResolvePPtr(context, sprite, atlasPointer, NULL);
+            if (atlas && atlasCache) {
+                if (atlasCache.count >= 3) [atlasCache removeAllObjects];
+                atlasCache[atlasKey] = atlas;
+            }
+        }
         for (id entry in ZSAEArray(atlas.fields[@"m_RenderDataMap"])) {
             NSDictionary *pair = ZSAEDict(entry);
             if (pair && [pair[@"first"] isEqual:key]) {
@@ -1911,11 +1949,22 @@ static ZSAssetExplorerVisual *ZSAEBuildSpriteVisual(ZSAEContext *context, ZSAEOb
         return nil;
     }
 
-    ZSAEObject *textureObject = ZSAEResolvePPtr(context, sourceOwner, texturePointer, error);
-    if (!textureObject) return nil;
+    NSString *textureKey = [NSString stringWithFormat:@"%p:%lld:%lld", sourceOwner.session, (long long)ZSAEInt(texturePointer[@"m_FileID"]), (long long)ZSAEInt(texturePointer[@"m_PathID"])];
     ZSAETextureRecord *record = nil;
     NSMutableData *rgba = nil;
-    if (!ZSAEDecodeTextureObject(textureObject, &record, &rgba, error)) return nil;
+    NSArray *cachedTexture = textureCache[textureKey];
+    if (cachedTexture.count == 2) {
+        record = cachedTexture[0];
+        rgba = cachedTexture[1];
+    } else {
+        ZSAEObject *textureObject = ZSAEResolvePPtr(context, sourceOwner, texturePointer, error);
+        if (!textureObject) return nil;
+        if (!ZSAEDecodeTextureObject(textureObject, &record, &rgba, error)) return nil;
+        if (textureCache) {
+            if (textureCache.count >= 2) [textureCache removeAllObjects];
+            textureCache[textureKey] = @[record, rgba];
+        }
+    }
 
     int32_t textureWidth = record.width;
     int32_t textureHeight = record.height;
@@ -1943,10 +1992,36 @@ static ZSAssetExplorerVisual *ZSAEBuildSpriteVisual(ZSAEContext *context, ZSAEOb
         return nil;
     }
 
+    NSDictionary *spriteRect = ZSAEDict(fields[@"m_Rect"]);
+    NSDictionary *pivot = ZSAEDict(fields[@"m_Pivot"]);
+    NSDictionary *offset = ZSAEDict(source[@"textureRectOffset"]);
+    double ppu = ZSAEDouble(fields[@"m_PixelsToUnits"]);
+
+    ZSAESpriteImage *result = [ZSAESpriteImage new];
+    result.image = image;
+    result.width = w;
+    result.height = h;
+    result.rectWidth = spriteRect ? ZSAEDouble(spriteRect[@"width"]) : (double)w;
+    result.rectHeight = spriteRect ? ZSAEDouble(spriteRect[@"height"]) : (double)h;
+    if (result.rectWidth <= 0) result.rectWidth = (double)w;
+    if (result.rectHeight <= 0) result.rectHeight = (double)h;
+    result.offsetX = offset ? ZSAEDouble(offset[@"x"]) : 0;
+    result.offsetY = offset ? ZSAEDouble(offset[@"y"]) : 0;
+    result.pivotX = pivot ? ZSAEDouble(pivot[@"x"]) : 0.5;
+    result.pivotY = pivot ? ZSAEDouble(pivot[@"y"]) : 0.5;
+    result.pixelsPerUnit = ppu > 0 ? ppu : 100;
+    result.textureName = record.name.length > 0 ? record.name : @"texture";
+    result.formatName = ZSAETextureFormatName(record.format);
+    return result;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildSpriteVisual(ZSAEContext *context, ZSAEObject *sprite, NSError **error) {
+    ZSAESpriteImage *result = ZSAEMakeSpriteImage(context, sprite, nil, error);
+    if (!result) return nil;
+    UIImage *image = result.image;
     ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
-    visual.name = ZSAEString(fields[@"m_Name"]);
-    NSString *textureName = record.name.length > 0 ? record.name : @"texture";
-    visual.summary = [NSString stringWithFormat:@"Sprite  •  %dx%d  •  %@  •  %@", w, h, textureName, ZSAETextureFormatName(record.format)];
+    visual.name = ZSAEString(sprite.fields[@"m_Name"]);
+    visual.summary = [NSString stringWithFormat:@"Sprite  •  %dx%d  •  %@  •  %@", result.width, result.height, result.textureName, result.formatName];
     visual.pageLabels = @[@"Sprite"];
     visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
         return image;
@@ -2467,6 +2542,380 @@ static ZSAssetExplorerVisual *ZSAEBuildMaterialVisual(ZSAEContext *context, ZSAE
     return visual;
 }
 
+static NSString *ZSAEClassLabel(int32_t classID) {
+    switch (classID) {
+        case 1: return @"GameObject";
+        case 4: return @"Transform";
+        case 20: return @"Camera";
+        case 23: return @"MeshRenderer";
+        case 33: return @"MeshFilter";
+        case 50: return @"Rigidbody2D";
+        case 58: return @"CircleCollider2D";
+        case 60: return @"PolygonCollider2D";
+        case 61: return @"BoxCollider2D";
+        case 64: return @"MeshCollider";
+        case 65: return @"BoxCollider";
+        case 82: return @"AudioSource";
+        case 95: return @"Animator";
+        case 114: return @"MonoBehaviour";
+        case 120: return @"LineRenderer";
+        case 198: return @"ParticleSystem";
+        case 199: return @"ParticleSystemRenderer";
+        case 210: return @"SortingGroup";
+        case 212: return @"SpriteRenderer";
+        case 222: return @"CanvasRenderer";
+        case 223: return @"Canvas";
+        case 224: return @"RectTransform";
+        case 225: return @"CanvasGroup";
+        default: return [NSString stringWithFormat:@"Class %d", classID];
+    }
+}
+
+@interface ZSAEGraphState : NSObject
+@property (nonatomic, strong) ZSAEContext *context;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *items;
+@property (nonatomic, strong) NSMutableString *outline;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSAEObject *> *sprites;
+@property (nonatomic, assign) NSUInteger reads;
+@property (nonatomic, assign) NSUInteger nodes;
+@property (nonatomic, assign) BOOL truncated;
+@end
+
+@implementation ZSAEGraphState
+@end
+
+static ZSAEObject *ZSAEGraphRead(ZSAEGraphState *state, ZSAEObject *owner, id pointer) {
+    if (state.reads >= 6000) {
+        state.truncated = YES;
+        return nil;
+    }
+    state.reads++;
+    return ZSAEResolvePPtr(state.context, owner, pointer, NULL);
+}
+
+static void ZSAEWalkGameObject(ZSAEGraphState *state, ZSAEObject *go, CGAffineTransform parent, double parentZ, NSUInteger depth, BOOL isRoot) {
+    if (state.nodes >= 1500 || depth > 32) {
+        state.truncated = YES;
+        return;
+    }
+    state.nodes++;
+
+    NSDictionary *fields = go.fields;
+    NSString *name = ZSAEString(fields[@"m_Name"]);
+    if (name.length == 0) name = @"GameObject";
+    BOOL active = fields[@"m_IsActive"] ? ZSAEInt(fields[@"m_IsActive"]) != 0 : YES;
+
+    ZSAEObject *transform = nil;
+    NSMutableArray<ZSAEObject *> *others = [NSMutableArray array];
+    for (id entry in ZSAEArray(fields[@"m_Component"])) {
+        NSDictionary *pair = ZSAEDict(entry);
+        id pointer = pair[@"component"] ?: pair[@"second"];
+        if (!pointer) continue;
+        ZSAEObject *component = ZSAEGraphRead(state, go, pointer);
+        if (!component) continue;
+        if (component.classID == 4 || component.classID == 224) {
+            if (!transform) transform = component;
+        } else {
+            [others addObject:component];
+        }
+    }
+
+    NSMutableArray<NSString *> *labels = [NSMutableArray array];
+    if (transform) [labels addObject:ZSAEClassLabel(transform.classID)];
+    for (ZSAEObject *component in others) [labels addObject:ZSAEClassLabel(component.classID)];
+    NSString *pad = [@"" stringByPaddingToLength:MIN(depth, (NSUInteger)32) * 2 withString:@" " startingAtIndex:0];
+    [state.outline appendFormat:@"%@%@%@  [%@]\n", pad, name, active ? @"" : @"  (inactive)", [labels componentsJoinedByString:@", "]];
+
+    CGAffineTransform local = CGAffineTransformIdentity;
+    double localZ = 0;
+    if (transform && !isRoot) {
+        NSDictionary *position = ZSAEDict(transform.fields[@"m_LocalPosition"]);
+        NSDictionary *rotation = ZSAEDict(transform.fields[@"m_LocalRotation"]);
+        NSDictionary *scale = ZSAEDict(transform.fields[@"m_LocalScale"]);
+        double sx = scale ? ZSAEDouble(scale[@"x"]) : 1;
+        double sy = scale ? ZSAEDouble(scale[@"y"]) : 1;
+        double qx = ZSAEDouble(rotation[@"x"]);
+        double qy = ZSAEDouble(rotation[@"y"]);
+        double qz = ZSAEDouble(rotation[@"z"]);
+        double qw = rotation ? ZSAEDouble(rotation[@"w"]) : 1;
+        double angle = atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz));
+        local = CGAffineTransformMakeScale(sx, sy);
+        local = CGAffineTransformConcat(local, CGAffineTransformMakeRotation(angle));
+        local = CGAffineTransformConcat(local, CGAffineTransformMakeTranslation(ZSAEDouble(position[@"x"]), ZSAEDouble(position[@"y"])));
+        localZ = ZSAEDouble(position[@"z"]);
+    }
+    CGAffineTransform world = CGAffineTransformConcat(local, parent);
+    double worldZ = parentZ + localZ;
+    if (!active && !isRoot) return;
+
+    for (ZSAEObject *component in others) {
+        if (component.classID != 212) continue;
+        NSDictionary *componentFields = component.fields;
+        if (componentFields[@"m_Enabled"] && ZSAEInt(componentFields[@"m_Enabled"]) == 0) continue;
+        NSDictionary *spritePointer = ZSAEDict(componentFields[@"m_Sprite"]);
+        if (!spritePointer || ZSAEInt(spritePointer[@"m_PathID"]) == 0) continue;
+        NSString *key = [NSString stringWithFormat:@"%p:%lld:%lld", go.session, (long long)ZSAEInt(spritePointer[@"m_FileID"]), (long long)ZSAEInt(spritePointer[@"m_PathID"])];
+        ZSAEObject *sprite = state.sprites[key];
+        if (!sprite) {
+            ZSAEObject *resolved = ZSAEGraphRead(state, component, spritePointer);
+            if (resolved && resolved.classID == 213) {
+                sprite = resolved;
+                state.sprites[key] = sprite;
+            }
+        }
+        if (!sprite) continue;
+        NSDictionary *color = ZSAEDict(componentFields[@"m_Color"]);
+        [state.items addObject:@{
+            @"key": key,
+            @"sprite": sprite,
+            @"transform": [NSValue valueWithCGAffineTransform:world],
+            @"z": @(worldZ),
+            @"r": @(color ? ZSAEDouble(color[@"r"]) : 1.0),
+            @"g": @(color ? ZSAEDouble(color[@"g"]) : 1.0),
+            @"b": @(color ? ZSAEDouble(color[@"b"]) : 1.0),
+            @"a": @(color ? ZSAEDouble(color[@"a"]) : 1.0),
+            @"flipX": @(ZSAEInt(componentFields[@"m_FlipX"]) != 0),
+            @"flipY": @(ZSAEInt(componentFields[@"m_FlipY"]) != 0),
+            @"layer": @(ZSAEInt(componentFields[@"m_SortingLayer"])),
+            @"order": @(ZSAEInt(componentFields[@"m_SortingOrder"])),
+            @"index": @(state.items.count),
+        }];
+    }
+
+    if (!transform) return;
+    for (id childPointer in ZSAEArray(transform.fields[@"m_Children"])) {
+        ZSAEObject *childTransform = ZSAEGraphRead(state, transform, childPointer);
+        if (!childTransform) continue;
+        ZSAEObject *childObject = ZSAEGraphRead(state, childTransform, childTransform.fields[@"m_GameObject"]);
+        if (!childObject || childObject.classID != 1) continue;
+        ZSAEWalkGameObject(state, childObject, world, worldZ, depth + 1, NO);
+    }
+}
+
+static UIImage *ZSAETintedImage(UIImage *image, double r, double g, double b) {
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = NO;
+    CGRect rect = CGRectMake(0, 0, image.size.width, image.size.height);
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:rect.size format:format];
+    UIColor *tint = [UIColor colorWithRed:MAX(0, MIN(1, r)) green:MAX(0, MIN(1, g)) blue:MAX(0, MIN(1, b)) alpha:1];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [image drawInRect:rect];
+        [tint setFill];
+        UIRectFillUsingBlendMode(rect, kCGBlendModeMultiply);
+        [image drawInRect:rect blendMode:kCGBlendModeDestinationIn alpha:1];
+    }];
+}
+
+static UIImage *ZSAERenderComposite(ZSAEContext *context, NSArray<NSDictionary *> *items, NSError **error) {
+    NSMutableDictionary<NSString *, ZSAEObject *> *distinct = [NSMutableDictionary dictionary];
+    for (NSDictionary *item in items) distinct[item[@"key"]] = item[@"sprite"];
+    NSArray<NSString *> *keys = [distinct.allKeys sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        NSComparisonResult result = [ZSAESpriteGroupKey(distinct[a]) compare:ZSAESpriteGroupKey(distinct[b])];
+        return result != NSOrderedSame ? result : [a compare:b];
+    }];
+
+    NSMutableDictionary *cache = [NSMutableDictionary dictionary];
+    cache[@"atlases"] = [NSMutableDictionary dictionary];
+    cache[@"textures"] = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, ZSAESpriteImage *> *images = [NSMutableDictionary dictionary];
+    NSError *firstError = nil;
+    for (NSString *key in keys) {
+        NSError *spriteError = nil;
+        ZSAESpriteImage *result = ZSAEMakeSpriteImage(context, distinct[key], cache, &spriteError);
+        if (result) images[key] = result;
+        else if (!firstError) firstError = spriteError;
+    }
+    if (images.count == 0) {
+        if (error) *error = firstError ?: ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"None of the sprites in this object could be decoded.");
+        return nil;
+    }
+
+    NSArray<NSDictionary *> *ordered = [items sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        int64_t layerA = ZSAEInt(a[@"layer"]);
+        int64_t layerB = ZSAEInt(b[@"layer"]);
+        if (layerA != layerB) return layerA < layerB ? NSOrderedAscending : NSOrderedDescending;
+        int64_t orderA = ZSAEInt(a[@"order"]);
+        int64_t orderB = ZSAEInt(b[@"order"]);
+        if (orderA != orderB) return orderA < orderB ? NSOrderedAscending : NSOrderedDescending;
+        double zA = ZSAEDouble(a[@"z"]);
+        double zB = ZSAEDouble(b[@"z"]);
+        if (zA != zB) return zA > zB ? NSOrderedAscending : NSOrderedDescending;
+        return [a[@"index"] compare:b[@"index"]];
+    }];
+
+    double minX = INFINITY, minY = INFINITY, maxX = -INFINITY, maxY = -INFINITY, maxPPU = 1;
+    NSMutableArray<NSDictionary *> *drawable = [NSMutableArray array];
+    for (NSDictionary *item in ordered) {
+        ZSAESpriteImage *sprite = images[item[@"key"]];
+        if (!sprite) continue;
+        CGAffineTransform world = [item[@"transform"] CGAffineTransformValue];
+        double x0 = (sprite.offsetX - sprite.pivotX * sprite.rectWidth) / sprite.pixelsPerUnit;
+        double y0 = (sprite.offsetY - sprite.pivotY * sprite.rectHeight) / sprite.pixelsPerUnit;
+        double qw = sprite.width / sprite.pixelsPerUnit;
+        double qh = sprite.height / sprite.pixelsPerUnit;
+        double fx = [item[@"flipX"] boolValue] ? -1 : 1;
+        double fy = [item[@"flipY"] boolValue] ? -1 : 1;
+        BOOL valid = YES;
+        double cornersX[2] = {x0, x0 + qw};
+        double cornersY[2] = {y0, y0 + qh};
+        for (int i = 0; i < 2; i++) {
+            for (int j = 0; j < 2; j++) {
+                CGPoint point = CGPointApplyAffineTransform(CGPointMake(cornersX[i] * fx, cornersY[j] * fy), world);
+                if (!isfinite(point.x) || !isfinite(point.y)) { valid = NO; continue; }
+                minX = MIN(minX, point.x);
+                maxX = MAX(maxX, point.x);
+                minY = MIN(minY, point.y);
+                maxY = MAX(maxY, point.y);
+            }
+        }
+        if (!valid) continue;
+        maxPPU = MAX(maxPPU, sprite.pixelsPerUnit);
+        [drawable addObject:item];
+    }
+
+    double boundsWidth = maxX - minX;
+    double boundsHeight = maxY - minY;
+    if (drawable.count == 0 || !(boundsWidth > 0) || !(boundsHeight > 0)) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"The sprites in this object have no visible area.");
+        return nil;
+    }
+
+    double scale = MIN(2048.0 / MAX(boundsWidth, boundsHeight), maxPPU);
+    CGFloat pad = 8;
+    CGFloat canvasWidth = MAX(16, ceil(boundsWidth * scale) + pad * 2);
+    CGFloat canvasHeight = MAX(16, ceil(boundsHeight * scale) + pad * 2);
+    CGAffineTransform worldToPixel = CGAffineTransformMake(scale, 0, 0, -scale, -minX * scale + pad, maxY * scale + pad);
+
+    NSMutableDictionary<NSString *, UIImage *> *tinted = [NSMutableDictionary dictionary];
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(canvasWidth, canvasHeight) format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *rendererContext) {
+        CGContextRef cg = rendererContext.CGContext;
+        CGContextSetInterpolationQuality(cg, kCGInterpolationHigh);
+        for (NSDictionary *item in drawable) {
+            ZSAESpriteImage *sprite = images[item[@"key"]];
+            double alpha = MAX(0, MIN(1, ZSAEDouble(item[@"a"])));
+            if (alpha <= 0) continue;
+            UIImage *image = sprite.image;
+            double r = ZSAEDouble(item[@"r"]);
+            double g = ZSAEDouble(item[@"g"]);
+            double b = ZSAEDouble(item[@"b"]);
+            if (r < 0.999 || g < 0.999 || b < 0.999) {
+                NSString *tintKey = [NSString stringWithFormat:@"%@:%.3f:%.3f:%.3f", item[@"key"], r, g, b];
+                UIImage *cachedTint = tinted[tintKey];
+                if (!cachedTint) {
+                    cachedTint = ZSAETintedImage(image, r, g, b);
+                    if (cachedTint) tinted[tintKey] = cachedTint;
+                }
+                if (cachedTint) image = cachedTint;
+            }
+            double x0 = (sprite.offsetX - sprite.pivotX * sprite.rectWidth) / sprite.pixelsPerUnit;
+            double y0 = (sprite.offsetY - sprite.pivotY * sprite.rectHeight) / sprite.pixelsPerUnit;
+            CGAffineTransform transform = CGAffineTransformMake(1.0 / sprite.pixelsPerUnit, 0, 0, -1.0 / sprite.pixelsPerUnit, x0, y0 + sprite.height / sprite.pixelsPerUnit);
+            transform = CGAffineTransformConcat(transform, CGAffineTransformMakeScale([item[@"flipX"] boolValue] ? -1 : 1, [item[@"flipY"] boolValue] ? -1 : 1));
+            transform = CGAffineTransformConcat(transform, [item[@"transform"] CGAffineTransformValue]);
+            transform = CGAffineTransformConcat(transform, worldToPixel);
+            CGContextSaveGState(cg);
+            CGContextConcatCTM(cg, transform);
+            [image drawInRect:CGRectMake(0, 0, sprite.width, sprite.height) blendMode:kCGBlendModeNormal alpha:alpha];
+            CGContextRestoreGState(cg);
+        }
+    }];
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildGameObjectVisual(ZSAEContext *context, ZSAEObject *object, NSError **error) {
+    ZSAEGraphState *state = [ZSAEGraphState new];
+    state.context = context;
+    state.items = [NSMutableArray array];
+    state.outline = [NSMutableString string];
+    state.sprites = [NSMutableDictionary dictionary];
+    ZSAEWalkGameObject(state, object, CGAffineTransformIdentity, 0, 0, YES);
+
+    NSString *name = ZSAEString(object.fields[@"m_Name"]);
+    NSString *label = name.length > 0 ? name : @"GameObject";
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = name;
+
+    if (state.items.count == 0) {
+        if (state.truncated) [state.outline appendString:@"… hierarchy truncated\n"];
+        visual.summary = [NSString stringWithFormat:@"%@  •  %lu object%@", label, (unsigned long)state.nodes, state.nodes == 1 ? @"" : @"s"];
+        visual.pageLabels = @[@"Hierarchy"];
+        visual.text = state.outline;
+        visual.exportData = [state.outline dataUsingEncoding:NSUTF8StringEncoding];
+        visual.fileExtension = @"txt";
+        return visual;
+    }
+
+    NSArray<NSDictionary *> *items = [state.items copy];
+    visual.summary = [NSString stringWithFormat:@"%@  •  %lu sprite%@  •  %lu object%@%@", label,
+                      (unsigned long)items.count, items.count == 1 ? @"" : @"s",
+                      (unsigned long)state.nodes, state.nodes == 1 ? @"" : @"s", state.truncated ? @"  •  truncated" : @""];
+    visual.pageLabels = @[@"Composite"];
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        return ZSAERenderComposite(context, items, providerError);
+    };
+    return visual;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourVisual(ZSAEContext *context, ZSAEObject *object, NSError **error) {
+    NSDictionary *fields = object.fields;
+    NSMutableArray<ZSAEObject *> *targets = [NSMutableArray array];
+    NSMutableArray<NSString *> *labels = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    __block NSUInteger attempts = 0;
+
+    void (^consider)(id, NSString *) = ^(id pointer, NSString *label) {
+        NSDictionary *reference = ZSAEDict(pointer);
+        if (!reference || !ZSAEIsPPtr(reference) || ZSAEInt(reference[@"m_PathID"]) == 0 || attempts >= 16) return;
+        NSString *identity = [NSString stringWithFormat:@"%lld:%lld", (long long)ZSAEInt(reference[@"m_FileID"]), (long long)ZSAEInt(reference[@"m_PathID"])];
+        if ([seen containsObject:identity]) return;
+        [seen addObject:identity];
+        attempts++;
+        ZSAEObject *target = ZSAEResolvePPtr(context, object, reference, NULL);
+        if (!target || (target.classID != 213 && target.classID != 28)) return;
+        NSString *targetName = ZSAEString(target.fields[@"m_Name"]);
+        [targets addObject:target];
+        [labels addObject:targetName.length > 0 ? [NSString stringWithFormat:@"%@  %@", label, targetName] : label];
+    };
+
+    NSArray<NSArray<NSString *> *> *keys = @[
+        @[@"m_Sprite", @"Sprite"], @[@"m_OverrideSprite", @"Override sprite"], @[@"sprite", @"Sprite"],
+        @[@"m_Texture", @"Texture"], @[@"texture", @"Texture"], @[@"spriteSheet", @"Sprite sheet"],
+        @[@"m_Icon", @"Icon"], @[@"icon", @"Icon"], @[@"m_Image", @"Image"], @[@"atlas", @"Atlas"],
+    ];
+    for (NSArray<NSString *> *entry in keys) consider(fields[entry[0]], entry[1]);
+    NSArray *atlasTextures = ZSAEArray(fields[@"m_AtlasTextures"]);
+    for (NSUInteger i = 0; i < atlasTextures.count && i < 8; i++) {
+        consider(atlasTextures[i], [NSString stringWithFormat:@"Atlas %lu", (unsigned long)(i + 1)]);
+    }
+
+    if (targets.count == 0) return ZSAEBuildInspectorVisual(object, error);
+
+    NSArray<ZSAEObject *> *resolved = [targets copy];
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    NSString *name = ZSAEString(fields[@"m_Name"]);
+    visual.name = name;
+    NSString *head = name.length > 0 ? name : @"MonoBehaviour";
+    visual.summary = [NSString stringWithFormat:@"%@  •  %@%@", head, labels.firstObject, labels.count > 1 ? [NSString stringWithFormat:@"  •  %lu images", (unsigned long)labels.count] : @""];
+    visual.pageLabels = [labels copy];
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        if (page < 0 || page >= (NSInteger)resolved.count) return nil;
+        ZSAEObject *target = resolved[(NSUInteger)page];
+        if (target.classID == 213) {
+            ZSAESpriteImage *result = ZSAEMakeSpriteImage(context, target, nil, providerError);
+            return result.image;
+        }
+        ZSAETextureRecord *record = nil;
+        NSMutableData *rgba = nil;
+        if (!ZSAEDecodeTextureObject(target, &record, &rgba, providerError)) return nil;
+        return ZSAEImageFromRGBA(rgba, record.width, record.height);
+    };
+    return visual;
+}
+
 static BOOL ZSAEIsImageClass(int32_t classID) {
     switch (classID) {
         case 28:
@@ -2700,6 +3149,10 @@ static BOOL ZSAEIsImageClass(int32_t classID) {
         case 187:
         case 188:
             return ZSAEBuildSliceVisual(object, error);
+        case 1:
+            return ZSAEBuildGameObjectVisual(context, object, error);
+        case 114:
+            return ZSAEBuildMonoBehaviourVisual(context, object, error);
         case 21:
             return ZSAEBuildMaterialVisual(context, object, error);
         case 49:
