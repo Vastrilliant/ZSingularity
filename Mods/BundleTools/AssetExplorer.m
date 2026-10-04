@@ -405,7 +405,11 @@ static BOOL ZSAEParseUnityFSForSerializedPath(NSString *path, NSString **outSeri
     (void)archiveSize;
 
     BOOL infoAtEnd = (flags & 0x80) != 0;
-    uint64_t headerEnd = cursor.pos;
+    uint64_t headerEnd = ((uint64_t)cursor.pos + 15) & ~15ULL;
+    if (headerEnd > fileData.length) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The UnityFS header is truncated.");
+        return NO;
+    }
     if (compressedInfoSize > fileData.length) {
         if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The UnityFS blocks-info range is invalid.");
         return NO;

@@ -10715,6 +10715,7 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
 
     self.docsActiveKey = key;
     self.syslogFullScreenOpen = NO;
+    [self zs_endAssetExplorerSession];
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
     self.docsTitleLabel.text = [key uppercaseString];
@@ -10774,6 +10775,7 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
+    [self zs_endAssetExplorerSession];
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
     [self positionPanelAnimated:YES];
@@ -15430,6 +15432,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     if (!self.syslogFullScreenOverlay) return;
 
     [self zs_endMemoryAnalysis];
+    [self zs_endAssetExplorerSession];
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = YES;
     [self zs_startSyslogInfoRefresh];
@@ -15696,6 +15699,17 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:!self.extendedCoverEntering];
     [self zs_assetExplorerLoadBundles];
+}
+
+- (void)zs_endAssetExplorerSession {
+    if (!self.assetExplorerFullScreenOpen) return;
+    self.assetExplorerGeneration += 1;
+    self.assetExplorerFullScreenOpen = NO;
+    self.assetExplorerSelectedBundle = nil;
+    self.assetExplorerAssets = @[];
+    self.assetExplorerCloseButton.hidden = NO;
+    self.assetExplorerBackButton.hidden = YES;
+    self.assetExplorerFullScreenOverlay.hidden = YES;
 }
 
 - (void)zs_closeAssetExplorerFullScreenPanelTapped {
@@ -16057,6 +16071,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         self.syslogFullScreenOpen = NO;
         [self zs_syncSyslogButtonState];
     }
+    [self zs_endAssetExplorerSession];
 
     self.docsActiveKey = nil;
     self.memoryFullScreenOpen = YES;
