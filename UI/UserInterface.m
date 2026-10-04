@@ -2873,6 +2873,13 @@ static BOOL g_zsLowResSwapBusy;
 static __weak UIButton *g_zsLowResCancelButton;
 static __weak UIView *g_zsLowResInfoWrapper;
 static __weak UIView *g_zsLowResProgressWrapper;
+static __weak UIView *g_zsLowResSwapWrapper;
+static __weak UIView *g_zsLowResSwapLeftSlot;
+static __weak UIView *g_zsLowResSwapRightSlot;
+static __weak UIImageView *g_zsLowResSwapLeftIcon;
+static __weak UIImageView *g_zsLowResSwapRightIcon;
+static __weak UIButton *g_zsLowResSwapButton;
+static NSString *g_zsLowResSharedPath;
 static __weak UIView *g_zsLowResTranscodeWrapper;
 static NSInteger g_zsLowResBlockIndex;
 static BOOL g_zsLowResCodecExpanded;
@@ -3168,6 +3175,15 @@ static NSString *zs_lowres_swap_shared_folders(void) {
     NSString *mergeError = [ZSLowRes mergeOriginalsIntoDirectory:source copied:NULL];
     if (mergeError) return mergeError;
 
+    if (![source isEqualToString:lowRes]) {
+        NSString *ledger = [lowRes stringByAppendingPathComponent:@"ledger.json"];
+        NSString *ledgerTarget = [source stringByAppendingPathComponent:@"ledger.json"];
+        if ([fm fileExistsAtPath:ledger]) {
+            [fm removeItemAtPath:ledgerTarget error:nil];
+            [fm copyItemAtPath:ledger toPath:ledgerTarget error:nil];
+        }
+    }
+
     NSString *backup = [shared stringByAppendingString:@".backup"];
     NSError *error = nil;
     if ([fm fileExistsAtPath:backup]) {
@@ -3189,6 +3205,156 @@ static NSString *zs_lowres_swap_shared_folders(void) {
     NSString *restoreError = [ZSLowRes restoreMissingFilesIntoDirectory:shared fromBackup:backup restored:NULL];
     if (restoreError) return [NSString stringWithFormat:@"The compressed textures are in place, but %@ The game may ask to download them again.", restoreError];
     return nil;
+}
+
+typedef struct {
+    BOOL diskExists;
+    BOOL diskTranscoded;
+    BOOL backupExists;
+    BOOL backupTranscoded;
+} ZSLowResFolderState;
+
+static ZSLowResFolderState zs_lowres_folder_state(NSString *shared) {
+    ZSLowResFolderState state = {0};
+    if (!shared) return state;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backup = [shared stringByAppendingString:@".backup"];
+    BOOL isDirectory = NO;
+    state.diskExists = [fm fileExistsAtPath:shared isDirectory:&isDirectory] && isDirectory;
+    isDirectory = NO;
+    state.backupExists = [fm fileExistsAtPath:backup isDirectory:&isDirectory] && isDirectory;
+    state.diskTranscoded = state.diskExists && [fm fileExistsAtPath:[shared stringByAppendingPathComponent:@"ledger.json"]];
+    state.backupTranscoded = state.backupExists && [fm fileExistsAtPath:[backup stringByAppendingPathComponent:@"ledger.json"]];
+    return state;
+}
+
+static NSString *zs_lowres_exchange_shared_folders(NSString *shared) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backup = [shared stringByAppendingString:@".backup"];
+    NSString *temp = [shared stringByAppendingString:@".swap"];
+    ZSLowResFolderState state = zs_lowres_folder_state(shared);
+    if (!state.diskExists) return @"Couldn't find the UnityCache/Shared folder.";
+    if (!state.backupExists) return @"Couldn't find Shared.backup.";
+    NSError *error = nil;
+    if ([fm fileExistsAtPath:temp] && ![fm removeItemAtPath:temp error:&error]) {
+        return [NSString stringWithFormat:@"Couldn't clear a leftover temporary folder: %@", error.localizedDescription ?: @"unknown error"];
+    }
+    if (![fm moveItemAtPath:shared toPath:temp error:&error]) {
+        return [NSString stringWithFormat:@"Couldn't rename Shared: %@", error.localizedDescription ?: @"unknown error"];
+    }
+    if (![fm moveItemAtPath:backup toPath:shared error:&error]) {
+        NSString *reason = error.localizedDescription ?: @"unknown error";
+        NSError *rollbackError = nil;
+        if (![fm moveItemAtPath:temp toPath:shared error:&rollbackError]) {
+            return [NSString stringWithFormat:@"Couldn't rename Shared.backup: %@. Restoring Shared also failed: %@. Your Shared folder is named Shared.swap.", reason, rollbackError.localizedDescription ?: @"unknown error"];
+        }
+        return [NSString stringWithFormat:@"Couldn't rename Shared.backup: %@. Nothing was changed.", reason];
+    }
+    if (![fm moveItemAtPath:temp toPath:backup error:&error]) {
+        NSString *reason = error.localizedDescription ?: @"unknown error";
+        NSError *rollbackError = nil;
+        if (![fm moveItemAtPath:shared toPath:backup error:&rollbackError] || ![fm moveItemAtPath:temp toPath:shared error:&rollbackError]) {
+            return [NSString stringWithFormat:@"Couldn't finish the swap: %@. Rolling back also failed: %@. Check for Shared.swap.", reason, rollbackError.localizedDescription ?: @"unknown error"];
+        }
+        return [NSString stringWithFormat:@"Couldn't finish the swap: %@. Nothing was changed.", reason];
+    }
+    return nil;
+}
+
+static UIColor *zs_lowres_original_folder_color(void) {
+    return [UIColor colorWithRed:0.35 green:0.78 blue:0.98 alpha:1.0];
+}
+
+static UIImage *zs_lowres_folder_image(void) {
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:44 weight:UIImageSymbolWeightRegular];
+    return [[UIImage systemImageNamed:@"folder.fill" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+static UIView *zs_make_lowres_folder_slot(NSString *name, UIImageView * __strong *iconOut) {
+    UIView *slot = [[UIView alloc] init];
+    slot.translatesAutoresizingMaskIntoConstraints = NO;
+    UIImageView *icon = [[UIImageView alloc] initWithImage:zs_lowres_folder_image()];
+    icon.translatesAutoresizingMaskIntoConstraints = NO;
+    icon.contentMode = UIViewContentModeScaleAspectFit;
+    icon.tintColor = zs_lowres_original_folder_color();
+    UILabel *label = zs_make_lowres_label(name, zs_disclosure_secondary_color(), UIFontWeightMedium);
+    [slot addSubview:icon];
+    [slot addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [slot.widthAnchor constraintEqualToConstant:64],
+        [icon.topAnchor constraintEqualToAnchor:slot.topAnchor],
+        [icon.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
+        [icon.widthAnchor constraintEqualToConstant:56],
+        [icon.heightAnchor constraintEqualToConstant:48],
+        [label.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:6],
+        [label.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
+        [label.bottomAnchor constraintEqualToAnchor:slot.bottomAnchor],
+    ]];
+    if (iconOut) *iconOut = icon;
+    return slot;
+}
+
+static NSAttributedString *zs_lowres_swap_legend(void) {
+    NSMutableParagraphStyle *paragraph = [[NSMutableParagraphStyle alloc] init];
+    paragraph.alignment = NSTextAlignmentCenter;
+    paragraph.lineSpacing = 2;
+    NSString *text = @"Green is the transcoded folder\nBlue is the original folder\n\nClick the swap icon to switch between them, you must restart the game for changes to take effect";
+    NSMutableAttributedString *legend = [[NSMutableAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: zs_mono_font(10, UIFontWeightMedium),
+        NSForegroundColorAttributeName: zs_disclosure_secondary_color(),
+        NSParagraphStyleAttributeName: paragraph,
+    }];
+    [legend addAttribute:NSForegroundColorAttributeName value:zs_accent_green_color() range:[text rangeOfString:@"Green"]];
+    [legend addAttribute:NSForegroundColorAttributeName value:zs_lowres_original_folder_color() range:[text rangeOfString:@"Blue"]];
+    return legend;
+}
+
+static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIImageView *leftIcon = nil;
+    UIImageView *rightIcon = nil;
+    UIView *leftSlot = zs_make_lowres_folder_slot(@"backup", &leftIcon);
+    UIView *rightSlot = zs_make_lowres_folder_slot(@"disk", &rightIcon);
+
+    UIButton *swap = [UIButton buttonWithType:UIButtonTypeSystem];
+    swap.translatesAutoresizingMaskIntoConstraints = NO;
+    UIImageSymbolConfiguration *swapConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightSemibold];
+    [swap setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right" withConfiguration:swapConfig] forState:UIControlStateNormal];
+    swap.tintColor = [UIColor colorWithWhite:0.9 alpha:1];
+    [swap addTarget:target action:swapAction forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *legend = [[UILabel alloc] init];
+    legend.translatesAutoresizingMaskIntoConstraints = NO;
+    legend.numberOfLines = 0;
+    legend.attributedText = zs_lowres_swap_legend();
+
+    for (UIView *view in @[leftSlot, rightSlot, swap, legend]) [container addSubview:view];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [leftSlot.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [leftSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
+        [rightSlot.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [rightSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:16],
+
+        [swap.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
+        [swap.centerYAnchor constraintEqualToAnchor:leftIcon.centerYAnchor],
+        [swap.widthAnchor constraintEqualToConstant:44],
+        [swap.heightAnchor constraintEqualToConstant:44],
+
+        [legend.topAnchor constraintEqualToAnchor:leftSlot.bottomAnchor constant:16],
+        [legend.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [legend.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [legend.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-12],
+    ]];
+
+    g_zsLowResSwapLeftSlot = leftSlot;
+    g_zsLowResSwapRightSlot = rightSlot;
+    g_zsLowResSwapLeftIcon = leftIcon;
+    g_zsLowResSwapRightIcon = rightIcon;
+    g_zsLowResSwapButton = swap;
+    return container;
 }
 
 static UIControl *zs_make_disclosure_row(NSString *title, NSString *value, id target, SEL action);
@@ -10645,6 +10811,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         zs_reveal_set_expanded(g_zsLowResInfoWrapper, !active && g_zsLowResStage != 0);
         zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, !active);
         zs_reveal_set_expanded(g_zsLowResProgressWrapper, active);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, NO);
     };
     if (animated) {
         [self zs_lowResAnimateChanges:changes];
@@ -10889,7 +11056,6 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResUserCancelled = NO;
     g_zsLowResStage = 3;
     g_zsLowResGeneration++;
-    [self zs_lowResSetActionButtonSwap:NO animated:NO];
     [[ZSMetalTabs shared] setPauseOverlayVisible:YES];
     [self zs_lowResRefreshProgressUI];
     [self zs_lowResSetPanelActive:YES animated:YES];
@@ -10915,14 +11081,18 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     if (index == NSNotFound) return;
     UIStackView *info = zs_make_lowres_info_view(self, @selector(lowResInfoActionTapped:), @selector(zs_lowResCodecRowTapped:));
     UIView *progress = zs_make_lowres_progress_view(self, @selector(lowResCancelTapped:));
+    UIView *swap = zs_make_lowres_swap_view(self, @selector(lowResSwapTapped:));
     UIView *infoWrapper = zs_make_reveal_wrapper(info, NO);
     UIView *progressWrapper = zs_make_reveal_wrapper(progress, NO);
+    UIView *swapWrapper = zs_make_reveal_wrapper(swap, NO);
     [inner removeArrangedSubview:button];
     [button removeFromSuperview];
     UIView *buttonWrapper = zs_make_reveal_wrapper(button, YES);
     [inner insertArrangedSubview:buttonWrapper atIndex:index];
     [inner insertArrangedSubview:infoWrapper atIndex:index + 1];
     [inner insertArrangedSubview:progressWrapper atIndex:index + 2];
+    [inner insertArrangedSubview:swapWrapper atIndex:index + 3];
+    g_zsLowResSwapWrapper = swapWrapper;
     g_zsLowResInfoView = info;
     g_zsLowResProgressView = progress;
     g_zsLowResInfoWrapper = infoWrapper;
@@ -10964,79 +11134,120 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     }
 }
 
-- (void)zs_lowResSetActionButtonSwap:(BOOL)swap animated:(BOOL)animated {
-    UIButton *button = g_zsLowResCancelButton;
-    if (!button) return;
-    NSString *title = swap ? @"Swap textures" : @"Cancel";
-    UIColor *color = swap ? zs_accent_green_color() : [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
-    dispatch_block_t apply = ^{
-        [button setTitle:title forState:UIControlStateNormal];
-        [button setTitleColor:color forState:UIControlStateNormal];
-    };
-    if (!animated) {
-        apply();
-        return;
-    }
-    [UIView transitionWithView:button
-                      duration:0.25
-                       options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent
-                    animations:apply
-                    completion:nil];
+- (void)zs_lowResApplySwapState:(ZSLowResFolderState)state {
+    UIColor *green = zs_accent_green_color();
+    UIColor *blue = zs_lowres_original_folder_color();
+    UIColor *missing = [UIColor colorWithWhite:1 alpha:0.2];
+    g_zsLowResSwapLeftIcon.tintColor = !state.backupExists ? missing : (state.backupTranscoded ? green : blue);
+    g_zsLowResSwapRightIcon.tintColor = !state.diskExists ? missing : (state.diskTranscoded ? green : blue);
+    BOOL canSwap = state.diskExists && state.backupExists;
+    g_zsLowResSwapButton.enabled = canSwap;
+    g_zsLowResSwapButton.alpha = canSwap ? 1 : 0.3;
 }
 
-- (void)zs_lowResConfirmSwap {
-    if (g_zsLowResSwapBusy) return;
+- (void)zs_lowResShowSwapWindow {
+    [self zs_lowResAnimateChanges:^{
+        zs_reveal_set_expanded(g_zsLowResInfoWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResProgressWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, YES);
+    }];
+}
+
+- (void)zs_lowResPresentAlertWithTitle:(NSString *)title message:(NSString *)message {
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
     if (!presenter) return;
-    NSString *shared = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
-    BOOL backupExists = shared && [NSFileManager.defaultManager fileExistsAtPath:[shared stringByAppendingString:@".backup"]];
-    NSString *message = @"The current Shared folder will be renamed to Shared.backup, and the compressed textures in Documents/LowRes will take its place as Shared.";
-    if (backupExists) message = [message stringByAppendingString:@"\n\nThe existing Shared.backup will be deleted."];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Swap textures?" message:message preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"Not Now" style:UIAlertActionStyleCancel handler:nil]];
-    __weak typeof(self) weakSelf = self;
-    [alert addAction:[UIAlertAction actionWithTitle:@"Swap" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        [weakSelf zs_lowResPerformSwap];
-    }]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
     [presenter presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)zs_lowResPerformSwap {
-    if (g_zsLowResSwapBusy) return;
+- (void)zs_lowResAutoSwapAfterCompletion {
     g_zsLowResSwapBusy = YES;
     g_zsLowResCancelButton.enabled = NO;
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *shared = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
         NSString *failure = zs_lowres_swap_shared_folders();
+        ZSLowResFolderState state = zs_lowres_folder_state(shared);
         dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
             g_zsLowResSwapBusy = NO;
             g_zsLowResCancelButton.enabled = YES;
-            UIViewController *presenter = zs_key_window().rootViewController;
-            while (presenter.presentedViewController) presenter = presenter.presentedViewController;
-            if (!failure) {
+            g_zsLowResSharedPath = shared;
+            if (!strongSelf) return;
+            if (!failure || state.diskTranscoded) {
+                [strongSelf zs_lowResApplySwapState:state];
+                [strongSelf zs_lowResShowSwapWindow];
+            } else {
                 g_zsLowResStage = 0;
                 g_zsLowResGeneration++;
-                [weakSelf zs_lowResSetPanelActive:NO animated:YES];
-                [weakSelf zs_lowResSetActionButtonSwap:NO animated:NO];
+                [strongSelf zs_lowResSetPanelActive:NO animated:YES];
             }
-            if (!presenter) return;
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:failure ? @"Swap failed" : @"Textures swapped"
-                                                                           message:failure ?: @"Your previous textures are in Shared.backup. Restart the game so it picks up the swapped files."
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [presenter presentViewController:alert animated:YES completion:nil];
+            if (failure) [strongSelf zs_lowResPresentAlertWithTitle:@"Swap failed" message:failure];
         });
     });
+}
+
+- (void)lowResSwapTapped:(UIButton *)sender {
+    if (g_zsLowResSwapBusy || g_zsLowResStage != 4) return;
+    NSString *shared = g_zsLowResSharedPath;
+    if (!shared) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+    g_zsLowResSwapBusy = YES;
+    sender.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *failure = zs_lowres_exchange_shared_folders(shared);
+        ZSLowResFolderState state = zs_lowres_folder_state(shared);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) {
+                g_zsLowResSwapBusy = NO;
+                return;
+            }
+            if (failure) {
+                g_zsLowResSwapBusy = NO;
+                [strongSelf zs_lowResApplySwapState:state];
+                [strongSelf zs_lowResPresentAlertWithTitle:@"Swap failed" message:failure];
+                return;
+            }
+            [strongSelf zs_lowResAnimateSwapToState:state];
+        });
+    });
+}
+
+- (void)zs_lowResAnimateSwapToState:(ZSLowResFolderState)state {
+    UIView *leftSlot = g_zsLowResSwapLeftSlot;
+    UIView *rightSlot = g_zsLowResSwapRightSlot;
+    UIImageView *leftIcon = g_zsLowResSwapLeftIcon;
+    UIImageView *rightIcon = g_zsLowResSwapRightIcon;
+    if (!leftSlot || !rightSlot || !leftIcon || !rightIcon) {
+        g_zsLowResSwapBusy = NO;
+        [self zs_lowResApplySwapState:state];
+        return;
+    }
+    CGFloat distance = CGRectGetMidX(rightSlot.frame) - CGRectGetMidX(leftSlot.frame);
+    __weak typeof(self) weakSelf = self;
+    [UIView animateWithDuration:0.5
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        leftIcon.transform = CGAffineTransformMakeTranslation(distance, 0);
+        rightIcon.transform = CGAffineTransformMakeTranslation(-distance, 0);
+    } completion:^(BOOL finished) {
+        leftIcon.transform = CGAffineTransformIdentity;
+        rightIcon.transform = CGAffineTransformIdentity;
+        [weakSelf zs_lowResApplySwapState:state];
+        g_zsLowResSwapBusy = NO;
+    }];
 }
 
 - (void)lowResCancelTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
-    if (g_zsLowResStage == 4) {
-        [self zs_lowResConfirmSwap];
-        return;
-    }
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
     if (!presenter) return;
@@ -11072,7 +11283,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         g_zsLowResGeneration++;
         [self zs_lowResRefreshProgressUI];
         g_zsLowResETALabel.text = @"Complete";
-        [self zs_lowResSetActionButtonSwap:YES animated:YES];
+        [self zs_lowResAutoSwapAfterCompletion];
         return;
     }
     g_zsLowResStage = 0;
