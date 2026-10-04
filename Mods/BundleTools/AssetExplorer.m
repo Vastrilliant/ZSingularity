@@ -41,7 +41,6 @@ typedef struct {
 } ZSAEBlock;
 
 typedef struct {
-    NSString *path;
     uint64_t offset;
     uint64_t size;
     uint32_t flags;
@@ -502,17 +501,20 @@ static BOOL ZSAEParseUnityFSForSerializedPath(NSString *path, NSString **outSeri
         return NO;
     }
 
+    NSMutableArray<NSString *> *nodePaths = [NSMutableArray arrayWithCapacity:nodeCount];
     for (uint32_t i = 0; i < nodeCount; i++) {
         uint64_t nodeOffset = 0;
         uint64_t nodeSize = 0;
         uint32_t nodeFlags = 0;
+        NSString *nodePath = nil;
         if (!ZSAEReadU64BE(&infoCursor, &nodeOffset) ||
             !ZSAEReadU64BE(&infoCursor, &nodeSize) ||
             !ZSAEReadU32BE(&infoCursor, &nodeFlags) ||
-            !ZSAEReadCString(&infoCursor, &nodes[i].path)) {
+            !ZSAEReadCString(&infoCursor, &nodePath)) {
             ok = NO;
             break;
         }
+        [nodePaths addObject:nodePath ?: @""];
         nodes[i].offset = nodeOffset;
         nodes[i].size = nodeSize;
         nodes[i].flags = nodeFlags;
@@ -530,7 +532,7 @@ static BOOL ZSAEParseUnityFSForSerializedPath(NSString *path, NSString **outSeri
 
     NSInteger cabIndex = NSNotFound;
     for (uint32_t i = 0; i < nodeCount; i++) {
-        if ((nodes[i].flags & 4) != 0 && [nodes[i].path hasPrefix:@"CAB-"]) {
+        if ((nodes[i].flags & 4) != 0 && [nodePaths[i] hasPrefix:@"CAB-"]) {
             cabIndex = (NSInteger)i;
             break;
         }
@@ -573,7 +575,7 @@ static BOOL ZSAEParseUnityFSForSerializedPath(NSString *path, NSString **outSeri
                                                nodes[cabIndex].offset, nodes[cabIndex].size,
                                                blocks, blockCount,
                                                &serializedPath, error);
-    NSString *cab = [nodes[cabIndex].path copy];
+    NSString *cab = [nodePaths[cabIndex] copy];
 
     free(nodes);
     free(blocks);
