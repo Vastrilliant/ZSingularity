@@ -2881,6 +2881,14 @@ static __weak UIImageView *g_zsLowResSwapRightIcon;
 static __weak UIButton *g_zsLowResSwapButton;
 static NSString *g_zsLowResSharedPath;
 static BOOL g_zsLowResSwapEligible;
+static BOOL g_zsLowResDiskExists;
+static BOOL g_zsLowResBackupExists;
+static BOOL g_zsLowResDiskTranscoded;
+static BOOL g_zsLowResBackupTranscoded;
+static BOOL g_zsLowResDeleteOpen;
+static BOOL g_zsLowResDeleteTargetIsDisk;
+static __weak UIView *g_zsLowResDeleteWrapper;
+static __weak UILabel *g_zsLowResDeleteLabel;
 static __weak UIView *g_zsLowResTranscodeWrapper;
 static NSInteger g_zsLowResBlockIndex;
 static BOOL g_zsLowResCodecExpanded;
@@ -3271,9 +3279,13 @@ static UIImage *zs_lowres_folder_image(void) {
     return [[UIImage systemImageNamed:@"folder.fill" withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
 }
 
-static UIView *zs_make_lowres_folder_slot(NSString *name, UIImageView * __strong *iconOut) {
+static UIView *zs_make_lowres_folder_slot(NSString *name, NSInteger tag, id<UIContextMenuInteractionDelegate> delegate, UIImageView * __strong *iconOut) {
     UIView *slot = [[UIView alloc] init];
     slot.translatesAutoresizingMaskIntoConstraints = NO;
+    slot.tag = tag;
+    slot.layer.borderWidth = 1;
+    slot.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.2].CGColor;
+    slot.layer.cornerRadius = 6;
     UIImageView *icon = [[UIImageView alloc] initWithImage:zs_lowres_folder_image()];
     icon.translatesAutoresizingMaskIntoConstraints = NO;
     icon.contentMode = UIViewContentModeScaleAspectFit;
@@ -3282,15 +3294,16 @@ static UIView *zs_make_lowres_folder_slot(NSString *name, UIImageView * __strong
     [slot addSubview:icon];
     [slot addSubview:label];
     [NSLayoutConstraint activateConstraints:@[
-        [slot.widthAnchor constraintEqualToConstant:52],
-        [icon.topAnchor constraintEqualToAnchor:slot.topAnchor],
+        [slot.widthAnchor constraintEqualToConstant:58],
+        [slot.heightAnchor constraintEqualToConstant:58],
+        [icon.topAnchor constraintEqualToAnchor:slot.topAnchor constant:5],
         [icon.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
         [icon.widthAnchor constraintEqualToConstant:40],
         [icon.heightAnchor constraintEqualToConstant:32],
         [label.topAnchor constraintEqualToAnchor:icon.bottomAnchor constant:3],
         [label.centerXAnchor constraintEqualToAnchor:slot.centerXAnchor],
-        [label.bottomAnchor constraintEqualToAnchor:slot.bottomAnchor],
     ]];
+    [slot addInteraction:[[UIContextMenuInteraction alloc] initWithDelegate:delegate]];
     if (iconOut) *iconOut = icon;
     return slot;
 }
@@ -3316,8 +3329,9 @@ static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
 
     UIImageView *leftIcon = nil;
     UIImageView *rightIcon = nil;
-    UIView *leftSlot = zs_make_lowres_folder_slot(@"backup", &leftIcon);
-    UIView *rightSlot = zs_make_lowres_folder_slot(@"disk", &rightIcon);
+    id<UIContextMenuInteractionDelegate> menuDelegate = (id<UIContextMenuInteractionDelegate>)target;
+    UIView *leftSlot = zs_make_lowres_folder_slot(@"backup", 1, menuDelegate, &leftIcon);
+    UIView *rightSlot = zs_make_lowres_folder_slot(@"disk", 2, menuDelegate, &rightIcon);
 
     UIButton *swap = [UIButton buttonWithType:UIButtonTypeSystem];
     swap.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3333,10 +3347,19 @@ static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
 
     for (UIView *view in @[leftSlot, rightSlot, swap, legend]) [container addSubview:view];
 
+    UILayoutGuide *leftGuide = [[UILayoutGuide alloc] init];
+    UILayoutGuide *rightGuide = [[UILayoutGuide alloc] init];
+    [container addLayoutGuide:leftGuide];
+    [container addLayoutGuide:rightGuide];
+
     [NSLayoutConstraint activateConstraints:@[
-        [leftSlot.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [leftGuide.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [leftGuide.trailingAnchor constraintEqualToAnchor:swap.leadingAnchor],
+        [rightGuide.leadingAnchor constraintEqualToAnchor:swap.trailingAnchor],
+        [rightGuide.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [leftSlot.centerXAnchor constraintEqualToAnchor:leftGuide.centerXAnchor],
+        [rightSlot.centerXAnchor constraintEqualToAnchor:rightGuide.centerXAnchor],
         [leftSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:10],
-        [rightSlot.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
         [rightSlot.topAnchor constraintEqualToAnchor:container.topAnchor constant:10],
 
         [swap.centerXAnchor constraintEqualToAnchor:container.centerXAnchor],
@@ -3356,6 +3379,81 @@ static UIView *zs_make_lowres_swap_view(id target, SEL swapAction) {
     g_zsLowResSwapRightIcon = rightIcon;
     g_zsLowResSwapButton = swap;
     return container;
+}
+
+static UIView *zs_make_lowres_delete_view(id target, SEL confirmAction, SEL cancelAction) {
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView *topSeparator = zs_make_grouped_row_separator();
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.numberOfLines = 0;
+    label.font = zs_mono_font(11, UIFontWeightMedium);
+    label.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+
+    UIView *separator = zs_make_grouped_row_separator();
+    UIButton *confirm = zs_make_grouped_action_button(@"Confirm", [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0]);
+    confirm.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [confirm addTarget:target action:confirmAction forControlEvents:UIControlEventTouchUpInside];
+    UIView *cancelSeparator = zs_make_grouped_row_separator();
+    UIButton *cancel = zs_make_grouped_action_button(@"Cancel", zs_disclosure_secondary_color());
+    cancel.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [cancel addTarget:target action:cancelAction forControlEvents:UIControlEventTouchUpInside];
+
+    for (UIView *view in @[topSeparator, label, separator, confirm, cancelSeparator, cancel]) [container addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [topSeparator.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [topSeparator.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [topSeparator.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [label.topAnchor constraintEqualToAnchor:topSeparator.bottomAnchor constant:12],
+        [label.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [label.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [separator.topAnchor constraintEqualToAnchor:label.bottomAnchor constant:12],
+        [separator.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [separator.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [confirm.topAnchor constraintEqualToAnchor:separator.bottomAnchor],
+        [confirm.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [confirm.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [confirm.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+        [cancelSeparator.topAnchor constraintEqualToAnchor:confirm.bottomAnchor],
+        [cancelSeparator.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [cancelSeparator.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [cancel.topAnchor constraintEqualToAnchor:cancelSeparator.bottomAnchor],
+        [cancel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [cancel.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [cancel.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+        [cancel.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
+    ]];
+    g_zsLowResDeleteLabel = label;
+    return container;
+}
+
+static NSString *zs_lowres_delete_folder(NSString *shared, BOOL deleteDisk) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backup = [shared stringByAppendingString:@".backup"];
+    NSError *error = nil;
+    if (!deleteDisk) {
+        if (![fm removeItemAtPath:backup error:&error]) {
+            return [NSString stringWithFormat:@"Couldn't delete Shared.backup: %@", error.localizedDescription ?: @"unknown error"];
+        }
+        return nil;
+    }
+    NSString *temp = [shared stringByAppendingString:@".deleting"];
+    if ([fm fileExistsAtPath:temp]) [fm removeItemAtPath:temp error:nil];
+    if (![fm moveItemAtPath:shared toPath:temp error:&error]) {
+        return [NSString stringWithFormat:@"Couldn't delete Shared: %@", error.localizedDescription ?: @"unknown error"];
+    }
+    if (![fm moveItemAtPath:backup toPath:shared error:&error]) {
+        NSString *reason = error.localizedDescription ?: @"unknown error";
+        NSError *rollbackError = nil;
+        if (![fm moveItemAtPath:temp toPath:shared error:&rollbackError]) {
+            return [NSString stringWithFormat:@"Couldn't promote Shared.backup: %@. Restoring Shared also failed: %@. Your Shared folder is named Shared.deleting.", reason, rollbackError.localizedDescription ?: @"unknown error"];
+        }
+        return [NSString stringWithFormat:@"Couldn't promote Shared.backup: %@. Nothing was deleted.", reason];
+    }
+    [fm removeItemAtPath:temp error:nil];
+    return nil;
 }
 
 static UIControl *zs_make_disclosure_row(NSString *title, NSString *value, id target, SEL action);
@@ -5716,7 +5814,7 @@ static const CGFloat kZSSyslogIndexColumnWidth = 22;
 
 @end
 
-@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate>
+@interface UserInterface : NSObject <UIGestureRecognizerDelegate, UIScrollViewDelegate, UITextFieldDelegate, UIDocumentPickerDelegate, UITextViewDelegate, CLLocationManagerDelegate, UIContextMenuInteractionDelegate>
 @property (nonatomic, strong) UIVisualEffectView *glassContainer;
 @property (nonatomic, strong) UIVisualEffectView *panelGlass;
 @property (nonatomic, strong) UIVisualEffectView *handleGlass;
@@ -10808,11 +10906,13 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)zs_lowResSetPanelActive:(BOOL)active animated:(BOOL)animated {
+    if (active) g_zsLowResDeleteOpen = NO;
     dispatch_block_t changes = ^{
         zs_reveal_set_expanded(g_zsLowResInfoWrapper, !active && g_zsLowResStage != 0);
         zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, !active);
         zs_reveal_set_expanded(g_zsLowResProgressWrapper, active);
-        zs_reveal_set_expanded(g_zsLowResSwapWrapper, !active && g_zsLowResStage == 0 && g_zsLowResSwapEligible);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, !active && g_zsLowResStage == 0 && g_zsLowResSwapEligible && !g_zsLowResDeleteOpen);
+        zs_reveal_set_expanded(g_zsLowResDeleteWrapper, !active && g_zsLowResStage == 0 && g_zsLowResDeleteOpen);
     };
     if (animated) {
         [self zs_lowResAnimateChanges:changes];
@@ -10892,6 +10992,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 
 - (void)zs_lowResBeginCounting {
     g_zsLowResStage = 1;
+    g_zsLowResDeleteOpen = NO;
     NSUInteger generation = ++g_zsLowResGeneration;
     UIColor *blue = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
     [UIView transitionWithView:g_zsLowResInfoLabel duration:0.25 options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowAnimatedContent animations:^{
@@ -10906,6 +11007,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         [self zs_lowResApplyConfigMode:NO];
         zs_reveal_set_expanded(g_zsLowResInfoWrapper, YES);
         zs_reveal_set_expanded(g_zsLowResSwapWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResDeleteWrapper, NO);
     }];
     __weak typeof(self) weakSelf = self;
     BOOL accepted = [ZSLowRes.shared prepareWithCompletion:^(NSUInteger textures, NSUInteger bundles, BOOL ok) {
@@ -11087,6 +11189,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIView *infoWrapper = zs_make_reveal_wrapper(info, NO);
     UIView *progressWrapper = zs_make_reveal_wrapper(progress, NO);
     UIView *swapWrapper = zs_make_reveal_wrapper(swap, NO);
+    UIView *deleteWrapper = zs_make_reveal_wrapper(zs_make_lowres_delete_view(self, @selector(lowResDeleteConfirmTapped:), @selector(lowResDeleteCancelTapped:)), NO);
     [inner removeArrangedSubview:button];
     [button removeFromSuperview];
     UIView *buttonWrapper = zs_make_reveal_wrapper(button, YES);
@@ -11094,7 +11197,10 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [inner insertArrangedSubview:infoWrapper atIndex:index + 1];
     [inner insertArrangedSubview:progressWrapper atIndex:index + 2];
     [inner insertArrangedSubview:swapWrapper atIndex:index + 3];
+    [inner insertArrangedSubview:deleteWrapper atIndex:index + 4];
     g_zsLowResSwapWrapper = swapWrapper;
+    g_zsLowResDeleteWrapper = deleteWrapper;
+    g_zsLowResDeleteOpen = NO;
     g_zsLowResInfoView = info;
     g_zsLowResProgressView = progress;
     g_zsLowResInfoWrapper = infoWrapper;
@@ -11141,6 +11247,10 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     UIColor *green = zs_accent_green_color();
     UIColor *blue = zs_lowres_original_folder_color();
     UIColor *missing = [UIColor colorWithWhite:1 alpha:0.2];
+    g_zsLowResDiskExists = state.diskExists;
+    g_zsLowResBackupExists = state.backupExists;
+    g_zsLowResDiskTranscoded = state.diskTranscoded;
+    g_zsLowResBackupTranscoded = state.backupTranscoded;
     g_zsLowResSwapLeftIcon.tintColor = !state.backupExists ? missing : (state.backupTranscoded ? green : blue);
     g_zsLowResSwapRightIcon.tintColor = !state.diskExists ? missing : (state.diskTranscoded ? green : blue);
     BOOL canSwap = state.diskExists && state.backupExists;
@@ -11162,7 +11272,11 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             g_zsLowResSwapEligible = eligible;
             [strongSelf zs_lowResApplySwapState:state];
             if (g_zsLowResStage != 0 || [ZSLowRes.shared status].running) return;
-            dispatch_block_t changes = ^{ zs_reveal_set_expanded(g_zsLowResSwapWrapper, eligible); };
+            if (!eligible) g_zsLowResDeleteOpen = NO;
+            dispatch_block_t changes = ^{
+                zs_reveal_set_expanded(g_zsLowResSwapWrapper, eligible && !g_zsLowResDeleteOpen);
+                zs_reveal_set_expanded(g_zsLowResDeleteWrapper, eligible && g_zsLowResDeleteOpen);
+            };
             if (animated) {
                 [strongSelf zs_lowResAnimateChanges:changes];
             } else {
@@ -11205,6 +11319,85 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             g_zsLowResGeneration++;
             [strongSelf zs_lowResSetPanelActive:NO animated:YES];
             if (failure) [strongSelf zs_lowResPresentAlertWithTitle:@"Swap failed" message:failure];
+        });
+    });
+}
+
+- (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(CGPoint)location {
+    if (g_zsLowResSwapBusy || g_zsLowResStage != 0 || [ZSLowRes.shared status].running) return nil;
+    BOOL isDisk = interaction.view.tag == 2;
+    if (isDisk ? !g_zsLowResDiskExists : !g_zsLowResBackupExists) return nil;
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggested) {
+        UIAction *delete = [UIAction actionWithTitle:@"Delete" image:[UIImage systemImageNamed:@"trash"] identifier:nil handler:^(UIAction *action) {
+            [weakSelf zs_lowResBeginDeleteForDisk:isDisk];
+        }];
+        delete.attributes = UIMenuElementAttributesDestructive;
+        return [UIMenu menuWithTitle:@"" children:@[delete]];
+    }];
+}
+
+- (UITargetedPreview *)zs_lowResSlotPreviewForInteraction:(UIContextMenuInteraction *)interaction {
+    UIView *view = interaction.view;
+    UIPreviewParameters *parameters = [[UIPreviewParameters alloc] init];
+    parameters.backgroundColor = UIColor.clearColor;
+    parameters.visiblePath = [UIBezierPath bezierPathWithRoundedRect:view.bounds cornerRadius:6];
+    return [[UITargetedPreview alloc] initWithView:view parameters:parameters];
+}
+
+- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction previewForHighlightingMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
+    return [self zs_lowResSlotPreviewForInteraction:interaction];
+}
+
+- (UITargetedPreview *)contextMenuInteraction:(UIContextMenuInteraction *)interaction previewForDismissingMenuWithConfiguration:(UIContextMenuConfiguration *)configuration {
+    return [self zs_lowResSlotPreviewForInteraction:interaction];
+}
+
+- (void)zs_lowResBeginDeleteForDisk:(BOOL)isDisk {
+    if (g_zsLowResSwapBusy || g_zsLowResStage != 0) return;
+    BOOL transcoded = isDisk ? g_zsLowResDiskTranscoded : g_zsLowResBackupTranscoded;
+    g_zsLowResDeleteTargetIsDisk = isDisk;
+    g_zsLowResDeleteLabel.text = transcoded
+        ? @"Deleting this folder will make the original take precedence, are you sure?"
+        : @"Deleting this folder will make the transcoded one take precedence, texture compression is a lossy process \u2014 if you want the original textures back you\u2019ll have to redownload them again, are you sure?";
+    g_zsLowResDeleteOpen = YES;
+    [self zs_lowResAnimateChanges:^{
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResDeleteWrapper, YES);
+    }];
+}
+
+- (void)lowResDeleteCancelTapped:(UIButton *)sender {
+    if (g_zsLowResSwapBusy) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    g_zsLowResDeleteOpen = NO;
+    [self zs_lowResAnimateChanges:^{
+        zs_reveal_set_expanded(g_zsLowResDeleteWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, g_zsLowResSwapEligible);
+    }];
+}
+
+- (void)lowResDeleteConfirmTapped:(UIButton *)sender {
+    if (g_zsLowResSwapBusy || g_zsLowResStage != 0 || [ZSLowRes.shared status].running) return;
+    NSString *shared = g_zsLowResSharedPath;
+    if (!shared) return;
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+    BOOL deleteDisk = g_zsLowResDeleteTargetIsDisk;
+    g_zsLowResSwapBusy = YES;
+    sender.enabled = NO;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *failure = zs_lowres_delete_folder(shared, deleteDisk);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            sender.enabled = YES;
+            g_zsLowResSwapBusy = NO;
+            g_zsLowResDeleteOpen = NO;
+            if (!strongSelf) return;
+            [strongSelf zs_lowResRefreshSwapWindowAnimated:YES];
+            if (failure) [strongSelf zs_lowResPresentAlertWithTitle:@"Delete failed" message:failure];
         });
     });
 }
