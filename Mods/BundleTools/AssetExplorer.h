@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 #include <stdint.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -13,6 +14,9 @@ typedef NS_ENUM(NSInteger, ZSAssetExplorerErrorCode) {
     ZSAssetExplorerErrorSerializedFileMalformed,
     ZSAssetExplorerErrorUnsupportedCompression,
     ZSAssetExplorerErrorUnsupportedSerializedFile,
+    ZSAssetExplorerErrorAssetNotFound,
+    ZSAssetExplorerErrorTextureUnsupported,
+    ZSAssetExplorerErrorTextureDecodeFailed,
 };
 
 @interface ZSAssetExplorerBundle : NSObject
@@ -29,9 +33,19 @@ typedef NS_ENUM(NSInteger, ZSAssetExplorerErrorCode) {
 @property (nonatomic, assign) uint32_t objectSize;
 @end
 
+@interface ZSAssetExplorerTexture : NSObject
+@property (nonatomic, strong, nullable) UIImage *image;
+@property (nonatomic, copy, nullable) NSString *name;
+@property (nonatomic, assign) NSInteger width;
+@property (nonatomic, assign) NSInteger height;
+@property (nonatomic, assign) int32_t format;
+@property (nonatomic, copy) NSString *formatName;
+@end
+
 @interface ZSAssetExplorer : NSObject
 + (NSArray<ZSAssetExplorerBundle *> *)cachedBundles:(NSError **)error;
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error;
++ (nullable ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -6011,6 +6011,12 @@ static const CGFloat kZSSyslogIndexColumnWidth = 22;
 @property (nonatomic, strong) UILabel *assetExplorerStatusLabel;
 @property (nonatomic, strong) UIButton *assetExplorerBackButton;
 @property (nonatomic, strong) UIButton *assetExplorerCloseButton;
+@property (nonatomic, assign) BOOL assetExplorerTextureOpen;
+@property (nonatomic, strong) UIButton *assetExplorerTextureBackButton;
+@property (nonatomic, strong) UIImageView *assetExplorerTextureImageView;
+@property (nonatomic, strong) UILabel *assetExplorerTextureMessageLabel;
+@property (nonatomic, strong) UILabel *assetExplorerTextureCaptionLabel;
+@property (nonatomic, strong) UIActivityIndicatorView *assetExplorerTextureSpinner;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerBundle *> *assetExplorerBundles;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerAssets;
 @property (nonatomic, strong) ZSAssetExplorerBundle *assetExplorerSelectedBundle;
@@ -8087,6 +8093,12 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerStatusLabel = nil;
     self.assetExplorerBackButton = nil;
     self.assetExplorerCloseButton = nil;
+    self.assetExplorerTextureOpen = NO;
+    self.assetExplorerTextureBackButton = nil;
+    self.assetExplorerTextureImageView = nil;
+    self.assetExplorerTextureMessageLabel = nil;
+    self.assetExplorerTextureCaptionLabel = nil;
+    self.assetExplorerTextureSpinner = nil;
     self.assetExplorerBundles = nil;
     self.assetExplorerAssets = nil;
     self.assetExplorerSelectedBundle = nil;
@@ -15623,6 +15635,77 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     [overlay addSubview:tableView];
     self.assetExplorerTableView = tableView;
 
+    UIButton *textureBackButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    textureBackButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(textureBackButton, backImage, [UIColor colorWithWhite:1 alpha:0.85]);
+    [textureBackButton addTarget:self action:@selector(zs_assetExplorerTextureBackTapped) forControlEvents:UIControlEventTouchUpInside];
+    textureBackButton.hidden = YES;
+    [overlay addSubview:textureBackButton];
+    self.assetExplorerTextureBackButton = textureBackButton;
+
+    UIImageView *textureImageView = [[UIImageView alloc] init];
+    textureImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    textureImageView.contentMode = UIViewContentModeScaleAspectFit;
+    textureImageView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.05];
+    textureImageView.layer.cornerRadius = 8;
+    textureImageView.layer.cornerCurve = kCACornerCurveContinuous;
+    textureImageView.clipsToBounds = YES;
+    textureImageView.hidden = YES;
+    [overlay addSubview:textureImageView];
+    self.assetExplorerTextureImageView = textureImageView;
+
+    UILabel *textureCaption = [[UILabel alloc] init];
+    textureCaption.translatesAutoresizingMaskIntoConstraints = NO;
+    textureCaption.font = zs_mono_font(9, UIFontWeightRegular);
+    textureCaption.textColor = [UIColor colorWithWhite:1 alpha:0.5];
+    textureCaption.textAlignment = NSTextAlignmentCenter;
+    textureCaption.adjustsFontSizeToFitWidth = YES;
+    textureCaption.minimumScaleFactor = 0.6;
+    textureCaption.hidden = YES;
+    [overlay addSubview:textureCaption];
+    self.assetExplorerTextureCaptionLabel = textureCaption;
+
+    UILabel *textureMessage = [[UILabel alloc] init];
+    textureMessage.translatesAutoresizingMaskIntoConstraints = NO;
+    textureMessage.font = zs_mono_font(11, UIFontWeightRegular);
+    textureMessage.textColor = [UIColor colorWithWhite:1 alpha:0.6];
+    textureMessage.textAlignment = NSTextAlignmentCenter;
+    textureMessage.numberOfLines = 0;
+    textureMessage.hidden = YES;
+    [overlay addSubview:textureMessage];
+    self.assetExplorerTextureMessageLabel = textureMessage;
+
+    UIActivityIndicatorView *textureSpinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    textureSpinner.translatesAutoresizingMaskIntoConstraints = NO;
+    textureSpinner.color = [UIColor colorWithWhite:1 alpha:0.7];
+    textureSpinner.hidesWhenStopped = YES;
+    [overlay addSubview:textureSpinner];
+    self.assetExplorerTextureSpinner = textureSpinner;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [textureBackButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [textureBackButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:8],
+        [textureBackButton.widthAnchor constraintEqualToConstant:30],
+        [textureBackButton.heightAnchor constraintEqualToConstant:30],
+
+        [textureCaption.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [textureCaption.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+        [textureCaption.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor constant:-8],
+
+        [textureImageView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [textureImageView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [textureImageView.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+        [textureImageView.bottomAnchor constraintEqualToAnchor:textureCaption.topAnchor constant:-8],
+
+        [textureMessage.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [textureMessage.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+        [textureMessage.leadingAnchor constraintGreaterThanOrEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
+        [textureMessage.trailingAnchor constraintLessThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
+
+        [textureSpinner.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [textureSpinner.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+    ]];
+
     [NSLayoutConstraint activateConstraints:@[
         [closeButton.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:kPanelPadding],
         [closeButton.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor constant:kZSSyslogFullScreenLeftInset],
@@ -15653,6 +15736,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerGeneration += 1;
     NSUInteger generation = self.assetExplorerGeneration;
     self.assetExplorerSelectedBundle = nil;
+    [self zs_assetExplorerSetTextureModeVisible:NO];
     self.assetExplorerAssets = @[];
     self.assetExplorerCloseButton.hidden = NO;
     self.assetExplorerTitleLabel.text = @"Asset Explorer";
@@ -15706,10 +15790,73 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.assetExplorerGeneration += 1;
     self.assetExplorerFullScreenOpen = NO;
     self.assetExplorerSelectedBundle = nil;
+    [self zs_assetExplorerSetTextureModeVisible:NO];
     self.assetExplorerAssets = @[];
     self.assetExplorerCloseButton.hidden = NO;
     self.assetExplorerBackButton.hidden = YES;
     self.assetExplorerFullScreenOverlay.hidden = YES;
+}
+
+- (void)zs_assetExplorerSetTextureModeVisible:(BOOL)visible {
+    self.assetExplorerTextureOpen = visible;
+    self.assetExplorerTableView.hidden = visible;
+    self.assetExplorerTitleLabel.hidden = visible;
+    self.assetExplorerStatusLabel.hidden = visible;
+    self.assetExplorerBackButton.hidden = visible || self.assetExplorerSelectedBundle == nil;
+    self.assetExplorerCloseButton.hidden = visible ? NO : (self.assetExplorerSelectedBundle != nil);
+    self.assetExplorerTextureBackButton.hidden = !visible;
+    self.assetExplorerTextureImageView.hidden = !visible;
+    self.assetExplorerTextureCaptionLabel.hidden = !visible;
+    if (!visible) {
+        [self.assetExplorerTextureSpinner stopAnimating];
+        self.assetExplorerTextureMessageLabel.hidden = YES;
+        self.assetExplorerTextureMessageLabel.text = nil;
+        self.assetExplorerTextureImageView.image = nil;
+        self.assetExplorerTextureCaptionLabel.text = nil;
+    }
+}
+
+- (void)zs_assetExplorerOpenTextureForAsset:(ZSAssetExplorerAsset *)asset {
+    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
+    if (!asset || !bundle || asset.classID != 28 || self.assetExplorerTextureOpen) return;
+
+    self.assetExplorerGeneration += 1;
+    NSUInteger generation = self.assetExplorerGeneration;
+    [self zs_assetExplorerSetTextureModeVisible:YES];
+    self.assetExplorerTextureImageView.image = nil;
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    self.assetExplorerTextureCaptionLabel.text = asset.assetName.length > 0 ? asset.assetName : @"Texture2D";
+    [self.assetExplorerTextureSpinner startAnimating];
+
+    __weak typeof(self) weakSelf = self;
+    NSString *bundlePath = [bundle.filePath copy];
+    int64_t pathID = asset.pathID;
+    NSString *assetName = [asset.assetName copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        ZSAssetExplorerTexture *texture = [ZSAssetExplorer textureForPathID:pathID inBundleAtPath:bundlePath error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerTextureOpen || strongSelf.assetExplorerGeneration != generation) return;
+            [strongSelf.assetExplorerTextureSpinner stopAnimating];
+            if (texture.image) {
+                strongSelf.assetExplorerTextureImageView.image = texture.image;
+                NSString *name = texture.name.length > 0 ? texture.name : (assetName.length > 0 ? assetName : @"Texture2D");
+                strongSelf.assetExplorerTextureCaptionLabel.text = [NSString stringWithFormat:@"%@  •  %ldx%ld  •  %@", name, (long)texture.width, (long)texture.height, texture.formatName];
+            } else {
+                strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't decode this texture.";
+                strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
+            }
+        });
+    });
+}
+
+- (void)zs_assetExplorerTextureBackTapped {
+    if (!self.assetExplorerTextureOpen) return;
+    self.assetExplorerGeneration += 1;
+    [self zs_assetExplorerSetTextureModeVisible:NO];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
 }
 
 - (void)zs_closeAssetExplorerFullScreenPanelTapped {
@@ -15800,6 +15947,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
         cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
         cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
+        cell.accessoryType = asset.classID == 28 ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
     }
     return cell;
 }
@@ -15807,7 +15955,12 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (tableView != self.assetExplorerTableView) return;
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (self.assetExplorerSelectedBundle) return;
+    if (self.assetExplorerSelectedBundle) {
+        if (self.assetExplorerTextureOpen || indexPath.row >= self.assetExplorerAssets.count) return;
+        ZSAssetExplorerAsset *asset = self.assetExplorerAssets[(NSUInteger)indexPath.row];
+        if (asset.classID == 28) [self zs_assetExplorerOpenTextureForAsset:asset];
+        return;
+    }
     if (indexPath.row >= self.assetExplorerBundles.count) return;
     [self zs_assetExplorerOpenBundle:self.assetExplorerBundles[(NSUInteger)indexPath.row]];
 }
@@ -18825,6 +18978,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     self.assetExplorerBundles = @[];
     self.assetExplorerAssets = @[];
     self.assetExplorerSelectedBundle = nil;
+    [self zs_assetExplorerSetTextureModeVisible:NO];
 }
 
 #pragma mark Post FX continuous reapply
