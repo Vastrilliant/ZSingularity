@@ -2880,6 +2880,7 @@ static __weak UIImageView *g_zsLowResSwapLeftIcon;
 static __weak UIImageView *g_zsLowResSwapRightIcon;
 static __weak UIButton *g_zsLowResSwapButton;
 static NSString *g_zsLowResSharedPath;
+static BOOL g_zsLowResSwapEligible;
 static __weak UIView *g_zsLowResTranscodeWrapper;
 static NSInteger g_zsLowResBlockIndex;
 static BOOL g_zsLowResCodecExpanded;
@@ -10811,7 +10812,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         zs_reveal_set_expanded(g_zsLowResInfoWrapper, !active && g_zsLowResStage != 0);
         zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, !active);
         zs_reveal_set_expanded(g_zsLowResProgressWrapper, active);
-        zs_reveal_set_expanded(g_zsLowResSwapWrapper, NO);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, !active && g_zsLowResStage == 0 && g_zsLowResSwapEligible);
     };
     if (animated) {
         [self zs_lowResAnimateChanges:changes];
@@ -10904,6 +10905,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     [self zs_lowResAnimateChanges:^{
         [self zs_lowResApplyConfigMode:NO];
         zs_reveal_set_expanded(g_zsLowResInfoWrapper, YES);
+        zs_reveal_set_expanded(g_zsLowResSwapWrapper, NO);
     }];
     __weak typeof(self) weakSelf = self;
     BOOL accepted = [ZSLowRes.shared prepareWithCompletion:^(NSUInteger textures, NSUInteger bundles, BOOL ok) {
@@ -11108,6 +11110,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
         [self zs_lowResSetPanelActive:YES animated:NO];
         if (!g_zsLowResTimer.isValid) [self zs_lowResStartUITimer];
     }
+    [self zs_lowResRefreshSwapWindowAnimated:NO];
 }
 
 - (void)zs_lowResRefreshProgressUI {
@@ -11145,13 +11148,31 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResSwapButton.alpha = canSwap ? 1 : 0.3;
 }
 
-- (void)zs_lowResShowSwapWindow {
-    [self zs_lowResAnimateChanges:^{
-        zs_reveal_set_expanded(g_zsLowResInfoWrapper, NO);
-        zs_reveal_set_expanded(g_zsLowResTranscodeWrapper, NO);
-        zs_reveal_set_expanded(g_zsLowResProgressWrapper, NO);
-        zs_reveal_set_expanded(g_zsLowResSwapWrapper, YES);
-    }];
+- (void)zs_lowResRefreshSwapWindowAnimated:(BOOL)animated {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *shared = [UnityCacheLocator unityCacheSharedDirectories].firstObject;
+        ZSLowResFolderState state = zs_lowres_folder_state(shared);
+        BOOL stagedLedger = [NSFileManager.defaultManager fileExistsAtPath:[[ZSLowRes stagingDirectory] stringByAppendingPathComponent:@"ledger.json"]];
+        BOOL eligible = state.backupExists && (state.backupTranscoded || state.diskTranscoded || stagedLedger);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || g_zsLowResSwapBusy) return;
+            g_zsLowResSharedPath = shared;
+            g_zsLowResSwapEligible = eligible;
+            [strongSelf zs_lowResApplySwapState:state];
+            if (g_zsLowResStage != 0 || [ZSLowRes.shared status].running) return;
+            dispatch_block_t changes = ^{ zs_reveal_set_expanded(g_zsLowResSwapWrapper, eligible); };
+            if (animated) {
+                [strongSelf zs_lowResAnimateChanges:changes];
+            } else {
+                changes();
+                [strongSelf.stack setNeedsLayout];
+                [strongSelf.stack layoutIfNeeded];
+                [strongSelf zs_updateSliderGlassVisibility];
+            }
+        });
+    });
 }
 
 - (void)zs_lowResPresentAlertWithTitle:(NSString *)title message:(NSString *)message {
@@ -11177,21 +11198,19 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
             g_zsLowResCancelButton.enabled = YES;
             g_zsLowResSharedPath = shared;
             if (!strongSelf) return;
-            if (!failure || state.diskTranscoded) {
-                [strongSelf zs_lowResApplySwapState:state];
-                [strongSelf zs_lowResShowSwapWindow];
-            } else {
-                g_zsLowResStage = 0;
-                g_zsLowResGeneration++;
-                [strongSelf zs_lowResSetPanelActive:NO animated:YES];
-            }
+            BOOL stagedLedger = [NSFileManager.defaultManager fileExistsAtPath:[[ZSLowRes stagingDirectory] stringByAppendingPathComponent:@"ledger.json"]];
+            g_zsLowResSwapEligible = state.backupExists && (state.backupTranscoded || state.diskTranscoded || stagedLedger);
+            [strongSelf zs_lowResApplySwapState:state];
+            g_zsLowResStage = 0;
+            g_zsLowResGeneration++;
+            [strongSelf zs_lowResSetPanelActive:NO animated:YES];
             if (failure) [strongSelf zs_lowResPresentAlertWithTitle:@"Swap failed" message:failure];
         });
     });
 }
 
 - (void)lowResSwapTapped:(UIButton *)sender {
-    if (g_zsLowResSwapBusy || g_zsLowResStage != 4) return;
+    if (g_zsLowResSwapBusy || g_zsLowResStage != 0 || [ZSLowRes.shared status].running) return;
     NSString *shared = g_zsLowResSharedPath;
     if (!shared) return;
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
@@ -11289,6 +11308,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
     g_zsLowResStage = 0;
     g_zsLowResGeneration++;
     [self zs_lowResSetPanelActive:NO animated:YES];
+    [self zs_lowResRefreshSwapWindowAnimated:YES];
     if (cancelled) return;
     UIViewController *presenter = zs_key_window().rootViewController;
     while (presenter.presentedViewController) presenter = presenter.presentedViewController;
