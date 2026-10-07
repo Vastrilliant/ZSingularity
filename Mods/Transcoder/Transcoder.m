@@ -44,6 +44,23 @@ static BOOL zt_class_is_transcoded(int32_t classID) {
         || classID == kZTClassTextAsset;
 }
 
+static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
+    if (zt_class_is_transcoded(classID)) return YES;
+    if (!layoutShared) return NO;
+    switch (classID) {
+        case 0:
+        case 48:
+        case 72:
+        case 115:
+        case 142:
+        case 150:
+        case 200:
+            return NO;
+        default:
+            return YES;
+    }
+}
+
 NSError *ZTMakeTranscoderError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:ZTranscoderServiceErrorDomain
                                code:code
@@ -267,6 +284,9 @@ static NSString *zt_format_name(int32_t format) {
 @property (nonatomic, assign) uint32_t parseFailures;
 @property (nonatomic, assign) NSUInteger originalObjectCount;
 @property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *classTypeIndex;
+@property (nonatomic, copy) NSArray<NSString *> *typeKeys;
+@property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *typeIndexByKey;
+@property (nonatomic, copy) NSData *trailer;
 @end
 
 @implementation ZTSerializedDocument
@@ -488,16 +508,22 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
         return nil;
     }
     BOOL ok = YES;
+    NSMutableArray<NSString *> *typeKeys = [NSMutableArray arrayWithCapacity:(NSUInteger)typeCount];
     for (int32_t ti = 0; ti < typeCount && ok; ti++) {
         if (data.length - pos < 7) { ok = NO; break; }
         int32_t classID = (int32_t)zt_le32(buf + pos);
         classIDs[ti] = classID;
         pos += 4 + 1 + 2;
+        NSMutableString *typeKey = [NSMutableString stringWithFormat:@"%d:", classID];
         if (classID == 114) {
             if (data.length - pos < 16) { ok = NO; break; }
+            for (NSUInteger h = 0; h < 16; h++) [typeKey appendFormat:@"%02x", buf[pos + h]];
+            [typeKey appendString:@":"];
             pos += 16;
         }
         if (data.length - pos < 24) { ok = NO; break; }
+        for (NSUInteger h = 0; h < 16; h++) [typeKey appendFormat:@"%02x", buf[pos + h]];
+        [typeKeys addObject:typeKey];
         pos += 16;
         uint32_t nodeCount = zt_le32(buf + pos);
         uint32_t stringSize = zt_le32(buf + pos + 4);
@@ -590,6 +616,12 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
         if (!classTypeIndex[classKey]) classTypeIndex[classKey] = @(i);
     }
     document.classTypeIndex = classTypeIndex;
+    document.typeKeys = typeKeys;
+    NSMutableDictionary<NSString *, NSNumber *> *typeIndexByKey = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < typeKeys.count; i++) if (!typeIndexByKey[typeKeys[i]]) typeIndexByKey[typeKeys[i]] = @(i);
+    document.typeIndexByKey = typeIndexByKey;
+    uint64_t trailerStart = tablePos + (uint64_t)objectCount * 24u;
+    document.trailer = trailerStart <= dataOffset ? [data subdataWithRange:NSMakeRange((NSUInteger)trailerStart, (NSUInteger)(dataOffset - trailerStart))] : [NSData data];
     for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
     free(trees); free(classIDs);
     return document;
@@ -1611,20 +1643,24 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSMutableDictionary<NSString *, ZTTextureReplacement *> *replacements = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSNumber *> *streamOffsets = [NSMutableDictionary dictionary];
     NSUInteger assetCount = 0;
-    for (ZTSerializedObject *sourceObject in sourceDoc.objects) if (zt_class_is_transcoded(sourceObject.classID)) assetCount++;
+    BOOL layoutShared = sourceDoc.trailer.length > 0 && [sourceDoc.trailer isEqualToData:targetDoc.trailer];
+    ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
+    for (ZTSerializedObject *sourceObject in sourceDoc.objects) if (zt_class_is_transplantable(sourceObject.classID, layoutShared)) assetCount++;
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
     NSUInteger matchedAssets = 0;
     ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas/SpriteRenderer/SpriteMask/TextAsset object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
-        if (!zt_class_is_transcoded(sourceObject.classID)) continue;
+        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared)) continue;
+        BOOL legacyClass = zt_class_is_transcoded(sourceObject.classID);
+        NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
         processedAssets++;
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
         ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
         BOOL isNewAsset = NO;
         if (!targetObject) {
-            NSNumber *newTypeIndex = targetDoc.classTypeIndex[@(sourceObject.classID)];
+            NSNumber *newTypeIndex = legacyClass ? targetDoc.classTypeIndex[@(sourceObject.classID)] : (sourceTypeKey ? targetDoc.typeIndexByKey[sourceTypeKey] : nil);
             if (!newTypeIndex) {
                 skippedAssets++;
                 ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): the original bundle has no type to add it under", sourceObject.classID, (long long)sourceObject.pathID, key);
@@ -1639,6 +1675,14 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             targetObject = addedObject;
             isNewAsset = YES;
             ZLog(@"[ZTranscoder] adding class=%d PathID=%lld (%@) to the bundle: not present in the original", sourceObject.classID, (long long)sourceObject.pathID, key);
+        }
+        if (!legacyClass && !isNewAsset) {
+            NSString *targetTypeKey = (targetObject.typeIndex >= 0 && (NSUInteger)targetObject.typeIndex < targetDoc.typeKeys.count) ? targetDoc.typeKeys[(NSUInteger)targetObject.typeIndex] : nil;
+            if (!sourceTypeKey || ![sourceTypeKey isEqualToString:targetTypeKey]) {
+                skippedAssets++;
+                ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld: its serialized layout differs between the mod and the original", sourceObject.classID, (long long)sourceObject.pathID);
+                continue;
+            }
         }
         matchedAssets++;
         if (sourceObject.classID == kZTClassTexture2D) {
