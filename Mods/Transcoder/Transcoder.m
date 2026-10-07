@@ -921,27 +921,18 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
         return NO;
     }
-    uint64_t totalExpected = 0;
-    if (!zt_format_is_crunched(source.format)) {
-        uint64_t cursor = 0;
-        for (int32_t mip = 0; mip < source.mipCount; mip++) {
-            uint32_t mw = (uint32_t)zt_mip_dimension(source.width, (uint32_t)mip);
-            uint32_t mh = (uint32_t)zt_mip_dimension(source.height, (uint32_t)mip);
-            uint64_t size = zt_expected_mip_size(source.format, mw, mh);
-            if (size == 0 || size > payload.length - MIN(cursor, (uint64_t)payload.length)) {
-                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ has an invalid payload size for mip %d (%@).", source.name, mip, zt_format_name(source.format)]);
-                return NO;
-            }
-            cursor += size;
-            totalExpected += size;
-        }
-        if (cursor != payload.length || totalExpected != source.completeImageSize) {
-            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ payload size mismatch: object=%u payload=%lu expected=%llu.", source.name, source.completeImageSize, (unsigned long)payload.length, (unsigned long long)totalExpected]);
+    uint64_t baseSize = 0;
+    if (zt_format_is_crunched(source.format)) {
+        if (payload.length != source.completeImageSize) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunched Texture2D %@ payload size mismatch: object=%u payload=%lu.", source.name, source.completeImageSize, (unsigned long)payload.length]);
             return NO;
         }
-    } else if (payload.length != source.completeImageSize) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunched Texture2D %@ payload size mismatch: object=%u payload=%lu.", source.name, source.completeImageSize, (unsigned long)payload.length]);
-        return NO;
+    } else {
+        baseSize = zt_expected_mip_size(source.format, source.width, source.height);
+        if (baseSize == 0 || baseSize > payload.length) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ has an invalid payload size for its base level (%@).", source.name, zt_format_name(source.format)]);
+            return NO;
+        }
     }
     NSString *outputPath = [workDir stringByAppendingPathComponent:[NSString stringWithFormat:@"texture-%lld.astc", (long long)source.object.pathID]];
     NSFileHandle *writer = [NSFileHandle fileHandleForWritingAtPath:outputPath];
@@ -953,39 +944,23 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create temporary ASTC output for %@.", source.name]);
         return NO;
     }
-    BOOL ok = YES;
-    uint64_t cursor = 0;
+    NSData *baseData = zt_format_is_crunched(source.format) ? payload : [payload subdataWithRange:NSMakeRange(0, (NSUInteger)baseSize)];
+    NSMutableData *rgba = nil;
+    NSError *decodeError = nil;
+    BOOL ok = zt_decode_texture_mip(source, baseData, source.width, source.height, 0, &rgba, &decodeError);
+    if (!ok && error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
     uint64_t totalOutput = 0;
-    for (int32_t mip = 0; mip < source.mipCount && ok; mip++) {
-        uint32_t mw = (uint32_t)zt_mip_dimension(source.width, (uint32_t)mip);
-        uint32_t mh = (uint32_t)zt_mip_dimension(source.height, (uint32_t)mip);
-        NSData *mipData = nil;
-        if (zt_format_is_crunched(source.format)) {
-            mipData = payload;
-        } else {
-            uint64_t mipSize = zt_expected_mip_size(source.format, mw, mh);
-            mipData = [payload subdataWithRange:NSMakeRange((NSUInteger)cursor, (NSUInteger)mipSize)];
-            cursor += mipSize;
-        }
-        NSMutableData *rgba = nil;
-        NSError *decodeError = nil;
-        if (!zt_decode_texture_mip(source, mipData, mw, mh, mip, &rgba, &decodeError)) {
-            if (error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
-            ok = NO;
-            break;
-        }
+    if (ok) {
         NSError *encodeError = nil;
-        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:mw height:mh sRGB:(source.colorSpace != 0) error:&encodeError];
+        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:source.width height:source.height sRGB:(source.colorSpace != 0) error:&encodeError];
         if (!astc) {
             if (error) *error = encodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
             ok = NO;
-            break;
-        }
-        if (!zt_write_all(writer, astc.bytes, astc.length, error)) { ok = NO; break; }
-        totalOutput += astc.length;
-        if (progress) {
-            double f = source.mipCount > 0 ? ((double)(mip + 1) / (double)source.mipCount) : 1.0;
-            progress(f, [NSString stringWithFormat:@"Encoded %@ mip %d/%d as ASTC 6x6", source.name.length ? source.name : @"<unnamed>", mip + 1, source.mipCount]);
+        } else if (!zt_write_all(writer, astc.bytes, astc.length, error)) {
+            ok = NO;
+        } else {
+            totalOutput = astc.length;
+            if (progress) progress(1.0, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", source.name.length ? source.name : @"<unnamed>"]);
         }
     }
     @try { [writer closeFile]; } @catch (__unused NSException *exception) {}
@@ -1027,6 +1002,7 @@ static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTe
         uint8_t emptyPathLength[4] = {0};
         [out appendBytes:emptyPathLength length:4];
         if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
+        if (!zt_patch_u32_relative(out, base, source.mipCountPosition, 1u)) return nil;
         if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
         return out;
     }
@@ -1048,6 +1024,7 @@ static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTe
     [out appendData:pathData];
     while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
     if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
+    if (!zt_patch_u32_relative(out, base, source.mipCountPosition, 1u)) return nil;
     if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
     return out;
 }
