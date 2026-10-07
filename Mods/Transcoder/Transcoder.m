@@ -285,6 +285,9 @@ static NSString *zt_format_name(int32_t format) {
 @property (nonatomic, copy) NSArray<NSString *> *typeKeys;
 @property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *typeIndexByKey;
 @property (nonatomic, copy) NSData *trailer;
+@property (nonatomic, assign) uint64_t typeCountOffset;
+@property (nonatomic, copy) NSArray<NSValue *> *typeRanges;
+@property (nonatomic, strong) NSMutableArray<NSData *> *injectedTypes;
 @end
 
 @implementation ZTSerializedDocument
@@ -491,6 +494,7 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile has no type trees.");
         return nil;
     }
+    uint64_t typeCountOffset = pos;
     int32_t typeCount = (int32_t)zt_le32(buf + pos);
     pos += 4;
     if (typeCount <= 0 || typeCount > 4096) {
@@ -507,7 +511,9 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
     }
     BOOL ok = YES;
     NSMutableArray<NSString *> *typeKeys = [NSMutableArray arrayWithCapacity:(NSUInteger)typeCount];
+    NSMutableArray<NSValue *> *typeRanges = [NSMutableArray arrayWithCapacity:(NSUInteger)typeCount];
     for (int32_t ti = 0; ti < typeCount && ok; ti++) {
+        NSUInteger typeStart = pos;
         if (data.length - pos < 7) { ok = NO; break; }
         int32_t classID = (int32_t)zt_le32(buf + pos);
         classIDs[ti] = classID;
@@ -543,6 +549,7 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
         pos += 4;
         if (deps < 0 || (uint64_t)deps * 4u > data.length - pos) { ok = NO; break; }
         pos += (size_t)deps * 4u;
+        [typeRanges addObject:[NSValue valueWithRange:NSMakeRange(typeStart, pos - typeStart)]];
     }
     if (!ok || data.length - pos < 4) {
         for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
@@ -615,6 +622,9 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
     }
     document.classTypeIndex = classTypeIndex;
     document.typeKeys = typeKeys;
+    document.typeRanges = typeRanges;
+    document.typeCountOffset = typeCountOffset;
+    document.injectedTypes = [NSMutableArray array];
     NSMutableDictionary<NSString *, NSNumber *> *typeIndexByKey = [NSMutableDictionary dictionary];
     for (NSUInteger i = 0; i < typeKeys.count; i++) if (!typeIndexByKey[typeKeys[i]]) typeIndexByKey[typeKeys[i]] = @(i);
     document.typeIndexByKey = typeIndexByKey;
@@ -1059,6 +1069,28 @@ static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTe
     return out;
 }
 
+static NSNumber *zt_inject_type(ZTSerializedDocument *target, ZTSerializedDocument *source, int32_t sourceTypeIndex) {
+    if (sourceTypeIndex < 0 || (NSUInteger)sourceTypeIndex >= source.typeKeys.count || source.typeRanges.count != source.typeKeys.count) return nil;
+    NSString *key = source.typeKeys[(NSUInteger)sourceTypeIndex];
+    NSNumber *existing = target.typeIndexByKey[key];
+    if (existing) return existing;
+    NSRange range = source.typeRanges[(NSUInteger)sourceTypeIndex].rangeValue;
+    if (range.location > source.data.length || range.length > source.data.length - range.location) return nil;
+    NSUInteger newIndex = target.typeKeys.count;
+    [target.injectedTypes addObject:[source.data subdataWithRange:range]];
+    target.typeKeys = [target.typeKeys arrayByAddingObject:key];
+    NSMutableDictionary<NSString *, NSNumber *> *byKey = [target.typeIndexByKey mutableCopy];
+    byKey[key] = @(newIndex);
+    target.typeIndexByKey = byKey;
+    int32_t classID = (int32_t)strtol(key.UTF8String, NULL, 10);
+    if (classID != 114 && !target.classTypeIndex[@(classID)]) {
+        NSMutableDictionary<NSNumber *, NSNumber *> *byClass = [target.classTypeIndex mutableCopy];
+        byClass[@(classID)] = @(newIndex);
+        target.classTypeIndex = byClass;
+    }
+    return @(newIndex);
+}
+
 static ZTSerializedObject *zt_find_object(NSDictionary<NSString *, ZTSerializedObject *> *map, int64_t pathID, int32_t classID) {
     return map[[NSString stringWithFormat:@"%d:%lld", classID, (long long)pathID]];
 }
@@ -1145,6 +1177,10 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     const uint8_t *headerSource = targetDoc.data.bytes;
     NSUInteger addedCount = targetDoc.objects.count > targetDoc.originalObjectCount ? targetDoc.objects.count - targetDoc.originalObjectCount : 0;
     uint64_t originalTableEnd = targetDoc.objectTableOffset + (uint64_t)targetDoc.originalObjectCount * 24u;
+    NSMutableData *injectedBytes = [NSMutableData data];
+    for (NSData *typeData in targetDoc.injectedTypes) [injectedBytes appendData:typeData];
+    uint64_t newTableOffset = targetDoc.objectTableOffset;
+    if (injectedBytes.length) newTableOffset = (targetDoc.objectCountOffset + injectedBytes.length + 4u + 3u) & ~3ULL;
     uint64_t newDataOffset = targetDoc.dataOffset;
     if (addedCount > 0) {
         if (targetDoc.data.length < 40 || zt_be32(headerSource + 8) < 22u || originalTableEnd > targetDoc.dataOffset) {
@@ -1153,7 +1189,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             return NO;
         }
         uint64_t trailingLength = targetDoc.dataOffset - originalTableEnd;
-        uint64_t grown = zt_align_up(targetDoc.objectTableOffset + (uint64_t)targetDoc.objects.count * 24u + trailingLength, 16u);
+        uint64_t grown = zt_align_up(newTableOffset + (uint64_t)targetDoc.objects.count * 24u + trailingLength, 16u);
         if (grown != UINT64_MAX && grown > newDataOffset) newDataOffset = grown;
     }
     uint64_t cursor = newDataOffset;
@@ -1193,9 +1229,25 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     uint64_t tableEnd = originalTableEnd;
     uint64_t tailLength = (originalObjectsEnd < targetDoc.data.length) ? (uint64_t)targetDoc.data.length - originalObjectsEnd : 0;
     uint64_t expectedFileSize = cursor + tailLength;
-    NSMutableData *headerBytes = [NSMutableData dataWithBytes:base length:(NSUInteger)targetDoc.objectTableOffset];
-    if (targetDoc.objectCountOffset + 4u <= headerBytes.length) {
-        uint8_t *countBytes = (uint8_t *)headerBytes.mutableBytes + targetDoc.objectCountOffset;
+    NSMutableData *headerBytes = nil;
+    uint64_t countPosition = targetDoc.objectCountOffset;
+    if (injectedBytes.length) {
+        headerBytes = [NSMutableData dataWithBytes:base length:(NSUInteger)targetDoc.objectCountOffset];
+        [headerBytes appendData:injectedBytes];
+        countPosition = headerBytes.length;
+        uint8_t zeroCount[4] = {0};
+        [headerBytes appendBytes:zeroCount length:4];
+        while (headerBytes.length < newTableOffset) { uint8_t zero = 0; [headerBytes appendBytes:&zero length:1]; }
+        if (targetDoc.typeCountOffset + 4u <= headerBytes.length) {
+            uint8_t *typeCountBytes = (uint8_t *)headerBytes.mutableBytes + targetDoc.typeCountOffset;
+            uint32_t newTypeCount = zt_le32(typeCountBytes) + (uint32_t)targetDoc.injectedTypes.count;
+            for (NSUInteger b = 0; b < 4; b++) typeCountBytes[b] = (uint8_t)(newTypeCount >> (8 * b));
+        }
+    } else {
+        headerBytes = [NSMutableData dataWithBytes:base length:(NSUInteger)targetDoc.objectTableOffset];
+    }
+    if (countPosition + 4u <= headerBytes.length) {
+        uint8_t *countBytes = (uint8_t *)headerBytes.mutableBytes + countPosition;
         uint32_t newObjectCount = (uint32_t)targetDoc.objects.count;
         for (NSUInteger b = 0; b < 4; b++) countBytes[b] = (uint8_t)(newObjectCount >> (8 * b));
     }
@@ -1203,7 +1255,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         uint8_t *hb = headerBytes.mutableBytes;
         for (NSUInteger b = 0; b < 8; b++) hb[24 + b] = (uint8_t)(expectedFileSize >> (8 * (7 - b)));
         if (addedCount > 0) {
-            uint32_t metadataSize = zt_be32(base + 20) + (uint32_t)(addedCount * 24u);
+            uint32_t metadataSize = zt_be32(base + 20) + (uint32_t)(addedCount * 24u) + (uint32_t)(newTableOffset - targetDoc.objectTableOffset);
             for (NSUInteger b = 0; b < 4; b++) hb[20 + b] = (uint8_t)(metadataSize >> (8 * (3 - b)));
             for (NSUInteger b = 0; b < 8; b++) hb[32 + b] = (uint8_t)(newDataOffset >> (8 * (7 - b)));
         }
@@ -1233,7 +1285,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             return NO;
         }
     }
-    uint64_t written = targetDoc.objectTableOffset + targetDoc.objects.count * 24u;
+    uint64_t written = newTableOffset + targetDoc.objects.count * 24u;
     if (written > newDataOffset) {
         [out closeFile];
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile object table exceeds data offset after rebuild.");
@@ -1643,14 +1695,18 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSUInteger assetCount = 0;
     BOOL layoutShared = sourceDoc.trailer.length > 0 && [sourceDoc.trailer isEqualToData:targetDoc.trailer];
     ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
-    for (ZTSerializedObject *sourceObject in sourceDoc.objects) if (zt_class_is_transplantable(sourceObject.classID, layoutShared)) assetCount++;
+    for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
+        BOOL present = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
+        if (zt_class_is_transplantable(sourceObject.classID, layoutShared) || (!present && zt_class_is_transplantable(sourceObject.classID, YES))) assetCount++;
+    }
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
     NSUInteger matchedAssets = 0;
     ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas/TextAsset object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
-        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared)) continue;
+        BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
+        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES))) continue;
         BOOL legacyClass = zt_class_is_transcoded(sourceObject.classID);
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
         processedAssets++;
@@ -1659,9 +1715,10 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         BOOL isNewAsset = NO;
         if (!targetObject) {
             NSNumber *newTypeIndex = legacyClass ? targetDoc.classTypeIndex[@(sourceObject.classID)] : (sourceTypeKey ? targetDoc.typeIndexByKey[sourceTypeKey] : nil);
+            if (!newTypeIndex) newTypeIndex = zt_inject_type(targetDoc, sourceDoc, sourceObject.typeIndex);
             if (!newTypeIndex) {
                 skippedAssets++;
-                ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): the original bundle has no type to add it under", sourceObject.classID, (long long)sourceObject.pathID, key);
+                ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): its type couldn't be copied into the original bundle", sourceObject.classID, (long long)sourceObject.pathID, key);
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                 continue;
             }
