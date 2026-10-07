@@ -3607,4 +3607,72 @@ static NSString *zslr_bytes(uint64_t bytes) {
     return text;
 }
 
+
++ (NSData *)encodeRGBA8DataToASTC6:(NSData *)rgbaData width:(uint32_t)width height:(uint32_t)height sRGB:(BOOL)sRGB error:(NSError **)error {
+    if (error) *error = nil;
+    if (!rgbaData || width == 0 || height == 0 || rgbaData.length != (size_t)width * height * 4u) {
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:1 userInfo:@{NSLocalizedDescriptionKey: @"RGBA8 input size does not match texture dimensions."}];
+        return nil;
+    }
+    char why[256] = {0};
+    id<MTLComputePipelineState> bootstrap = zslr_metal_prepare(8u, YES, why, sizeof(why));
+    if (!bootstrap) {
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:2 userInfo:@{NSLocalizedDescriptionKey: why[0] ? [NSString stringWithUTF8String:why] : @"Metal ASTC encoder initialization failed."}];
+        return nil;
+    }
+    static id<MTLComputePipelineState> g_astc6FastPipeline;
+    static dispatch_once_t onceToken;
+    static NSString *pipelineError;
+    dispatch_once(&onceToken, ^{
+        os_unfair_lock_lock(&g_zslrMetalLock);
+        NSError *pipelineCreateError = nil;
+        id<MTLFunction> function = [g_zslrMetalLibrary newFunctionWithName:@"zslr_astc_encode_fast_6"];
+        if (!function) pipelineError = @"Metal ASTC 6x6 encoder function is missing.";
+        else {
+            MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
+            descriptor.computeFunction = function;
+            descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
+            g_astc6FastPipeline = [g_zslrMetalDevice newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&pipelineCreateError];
+            if (!g_astc6FastPipeline) pipelineError = pipelineCreateError.localizedDescription ?: @"Metal ASTC 6x6 encoder pipeline creation failed.";
+        }
+        os_unfair_lock_unlock(&g_zslrMetalLock);
+    });
+    if (!g_astc6FastPipeline) {
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:3 userInfo:@{NSLocalizedDescriptionKey: pipelineError ?: @"Metal ASTC 6x6 encoder pipeline is unavailable."}];
+        return nil;
+    }
+    uint32_t blocksX = (width + 5u) / 6u;
+    uint32_t blocksY = (height + 5u) / 6u;
+    size_t blockCount = (size_t)blocksX * blocksY;
+    if (blockCount > SIZE_MAX / 16u) {
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:4 userInfo:@{NSLocalizedDescriptionKey: @"ASTC output size overflowed."}];
+        return nil;
+    }
+    size_t outputLength = blockCount * 16u;
+    MTLTextureDescriptor *sourceDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:sRGB ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+    sourceDescriptor.storageMode = MTLStorageModeShared;
+    sourceDescriptor.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> sourceTexture = [g_zslrMetalDevice newTextureWithDescriptor:sourceDescriptor];
+    id<MTLBuffer> outputBuffer = zslr_pool_take_buffer(outputLength);
+    id<MTLBuffer> metricBuffer = zslr_pool_take_buffer(blockCount * sizeof(float));
+    if (!sourceTexture || !outputBuffer || !metricBuffer) {
+        zslr_pool_give_buffer(outputBuffer);
+        zslr_pool_give_buffer(metricBuffer);
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:5 userInfo:@{NSLocalizedDescriptionKey: @"Metal ASTC 6x6 encoder resource allocation failed."}];
+        return nil;
+    }
+    [sourceTexture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgbaData.bytes bytesPerRow:(NSUInteger)width * 4u];
+    char gpuWhy[256] = {0};
+    int rc = zslr_gpu_run(g_zslrMetalQueue, g_astc6FastPipeline, sourceTexture, outputBuffer, metricBuffer, width, height, 6u, blocksX, blocksY, sRGB ? 1 : 0, 0u, gpuWhy, sizeof(gpuWhy));
+    zslr_pool_give_buffer(metricBuffer);
+    NSData *result = nil;
+    if (rc == 0) result = [NSData dataWithBytes:outputBuffer.contents length:outputLength];
+    zslr_pool_give_buffer(outputBuffer);
+    if (rc != 0) {
+        if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:6 userInfo:@{NSLocalizedDescriptionKey: gpuWhy[0] ? [NSString stringWithUTF8String:gpuWhy] : @"Metal ASTC 6x6 encoding failed."}];
+        return nil;
+    }
+    return result;
+}
+
 @end

@@ -4527,22 +4527,7 @@ static UIVisualEffectView *zs_wrap_field_in_native_glass(UITextField *field, CGF
 
 #pragma mark Re-Encoding format (Config section)
 
-static NSArray<NSString *> *zs_reencode_format_options(void) {
-    return @[@"ASTC_RGBA_4x4", @"ASTC_RGBA_6x6", @"ASTC_RGBA_8x8", @"RGBA32", @"ETC2"];
-}
-
-static NSString * const kZSDefaultReencodeFormat = @"ASTC_RGBA_6x6";
-
 static const CGFloat kZSReencodeFieldHeight = 28;
-
-static NSString *zs_reencode_format_display_name(NSString *format) {
-    if ([format isEqualToString:@"ASTC_RGBA_4x4"]) return @"ASTC 4x4";
-    if ([format isEqualToString:@"ASTC_RGBA_6x6"]) return @"ASTC 6x6";
-    if ([format isEqualToString:@"ASTC_RGBA_8x8"]) return @"ASTC 8x8";
-    if ([format isEqualToString:@"RGBA32"]) return @"RGBA32";
-    if ([format isEqualToString:@"ETC2"]) return @"ETC2";
-    return format ?: @"RGBA32";
-}
 
 static NSString *zs_codec_descriptor_label_for_format(NSString *format) {
     if ([format isEqualToString:@"ASTC_RGBA_4x4"]) return @"ASTC_4x4";
@@ -5977,8 +5962,6 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, assign) BOOL authCredentialsStale;
 
 @property (nonatomic, strong) UIControl *customGreetingRow;
-
-@property (nonatomic, strong) UIControl *reencodeFormatRow;
 
 @property (nonatomic, weak) UIButton *modsOptionsDropdownButton;
 @property (nonatomic, strong) UIView *modsOptionsDropdownOverlay;
@@ -8166,7 +8149,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.authStatusLabel = nil;
 
     self.customGreetingRow = nil;
-    self.reencodeFormatRow = nil;
 
     self.modsOptionsDropdownOverlay = nil;
     self.modsOptionsDropdownScrim = nil;
@@ -9118,32 +9100,6 @@ static const CGFloat kContentFadeHeight = 22;
     }];
 
     [self.pendingSectionBuilders addObject:^{
-    zs_add_section_header_with_docs(self.stack, @"Auth", self, @selector(docsInfoTapped:));
-
-    self.authRepoLinkField = [[UITextField alloc] init];
-    self.authRepoLinkField.keyboardType = UIKeyboardTypeURL;
-    self.authRepoLinkField.delegate = self;
-
-    self.authTokenField = [[UITextField alloc] init];
-    self.authTokenField.delegate = self;
-
-    self.authVerifyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    zs_style_auth_verify_button(self.authVerifyButton, @"Verify");
-    [self.authVerifyButton addTarget:self action:@selector(zs_authVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.authStatusLabel = [[UILabel alloc] init];
-    UIView *authCard = zs_make_auth_credentials_card(self.authRepoLinkField, self.authTokenField, self.authVerifyButton, self.authStatusLabel);
-    self.authRepoLinkFieldContainer = self.authRepoLinkField;
-    self.authTokenFieldContainer = self.authTokenField;
-    [self.stack addArrangedSubview:authCard];
-    [self.stack setCustomSpacing:8 afterView:authCard];
-
-    [self zs_loadAuthFields];
-
-    [self zs_authRunBootVerification];
-    }];
-
-    [self.pendingSectionBuilders addObject:^{
     NSUInteger developerViewsStart = self.stack.arrangedSubviews.count;
     zs_add_section_header(self.stack, @"Developer", self);
 
@@ -9288,18 +9244,8 @@ static const CGFloat kContentFadeHeight = 22;
     [self.pendingSectionBuilders addObject:^{
     zs_add_section_header_with_docs(self.stack, @"Config", self, @selector(docsInfoTapped:));
 
-    NSString *currentReencodeFormat = [ZTranscoderSettings loadConfig].outputFormat;
-    if (currentReencodeFormat.length == 0) currentReencodeFormat = kZSDefaultReencodeFormat;
-    UIControl *reencodeFormatRow = zs_make_disclosure_row(@"Transcode format",
-                                                           zs_reencode_format_display_name(currentReencodeFormat),
-                                                           self, @selector(zs_reencodeFormatRowTapped:));
-    self.reencodeFormatRow = reencodeFormatRow;
-
     ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
     [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
-
-    ZSRow *lz4hcRow = zs_make_switch_row(@"LZ4HC compression on dispatch", ZTranscoderService.isUploadCompressionEnabled);
-    [lz4hcRow.toggle addTarget:self action:@selector(lz4hcCompressionChanged:) forControlEvents:UIControlEventValueChanged];
 
     UIButton *manualIndexButton = zs_make_grouped_action_button(@"Manually Index Files", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [manualIndexButton addTarget:self action:@selector(manuallyIndexFilesTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -9319,21 +9265,12 @@ static const CGFloat kContentFadeHeight = 22;
         [weakSelf hardAssetsResetTapped];
     });
 
-    UIButton *deleteProxyReleasesButton = zs_make_grouped_action_button(@"Delete Stored Bundles in Proxy", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
-    zs_attach_tap_to_confirm(deleteProxyReleasesButton, self,
-        @"Delete Stored Bundles in Proxy?", @"Every bundle stored in the transcoder proxy will be permanently deleted.", @"Delete", YES, ^{
-        [weakSelf deleteStoredBundlesInProxyTapped:deleteProxyReleasesButton];
-    });
-
     UIView *configActionsCard = zs_make_grouped_action_card(@[
-        reencodeFormatRow,
         manifestZeroingRow,
-        lz4hcRow,
         manualIndexButton,
         resetReapplyRow,
         deleteSpecificAssetButton,
         hardResetButton,
-        deleteProxyReleasesButton,
     ]);
     configActionsCard.layer.borderWidth = 1;
     configActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -12024,50 +11961,6 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
     [self zs_presentModsAlertWithTitle:@"Hard Assets Reset" message:message offersRestart:YES];
 }
 
-- (void)deleteStoredBundlesInProxyTapped:(UIButton *)button {
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        [self zs_presentModsAlertWithTitle:@"Auth Not Configured"
-                                    message:@"Set a GitHub Repository Link and Personal Access Token under Mods \u2192 Auth first."];
-        return;
-    }
-
-    NSString *originalTitle = [button titleForState:UIControlStateNormal];
-    button.enabled = NO;
-    [button setTitle:@"Deleting\u2026" forState:UIControlStateNormal];
-
-    __weak typeof(self) weakSelf = self;
-    [ZTranscoderService deleteAllReleasesForConfig:config completion:^(NSInteger deletedCount, NSError *error) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        button.enabled = YES;
-        [button setTitle:originalTitle forState:UIControlStateNormal];
-
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        if (error) {
-            [haptic notificationOccurred:UINotificationFeedbackTypeError];
-            [strongSelf zs_presentModsAlertWithTitle:@"Delete Failed"
-                                              message:error.localizedDescription ?: @"Couldn't reach the configured repository."];
-            return;
-        }
-
-        if (deletedCount == 0) {
-            [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
-            [strongSelf zs_presentModsAlertWithTitle:@"Nothing to Delete"
-                                              message:@"No releases were found in the configured repository."];
-            return;
-        }
-
-        [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
-        ZLog(@"[UserInterface] Delete Stored Bundles in Proxy: deleted %ld release(s)", (long)deletedCount);
-        [strongSelf zs_presentModsAlertWithTitle:@"Proxy Cleared"
-                                          message:[NSString stringWithFormat:@"Deleted %ld release%@ from the configured repository.",
-                                                    (long)deletedCount, deletedCount == 1 ? @"" : @"s"]];
-    }];
-}
 
 #pragma mark Mods (Load Mods - single entry point, routes by file kind)
 
@@ -12772,22 +12665,6 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 }
 
 - (void)zs_doctorBeginDispatchForEntry:(ModAssetLibraryEntry *)entry folderName:(NSString *)folderName previousScratchBranch:(nullable NSString *)previousScratchBranch {
-
-    if (self.authCredentialsStale) {
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        ZLog(@"[Mods Library] dispatch for %@ blocked: auth credentials are stale.", entry.fileName);
-        return;
-    }
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        ZLog(@"[Mods Library] dispatch for %@ blocked: auth not configured (repo/owner/token missing).", entry.fileName);
-        [self zs_presentModsAlertWithTitle:@"Auth Not Configured"
-                                    message:@"Set a GitHub Repository Link and Personal Access Token under Mods \u2192 Auth first."];
-        return;
-    }
-
     NSString *entryPath = entry.path;
     [self.doctorUploadProgressLastUpdate removeObjectForKey:entryPath];
     [self.doctorProcessProgressLastPercent removeObjectForKey:entryPath];
@@ -12796,31 +12673,41 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:entry
                                                                         inFolder:folderName
                                                                       applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusUploading;
+        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusProcessing;
         entryToMutate.doctorUploadProgress = 0;
+        entryToMutate.doctorUploadTotalBytes = 0;
         entryToMutate.doctorProcessProgress = 0.0;
         entryToMutate.doctorLastError = nil;
-        entryToMutate.doctorTranscodeCodec = config.outputFormat.length > 0 ? config.outputFormat : kZSDefaultReencodeFormat;
+        entryToMutate.doctorTranscodeCodec = @"ASTC_RGBA_6x6";
+        entryToMutate.doctorScratchBranch = nil;
+        entryToMutate.doctorRunID = nil;
+        entryToMutate.doctorRunURL = nil;
     }
                                                                            error:&stateError];
     if (!updated) {
-        ZLog(@"[Mods Library] couldn't flip %@ to Uploading: %@", entry.fileName, stateError);
+        ZLog(@"[Mods Library] couldn't flip %@ to Processing: %@", entry.fileName, stateError);
         return;
     }
     [self zs_rebuildModsLibrary];
 
-    ZLog(@"[Mods Library] dispatching %@ (folder=%@, resuming scratch branch=%@).", entryPath.lastPathComponent, folderName, previousScratchBranch ?: @"none");
+    ZLog(@"[Mods Library] starting on-device transcode for %@ (previous scratch branch=%@ ignored).", entryPath.lastPathComponent, previousScratchBranch ?: @"none");
     NSURL *bundleURL = [NSURL fileURLWithPath:entryPath];
-    NSString *carra2Hash1 = entry.isAssetBundle ? nil : entry.zipCacheHash1;
-    NSString *carra2Hash2 = entry.isAssetBundle ? nil : entry.zipCacheHash2;
+    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
+    if (entry.resolvedInstallTargetPath.length > 0) {
+        config.targetBundlePath = [NSHomeDirectory() stringByAppendingPathComponent:entry.resolvedInstallTargetPath];
+        ZLog(@"[Mods Library] local transcode target for %@: %@", entry.fileName, config.targetBundlePath);
+    } else {
+        ZLog(@"[Mods Library] no stored install target for %@; transcoder will use its CAB-resolution fallback.", entry.fileName);
+    }
     __weak typeof(self) weakSelf = self;
     [ZTranscoderService dispatchBundleAtURL:bundleURL
-                                   carra2Hash1:carra2Hash1
-                                   carra2Hash2:carra2Hash2
+                                   carra2Hash1:nil
+                                   carra2Hash2:nil
                                         config:config
-                         previousScratchBranch:previousScratchBranch
+                         previousScratchBranch:nil
                                 uploadProgress:^(int64_t bytesSent, int64_t totalBytesExpected) {
-        [weakSelf zs_doctorHandleUploadProgress:bytesSent totalBytesExpected:totalBytesExpected forEntryPath:entryPath inFolder:folderName];
+        double fraction = totalBytesExpected > 0 ? (double)bytesSent / (double)totalBytesExpected : 0.0;
+        [weakSelf zs_doctorHandleProcessProgress:fraction forEntryPath:entryPath inFolder:folderName];
     }
                                     completion:^(ZTranscoderHandle * _Nullable handle, NSError * _Nullable error) {
         [weakSelf zs_doctorDispatchCompletedForEntryPath:entryPath inFolder:folderName handle:handle error:error];
@@ -13009,90 +12896,9 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 }
 
 - (void)zs_pollDoctorRunForEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName {
-    NSError *readError = nil;
-    NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:&readError];
-    ModAssetLibraryEntry *current = nil;
-    for (ModAssetLibraryEntry *candidate in entries) {
-        if ([candidate.path isEqualToString:entryPath]) { current = candidate; break; }
-    }
-    if (!current || current.doctorStatus != ModAssetLibraryDoctorStatusProcessing) {
-        ZLog(@"[Mods Library] poll for %@ found it no longer Processing (status changed or entry deleted), stopping timer.", entryPath.lastPathComponent);
-        [self zs_stopDoctorPollTimerForEntryPath:entryPath];
-        return;
-    }
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        [self zs_doctorFailEntryAtPath:entryPath inFolder:folderName error:
-            [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                 code:ZTranscoderServiceErrorInvalidConfig
-                             userInfo:@{NSLocalizedDescriptionKey: @"GitHub auth was cleared while this bundle was still processing."}]];
-        return;
-    }
-
-    ZTranscoderHandle *handle = [ZTranscoderHandle handleFromDictionaryRepresentation:@{
-        @"scratchBranch": current.doctorScratchBranch ?: @"",
-        @"runID": current.doctorRunID ?: @"",
-        @"runURL": current.doctorRunURL ?: @"",
-    }];
-    if (!handle) {
-        [self zs_doctorFailEntryAtPath:entryPath inFolder:folderName error:
-            [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                 code:ZTranscoderServiceErrorRunNotFound
-                             userInfo:@{NSLocalizedDescriptionKey: @"Lost track of this submission's scratch branch."}]];
-        return;
-    }
-
-    __weak typeof(self) weakSelf = self;
-    if (current.doctorRunID.length == 0) {
-
-        [ZTranscoderService resolveRunForHandle:handle config:config completion:^(BOOL found, NSError * _Nullable error) {
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            if (error) {
-                [strongSelf zs_doctorFailEntryAtPath:entryPath inFolder:folderName error:error];
-                return;
-            }
-            if (!found) return;
-            ZLog(@"[Mods Library] storing resolved run %@ against %@.", handle.runID, entryPath.lastPathComponent);
-            [ModAssetLibrary updateDoctorStateForEntry:zs_mods_entry_placeholder_for_path(entryPath)
-                                                inFolder:folderName
-                                              applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-                entryToMutate.doctorRunID = handle.runID;
-                entryToMutate.doctorRunURL = handle.runURL;
-            }
-                                                   error:nil];
-            [strongSelf zs_rebuildModsLibrary];
-        }];
-        return;
-    }
-
-    [ZTranscoderService fetchRunStatusForHandle:handle config:config completion:^(ZTranscoderRunStatus status, double percentComplete, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (status == ZTranscoderRunStatusFailed) {
-            [strongSelf zs_doctorFailEntryAtPath:entryPath inFolder:folderName error:error];
-            return;
-        }
-        if (status == ZTranscoderRunStatusSucceeded) {
-            [strongSelf zs_stopDoctorPollTimerForEntryPath:entryPath];
-            [strongSelf.doctorProcessProgressLastPercent removeObjectForKey:entryPath];
-            NSError *stateError = nil;
-            ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:zs_mods_entry_placeholder_for_path(entryPath)
-                                                                                inFolder:folderName
-                                                                              applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-                entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusReadyToDownload;
-                entryToMutate.doctorProcessProgress = 1.0;
-            }
-                                                                                   error:&stateError];
-            ZLog(@"[Mods Library] %@ finished processing, ready to download.", entryPath.lastPathComponent);
-            if (updated) [strongSelf zs_rebuildModsLibrary];
-            return;
-        }
-
-        [strongSelf zs_doctorHandleProcessProgress:percentComplete forEntryPath:entryPath inFolder:folderName];
-    }];
+    ZLog(@"[Mods Library] ignoring legacy remote poll for %@ because visual mods now transcode entirely on-device.", entryPath.lastPathComponent);
+    [self zs_stopDoctorPollTimerForEntryPath:entryPath];
+    (void)folderName;
 }
 
 - (void)zs_doctorHandleProcessProgress:(double)fractionComplete forEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName {
@@ -13117,32 +12923,49 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     if (self.doctorStateRecoveredThisLaunch) return;
     self.doctorStateRecoveredThisLaunch = YES;
 
-    NSInteger interruptedUploads = 0;
-    NSInteger resumedPolls = 0;
+    NSInteger interruptedTranscodes = 0;
+    NSInteger recoveredOutputs = 0;
     for (NSString *folderName in [ModAssetLibrary folderNames]) {
         NSError *error = nil;
         NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:&error];
         for (ModAssetLibraryEntry *entry in entries) {
             if (entry.doctorStatus == ModAssetLibraryDoctorStatusUploading) {
-                interruptedUploads++;
+                interruptedTranscodes++;
                 [ModAssetLibrary updateDoctorStateForEntry:entry
                                                     inFolder:folderName
                                                   applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
                     entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusFailed;
-                    entryToMutate.doctorLastError = @"Upload was interrupted (the app was closed or backgrounded mid-upload). Tap Retry to send it again.";
+                    entryToMutate.doctorLastError = @"On-device transcoding was interrupted (the app was closed or backgrounded mid-transcode). Tap Retry to run it again.";
                 }
                                                        error:nil];
             } else if (entry.doctorStatus == ModAssetLibraryDoctorStatusProcessing) {
-                if (!self.doctorPollTimers[entry.path]) {
-                    resumedPolls++;
-                    [self zs_armDoctorPollTimerForEntryPath:entry.path inFolder:folderName];
+                NSString *outputPath = entry.doctorScratchBranch;
+                if (outputPath.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:outputPath]) {
+                    recoveredOutputs++;
+                    [ModAssetLibrary updateDoctorStateForEntry:entry
+                                                        inFolder:folderName
+                                                      applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
+                        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusReadyToDownload;
+                        entryToMutate.doctorProcessProgress = 1.0;
+                        entryToMutate.doctorLastError = nil;
+                    }
+                                                           error:nil];
+                } else {
+                    interruptedTranscodes++;
+                    [ModAssetLibrary updateDoctorStateForEntry:entry
+                                                        inFolder:folderName
+                                                      applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
+                        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusFailed;
+                        entryToMutate.doctorLastError = @"On-device transcoding was interrupted (the app was closed or backgrounded mid-transcode). Tap Retry to run it again.";
+                    }
+                                                           error:nil];
                 }
             }
         }
     }
-    if (interruptedUploads > 0 || resumedPolls > 0) {
-        ZLog(@"[Mods Library] launch recovery: %ld interrupted upload(s) marked Failed, %ld Processing entr%@ resumed polling.",
-             (long)interruptedUploads, (long)resumedPolls, resumedPolls == 1 ? @"y" : @"ies");
+    if (interruptedTranscodes > 0 || recoveredOutputs > 0) {
+        ZLog(@"[Mods Library] launch recovery: %ld interrupted local transcode(s) marked Failed, %ld completed output(s) recovered as ReadyToDownload.",
+             (long)interruptedTranscodes, (long)recoveredOutputs);
     }
 }
 
@@ -14429,13 +14252,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
 - (void)zs_modsLibraryEntryDownloadTapped:(UIButton *)sender {
 
-    if (self.authCredentialsStale) {
-        UINotificationFeedbackGenerator *errorHaptic = [UINotificationFeedbackGenerator new];
-        [errorHaptic notificationOccurred:UINotificationFeedbackTypeError];
-        ZLog(@"[Mods Library] download blocked: auth credentials are stale.");
-        return;
-    }
-
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 
@@ -14454,13 +14270,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     }
 
     ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        ZLog(@"[Mods Library] download for %@ blocked: auth not configured (repo/owner/token missing).", entry.fileName);
-        [self zs_presentModsAlertWithTitle:@"Auth Not Configured"
-                                    message:@"Set a GitHub Repository Link and Personal Access Token under Mods \u2192 Auth first."];
-        return;
-    }
-
     ZTranscoderHandle *handle = [ZTranscoderHandle handleFromDictionaryRepresentation:@{
         @"scratchBranch": entry.doctorScratchBranch ?: @"",
         @"runID": entry.doctorRunID ?: @"",
@@ -14485,7 +14294,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     if (resetEntry) self.doctorDownloadLiveEntryCache[entryPath] = resetEntry;
     [self zs_rebuildModsLibrary];
 
-    ZLog(@"[Mods Library] downloading doctored bundle for %@ (run=%@).", entryPath.lastPathComponent, handle.runID);
+    ZLog(@"[Mods Library] installing locally transcoded bundle for %@.", entryPath.lastPathComponent);
     __weak typeof(self) weakSelf = self;
     [ZTranscoderService fetchDoctoredBundleForHandle:handle config:config
         progress:^(int64_t bytesWritten, int64_t totalBytesExpected) {
@@ -18495,91 +18304,6 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
             [strongSelf zs_authEnterStaleState];
         }
     }];
-}
-
-#pragma mark Re-Encoding format
-
-- (void)zs_reencodeFormatSelected:(NSString *)format {
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    config.outputFormat = format;
-
-    NSError *error = nil;
-    if (![ZTranscoderSettings saveConfig:config error:&error]) {
-        ZLog(@"[UserInterface] Config: failed to save Re-Encoding format: %@", error);
-        return;
-    }
-
-    if (self.reencodeFormatRow) {
-        zs_disclosure_row_set_value(self.reencodeFormatRow, zs_reencode_format_display_name(format));
-    }
-
-    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
-    [haptic selectionChanged];
-}
-
-#pragma mark Custom Greeting Text
-
-- (void)zs_customGreetingTextButtonTapped:(UIControl *)sender {
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) return;
-
-    NSString *currentText = zs_custom_greeting_text();
-
-    UIAlertController *prompt = [UIAlertController alertControllerWithTitle:@"Custom Greeting Text"
-                                                                      message:@"Overrides the greeting phrase shown on your own player card. Only visible on this device."
-                                                               preferredStyle:UIAlertControllerStyleAlert];
-    [prompt addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"Enter custom greeting";
-        field.text = currentText;
-        field.autocapitalizationType = UITextAutocapitalizationTypeSentences;
-        field.autocorrectionType = UITextAutocorrectionTypeDefault;
-        field.clearButtonMode = UITextFieldViewModeWhileEditing;
-    }];
-    [prompt addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    __weak typeof(self) weakSelf = self;
-    if (currentText.length > 0) {
-        [prompt addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            zs_set_custom_greeting_text(@"");
-            if (weakSelf.customGreetingRow) zs_disclosure_row_set_value(weakSelf.customGreetingRow, zs_custom_greeting_button_title(@""));
-        }]];
-    }
-    [prompt addAction:[UIAlertAction actionWithTitle:@"Save" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        NSString *entered = prompt.textFields.firstObject.text ?: @"";
-        zs_set_custom_greeting_text(entered);
-        NSString *stored = zs_custom_greeting_text();
-        if (weakSelf.customGreetingRow) zs_disclosure_row_set_value(weakSelf.customGreetingRow, zs_custom_greeting_button_title(stored));
-    }]];
-    [presenter presentViewController:prompt animated:YES completion:nil];
-}
-
-- (void)zs_reencodeFormatRowTapped:(UIControl *)sender {
-    UIView *card = zs_enclosing_grouped_card(sender);
-    if (!card) return;
-
-    NSArray<NSString *> *formats = zs_reencode_format_options();
-    NSMutableArray<NSString *> *titles = [NSMutableArray arrayWithCapacity:formats.count];
-    for (NSString *format in formats) {
-        [titles addObject:zs_reencode_format_display_name(format)];
-    }
-
-    NSString *currentFormat = [ZTranscoderSettings loadConfig].outputFormat;
-    if (currentFormat.length == 0) currentFormat = kZSDefaultReencodeFormat;
-    NSInteger selectedIndex = (NSInteger)[formats indexOfObject:currentFormat];
-    if (selectedIndex == NSNotFound) selectedIndex = -1;
-
-    [self zs_presentOptionsInCard:card titles:titles selectedIndex:selectedIndex action:@selector(zs_reencodeOptionTapped:)];
-
-    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
-    [haptic selectionChanged];
-}
-
-- (void)zs_reencodeOptionTapped:(UIControl *)sender {
-    NSArray<NSString *> *formats = zs_reencode_format_options();
-    if (sender.tag < 0 || sender.tag >= (NSInteger)formats.count) return;
-
-    UIView *card = zs_enclosing_grouped_card(sender);
-    [self zs_reencodeFormatSelected:formats[sender.tag]];
-    if (card) [self zs_restoreCardFromOptions:card];
 }
 
 - (void)zs_animateCardSwapFrom:(UIView *)outgoing to:(UIView *)incoming completion:(void (^)(void))completion {

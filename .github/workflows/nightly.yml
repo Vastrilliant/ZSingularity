@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - TranscodeTest
     paths-ignore:
       - 'Documentation/**'
       - 'README.md'

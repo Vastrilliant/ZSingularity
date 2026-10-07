@@ -1,1494 +1,1734 @@
 #import "Transcoder.h"
 #import "ZTweakLog.h"
-#import "ZSEngine.h"
 #import "UnityBundleTools.h"
 #import "Mods.h"
+#import "ZSLowRes.h"
+#import "IL2CppIntrospection.h"
 #import <CommonCrypto/CommonDigest.h>
-#import <Security/Security.h>
-
-#pragma mark - ZTranscoderService
+#import <Metal/Metal.h>
+#import <mach-o/dyld.h>
+#import <mach-o/getsect.h>
+#import <lz4hc.h>
+#import <objc/runtime.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 NSString * const ZTranscoderServiceErrorDomain = @"ZTranscoderServiceErrorDomain";
 NSString * const ZTranscoderServiceHTTPStatusKey = @"ZTranscoderServiceHTTPStatusKey";
 NSString * const ZTranscoderServiceResponseBodyKey = @"ZTranscoderServiceResponseBodyKey";
 NSString * const ZTranscoderServiceRunURLKey = @"ZTranscoderServiceRunURLKey";
 
-static NSString * const kBDSInputAssetName = @"input.bundle";
-static NSString * const kBDSCarra2AssetName = @"input.carra2";
-static NSString * const kBDSOutputAssetName = @"output.bundle";
-
-static NSString * const kBDSOriginalAssetName = @"original.bundle";
-static NSString * const kBDSReleaseTagInputKey = @"release_tag";
-static NSString * const kBDSInputFormatKey = @"output_format";
-
-static NSString * const kBDSDefaultRef = @"main";
-static NSString * const kBDSDefaultWorkflowFile = @"ztranscoder.yml";
-static NSString * const kBDSDefaultOutputFormat = @"ASTC_RGBA_6x6";
-
-static const NSTimeInterval kBDSRunDiscoveryTimeout = 30.0;
-static const NSTimeInterval kBDSRunDiscoveryPollInterval = 2.0;
-static const NSTimeInterval kBDSRunCompletionTimeout = 600.0;
-static const NSTimeInterval kBDSRunCompletionPollInterval = 5.0;
-
 static NSString * const kSettingsSection = @"transcoder";
 static NSString * const kUploadCompressionEnabledKey = @"uploadCompressionEnabled";
+static NSString * const kZSTranscoderTempPrefix = @"zst-local-transcoder-";
+static const uint32_t kZSTranscoderBlockSize = 131072u;
+static const uint32_t kZSTranscoderUnityFSFlagsPaddingAtStart = 0x200u;
+static const uint32_t kZSTranscoderUnityFSFlagsInfoAtEnd = 0x80u;
+static const uint32_t kZSTranscoderUnityFSCompressionMask = 0x3fu;
+static const uint32_t kZSTranscoderMaxTextureDimension = 16384u;
 
-static NSString *bds_compressionLabel(uint8_t type) {
-    switch (type) {
-        case 0: return @"none";
-        case 1: return @"LZMA";
-        case 2: return @"LZ4";
-        case 3: return @"LZ4HC";
-        case 4: return @"LZHAM";
-        default: return [NSString stringWithFormat:@"type-%u", type];
+NSError *ZTMakeTranscoderError(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:ZTranscoderServiceErrorDomain
+                               code:code
+                           userInfo:@{NSLocalizedDescriptionKey: message ?: @"Unknown transcoder error."}];
+}
+
+static uint16_t zt_be16(const uint8_t *p) {
+    return ((uint16_t)p[0] << 8) | p[1];
+}
+
+static uint32_t zt_be32(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
+}
+
+static uint64_t zt_be64(const uint8_t *p) {
+    uint64_t hi = zt_be32(p);
+    uint64_t lo = zt_be32(p + 4);
+    return (hi << 32) | lo;
+}
+
+static uint32_t zt_le32(const uint8_t *p) {
+    return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t zt_le64(const uint8_t *p) {
+    uint64_t lo = zt_le32(p);
+    uint64_t hi = zt_le32(p + 4);
+    return lo | (hi << 32);
+}
+
+static void zt_put_be32(NSMutableData *data, uint32_t value) {
+    uint8_t b[4] = {(uint8_t)(value >> 24), (uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value};
+    [data appendBytes:b length:4];
+}
+
+static void zt_put_be64(NSMutableData *data, uint64_t value) {
+    uint8_t b[8] = {
+        (uint8_t)(value >> 56), (uint8_t)(value >> 48), (uint8_t)(value >> 40), (uint8_t)(value >> 32),
+        (uint8_t)(value >> 24), (uint8_t)(value >> 16), (uint8_t)(value >> 8), (uint8_t)value
+    };
+    [data appendBytes:b length:8];
+}
+
+static void zt_put_be16(NSMutableData *data, uint16_t value) {
+    uint8_t b[2] = {(uint8_t)(value >> 8), (uint8_t)value};
+    [data appendBytes:b length:2];
+}
+
+static uint64_t zt_align_up(uint64_t value, uint64_t alignment) {
+    if (alignment <= 1) return value;
+    uint64_t mask = alignment - 1;
+    if (value > UINT64_MAX - mask) return UINT64_MAX;
+    return (value + mask) & ~mask;
+}
+
+static NSString *zt_temp_directory(void) {
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@%@", kZSTranscoderTempPrefix, NSUUID.UUID.UUIDString]];
+    if (![NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
+    return path;
+}
+
+static BOOL zt_write_all(NSFileHandle *handle, const void *bytes, NSUInteger length, NSError **error) {
+    if (!handle) return NO;
+    @try {
+        if (length) [handle writeData:[NSData dataWithBytes:bytes length:length]];
+        return YES;
+    } @catch (NSException *exception) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, exception.reason ?: @"File write failed.");
+        return NO;
     }
 }
 
-static NSString *bds_uniqueTagForCAB(NSString *cabIdentifier) {
-    NSString *uuid = [NSUUID UUID].UUIDString;
-    if (cabIdentifier.length == 0) {
-        return [NSString stringWithFormat:@"bundle-doctor/%@", uuid];
+static BOOL zt_copy_range_to_handle(NSFileHandle *handle, const uint8_t *base, uint64_t offset, uint64_t length, NSError **error) {
+    if (!handle || (!base && length)) return NO;
+    const size_t chunk = 1024u * 1024u;
+    while (length) {
+        size_t n = (size_t)MIN((uint64_t)chunk, length);
+        if (!zt_write_all(handle, base + offset, n, error)) return NO;
+        offset += n;
+        length -= n;
     }
-    NSString *cabHash = [cabIdentifier hasPrefix:@"CAB-"] ? [cabIdentifier substringFromIndex:4] : cabIdentifier;
-    NSString *cabTrunc = [cabHash substringToIndex:MIN((NSUInteger)5, cabHash.length)];
-    return [NSString stringWithFormat:@"bundle-doctor/CAB-%@-%@", cabTrunc, uuid];
+    return YES;
 }
 
-static NSData *bds_prepareBundleDataForUpload(NSData *data, unsigned long long *outCompressedByteSize, NSError **error) {
-    if (outCompressedByteSize) *outCompressedByteSize = 0;
-    if (data.length == 0) return data;
-
-    if (![ZTranscoderService isUploadCompressionEnabled]) {
-        ZLog(@"[ZTranscoderService] upload compression disabled via Config switch - uploading %lu bytes unchanged",
-             (unsigned long)data.length);
-        return data;
+static BOOL zt_copy_file_to_handle(NSFileHandle *output, NSString *path, NSError **error) {
+    NSFileHandle *input = [NSFileHandle fileHandleForReadingAtPath:path];
+    if (!input) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't open temporary asset at %@.", path]);
+        return NO;
     }
-
-    NSString *tmpName = [NSString stringWithFormat:@"bds-upload-%@.bundle", NSUUID.UUID.UUIDString];
-    NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:tmpName];
-    NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-
-    NSError *writeError = nil;
-    if (![data writeToURL:tmpURL options:NSDataWritingAtomic error:&writeError]) {
-        if (error) *error = writeError;
-        return nil;
+    @try {
+        while (YES) {
+            NSData *chunk = [input readDataOfLength:1024u * 1024u];
+            if (chunk.length == 0) break;
+            if (!zt_write_all(output, chunk.bytes, chunk.length, error)) {
+                [input closeFile];
+                return NO;
+            }
+        }
+    } @catch (NSException *exception) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, exception.reason ?: @"Temporary asset read failed.");
+        [input closeFile];
+        return NO;
     }
-
-    NSError *compressionError = nil;
-    uint8_t type = [UnityBundleCAB compressionTypeForBundleAtPath:tmpPath error:&compressionError];
-    if (compressionError) {
-        [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-        if (error) *error = compressionError;
-        return nil;
-    }
-
-    if (type != 0 && type != 2) {
-        ZLog(@"[ZTranscoderService] upload compression: leaving %@ bundle unchanged (%lu bytes)",
-             bds_compressionLabel(type), (unsigned long)data.length);
-        [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-        return data;
-    }
-
-    ZLog(@"[ZTranscoderService] upload compression: source is %@ (%lu bytes), recompressing as LZ4HC…",
-         bds_compressionLabel(type), (unsigned long)data.length);
-
-    NSData *compressed = [UnityBundleCAB LZ4HCDataForBundleAtPath:tmpPath error:&compressionError];
-    [NSFileManager.defaultManager removeItemAtPath:tmpPath error:nil];
-    if (!compressed) {
-        if (error) *error = compressionError ?: [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                                                       code:ZTranscoderServiceErrorRequestFailed
-                                                                   userInfo:@{NSLocalizedDescriptionKey: @"Couldn't recompress the bundle as LZ4HC for upload."}];
-        return nil;
-    }
-
-    ZLog(@"[ZTranscoderService] upload compression: %lu -> %lu bytes (%.1f%% of original)",
-         (unsigned long)data.length,
-         (unsigned long)compressed.length,
-         data.length ? (100.0 * (double)compressed.length / (double)data.length) : 0.0);
-    if (outCompressedByteSize) *outCompressedByteSize = compressed.length;
-    return compressed;
+    [input closeFile];
+    return YES;
 }
 
-#pragma mark - ZTranscoderConfig
+static uint64_t zt_file_size(NSString *path) {
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
+    return [attrs[NSFileSize] unsignedLongLongValue];
+}
+
+static NSString *zt_sha256(NSData *data) {
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *text = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [text appendFormat:@"%02x", digest[i]];
+    return text;
+}
+
+static NSString *zt_sha256_range(const uint8_t *base, uint64_t offset, uint64_t length) {
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    const size_t chunk = 1024u * 1024u;
+    while (length) {
+        size_t n = (size_t)MIN((uint64_t)chunk, length);
+        CC_SHA256_Update(&ctx, base + offset, (CC_LONG)n);
+        offset += n;
+        length -= n;
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_Final(digest, &ctx);
+    NSMutableString *text = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [text appendFormat:@"%02x", digest[i]];
+    return text;
+}
+
+static uint64_t zt_mip_dimension(uint32_t value, uint32_t mip) {
+    return MAX(1u, value >> mip);
+}
+
+static BOOL zt_format_is_crunched(int32_t format) {
+    return format == 28 || format == 29 || format == 64 || format == 65;
+}
+
+static NSString *zt_format_name(int32_t format) {
+    switch (format) {
+        case 3: return @"RGB24";
+        case 4: return @"RGBA32";
+        case 10: return @"DXT1";
+        case 12: return @"DXT5";
+        case 28: return @"DXT1 Crunched";
+        case 29: return @"DXT5 Crunched";
+        case 34: return @"ETC RGB4";
+        case 45: return @"ETC2 RGB";
+        case 46: return @"ETC2 RGBA1";
+        case 47: return @"ETC2 RGBA8";
+        case 48: case 54: return @"ASTC 4x4";
+        case 49: case 55: return @"ASTC 5x5";
+        case 50: case 56: return @"ASTC 6x6";
+        case 51: case 57: return @"ASTC 8x8";
+        case 52: case 58: return @"ASTC 10x10";
+        case 53: case 59: return @"ASTC 12x12";
+        case 63: return @"R8";
+        case 64: return @"ETC Crunched";
+        case 65: return @"ETC2 RGBA8 Crunched";
+        default: return [NSString stringWithFormat:@"Format %d", format];
+    }
+}
+
+@interface ZTSerializedObject : NSObject
+@property (nonatomic, assign) int32_t classID;
+@property (nonatomic, assign) int32_t typeIndex;
+@property (nonatomic, assign) int64_t pathID;
+@property (nonatomic, assign) uint64_t byteStart;
+@property (nonatomic, assign) uint32_t byteSize;
+@property (nonatomic, assign) uint64_t objectStart;
+@property (nonatomic, strong, nullable) NSData *replacementObject;
+@end
+
+@implementation ZTSerializedObject
+@end
+
+@interface ZTTextureRecord : NSObject
+@property (nonatomic, strong) ZTSerializedObject *object;
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) uint32_t width;
+@property (nonatomic, assign) uint32_t height;
+@property (nonatomic, assign) uint32_t completeImageSize;
+@property (nonatomic, assign) int32_t format;
+@property (nonatomic, assign) int32_t mipCount;
+@property (nonatomic, assign) int32_t colorSpace;
+@property (nonatomic, assign) BOOL readable;
+@property (nonatomic, assign) uint32_t imageDataLength;
+@property (nonatomic, assign) uint64_t imageDataPosition;
+@property (nonatomic, assign) uint64_t formatPosition;
+@property (nonatomic, assign) uint64_t completeSizePosition;
+@property (nonatomic, assign) uint64_t mipCountPosition;
+@property (nonatomic, assign) uint64_t streamOffsetPosition;
+@property (nonatomic, assign) uint64_t streamSizePosition;
+@property (nonatomic, assign) uint64_t streamPathPosition;
+@property (nonatomic, assign) uint64_t streamOffset;
+@property (nonatomic, assign) uint32_t streamSize;
+@property (nonatomic, assign) uint32_t streamPathLength;
+@property (nonatomic, copy) NSString *streamPath;
+@end
+
+@implementation ZTTextureRecord
+- (BOOL)isStreamed { return self.imageDataLength == 0 && self.streamSize > 0; }
+- (BOOL)isInline { return self.imageDataLength > 0; }
+@end
+
+@interface ZTSerializedDocument : NSObject
+@property (nonatomic, strong) NSData *data;
+@property (nonatomic, assign) uint64_t dataOffset;
+@property (nonatomic, assign) uint64_t objectTableOffset;
+@property (nonatomic, copy) NSArray<ZTSerializedObject *> *objects;
+@property (nonatomic, copy) NSArray<ZTTextureRecord *> *textures;
+@property (nonatomic, assign) uint32_t parseFailures;
+@end
+
+@implementation ZTSerializedDocument
+@end
+
+@interface ZTTextureReplacement : NSObject
+@property (nonatomic, strong) ZTTextureRecord *source;
+@property (nonatomic, strong) ZTTextureRecord *target;
+@property (nonatomic, copy) NSString *encodedPath;
+@property (nonatomic, assign) uint32_t encodedSize;
+@property (nonatomic, assign) uint64_t targetStreamOffset;
+@property (nonatomic, copy, nullable) NSData *replacementObject;
+@property (nonatomic, copy, nullable) NSData *sourceObjectData;
+@end
+
+@implementation ZTTextureReplacement
+@end
+
+static int zt_type_tree_subtree_end(const uint8_t *nodes, uint32_t count, uint32_t i) {
+    uint8_t level = nodes[(size_t)i * 32u + 2u];
+    uint32_t j = i + 1;
+    while (j < count && nodes[(size_t)j * 32u + 2u] > level) j++;
+    return (int)j;
+}
+
+static const char *zt_type_tree_name(const uint8_t *nodes, uint32_t nodeCount, const uint8_t *strings, uint32_t stringSize, uint32_t i) {
+    if (i >= nodeCount || !strings) return NULL;
+    uint32_t nameOffset = zt_le32(nodes + (size_t)i * 32u + 8u);
+    if (nameOffset & 0x80000000u || nameOffset >= stringSize) return NULL;
+    const uint8_t *p = strings + nameOffset;
+    const uint8_t *end = strings + stringSize;
+    const uint8_t *q = p;
+    while (q < end && *q) q++;
+    if (q >= end) return NULL;
+    return (const char *)p;
+}
+
+static uint64_t zt_align4_from(uint64_t start, uint64_t pos) {
+    uint64_t rel = pos - start;
+    return start + ((rel + 3u) & ~3ULL);
+}
+
+static int zt_walk_tree(const uint8_t *nodes, uint32_t nodeCount, const uint8_t *buf, uint64_t start, uint64_t limit, uint32_t i, uint64_t *pos, int depth) {
+    if (depth > 24 || i >= nodeCount || *pos > limit) return -1;
+    uint8_t level = nodes[(size_t)i * 32u + 2u];
+    uint8_t flags = nodes[(size_t)i * 32u + 3u];
+    int32_t byteSize = (int32_t)zt_le32(nodes + (size_t)i * 32u + 12u);
+    int32_t meta = (int32_t)zt_le32(nodes + (size_t)i * 32u + 20u);
+    int end = zt_type_tree_subtree_end(nodes, nodeCount, i);
+    if (flags & 1u) {
+        if (end < (int)i + 3 || limit - *pos < 4) return -1;
+        uint32_t count = zt_le32(buf + *pos);
+        *pos += 4;
+        uint32_t dataNode = i + 2;
+        int dataEnd = zt_type_tree_subtree_end(nodes, nodeCount, dataNode);
+        int32_t dataSize = (int32_t)zt_le32(nodes + (size_t)dataNode * 32u + 12u);
+        if (dataEnd == (int)dataNode + 1 && dataSize > 0) {
+            uint64_t bytes = (uint64_t)count * (uint64_t)dataSize;
+            if (bytes > limit - *pos) return -1;
+            *pos += bytes;
+        } else {
+            for (uint32_t k = 0; k < count; k++) {
+                if (zt_walk_tree(nodes, nodeCount, buf, start, limit, dataNode, pos, depth + 1) < 0) return -1;
+            }
+        }
+        if (meta & 0x4000) *pos = zt_align4_from(start, *pos);
+        return *pos <= limit ? end : -1;
+    }
+    if (end > (int)i + 1) {
+        uint32_t j = i + 1;
+        while (j < (uint32_t)end) {
+            int next = zt_walk_tree(nodes, nodeCount, buf, start, limit, j, pos, depth + 1);
+            if (next < 0) return -1;
+            j = (uint32_t)next;
+        }
+        if (meta & 0x4000) *pos = zt_align4_from(start, *pos);
+        return *pos <= limit ? end : -1;
+    }
+    if (byteSize <= 0 || (uint64_t)byteSize > limit - *pos) return -1;
+    *pos += (uint64_t)byteSize;
+    if (meta & 0x4000) *pos = zt_align4_from(start, *pos);
+    return *pos <= limit ? end : -1;
+}
+
+static BOOL zt_read_cstring(NSData *data, NSUInteger *pos, NSString **outString) {
+    if (!data || !pos || *pos >= data.length) return NO;
+    const uint8_t *bytes = data.bytes;
+    NSUInteger i = *pos;
+    while (i < data.length && bytes[i]) i++;
+    if (i >= data.length) return NO;
+    NSString *string = [[NSString alloc] initWithBytes:bytes + *pos length:i - *pos encoding:NSUTF8StringEncoding];
+    if (!string) string = @"";
+    *pos = i + 1;
+    if (outString) *outString = string;
+    return YES;
+}
+
+static BOOL zt_parse_texture(const uint8_t *buf, ZTSerializedObject *object, const uint8_t *nodes, uint32_t nodeCount, const uint8_t *strings, uint32_t stringSize, ZTTextureRecord **outTexture) {
+    if (!buf || !nodes || !outTexture || nodeCount < 2) return NO;
+    ZTTextureRecord *texture = [ZTTextureRecord new];
+    texture.object = object;
+    uint64_t start = object.objectStart;
+    uint64_t limit = start + object.byteSize;
+    uint64_t pos = start;
+    uint32_t i = 1;
+    unsigned found = 0;
+    while (i < nodeCount) {
+        uint64_t at = pos;
+        const char *name = zt_type_tree_name(nodes, nodeCount, strings, stringSize, i);
+        int end = zt_type_tree_subtree_end(nodes, nodeCount, i);
+        if (name) {
+            int32_t byteSize = (int32_t)zt_le32(nodes + (size_t)i * 32u + 12u);
+            if (!strcmp(name, "m_Name")) {
+                if (limit - at < 4) return NO;
+                uint32_t len = zt_le32(buf + at);
+                if (len > limit - at - 4) return NO;
+                NSUInteger n = MIN((NSUInteger)len, (NSUInteger)127);
+                texture.name = n ? [[NSString alloc] initWithBytes:buf + at + 4 length:n encoding:NSUTF8StringEncoding] : @"";
+                if (!texture.name) texture.name = @"";
+            } else if (!strcmp(name, "m_Width") && byteSize == 4 && limit - at >= 4) {
+                texture.width = zt_le32(buf + at);
+                found |= 1;
+            } else if (!strcmp(name, "m_Height") && byteSize == 4 && limit - at >= 4) {
+                texture.height = zt_le32(buf + at);
+                found |= 2;
+            } else if (!strcmp(name, "m_CompleteImageSize") && byteSize == 4 && limit - at >= 4) {
+                texture.completeImageSize = zt_le32(buf + at);
+                texture.completeSizePosition = at;
+                found |= 4;
+            } else if (!strcmp(name, "m_TextureFormat") && byteSize == 4 && limit - at >= 4) {
+                texture.format = (int32_t)zt_le32(buf + at);
+                texture.formatPosition = at;
+                found |= 8;
+            } else if (!strcmp(name, "m_MipCount") && byteSize == 4 && limit - at >= 4) {
+                texture.mipCount = (int32_t)zt_le32(buf + at);
+                texture.mipCountPosition = at;
+                found |= 16;
+            } else if (!strcmp(name, "m_IsReadable") && byteSize == 1 && limit - at >= 1) {
+                texture.readable = buf[at] != 0;
+                found |= 32;
+            } else if (!strcmp(name, "m_ColorSpace") && byteSize == 4 && limit - at >= 4) {
+                texture.colorSpace = (int32_t)zt_le32(buf + at);
+                found |= 64;
+            } else if (!strcmp(name, "image data") && limit - at >= 4) {
+                texture.imageDataLength = zt_le32(buf + at);
+                texture.imageDataPosition = at;
+                found |= 128;
+            } else if (!strcmp(name, "m_StreamData")) {
+                if (end != (int)i + 7 || limit - at < 16) return NO;
+                uint32_t streamPathLength = zt_le32(buf + at + 12);
+                if (limit - at < 16u + streamPathLength) return NO;
+                texture.streamOffset = zt_le64(buf + at);
+                texture.streamOffsetPosition = at;
+                texture.streamSize = zt_le32(buf + at + 8);
+                texture.streamSizePosition = at + 8;
+                texture.streamPathLength = streamPathLength;
+                texture.streamPathPosition = at + 16;
+                if (streamPathLength) {
+                    texture.streamPath = [[NSString alloc] initWithBytes:buf + at + 16 length:streamPathLength encoding:NSUTF8StringEncoding] ?: @"";
+                } else {
+                    texture.streamPath = @"";
+                }
+                found |= 256;
+            }
+        }
+        int next = zt_walk_tree(nodes, nodeCount, buf, start, limit, i, &pos, 0);
+        if (next < 0) return NO;
+        i = (uint32_t)next;
+    }
+    if (pos != limit || found != 511u || texture.width == 0 || texture.height == 0 || texture.mipCount <= 0) return NO;
+    *outTexture = texture;
+    return YES;
+}
+
+static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) {
+    if (!data || data.length < 64) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile is too small.");
+        return nil;
+    }
+    const uint8_t *buf = data.bytes;
+    uint32_t version = zt_be32(buf + 8);
+    if (version != 22) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Unsupported SerializedFile version %u.", version]);
+        return nil;
+    }
+    if (buf[16] != 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Big-endian SerializedFile is unsupported.");
+        return nil;
+    }
+    uint64_t dataOffset = zt_be64(buf + 32);
+    if (dataOffset > data.length) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile data offset is out of range.");
+        return nil;
+    }
+    NSUInteger pos = 48;
+    NSString *unityVersion = nil;
+    if (!zt_read_cstring(data, &pos, &unityVersion) || data.length - pos < 9) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile metadata is truncated.");
+        return nil;
+    }
+    pos += 4;
+    uint8_t enableTypeTree = buf[pos++];
+    if (!enableTypeTree) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile has no type trees.");
+        return nil;
+    }
+    int32_t typeCount = (int32_t)zt_le32(buf + pos);
+    pos += 4;
+    if (typeCount <= 0 || typeCount > 4096) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile has an implausible type count.");
+        return nil;
+    }
+    typedef struct { uint8_t *nodes; uint32_t count; uint8_t *strings; uint32_t stringSize; BOOL active; } ZTTree;
+    ZTTree *trees = calloc((size_t)typeCount, sizeof(ZTTree));
+    int32_t *classIDs = calloc((size_t)typeCount, sizeof(int32_t));
+    if (!trees || !classIDs) {
+        free(trees); free(classIDs);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't allocate SerializedFile type metadata.");
+        return nil;
+    }
+    BOOL ok = YES;
+    for (int32_t ti = 0; ti < typeCount && ok; ti++) {
+        if (data.length - pos < 7) { ok = NO; break; }
+        int32_t classID = (int32_t)zt_le32(buf + pos);
+        classIDs[ti] = classID;
+        pos += 4 + 1 + 2;
+        if (classID == 114) {
+            if (data.length - pos < 16) { ok = NO; break; }
+            pos += 16;
+        }
+        if (data.length - pos < 24) { ok = NO; break; }
+        pos += 16;
+        uint32_t nodeCount = zt_le32(buf + pos);
+        uint32_t stringSize = zt_le32(buf + pos + 4);
+        pos += 8;
+        uint64_t nodeBytes = (uint64_t)nodeCount * 32u;
+        if (nodeCount > 100000 || stringSize > (16u << 20) || nodeBytes > data.length - pos || stringSize > data.length - pos - nodeBytes) { ok = NO; break; }
+        if (classID == 28) {
+            trees[ti].nodes = malloc((size_t)nodeBytes);
+            if (!trees[ti].nodes) { ok = NO; break; }
+            memcpy(trees[ti].nodes, buf + pos, (size_t)nodeBytes);
+            trees[ti].count = nodeCount;
+            trees[ti].strings = (uint8_t *)(buf + pos + nodeBytes);
+            trees[ti].stringSize = stringSize;
+            trees[ti].active = YES;
+        }
+        pos += (size_t)nodeBytes + stringSize;
+        if (data.length - pos < 4) { ok = NO; break; }
+        int32_t deps = (int32_t)zt_le32(buf + pos);
+        pos += 4;
+        if (deps < 0 || (uint64_t)deps * 4u > data.length - pos) { ok = NO; break; }
+        pos += (size_t)deps * 4u;
+    }
+    if (!ok || data.length - pos < 4) {
+        for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
+        free(trees); free(classIDs);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile type metadata is truncated or malformed.");
+        return nil;
+    }
+    int32_t objectCount = (int32_t)zt_le32(buf + pos);
+    pos += 4;
+    if (objectCount < 0 || objectCount > 4000000) {
+        for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
+        free(trees); free(classIDs);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile object count is implausible.");
+        return nil;
+    }
+    NSUInteger tablePos = (pos + 3u) & ~3u;
+    if (dataOffset < tablePos || dataOffset > data.length) {
+        for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
+        free(trees); free(classIDs);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile object table exceeds data offset.");
+        return nil;
+    }
+    NSMutableArray<ZTSerializedObject *> *objects = [NSMutableArray arrayWithCapacity:(NSUInteger)objectCount];
+    NSMutableArray<ZTTextureRecord *> *textures = [NSMutableArray array];
+    uint32_t failures = 0;
+    pos = tablePos;
+    for (int32_t oi = 0; oi < objectCount; oi++) {
+        pos = (pos + 3u) & ~3u;
+        if (data.length - pos < 24) { failures++; break; }
+        ZTSerializedObject *object = [ZTSerializedObject new];
+        object.pathID = (int64_t)zt_le64(buf + pos);
+        object.byteStart = zt_le64(buf + pos + 8);
+        object.byteSize = zt_le32(buf + pos + 16);
+        object.typeIndex = (int32_t)zt_le32(buf + pos + 20);
+        if (object.typeIndex >= 0 && object.typeIndex < typeCount) object.classID = classIDs[object.typeIndex];
+        object.objectStart = dataOffset + object.byteStart;
+        if (object.objectStart > data.length || object.byteSize > data.length - object.objectStart) failures++;
+        [objects addObject:object];
+        if (object.classID == 28 && object.typeIndex >= 0 && object.typeIndex < typeCount && trees[object.typeIndex].active && object.objectStart <= data.length && object.byteSize <= data.length - object.objectStart) {
+            ZTTextureRecord *texture = nil;
+            if (zt_parse_texture(buf, object, trees[object.typeIndex].nodes, trees[object.typeIndex].count, trees[object.typeIndex].strings, trees[object.typeIndex].stringSize, &texture)) {
+                [textures addObject:texture];
+            } else {
+                failures++;
+            }
+        }
+        pos += 24;
+    }
+    if (failures || pos > dataOffset) {
+        for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
+        free(trees); free(classIDs);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"SerializedFile object parsing failed for %u object(s).", failures]);
+        return nil;
+    }
+    ZTSerializedDocument *document = [ZTSerializedDocument new];
+    document.data = data;
+    document.dataOffset = dataOffset;
+    document.objectTableOffset = tablePos;
+    document.objects = objects;
+    document.textures = textures;
+    document.parseFailures = failures;
+    for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
+    free(trees); free(classIDs);
+    return document;
+}
+
+static UnityBundleNode *zt_resS_node(UnityBundleArchive *archive, NSError **error) {
+    UnityBundleNode *resS = nil;
+    for (UnityBundleNode *node in archive.nodes) {
+        if ([node.path hasSuffix:@".resS"]) {
+            if (resS) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Bundle contains multiple .resS nodes.");
+                return nil;
+            }
+            resS = node;
+        }
+    }
+    if (!resS) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Bundle has no .resS node.");
+        return nil;
+    }
+    return resS;
+}
+
+static BOOL zt_texture_payload(ZTTextureRecord *texture, UnityBundleArchive *archive, NSData *serializedData, NSData **outPayload, NSError **error) {
+    if (!texture || !archive || !serializedData || !outPayload) return NO;
+    const uint8_t *base = serializedData.bytes;
+    if (texture.isInline) {
+        if ((uint64_t)texture.imageDataPosition + 4u + texture.imageDataLength > serializedData.length) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Inline Texture2D image data exceeds its SerializedFile object.");
+            return NO;
+        }
+        *outPayload = [NSData dataWithBytes:base + texture.imageDataPosition + 4 length:texture.imageDataLength];
+        return YES;
+    }
+    UnityBundleNode *resS = zt_resS_node(archive, error);
+    if (!resS || texture.streamOffset > (uint64_t)resS.size || texture.streamSize > (uint64_t)resS.size - texture.streamOffset) return NO;
+    if (texture.streamPath.length > 0 && ![[resS.path lastPathComponent] isEqualToString:texture.streamPath.lastPathComponent]) {
+        ZLog(@"[ZTranscoder] streamed path mismatch: object path=%@ node=%@", texture.streamPath, resS.path);
+    }
+    const uint8_t *streamBase = archive.data.bytes + resS.offset;
+    *outPayload = [NSData dataWithBytes:streamBase + texture.streamOffset length:texture.streamSize];
+    return YES;
+}
+
+static BOOL zt_write_u32_at(NSMutableData *data, NSUInteger offset, uint32_t value) {
+    if (offset > data.length || data.length - offset < 4) return NO;
+    uint8_t b[4] = {(uint8_t)value, (uint8_t)(value >> 8), (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
+    memcpy((uint8_t *)data.mutableBytes + offset, b, 4);
+    return YES;
+}
+
+static void zt_expand565(uint16_t color, uint8_t *rgb) {
+    uint8_t r = (uint8_t)((color >> 11) & 31);
+    uint8_t g = (uint8_t)((color >> 5) & 63);
+    uint8_t b = (uint8_t)(color & 31);
+    rgb[0] = (uint8_t)((r << 3) | (r >> 2));
+    rgb[1] = (uint8_t)((g << 2) | (g >> 4));
+    rgb[2] = (uint8_t)((b << 3) | (b >> 2));
+}
+
+static void zt_build_bc1_palette(const uint8_t *block, BOOL forceFourColor, uint8_t palette[4][4]) {
+    uint16_t c0 = (uint16_t)(block[0] | (block[1] << 8));
+    uint16_t c1 = (uint16_t)(block[2] | (block[3] << 8));
+    zt_expand565(c0, palette[0]);
+    zt_expand565(c1, palette[1]);
+    palette[0][3] = 255;
+    palette[1][3] = 255;
+    palette[2][3] = 255;
+    palette[3][3] = 255;
+    if (c0 > c1 || forceFourColor) {
+        for (int ch = 0; ch < 3; ch++) {
+            palette[2][ch] = (uint8_t)((2 * palette[0][ch] + palette[1][ch]) / 3);
+            palette[3][ch] = (uint8_t)((palette[0][ch] + 2 * palette[1][ch]) / 3);
+        }
+    } else {
+        for (int ch = 0; ch < 3; ch++) palette[2][ch] = (uint8_t)((palette[0][ch] + palette[1][ch]) / 2);
+        palette[3][0] = palette[3][1] = palette[3][2] = 0;
+        palette[3][3] = 0;
+    }
+}
+
+static BOOL zt_decode_dxt(NSData *pixels, uint8_t *dst, uint32_t width, uint32_t height, BOOL dxt5) {
+    size_t blocksWide = ((size_t)width + 3u) / 4u;
+    size_t blocksHigh = ((size_t)height + 3u) / 4u;
+    size_t blockSize = dxt5 ? 16u : 8u;
+    size_t needed = blocksWide * blocksHigh * blockSize;
+    if (pixels.length < needed) return NO;
+    const uint8_t *src = pixels.bytes;
+    for (size_t by = 0; by < blocksHigh; by++) {
+        for (size_t bx = 0; bx < blocksWide; bx++) {
+            const uint8_t *block = src + (by * blocksWide + bx) * blockSize;
+            const uint8_t *colorBlock = dxt5 ? block + 8 : block;
+            uint8_t palette[4][4];
+            zt_build_bc1_palette(colorBlock, dxt5, palette);
+            uint32_t colorBits = (uint32_t)colorBlock[4] | ((uint32_t)colorBlock[5] << 8) | ((uint32_t)colorBlock[6] << 16) | ((uint32_t)colorBlock[7] << 24);
+            uint8_t alphas[8] = {0};
+            uint64_t alphaBits = 0;
+            if (dxt5) {
+                uint8_t a0 = block[0];
+                uint8_t a1 = block[1];
+                alphas[0] = a0;
+                alphas[1] = a1;
+                if (a0 > a1) {
+                    for (int i = 1; i <= 6; i++) alphas[i + 1] = (uint8_t)(((7 - i) * a0 + i * a1) / 7);
+                } else {
+                    for (int i = 1; i <= 4; i++) alphas[i + 1] = (uint8_t)(((5 - i) * a0 + i * a1) / 5);
+                    alphas[6] = 0;
+                    alphas[7] = 255;
+                }
+                for (int i = 0; i < 6; i++) alphaBits |= ((uint64_t)block[2 + i]) << (8 * i);
+            }
+            for (int py = 0; py < 4; py++) {
+                size_t y = by * 4u + (size_t)py;
+                if (y >= height) break;
+                for (int px = 0; px < 4; px++) {
+                    size_t x = bx * 4u + (size_t)px;
+                    if (x >= width) break;
+                    int pixel = py * 4 + px;
+                    uint32_t index = (colorBits >> (2 * pixel)) & 3u;
+                    uint8_t *out = dst + (y * (size_t)width + x) * 4u;
+                    memcpy(out, palette[index], 4);
+                    if (dxt5) out[3] = alphas[(alphaBits >> (3 * pixel)) & 7u];
+                }
+            }
+        }
+    }
+    return YES;
+}
+
+static void zt_flip_rgba_vertical(uint8_t *pixels, uint32_t width, uint32_t height) {
+    size_t rowBytes = (size_t)width * 4u;
+    uint8_t *row = malloc(rowBytes);
+    if (!row) return;
+    for (uint32_t y = 0; y < height / 2u; y++) {
+        uint8_t *a = pixels + (size_t)y * rowBytes;
+        uint8_t *b = pixels + (size_t)(height - 1u - y) * rowBytes;
+        memcpy(row, a, rowBytes);
+        memcpy(a, b, rowBytes);
+        memcpy(b, row, rowBytes);
+    }
+    free(row);
+}
+
+static id<MTLDevice> g_zstDecodeDevice;
+static id<MTLCommandQueue> g_zstDecodeQueue;
+static id<MTLComputePipelineState> g_zstDecodePipeline;
+static dispatch_once_t g_zstDecodeOnce;
+static NSString *g_zstDecodeError;
+
+static BOOL zt_prepare_compressed_decoder(void) {
+    dispatch_once(&g_zstDecodeOnce, ^{
+        g_zstDecodeDevice = MTLCreateSystemDefaultDevice();
+        if (!g_zstDecodeDevice) {
+            g_zstDecodeError = @"Metal device unavailable for compressed texture decoding.";
+            return;
+        }
+        NSString *source = @"#include <metal_stdlib>\nusing namespace metal;\nkernel void zst_decode_copy(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::write> dst [[texture(1)]], uint2 gid [[thread_position_in_grid]]) { if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return; constexpr sampler s(coord::pixel, filter::nearest, address::clamp_to_edge); dst.write(src.sample(s, float2(gid) + 0.5), gid); }\n";
+        NSError *error = nil;
+        id<MTLLibrary> library = [g_zstDecodeDevice newLibraryWithSource:source options:nil error:&error];
+        id<MTLFunction> function = [library newFunctionWithName:@"zst_decode_copy"];
+        g_zstDecodeQueue = [g_zstDecodeDevice newCommandQueue];
+        g_zstDecodePipeline = function ? [g_zstDecodeDevice newComputePipelineStateWithFunction:function error:&error] : nil;
+        if (!g_zstDecodeQueue || !g_zstDecodePipeline) g_zstDecodeError = error.localizedDescription ?: @"Couldn't create compressed texture decoder.";
+    });
+    return g_zstDecodeDevice && g_zstDecodeQueue && g_zstDecodePipeline;
+}
+
+static BOOL zt_metal_decode(MTLPixelFormat pixelFormat, uint32_t blockWidth, uint32_t blockBytes, NSData *pixels, uint32_t width, uint32_t height, NSMutableData *rgba, NSError **error) {
+    if (!zt_prepare_compressed_decoder()) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, g_zstDecodeError ?: @"Compressed texture decoder unavailable.");
+        return NO;
+    }
+    uint32_t blocksWide = (width + blockWidth - 1u) / blockWidth;
+    uint32_t blockHeight = blockWidth;
+    uint32_t blocksHigh = (height + blockHeight - 1u) / blockHeight;
+    size_t needed = (size_t)blocksWide * blocksHigh * blockBytes;
+    if (pixels.length < needed) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Compressed texture data is shorter than its dimensions require.");
+        return NO;
+    }
+    MTLTextureDescriptor *srcDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:width height:height mipmapped:NO];
+    srcDesc.usage = MTLTextureUsageShaderRead;
+    MTLTextureDescriptor *dstDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:width height:height mipmapped:NO];
+    dstDesc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    id<MTLTexture> source = [g_zstDecodeDevice newTextureWithDescriptor:srcDesc];
+    id<MTLTexture> destination = [g_zstDecodeDevice newTextureWithDescriptor:dstDesc];
+    if (!source || !destination) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Metal could not allocate compressed texture decoder resources.");
+        return NO;
+    }
+    [source replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:pixels.bytes bytesPerRow:(NSUInteger)blocksWide * blockBytes];
+    id<MTLCommandBuffer> command = [g_zstDecodeQueue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+    [encoder setComputePipelineState:g_zstDecodePipeline];
+    [encoder setTexture:source atIndex:0];
+    [encoder setTexture:destination atIndex:1];
+    MTLSize group = MTLSizeMake(16, 16, 1);
+    MTLSize groups = MTLSizeMake((width + 15u) / 16u, (height + 15u) / 16u, 1);
+    [encoder dispatchThreadgroups:groups threadsPerThreadgroup:group];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, command.error.localizedDescription ?: @"Metal failed to decode compressed texture data.");
+        return NO;
+    }
+    [destination getBytes:rgba.mutableBytes bytesPerRow:(NSUInteger)width * 4u fromRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0];
+    return YES;
+}
+
+static BOOL zt_decode_crunched_with_unity(NSData *pixels, uint32_t width, uint32_t height, int32_t format, int32_t mipCount, int32_t colorSpace, NSMutableData *rgba, NSError **error) {
+    if (mipCount != 1) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunched Texture2D %ux%u has %d mip levels; the runtime fallback only supports single-mip Crunch.", width, height, mipCount]);
+        return NO;
+    }
+    if (![IL2CppBridge resolveSymbols]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"IL2CPP symbols are unavailable for Crunch decoding.");
+        return NO;
+    }
+    __block NSData *decoded = nil;
+    __block NSString *failure = nil;
+    void (^work)(void) = ^{
+        void *klass = [IL2CppBridge classNamed:"Texture2D" inNamespace:"UnityEngine" assemblyContains:"CoreModule"];
+        if (!klass) { failure = @"UnityEngine.Texture2D class not found."; return; }
+        const void *ctor = [IL2CppBridge methodOnClass:klass name:".ctor" argCount:5];
+        const void *load = [IL2CppBridge methodOnClass:klass name:"LoadRawTextureData" argCount:2];
+        const void *apply = [IL2CppBridge methodOnClass:klass name:"Apply" argCount:2];
+        const void *getPixels = [IL2CppBridge methodOnClass:klass name:"GetPixels32" argCount:0];
+        if (!ctor || !load || !apply || !getPixels) { failure = @"Required Unity Texture2D methods for Crunch decoding were not found."; return; }
+        void *texture = [IL2CppBridge newObjectForClass:klass];
+        if (!texture) { failure = @"Unity failed to allocate a Texture2D for Crunch decoding."; return; }
+        int32_t w = (int32_t)width;
+        int32_t h = (int32_t)height;
+        int32_t texFormat = format;
+        BOOL mipChain = NO;
+        BOOL linear = colorSpace == 0;
+        void *ctorArgs[5] = {&w, &h, &texFormat, &mipChain, &linear};
+        void *exception = NULL;
+        [IL2CppBridge invokeMethod:ctor onInstance:texture args:ctorArgs outException:&exception];
+        if (exception) { failure = @"Unity Texture2D constructor rejected the Crunch texture format."; return; }
+        void *ptr = (void *)pixels.bytes;
+        int32_t byteCount = (int32_t)pixels.length;
+        void *loadArgs[2] = {&ptr, &byteCount};
+        exception = NULL;
+        [IL2CppBridge invokeMethod:load onInstance:texture args:loadArgs outException:&exception];
+        if (exception) { failure = @"Unity Texture2D rejected the Crunch payload through LoadRawTextureData."; return; }
+        BOOL updateMipmaps = NO;
+        BOOL makeNoLongerReadable = NO;
+        void *applyArgs[2] = {&updateMipmaps, &makeNoLongerReadable};
+        exception = NULL;
+        [IL2CppBridge invokeMethod:apply onInstance:texture args:applyArgs outException:&exception];
+        if (exception) { failure = @"Unity Texture2D failed while applying the Crunch payload."; return; }
+        exception = NULL;
+        void *pixelsArray = [IL2CppBridge invokeMethod:getPixels onInstance:texture args:NULL outException:&exception];
+        if (exception || !pixelsArray) { failure = @"Unity Texture2D could not return decoded Crunch pixels."; return; }
+        uint32_t count = *(uint32_t *)((uint8_t *)pixelsArray + 0x18);
+        size_t expected = (size_t)width * height;
+        if (count < expected) { failure = @"Unity returned fewer pixels than expected for the Crunch texture."; return; }
+        NSData *data = [NSData dataWithBytes:(uint8_t *)pixelsArray + 0x20 length:expected * 4u];
+        if (!data) { failure = @"Couldn't copy Unity Crunch pixels."; return; }
+        decoded = data;
+    };
+    if ([NSThread isMainThread]) work();
+    else dispatch_sync(dispatch_get_main_queue(), work);
+    if (!decoded) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, failure ?: @"Crunch decoding failed.");
+        return NO;
+    }
+    [rgba setData:decoded];
+    zt_flip_rgba_vertical(rgba.mutableBytes, width, height);
+    return YES;
+}
+
+static BOOL zt_decode_texture_mip(ZTTextureRecord *texture, NSData *payload, uint32_t width, uint32_t height, int32_t colorSpace, NSMutableData **outRGBA, NSError **error) {
+    if (!texture || !payload || width == 0 || height == 0 || width > kZSTranscoderMaxTextureDimension || height > kZSTranscoderMaxTextureDimension) return NO;
+    size_t pixelCount = (size_t)width * height;
+    NSMutableData *rgba = [NSMutableData dataWithLength:pixelCount * 4u];
+    if (!rgba) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't allocate RGBA decode memory.");
+        return NO;
+    }
+    const uint8_t *src = payload.bytes;
+    BOOL ok = NO;
+    switch (texture.format) {
+        case 3:
+            if (payload.length >= pixelCount * 3u) {
+                uint8_t *dst = rgba.mutableBytes;
+                for (size_t i = 0; i < pixelCount; i++) {
+                    dst[i * 4] = src[i * 3];
+                    dst[i * 4 + 1] = src[i * 3 + 1];
+                    dst[i * 4 + 2] = src[i * 3 + 2];
+                    dst[i * 4 + 3] = 255;
+                }
+                ok = YES;
+            }
+            break;
+        case 4:
+            if (payload.length >= pixelCount * 4u) { memcpy(rgba.mutableBytes, src, pixelCount * 4u); ok = YES; }
+            break;
+        case 10:
+        case 12:
+            ok = zt_decode_dxt(payload, rgba.mutableBytes, width, height, texture.format == 12);
+            break;
+        case 34:
+        case 45:
+            ok = zt_metal_decode(MTLPixelFormatETC2_RGB8, 4, 8, payload, width, height, rgba, error);
+            break;
+        case 46:
+            ok = zt_metal_decode(MTLPixelFormatETC2_RGB8A1, 4, 8, payload, width, height, rgba, error);
+            break;
+        case 47:
+            ok = zt_metal_decode(MTLPixelFormatEAC_RGBA8, 4, 16, payload, width, height, rgba, error);
+            break;
+        case 48: case 54:
+            ok = zt_metal_decode(MTLPixelFormatASTC_4x4_LDR, 4, 16, payload, width, height, rgba, error);
+            break;
+        case 49: case 55:
+            ok = zt_metal_decode(MTLPixelFormatASTC_5x5_LDR, 5, 16, payload, width, height, rgba, error);
+            break;
+        case 50: case 56:
+            ok = zt_metal_decode(MTLPixelFormatASTC_6x6_LDR, 6, 16, payload, width, height, rgba, error);
+            break;
+        case 51: case 57:
+            ok = zt_metal_decode(MTLPixelFormatASTC_8x8_LDR, 8, 16, payload, width, height, rgba, error);
+            break;
+        case 52: case 58:
+            ok = zt_metal_decode(MTLPixelFormatASTC_10x10_LDR, 10, 16, payload, width, height, rgba, error);
+            break;
+        case 53: case 59:
+            ok = zt_metal_decode(MTLPixelFormatASTC_12x12_LDR, 12, 16, payload, width, height, rgba, error);
+            break;
+        case 63:
+            if (payload.length >= pixelCount) {
+                uint8_t *dst = rgba.mutableBytes;
+                for (size_t i = 0; i < pixelCount; i++) dst[i * 4] = dst[i * 4 + 1] = dst[i * 4 + 2] = src[i], dst[i * 4 + 3] = 255;
+                ok = YES;
+            }
+            break;
+        default:
+            if (zt_format_is_crunched(texture.format)) ok = zt_decode_crunched_with_unity(payload, width, height, texture.format, texture.mipCount, colorSpace, rgba, error);
+            break;
+    }
+    if (!ok && error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Unsupported or malformed Texture2D format %@ (%d).", zt_format_name(texture.format), texture.format]);
+    if (ok && texture.format != 28 && texture.format != 29 && texture.format != 64 && texture.format != 65) *outRGBA = rgba;
+    else *outRGBA = rgba;
+    return ok;
+}
+
+static uint64_t zt_expected_mip_size(int32_t format, uint32_t width, uint32_t height) {
+    uint64_t w = width, h = height;
+    switch (format) {
+        case 3: return w * h * 3u;
+        case 4: return w * h * 4u;
+        case 10: case 28: case 34: case 45: return ((w + 3u) / 4u) * ((h + 3u) / 4u) * (format == 10 || format == 28 ? 8u : 8u);
+        case 12: case 29: case 47: case 65: return ((w + 3u) / 4u) * ((h + 3u) / 4u) * (format == 12 || format == 29 ? 16u : 16u);
+        case 46: return ((w + 3u) / 4u) * ((h + 3u) / 4u) * 8u;
+        case 48: case 54: return ((w + 3u) / 4u) * ((h + 3u) / 4u) * 16u;
+        case 49: case 55: return ((w + 4u) / 5u) * ((h + 4u) / 5u) * 16u;
+        case 50: case 56: return ((w + 5u) / 6u) * ((h + 5u) / 6u) * 16u;
+        case 51: case 57: return ((w + 7u) / 8u) * ((h + 7u) / 8u) * 16u;
+        case 52: case 58: return ((w + 9u) / 10u) * ((h + 9u) / 10u) * 16u;
+        case 53: case 59: return ((w + 11u) / 12u) * ((h + 11u) / 12u) * 16u;
+        case 63: return w * h;
+        default: return 0;
+    }
+}
+
+static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
+    if (source.mipCount <= 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
+        return NO;
+    }
+    uint64_t totalExpected = 0;
+    if (!zt_format_is_crunched(source.format)) {
+        uint64_t cursor = 0;
+        for (int32_t mip = 0; mip < source.mipCount; mip++) {
+            uint32_t mw = (uint32_t)zt_mip_dimension(source.width, (uint32_t)mip);
+            uint32_t mh = (uint32_t)zt_mip_dimension(source.height, (uint32_t)mip);
+            uint64_t size = zt_expected_mip_size(source.format, mw, mh);
+            if (size == 0 || size > payload.length - MIN(cursor, (uint64_t)payload.length)) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ has an invalid payload size for mip %d (%@).", source.name, mip, zt_format_name(source.format)]);
+                return NO;
+            }
+            cursor += size;
+            totalExpected += size;
+        }
+        if (cursor != payload.length || totalExpected != source.completeImageSize) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ payload size mismatch: object=%u payload=%lu expected=%llu.", source.name, source.completeImageSize, (unsigned long)payload.length, (unsigned long long)totalExpected]);
+            return NO;
+        }
+    } else if (payload.length != source.completeImageSize) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunched Texture2D %@ payload size mismatch: object=%u payload=%lu.", source.name, source.completeImageSize, (unsigned long)payload.length]);
+        return NO;
+    }
+    NSString *outputPath = [workDir stringByAppendingPathComponent:[NSString stringWithFormat:@"texture-%lld.astc", (long long)source.object.pathID]];
+    NSFileHandle *writer = [NSFileHandle fileHandleForWritingAtPath:outputPath];
+    if (!writer) {
+        [[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil];
+        writer = [NSFileHandle fileHandleForWritingAtPath:outputPath];
+    }
+    if (!writer) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create temporary ASTC output for %@.", source.name]);
+        return NO;
+    }
+    BOOL ok = YES;
+    uint64_t cursor = 0;
+    uint64_t totalOutput = 0;
+    for (int32_t mip = 0; mip < source.mipCount && ok; mip++) {
+        uint32_t mw = (uint32_t)zt_mip_dimension(source.width, (uint32_t)mip);
+        uint32_t mh = (uint32_t)zt_mip_dimension(source.height, (uint32_t)mip);
+        NSData *mipData = nil;
+        if (zt_format_is_crunched(source.format)) {
+            mipData = payload;
+        } else {
+            uint64_t mipSize = zt_expected_mip_size(source.format, mw, mh);
+            mipData = [payload subdataWithRange:NSMakeRange((NSUInteger)cursor, (NSUInteger)mipSize)];
+            cursor += mipSize;
+        }
+        NSMutableData *rgba = nil;
+        NSError *decodeError = nil;
+        if (!zt_decode_texture_mip(source, mipData, mw, mh, source.colorSpace, &rgba, &decodeError)) {
+            if (error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
+            ok = NO;
+            break;
+        }
+        NSError *encodeError = nil;
+        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:mw height:mh sRGB:(source.colorSpace != 0) error:&encodeError];
+        if (!astc) {
+            if (error) *error = encodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
+            ok = NO;
+            break;
+        }
+        if (!zt_write_all(writer, astc.bytes, astc.length, error)) { ok = NO; break; }
+        totalOutput += astc.length;
+        if (progress) {
+            double f = source.mipCount > 0 ? ((double)(mip + 1) / (double)source.mipCount) : 1.0;
+            progress(f, [NSString stringWithFormat:@"Encoded %@ mip %d/%d as ASTC 6x6", source.name.length ? source.name : @"<unnamed>", mip + 1, source.mipCount]);
+        }
+    }
+    @try { [writer closeFile]; } @catch (__unused NSException *exception) {}
+    if (!ok) { [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil]; return NO; }
+    if (totalOutput > UINT32_MAX) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"ASTC output exceeds Unity's 32-bit Texture2D image-size field.");
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        return NO;
+    }
+    if (outPath) *outPath = outputPath;
+    if (outSize) *outSize = (uint32_t)totalOutput;
+    return YES;
+}
+
+static BOOL zt_patch_u32_relative(NSMutableData *data, uint64_t base, uint64_t absolutePosition, uint32_t value) {
+    if (absolutePosition < base || absolutePosition - base > data.length || data.length - (NSUInteger)(absolutePosition - base) < 4) return NO;
+    return zt_write_u32_at(data, (NSUInteger)(absolutePosition - base), value);
+}
+
+static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTextureRecord *target, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize, uint64_t streamOffset) {
+    if (!source || !target || !sourceObject || !encodedData) return nil;
+    uint64_t base = source.object.objectStart;
+    NSUInteger imageField = (NSUInteger)(source.imageDataPosition - base);
+    if (imageField > sourceObject.length || sourceObject.length - imageField < 4) return nil;
+    NSUInteger oldImageStart = imageField + 4u;
+    NSUInteger oldImageEnd = oldImageStart + source.imageDataLength;
+    if (oldImageEnd > sourceObject.length) return nil;
+    NSUInteger oldStreamStart = (NSUInteger)(source.streamOffsetPosition - base);
+    if (oldStreamStart > sourceObject.length || oldStreamStart < oldImageEnd) return nil;
+    NSMutableData *out = [NSMutableData data];
+    if (!target.isStreamed) {
+        [out appendBytes:sourceObject.bytes length:imageField];
+        uint8_t imageLength[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
+        [out appendBytes:imageLength length:4];
+        [out appendData:encodedData];
+        while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
+        uint8_t streamZero[12] = {0};
+        [out appendBytes:streamZero length:12];
+        uint8_t emptyPathLength[4] = {0};
+        [out appendBytes:emptyPathLength length:4];
+        if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
+        if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
+        return out;
+    }
+    [out appendBytes:sourceObject.bytes length:imageField];
+    uint8_t zeroLength[4] = {0};
+    [out appendBytes:zeroLength length:4];
+    while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
+    uint8_t streamOffsetBytes[8] = {
+        (uint8_t)streamOffset, (uint8_t)(streamOffset >> 8), (uint8_t)(streamOffset >> 16), (uint8_t)(streamOffset >> 24),
+        (uint8_t)(streamOffset >> 32), (uint8_t)(streamOffset >> 40), (uint8_t)(streamOffset >> 48), (uint8_t)(streamOffset >> 56)
+    };
+    [out appendBytes:streamOffsetBytes length:8];
+    uint8_t streamSizeBytes[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
+    [out appendBytes:streamSizeBytes length:4];
+    NSData *pathData = [target.streamPath dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    uint32_t pathLength = (uint32_t)pathData.length;
+    uint8_t pathLengthBytes[4] = {(uint8_t)pathLength, (uint8_t)(pathLength >> 8), (uint8_t)(pathLength >> 16), (uint8_t)(pathLength >> 24)};
+    [out appendBytes:pathLengthBytes length:4];
+    [out appendData:pathData];
+    if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
+    if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
+    return out;
+}
+
+static ZTSerializedObject *zt_find_object(NSDictionary<NSString *, ZTSerializedObject *> *map, int64_t pathID, int32_t classID) {
+    return map[[NSString stringWithFormat:@"%d:%lld", classID, (long long)pathID]];
+}
+
+static NSDictionary<NSString *, ZTTextureRecord *> *zt_texture_map(NSArray<ZTTextureRecord *> *textures) {
+    NSMutableDictionary *map = [NSMutableDictionary dictionaryWithCapacity:textures.count];
+    for (ZTTextureRecord *texture in textures) map[[NSString stringWithFormat:@"%lld", (long long)texture.object.pathID]] = texture;
+    return map;
+}
+
+static NSData *zt_object_data(ZTSerializedObject *object, NSData *data) {
+    if (object.objectStart > data.length || object.byteSize > data.length - object.objectStart) return nil;
+    return [NSData dataWithBytes:(const uint8_t *)data.bytes + object.objectStart length:object.byteSize];
+}
+
+static BOOL zt_repack_resS(UnityBundleArchive *targetArchive, ZTSerializedDocument *targetDoc, NSDictionary<NSString *, ZTTextureReplacement *> *replacements, NSString *outputPath, NSMutableDictionary<NSString *, NSNumber *> *streamOffsets, uint64_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
+    UnityBundleNode *resS = zt_resS_node(targetArchive, error);
+    if (!resS) return NO;
+    NSArray<ZTTextureRecord *> *sorted = [targetDoc.textures sortedArrayUsingComparator:^NSComparisonResult(ZTTextureRecord *a, ZTTextureRecord *b) {
+        return a.object.pathID < b.object.pathID ? NSOrderedAscending : (a.object.pathID > b.object.pathID ? NSOrderedDescending : NSOrderedSame);
+    }];
+    if (![[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create replacement .resS at %@.", outputPath]);
+        return NO;
+    }
+    NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:outputPath];
+    uint64_t cursor = 0;
+    const uint8_t *streamBytes = targetArchive.data.bytes + resS.offset;
+    for (NSUInteger i = 0; i < sorted.count; i++) {
+        ZTTextureRecord *texture = sorted[i];
+        if (!texture.isStreamed) continue;
+        uint64_t aligned = zt_align_up(cursor, 16u);
+        if (aligned == UINT64_MAX) { if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @".resS output size overflowed."); [out closeFile]; return NO; }
+        while (cursor < aligned) { uint8_t zero = 0; if (!zt_write_all(out, &zero, 1, error)) { [out closeFile]; return NO; } cursor++; }
+        NSString *key = [NSString stringWithFormat:@"%lld", (long long)texture.object.pathID];
+        streamOffsets[key] = @(aligned);
+        ZTTextureReplacement *replacement = replacements[key];
+        if (replacement) {
+            if (!zt_copy_file_to_handle(out, replacement.encodedPath, error)) { [out closeFile]; return NO; }
+            cursor += replacement.encodedSize;
+            ZLog(@"[ZTranscoder] .resS transplant PathID=%@ original=%u new=%u offset=%llu", key, texture.streamSize, replacement.encodedSize, (unsigned long long)aligned);
+        } else {
+            if (texture.streamOffset > (uint64_t)resS.size || texture.streamSize > (uint64_t)resS.size - texture.streamOffset) { [out closeFile]; if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Target .resS texture reference is out of range."); return NO; }
+            if (!zt_copy_range_to_handle(out, streamBytes, texture.streamOffset, texture.streamSize, error)) { [out closeFile]; return NO; }
+            cursor += texture.streamSize;
+        }
+        if (progress) progress(sorted.count ? (double)(i + 1) / (double)sorted.count : 1.0, [NSString stringWithFormat:@"Repacking .resS texture %lu/%lu", (unsigned long)(i + 1), (unsigned long)sorted.count]);
+    }
+    @try { [out closeFile]; } @catch (__unused NSException *exception) {}
+    if (outSize) *outSize = cursor;
+    ZLog(@"[ZTranscoder] rebuilt existing .resS node %@: %llu bytes", resS.path, (unsigned long long)cursor);
+    return YES;
+}
+
+static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSDictionary<NSString *, ZTTextureReplacement *> *replacements, NSMutableDictionary<NSString *, NSNumber *> *streamOffsets, NSString *outputPath, NSError **error) {
+    if (![[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create replacement SerializedFile at %@.", outputPath]);
+        return NO;
+    }
+    NSMutableDictionary<NSString *, ZTTextureRecord *> *textureByObject = [NSMutableDictionary dictionaryWithCapacity:targetDoc.textures.count];
+    for (ZTTextureRecord *texture in targetDoc.textures) textureByObject[[NSString stringWithFormat:@"%lld", (long long)texture.object.pathID]] = texture;
+    NSMutableArray<NSNumber *> *newStarts = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
+    NSMutableArray<NSNumber *> *newSizes = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
+    uint64_t cursor = targetDoc.dataOffset;
+    for (ZTSerializedObject *object in targetDoc.objects) {
+        cursor = zt_align_up(cursor, 8u);
+        if (cursor == UINT64_MAX || cursor < targetDoc.dataOffset) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile output offset overflowed.");
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        [newStarts addObject:@(cursor - targetDoc.dataOffset)];
+        NSData *objectData = nil;
+        NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
+        ZTTextureRecord *targetTexture = textureByObject[key];
+        ZTTextureReplacement *replacement = replacements[key];
+        if (replacement && targetTexture) {
+            NSData *sourceRawObject = replacement.sourceObjectData;
+            NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
+            uint64_t streamOffset = [streamOffsets[key] unsignedLongLongValue];
+            objectData = sourceRawObject && encoded ? zt_build_texture_object_from_source(replacement.source, targetTexture, sourceRawObject, encoded, replacement.encodedSize, streamOffset) : nil;
+        } else if (object.replacementObject) {
+            objectData = object.replacementObject;
+        } else {
+            objectData = zt_object_data(object, targetDoc.data);
+        }
+        if (!objectData || objectData.length > UINT32_MAX) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't size rebuilt object PathID=%lld.", (long long)object.pathID]);
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        [newSizes addObject:@(objectData.length)];
+        cursor += objectData.length;
+        if (objectData != object.replacementObject && objectData != targetDoc.data) objectData = nil;
+    }
+    NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:outputPath];
+    if (!out) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Couldn't open rebuilt SerializedFile for writing.");
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        return NO;
+    }
+    const uint8_t *base = targetDoc.data.bytes;
+    if (!zt_copy_range_to_handle(out, base, 0, targetDoc.objectTableOffset, error)) {
+        [out closeFile];
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        return NO;
+    }
+    for (NSUInteger i = 0; i < targetDoc.objects.count; i++) {
+        ZTSerializedObject *object = targetDoc.objects[i];
+        uint8_t entry[24] = {0};
+        uint64_t pathID = (uint64_t)object.pathID;
+        uint64_t byteStart = [newStarts[i] unsignedLongLongValue];
+        uint32_t byteSize = [newSizes[i] unsignedIntValue];
+        for (NSUInteger b = 0; b < 8; b++) entry[b] = (uint8_t)(pathID >> (8 * b));
+        for (NSUInteger b = 0; b < 8; b++) entry[8 + b] = (uint8_t)(byteStart >> (8 * b));
+        for (NSUInteger b = 0; b < 4; b++) entry[16 + b] = (uint8_t)(byteSize >> (8 * b));
+        uint32_t typeIndex = (uint32_t)object.typeIndex;
+        for (NSUInteger b = 0; b < 4; b++) entry[20 + b] = (uint8_t)(typeIndex >> (8 * b));
+        if (!zt_write_all(out, entry, sizeof(entry), error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+    }
+    uint64_t written = targetDoc.objectTableOffset + targetDoc.objects.count * 24u;
+    if (written > targetDoc.dataOffset) {
+        [out closeFile];
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile object table exceeds data offset after rebuild.");
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        return NO;
+    }
+    while (written < targetDoc.dataOffset) {
+        uint8_t zero = 0;
+        if (!zt_write_all(out, &zero, 1, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        written++;
+    }
+    for (NSUInteger i = 0; i < targetDoc.objects.count; i++) {
+        ZTSerializedObject *object = targetDoc.objects[i];
+        uint64_t desiredStart = [newStarts[i] unsignedLongLongValue] + targetDoc.dataOffset;
+        while (written < desiredStart) {
+            uint8_t zero = 0;
+            if (!zt_write_all(out, &zero, 1, error)) {
+                [out closeFile];
+                [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+                return NO;
+            }
+            written++;
+        }
+        NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
+        ZTTextureRecord *targetTexture = textureByObject[key];
+        ZTTextureReplacement *replacement = replacements[key];
+        NSData *objectData = nil;
+        if (replacement && targetTexture) {
+            NSData *sourceRawObject = replacement.sourceObjectData;
+            NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
+            uint64_t streamOffset = [streamOffsets[key] unsignedLongLongValue];
+            objectData = sourceRawObject && encoded ? zt_build_texture_object_from_source(replacement.source, targetTexture, sourceRawObject, encoded, replacement.encodedSize, streamOffset) : nil;
+        } else if (object.replacementObject) {
+            objectData = object.replacementObject;
+        } else {
+            objectData = zt_object_data(object, targetDoc.data);
+        }
+        if (!objectData || objectData.length != [newSizes[i] unsignedIntegerValue]) {
+            [out closeFile];
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Rebuilt object PathID=%lld changed size between passes.", (long long)object.pathID]);
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        if (!zt_write_all(out, objectData.bytes, objectData.length, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        written += objectData.length;
+    }
+    @try { [out closeFile]; } @catch (__unused NSException *exception) {}
+    NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:outputPath error:nil];
+    uint64_t finalSize = [attrs[NSFileSize] unsignedLongLongValue];
+    if (finalSize != written) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile output size did not match the bytes written.");
+        [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] rebuilt SerializedFile: objects=%lu dataOffset=%llu output=%llu", (unsigned long)targetDoc.objects.count, (unsigned long long)targetDoc.dataOffset, (unsigned long long)finalSize);
+    return YES;
+}
+
+static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *originalArchive, NSString *serializedPath, NSString *resSPath, NSString *outputPath, NSError **error) {
+    NSData *headerData = [NSData dataWithContentsOfFile:templateBundlePath];
+    if (!headerData || headerData.length < 48 || memcmp(headerData.bytes, "UnityFS", 7) != 0) {
+        if (error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Template bundle has an invalid UnityFS header.");
+        return NO;
+    }
+    const uint8_t *bytes = headerData.bytes;
+    NSUInteger pos = 8;
+    uint32_t formatVersion = zt_be32(bytes + pos); pos += 4;
+    NSUInteger versionStart = pos;
+    while (pos < headerData.length && bytes[pos]) pos++;
+    if (pos >= headerData.length) return NO;
+    NSString *unityVersion = [[NSString alloc] initWithBytes:bytes + versionStart length:pos - versionStart encoding:NSUTF8StringEncoding] ?: @"";
+    pos++;
+    NSUInteger revisionStart = pos;
+    while (pos < headerData.length && bytes[pos]) pos++;
+    if (pos >= headerData.length) return NO;
+    NSString *unityRevision = [[NSString alloc] initWithBytes:bytes + revisionStart length:pos - revisionStart encoding:NSUTF8StringEncoding] ?: @"";
+    pos++;
+    if (headerData.length - pos < 20) return NO;
+    uint64_t oldArchiveSize = zt_be64(bytes + pos); (void)oldArchiveSize; pos += 8;
+    uint32_t oldCompressedInfoSize = zt_be32(bytes + pos); (void)oldCompressedInfoSize; pos += 4;
+    uint32_t oldUncompressedInfoSize = zt_be32(bytes + pos); (void)oldUncompressedInfoSize; pos += 4;
+    uint32_t flags = zt_be32(bytes + pos); pos += 4;
+    uint32_t compression = flags & kZSTranscoderUnityFSCompressionMask;
+    if (compression != UnityBundleCABCompressionNone && compression != UnityBundleCABCompressionLZ4 && compression != UnityBundleCABCompressionLZ4HC) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"UnityFS template uses unsupported compression type %u.", compression]);
+        return NO;
+    }
+    if (originalArchive.nodes.count != 2) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The input bundle does not contain exactly the expected serialized + .resS node pair.");
+        return NO;
+    }
+    NSString *cabPath = nil;
+    for (UnityBundleNode *node in originalArchive.nodes) if (node.flags & 4u) cabPath = node.path;
+    if (!cabPath) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template does not expose a serialized CAB node.");
+        return NO;
+    }
+    NSString *resPath = nil;
+    for (UnityBundleNode *node in originalArchive.nodes) if ([node.path hasSuffix:@".resS"]) resPath = node.path;
+    if (!resPath) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template has no .resS node.");
+        return NO;
+    }
+    NSString *blockDataPath = [[outputPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"blocks-%@", NSUUID.UUID.UUIDString]];
+    [[NSFileManager defaultManager] createFileAtPath:blockDataPath contents:nil attributes:nil];
+    NSFileHandle *blockOutput = [NSFileHandle fileHandleForWritingAtPath:blockDataPath];
+    NSMutableData *blockUsizes = [NSMutableData data];
+    NSMutableData *blockCsizes = [NSMutableData data];
+    NSMutableData *blockFlags = [NSMutableData data];
+    uint64_t nodeLengths[2] = {zt_file_size(serializedPath), zt_file_size(resSPath)};
+    uint64_t streamOffset = 0;
+    BOOL blockReadFailed = NO;
+    uint8_t raw[kZSTranscoderBlockSize];
+    for (UnityBundleNode *node in originalArchive.nodes) {
+        NSString *path = [node.path hasSuffix:@".resS"] ? resSPath : serializedPath;
+        uint64_t nodeSize = [node.path hasSuffix:@".resS"] ? nodeLengths[1] : nodeLengths[0];
+        NSFileHandle *input = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (!input) {
+            [blockOutput closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't open rebuilt node %@.", node.path]);
+            return NO;
+        }
+        uint64_t remaining = nodeSize;
+        while (remaining) {
+            NSUInteger n = (NSUInteger)MIN((uint64_t)sizeof(raw), remaining);
+            NSData *data = [input readDataOfLength:n];
+            if (data.length != n) { remaining = UINT64_MAX; blockReadFailed = YES; break; }
+            int bound = LZ4_compressBound((int)n);
+            NSMutableData *compressed = [NSMutableData dataWithLength:(NSUInteger)MAX(bound, (int)n)];
+            int c = 0;
+            if (compression == UnityBundleCABCompressionLZ4HC) c = LZ4_compress_HC(data.bytes, compressed.mutableBytes, (int)n, bound, LZ4HC_CLEVEL_DEFAULT);
+            else if (compression == UnityBundleCABCompressionLZ4) c = LZ4_compress_default(data.bytes, compressed.mutableBytes, (int)n, bound);
+            if (c <= 0 || c >= (int)n) {
+                zt_put_be32(blockUsizes, (uint32_t)n);
+                zt_put_be32(blockCsizes, (uint32_t)n);
+                zt_put_be16(blockFlags, 0);
+                [blockOutput writeData:data];
+            } else {
+                uint16_t fl = compression == UnityBundleCABCompressionLZ4HC ? 3u : 2u;
+                zt_put_be32(blockUsizes, (uint32_t)n);
+                zt_put_be32(blockCsizes, (uint32_t)c);
+                zt_put_be16(blockFlags, fl);
+                [blockOutput writeData:[compressed subdataWithRange:NSMakeRange(0, (NSUInteger)c)]];
+            }
+            remaining -= n;
+            streamOffset += n;
+        }
+        [input closeFile];
+        if (remaining == UINT64_MAX) break;
+    }
+    if (blockReadFailed) {
+        [blockOutput closeFile]; [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"UnityFS block generation failed while reading a rebuilt node.");
+        return NO;
+    }
+    [blockOutput closeFile];
+    uint32_t blockCount = (uint32_t)(blockUsizes.length / 4u);
+    NSMutableData *info = [NSMutableData dataWithLength:16];
+    zt_put_be32(info, blockCount);
+    for (uint32_t i = 0; i < blockCount; i++) {
+        const uint8_t *us = blockUsizes.bytes + (size_t)i * 4u;
+        const uint8_t *cs = blockCsizes.bytes + (size_t)i * 4u;
+        const uint8_t *fl = blockFlags.bytes + (size_t)i * 2u;
+        [info appendBytes:us length:4]; [info appendBytes:cs length:4]; [info appendBytes:fl length:2];
+    }
+    zt_put_be32(info, 2u);
+    uint64_t nodeOffset = 0;
+    for (NSUInteger i = 0; i < originalArchive.nodes.count; i++) {
+        UnityBundleNode *node = originalArchive.nodes[i];
+        uint64_t size = [node.path hasSuffix:@".resS"] ? nodeLengths[1] : nodeLengths[0];
+        zt_put_be64(info, nodeOffset);
+        zt_put_be64(info, size);
+        zt_put_be32(info, node.flags);
+        NSData *pathData = [node.path dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+        [info appendData:pathData];
+        uint8_t nul = 0; [info appendBytes:&nul length:1];
+        nodeOffset += size;
+    }
+    int infoBound = LZ4_compressBound((int)info.length);
+    NSMutableData *compressedInfo = [NSMutableData dataWithLength:(NSUInteger)MAX(infoBound, (int)info.length)];
+    int infoCompressedLength = 0;
+    if (compression == UnityBundleCABCompressionLZ4HC) infoCompressedLength = LZ4_compress_HC(info.bytes, compressedInfo.mutableBytes, (int)info.length, infoBound, LZ4HC_CLEVEL_DEFAULT);
+    else if (compression == UnityBundleCABCompressionLZ4) infoCompressedLength = LZ4_compress_default(info.bytes, compressedInfo.mutableBytes, (int)info.length, infoBound);
+    else { infoCompressedLength = (int)info.length; memcpy(compressedInfo.mutableBytes, info.bytes, info.length); }
+    if (infoCompressedLength <= 0) {
+        [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"UnityFS blocks-info compression failed.");
+        return NO;
+    }
+    compressedInfo.length = (NSUInteger)infoCompressedLength;
+    NSMutableData *header = [NSMutableData data];
+    [header appendBytes:"UnityFS" length:7]; uint8_t nul=0; [header appendBytes:&nul length:1];
+    zt_put_be32(header, formatVersion);
+    [header appendData:[unityVersion dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data]]; [header appendBytes:&nul length:1];
+    [header appendData:[unityRevision dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data]]; [header appendBytes:&nul length:1];
+    uint64_t headerBaseLength = header.length + 8 + 4 + 4 + 4;
+    (void)headerBaseLength;
+    uint64_t archiveSize = 0;
+    uint64_t headerEnd = zt_align_up(header.length + 20u, 16u);
+    if (flags & kZSTranscoderUnityFSFlagsInfoAtEnd) archiveSize = headerEnd + streamOffset + compressedInfo.length;
+    else {
+        uint64_t dataStart = headerEnd + compressedInfo.length;
+        if (flags & kZSTranscoderUnityFSFlagsPaddingAtStart) dataStart = zt_align_up(dataStart, 16u);
+        archiveSize = dataStart + streamOffset;
+    }
+    zt_put_be64(header, archiveSize);
+    zt_put_be32(header, (uint32_t)compressedInfo.length);
+    zt_put_be32(header, (uint32_t)info.length);
+    zt_put_be32(header, flags);
+    while (header.length < headerEnd) [header appendBytes:"\0" length:1];
+    if (![[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil]) {
+        [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create output UnityFS bundle at %@.", outputPath]);
+        return NO;
+    }
+    NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:outputPath];
+    [out writeData:header];
+    if (flags & kZSTranscoderUnityFSFlagsInfoAtEnd) {
+        if (!zt_copy_file_to_handle(out, blockDataPath, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+            return NO;
+        }
+        [out writeData:compressedInfo];
+    } else {
+        [out writeData:compressedInfo];
+        uint64_t desiredDataStart = headerEnd + compressedInfo.length;
+        if (flags & kZSTranscoderUnityFSFlagsPaddingAtStart) desiredDataStart = zt_align_up(desiredDataStart, 16u);
+        while ((uint64_t)out.offsetInFile < desiredDataStart) [out writeData:[NSData dataWithBytes:"\0" length:1]];
+        if (!zt_copy_file_to_handle(out, blockDataPath, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+            return NO;
+        }
+    }
+    [out closeFile];
+    [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
+    return YES;
+}
 
 @implementation ZTranscoderConfig
-
 - (ZTranscoderConfig *)normalizedConfig {
     ZTranscoderConfig *copy = [ZTranscoderConfig new];
     copy.repoOwner = self.repoOwner;
     copy.repoName = self.repoName;
+    copy.ref = self.ref.length ? self.ref : @"main";
+    copy.workflowFile = self.workflowFile.length ? self.workflowFile : @"ztranscoder.yml";
+    copy.outputFormat = @"ASTC_RGBA_6x6";
+    copy.targetBundlePath = self.targetBundlePath;
     copy.authToken = self.authToken;
-    copy.ref = self.ref.length > 0 ? self.ref : kBDSDefaultRef;
-    copy.workflowFile = self.workflowFile.length > 0 ? self.workflowFile : kBDSDefaultWorkflowFile;
-    copy.outputFormat = self.outputFormat.length > 0 ? self.outputFormat : kBDSDefaultOutputFormat;
     return copy;
 }
-
 @end
 
-#pragma mark - ZTranscoderHandle
+@interface ZTranscoderHandle ()
+@property (nonatomic, copy, readwrite) NSString *scratchBranch;
+@property (nonatomic, assign, readwrite) BOOL alreadyComplete;
+@end
 
-@implementation ZTranscoderHandle {
-    NSString *_scratchBranch;
-    BOOL _alreadyComplete;
+@implementation ZTranscoderHandle
+- (NSDictionary<NSString *,NSString *> *)dictionaryRepresentation {
+    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
+    if (self.scratchBranch.length) dict[@"scratchBranch"] = self.scratchBranch;
+    if (self.runID.length) dict[@"runID"] = self.runID;
+    if (self.runURL.length) dict[@"runURL"] = self.runURL;
+    dict[@"alreadyComplete"] = self.alreadyComplete ? @"1" : @"0";
+    return dict;
 }
-
-- (instancetype)initWithScratchBranch:(NSString *)scratchBranch {
-    return [self initWithScratchBranch:scratchBranch alreadyComplete:NO];
-}
-
-- (instancetype)initWithScratchBranch:(NSString *)scratchBranch alreadyComplete:(BOOL)alreadyComplete {
-    if ((self = [super init])) {
-        _scratchBranch = [scratchBranch copy];
-        _alreadyComplete = alreadyComplete;
-    }
-    return self;
-}
-
-- (NSString *)scratchBranch { return _scratchBranch; }
-- (BOOL)alreadyComplete { return _alreadyComplete; }
-
-- (NSDictionary<NSString *, NSString *> *)dictionaryRepresentation {
-    NSMutableDictionary<NSString *, NSString *> *d = [NSMutableDictionary dictionary];
-    d[@"scratchBranch"] = self.scratchBranch;
-    if (self.runID) d[@"runID"] = self.runID;
-    if (self.runURL) d[@"runURL"] = self.runURL;
-    return d;
-}
-
-+ (nullable instancetype)handleFromDictionaryRepresentation:(NSDictionary<NSString *, NSString *> *)dict {
-    NSString *branch = dict[@"scratchBranch"];
-    if (![branch isKindOfClass:NSString.class] || branch.length == 0) return nil;
-    ZTranscoderHandle *handle = [[ZTranscoderHandle alloc] initWithScratchBranch:branch];
++ (instancetype)handleFromDictionaryRepresentation:(NSDictionary<NSString *,NSString *> *)dict {
+    NSString *path = [dict[@"scratchBranch"] isKindOfClass:NSString.class] ? dict[@"scratchBranch"] : nil;
+    if (!path.length) return nil;
+    ZTranscoderHandle *handle = [ZTranscoderHandle new];
+    handle.scratchBranch = path;
     handle.runID = [dict[@"runID"] isKindOfClass:NSString.class] ? dict[@"runID"] : nil;
     handle.runURL = [dict[@"runURL"] isKindOfClass:NSString.class] ? dict[@"runURL"] : nil;
+    handle.alreadyComplete = [dict[@"alreadyComplete"] integerValue] != 0 || [NSFileManager.defaultManager fileExistsAtPath:path];
     return handle;
 }
-
 @end
 
-#pragma mark - BDSUploadProgressDelegate
-
-@interface BDSUploadProgressDelegate : NSObject <NSURLSessionTaskDelegate>
-@property (nonatomic, copy, nullable) void (^onProgress)(int64_t bytesSent);
-@end
-
-@implementation BDSUploadProgressDelegate
-
-- (void)URLSession:(NSURLSession *)session
-              task:(NSURLSessionTask *)task
-    didSendBodyData:(int64_t)bytesSent
-     totalBytesSent:(int64_t)totalBytesSent
-totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
-    if (!self.onProgress) return;
-    self.onProgress(totalBytesSent);
+static BOOL zt_verify_target(NSString *moddedPath, ZTranscoderConfig *config, NSString **outTargetPath, NSString **outCAB, NSError **error) {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:moddedPath]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Provided mod bundle does not exist: %@", moddedPath]);
+        return NO;
+    }
+    if (config.targetBundlePath.length > 0) {
+        NSString *candidate = config.targetBundlePath;
+        if (![candidate hasPrefix:@"/"]) candidate = [NSHomeDirectory() stringByAppendingPathComponent:candidate];
+        BOOL isDir = NO;
+        if ([[NSFileManager defaultManager] fileExistsAtPath:candidate isDirectory:&isDir] && !isDir) {
+            ZLog(@"[ZTranscoder] explicit target bundle path verified: %@", candidate);
+            if (outTargetPath) *outTargetPath = candidate;
+            if (outCAB) *outCAB = [UnityBundleCAB primaryCABForBundleAtPath:candidate error:nil];
+            return YES;
+        }
+        ZLog(@"[ZTranscoder] explicit target bundle path does not exist: %@", candidate);
+    }
+    NSError *cabError = nil;
+    NSString *cab = [UnityBundleCAB primaryCABForBundleAtPath:moddedPath error:&cabError];
+    if (!cab) {
+        if (error) *error = cabError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't determine the mod bundle CAB identifier.");
+        return NO;
+    }
+    NSError *targetError = nil;
+    NSString *target = [UnityCacheLocator locateBundlePathForCAB:cab error:&targetError];
+    if (!target || ![[NSFileManager defaultManager] fileExistsAtPath:target]) {
+        if (error) *error = targetError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"The game's stock bundle for %@ could not be located.", cab]);
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] target resolved by CAB fallback: %@ -> %@", cab, target);
+    if (outTargetPath) *outTargetPath = target;
+    if (outCAB) *outCAB = cab;
+    return YES;
 }
 
-@end
-
-#pragma mark - BDSDownloadProgressDelegate
-
-@interface BDSDownloadProgressDelegate : NSObject <NSURLSessionDownloadDelegate>
-@property (nonatomic, copy, nullable) void (^onProgress)(int64_t bytesWritten, int64_t totalBytesExpected);
-@property (nonatomic, assign) int64_t knownTotalBytesExpected;
-@end
-
-@implementation BDSDownloadProgressDelegate
-
-- (void)URLSession:(NSURLSession *)session
-      downloadTask:(NSURLSessionDownloadTask *)downloadTask
-      didWriteData:(int64_t)bytesWritten
- totalBytesWritten:(int64_t)totalBytesWritten
-totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite {
-    if (!self.onProgress) return;
-    int64_t total = self.knownTotalBytesExpected > 0 ? self.knownTotalBytesExpected : totalBytesExpectedToWrite;
-    self.onProgress(totalBytesWritten, total);
+static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void (^progress)(double, NSString *), NSURL **outputURL, NSError **error) {
+    NSString *inputPath = moddedURL.path;
+    ZLog(@"[ZTranscoder] starting local visual-mod transcode for %@", inputPath);
+    NSString *targetPath = nil;
+    NSString *cab = nil;
+    if (!zt_verify_target(inputPath, config, &targetPath, &cab, error)) return NO;
+    ZLog(@"[ZTranscoder] verified target CAB=%@ path=%@", cab, targetPath);
+    NSString *workDir = zt_temp_directory();
+    if (!workDir) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Couldn't create the on-device transcoder workspace.");
+        return NO;
+    }
+    NSString *originalCopy = [workDir stringByAppendingPathComponent:@"original.bundle"];
+    if (![[NSFileManager defaultManager] copyItemAtPath:targetPath toPath:originalCopy error:error]) {
+        if (error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't copy the original game bundle into the transcoder workspace.");
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] copied original game bundle to %@", originalCopy);
+    NSError *archiveError = nil;
+    UnityBundleArchive *sourceArchive = [UnityBundleCAB decompressedArchiveAtPath:inputPath error:&archiveError];
+    if (!sourceArchive) { if (error) *error = archiveError; [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    UnityBundleArchive *targetArchive = [UnityBundleCAB decompressedArchiveAtPath:originalCopy error:&archiveError];
+    if (!targetArchive) { if (error) *error = archiveError; [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    UnityBundleNode *sourceCABNode = nil;
+    UnityBundleNode *targetCABNode = nil;
+    UnityBundleNode *sourceResS = zt_resS_node(sourceArchive, error);
+    UnityBundleNode *targetResS = zt_resS_node(targetArchive, error);
+    for (UnityBundleNode *node in sourceArchive.nodes) if (node.flags & 4u) sourceCABNode = node;
+    for (UnityBundleNode *node in targetArchive.nodes) if (node.flags & 4u) targetCABNode = node;
+    if (!sourceCABNode || !targetCABNode || !sourceResS || !targetResS) {
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
+    }
+    NSData *sourceSerializedView = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)sourceArchive.data.bytes + sourceCABNode.offset) length:(NSUInteger)sourceCABNode.size freeWhenDone:NO];
+    NSData *targetSerializedView = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)targetArchive.data.bytes + targetCABNode.offset) length:(NSUInteger)targetCABNode.size freeWhenDone:NO];
+    ZTSerializedDocument *sourceDoc = zt_parse_serialized(sourceSerializedView, &archiveError);
+    ZTSerializedDocument *targetDoc = zt_parse_serialized(targetSerializedView, &archiveError);
+    if (!sourceDoc || !targetDoc) {
+        if (error) *error = archiveError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't parse source or original SerializedFile.");
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] source objects=%lu Texture2D=%lu, target objects=%lu Texture2D=%lu", (unsigned long)sourceDoc.objects.count, (unsigned long)sourceDoc.textures.count, (unsigned long)targetDoc.objects.count, (unsigned long)targetDoc.textures.count);
+    NSDictionary *targetObjectMap = ^NSDictionary *(void) {
+        NSMutableDictionary *map = [NSMutableDictionary dictionaryWithCapacity:targetDoc.objects.count];
+        for (ZTSerializedObject *object in targetDoc.objects) map[[NSString stringWithFormat:@"%d:%lld", object.classID, (long long)object.pathID]] = object;
+        return map;
+    }();
+    NSDictionary *targetTextureMap = zt_texture_map(targetDoc.textures);
+    NSMutableDictionary<NSString *, ZTTextureReplacement *> *replacements = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSNumber *> *streamOffsets = [NSMutableDictionary dictionary];
+    NSUInteger assetCount = 0;
+    for (ZTSerializedObject *sourceObject in sourceDoc.objects) if (sourceObject.classID == 28 || sourceObject.classID == 213 || sourceObject.classID == 687) assetCount++;
+    NSUInteger processedAssets = 0;
+    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas object(s)", (unsigned long)assetCount);
+    NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
+    for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
+        if (!(sourceObject.classID == 28 || sourceObject.classID == 213 || sourceObject.classID == 687)) continue;
+        processedAssets++;
+        NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
+        ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
+        if (!targetObject) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Required mod asset class=%d PathID=%lld is not present in the original bundle.", sourceObject.classID, (long long)sourceObject.pathID]);
+            [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+            return NO;
+        }
+        if (sourceObject.classID == 28) {
+            ZTTextureRecord *sourceTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
+            ZTTextureRecord *targetTexture = targetTextureMap[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]];
+            if (!sourceTexture || !targetTexture) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D PathID=%lld could not be parsed from both bundles.", (long long)sourceObject.pathID]);
+                [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                return NO;
+            }
+            NSData *sourcePayload = nil;
+            NSData *targetPayload = nil;
+            if (!zt_texture_payload(sourceTexture, sourceArchive, sourceDoc.data, &sourcePayload, error) || !zt_texture_payload(targetTexture, targetArchive, targetDoc.data, &targetPayload, error)) {
+                [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                return NO;
+            }
+            NSString *sourceHash = zt_sha256(sourcePayload);
+            NSString *targetHash = zt_sha256(targetPayload);
+            NSData *sourceObjectData = zt_object_data(sourceObject, sourceDoc.data);
+            NSData *targetObjectData = zt_object_data(targetObject, targetDoc.data);
+            NSString *sourceObjectHash = zt_sha256(sourceObjectData);
+            NSString *targetObjectHash = zt_sha256(targetObjectData);
+            BOOL exact = sourceObjectData.length == targetObjectData.length && [sourceObjectHash isEqualToString:targetObjectHash];
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ objectBytes source=%lu target=%lu imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d imageHash=%@ objectMatch=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO", exact ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
+            if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; retaining PathID matching", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
+            if (exact) continue;
+            ZTTextureReplacement *replacement = [ZTTextureReplacement new];
+            replacement.source = sourceTexture;
+            replacement.target = targetTexture;
+            replacement.sourceObjectData = zt_object_data(sourceTexture.object, sourceDoc.data);
+            NSString *encodedPath = nil;
+            uint32_t encodedSize = 0;
+            if (!zt_make_astc_replacement(sourceTexture, sourcePayload, workDir, &encodedPath, &encodedSize, error, ^(double f, NSString *stage) {
+                if (progress) {
+                    double base = assetCount ? ((double)(processedAssets - 1u) / (double)assetCount) : 0.0;
+                    double span = assetCount ? (1.0 / (double)assetCount) : 1.0;
+                    progress(0.1 + 0.7 * (base + span * f), stage);
+                }
+            })) {
+                [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                return NO;
+            }
+            replacement.encodedPath = encodedPath;
+            replacement.encodedSize = encodedSize;
+            replacements[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]] = replacement;
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld transcoded to ASTC 6x6: %lu -> %u bytes", (long long)sourceObject.pathID, (unsigned long)sourcePayload.length, encodedSize);
+        } else {
+            NSData *sourceObjectData = zt_object_data(sourceObject, sourceDoc.data);
+            NSData *targetObjectData = zt_object_data(targetObject, targetDoc.data);
+            if (!sourceObjectData || !targetObjectData) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't extract class=%d PathID=%lld.", sourceObject.classID, (long long)sourceObject.pathID]);
+                [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                return NO;
+            }
+            NSString *sourceHash = zt_sha256(sourceObjectData);
+            NSString *targetHash = zt_sha256(targetObjectData);
+            ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu hashMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO");
+            if (sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
+        }
+        if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+    }
+    NSString *resSOutput = [workDir stringByAppendingPathComponent:@"target.resS"];
+    uint64_t newResSSize = 0;
+    if (!zt_repack_resS(targetArchive, targetDoc, replacements, resSOutput, streamOffsets, &newResSSize, error, ^(double f, NSString *stage) {
+        if (progress) progress(0.8 + 0.05 * f, stage);
+    })) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    NSString *serializedOutput = [workDir stringByAppendingPathComponent:@"target.cab"];
+    if (!zt_rebuild_serialized_correctly(targetDoc, replacements, streamOffsets, serializedOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    ZLog(@"[ZTranscoder] rebuilt SerializedFile node: original=%lld new=%llu", (long long)targetCABNode.size, (unsigned long long)zt_file_size(serializedOutput));
+    NSString *bundleOutput = [workDir stringByAppendingPathComponent:@"modded.bundle"];
+    if (!zt_write_unityfs(originalCopy, targetArchive, serializedOutput, resSOutput, bundleOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    if (zt_file_size(bundleOutput) == 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"UnityFS output bundle is empty.");
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] final UnityFS output=%llu bytes targetOriginal=%llu bytes resS=%llu bytes", (unsigned long long)zt_file_size(bundleOutput), (unsigned long long)zt_file_size(originalCopy), (unsigned long long)newResSSize);
+    NSString *replacementInput = [inputPath stringByAppendingString:@".zst-out"];
+    [[NSFileManager defaultManager] removeItemAtPath:replacementInput error:nil];
+    if (![[NSFileManager defaultManager] copyItemAtPath:bundleOutput toPath:replacementInput error:error]) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    NSURL *inputURL = [NSURL fileURLWithPath:inputPath];
+    NSURL *replacementURL = [NSURL fileURLWithPath:replacementInput];
+    if (![[NSFileManager defaultManager] replaceItemAtURL:inputURL withItemAtURL:replacementURL backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:error]) {
+        [[NSFileManager defaultManager] removeItemAtPath:replacementInput error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] replaced input bundle with locally transcoded output %@", inputPath);
+    if (progress) progress(1.0, @"Local ASTC 6x6 bundle transcode complete");
+    if (outputURL) *outputURL = [NSURL fileURLWithPath:inputPath];
+    [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+    (void)config;
+    return YES;
 }
-
-- (void)URLSession:(NSURLSession *)session
-      downloadTask:(NSURLSessionDownloadTask *)downloadTask
-didFinishDownloadingToURL:(NSURL *)location {
-}
-
-@end
-
-#pragma mark - ZTranscoderService
-
-@interface ZTranscoderService ()
-+ (nullable NSData *)bds_findOriginalBundleDataForModdedBundleAtPath:(NSString *)moddedBundlePath;
-+ (nullable NSData *)bds_findOriginalGameFileDataForHash1:(NSString *)hash1 hash2:(NSString *)hash2;
-+ (BOOL)bds_resolveBaseCommitSHA:(NSString **)outCommitSHA
-                          config:(ZTranscoderConfig *)config
-                           error:(NSError **)error;
-+ (BOOL)bds_createBranch:(NSString *)branchName
-              atCommitSHA:(NSString *)commitSHA
-                   config:(ZTranscoderConfig *)config
-                    error:(NSError **)error;
-+ (BOOL)bds_errorIsAlreadyExists:(NSError *)error;
-+ (void)bds_deleteBranch:(NSString *)branchName config:(ZTranscoderConfig *)config;
-+ (BOOL)bds_createReleaseWithTagName:(NSString *)tagName
-                       targetCommitish:(NSString *)targetCommitish
-                                config:(ZTranscoderConfig *)config
-                  outUploadURLTemplate:(NSString **)outUploadURLTemplate
-                                 error:(NSError **)error;
-+ (BOOL)bds_uploadReleaseAssetData:(NSData *)data
-                                name:(NSString *)name
-                   uploadURLTemplate:(NSString *)uploadURLTemplate
-                            progress:(nullable void (^)(int64_t bytesSent))progress
-                              config:(ZTranscoderConfig *)config
-                               error:(NSError **)error;
-+ (nullable NSDictionary *)bds_fetchReleaseByTag:(NSString *)tagName config:(ZTranscoderConfig *)config error:(NSError **)error;
-+ (BOOL)bds_releaseAtTagHasOutputAsset:(NSString *)tagName config:(ZTranscoderConfig *)config;
-+ (BOOL)bds_downloadReleaseAssetNamed:(NSString *)name
-                       fromReleaseTag:(NSString *)releaseTag
-                               config:(ZTranscoderConfig *)config
-                             progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))progress
-                                 data:(NSData **)outData
-                                error:(NSError **)error;
-+ (void)bds_deleteReleaseWithTag:(NSString *)tagName config:(ZTranscoderConfig *)config;
-+ (void)bds_cleanupScratchSubmission:(NSString *)scratchBranch config:(ZTranscoderConfig *)config;
-+ (BOOL)bds_dispatchWorkflowOnBranch:(NSString *)branchName
-                                config:(ZTranscoderConfig *)config
-                                 error:(NSError **)error;
-+ (BOOL)bds_findRunOnBranch:(NSString *)branchName
-             dispatchedAfter:(NSDate *)dispatchedAt
-                      config:(ZTranscoderConfig *)config
-                       runID:(NSString **)outRunID
-                      runURL:(NSString **)outRunURL
-                       error:(NSError **)error;
-+ (BOOL)bds_waitForRunCompletion:(NSString *)runID
-                            runURL:(NSString *)runURL
-                            config:(ZTranscoderConfig *)config
-                             error:(NSError **)error;
-+ (nullable NSMutableURLRequest *)bds_requestForAbsoluteURLString:(NSString *)urlString config:(ZTranscoderConfig *)config;
-+ (nullable NSMutableURLRequest *)bds_requestForPath:(NSString *)path config:(ZTranscoderConfig *)config;
-+ (nullable NSData *)bds_downloadBinaryAtAbsoluteURLString:(NSString *)urlString
-                                                       config:(ZTranscoderConfig *)config
-                                              knownTotalBytes:(int64_t)knownTotalBytes
-                                                     progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))progress
-                                                        error:(NSError **)error;
-+ (nullable id)bds_getJSON:(NSString *)path config:(ZTranscoderConfig *)config error:(NSError **)error;
-+ (nullable id)bds_postJSON:(NSString *)path body:(NSDictionary *)body config:(ZTranscoderConfig *)config error:(NSError **)error;
-+ (BOOL)bds_deleteJSON:(NSString *)path config:(ZTranscoderConfig *)config error:(NSError **)error;
-+ (nullable id)bds_performJSONRequest:(NSURLRequest *)request expectBody:(BOOL)expectBody error:(NSError **)error;
-+ (NSDateFormatter *)bds_iso8601Formatter;
-+ (NSError *)bds_errorWithCode:(ZTranscoderServiceErrorCode)code description:(NSString *)description;
-@end
-
-#pragma mark - ZTranscoderService
 
 @implementation ZTranscoderService
-
-+ (BOOL)isUploadCompressionEnabled {
-    NSDictionary *section = zs_settings_section(kSettingsSection);
-    id stored = section[kUploadCompressionEnabledKey];
-
-    return stored ? [stored boolValue] : NO;
-}
-
-+ (void)setUploadCompressionEnabled:(BOOL)enabled {
-    NSMutableDictionary *section = [zs_settings_section(kSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
-    section[kUploadCompressionEnabledKey] = @(enabled);
-    zs_write_settings_section(kSettingsSection, section);
-    ZLog(@"[ZTranscoderService] upload compression %@ via Config switch", enabled ? @"enabled" : @"disabled");
-}
-
-#pragma mark Public entry point
-
-+ (void)ztranscoderBundleAtURL:(NSURL *)moddedBundleURL
-                    config:(ZTranscoderConfig *)rawConfig
-                  progress:(void (^)(NSString *status))progress
-                completion:(void (^)(NSURL * _Nullable doctoredBundleURL, NSError * _Nullable error))completion {
-    void (^report)(NSString *) = ^(NSString *status) {
-        if (!progress) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ progress(status); });
-    };
-    void (^finish)(NSURL * _Nullable, NSError * _Nullable) = ^(NSURL * _Nullable url, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(url, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                 description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
++ (void)ztranscoderBundleAtURL:(NSURL *)moddedBundleURL config:(ZTranscoderConfig *)config progress:(void (^)(double, NSString *))progress completion:(void (^)(NSURL *, NSError *))completion {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-
-        BOOL scoped = [moddedBundleURL startAccessingSecurityScopedResource];
-        NSData *moddedData = [NSData dataWithContentsOfURL:moddedBundleURL options:0 error:&error];
-        if (scoped) [moddedBundleURL stopAccessingSecurityScopedResource];
-        if (!moddedData) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorCantReadModdedBundle
-                                     description:error.localizedDescription ?: @"Couldn't read the modded bundle."]);
-            return;
-        }
-
-        NSData *uploadData = bds_prepareBundleDataForUpload(moddedData, NULL, &error);
-        if (!uploadData) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                     description:error.localizedDescription ?: @"Couldn't prepare the bundle for upload."]);
-            return;
-        }
-
-        NSString *scratchBranch = [NSString stringWithFormat:@"bundle-doctor/%@", [NSUUID UUID].UUIDString];
-        ZLog(@"[ZTranscoderService] starting run on %@/%@, scratch branch %@",
-              config.repoOwner, config.repoName, scratchBranch);
-
-        report(@"Reading base branch\u2026");
-        NSString *baseCommitSHA = nil;
-        if (![self bds_resolveBaseCommitSHA:&baseCommitSHA config:config error:&error]) {
-            finish(nil, error);
-            return;
-        }
-
-        if (![self bds_createBranch:scratchBranch atCommitSHA:baseCommitSHA config:config error:&error]) {
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Creating queue release\u2026");
-        NSString *uploadURLTemplate = nil;
-        if (![self bds_createReleaseWithTagName:scratchBranch targetCommitish:scratchBranch
-                                          config:config outUploadURLTemplate:&uploadURLTemplate error:&error]) {
-            [self bds_deleteBranch:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Uploading modded bundle\u2026");
-        if (![self bds_uploadReleaseAssetData:uploadData name:kBDSInputAssetName
-                             uploadURLTemplate:uploadURLTemplate progress:nil
-                                        config:config error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Triggering ztranscoder workflow\u2026");
-        NSDate *dispatchedAt = [NSDate date];
-        if (![self bds_dispatchWorkflowOnBranch:scratchBranch config:config error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Waiting for the run to start\u2026");
-        NSString *runID = nil;
-        NSString *runURL = nil;
-        if (![self bds_findRunOnBranch:scratchBranch dispatchedAfter:dispatchedAt config:config
-                                  runID:&runID runURL:&runURL error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Waiting for the workflow to finish\u2026");
-        if (![self bds_waitForRunCompletion:runID runURL:runURL config:config error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Downloading doctored bundle\u2026");
-        NSData *doctoredData = nil;
-        if (![self bds_downloadReleaseAssetNamed:kBDSOutputAssetName fromReleaseTag:scratchBranch
-                                           config:config progress:nil data:&doctoredData error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        report(@"Cleaning up\u2026");
-        [self bds_cleanupScratchSubmission:scratchBranch config:config];
-
-        NSString *tempName = [NSString stringWithFormat:@"doctored-%@.bundle", [NSUUID UUID].UUIDString];
-        NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:tempName]];
-        NSError *writeError = nil;
-        if (![doctoredData writeToURL:tempURL options:NSDataWritingAtomic error:&writeError]) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                     description:writeError.localizedDescription ?: @"Couldn't write doctored bundle to a temp file."]);
-            return;
-        }
-
-        ZLog(@"[ZTranscoderService] doctored bundle ready at %@ (%lu bytes)",
-              tempURL.path, (unsigned long)doctoredData.length);
-
-        finish(tempURL, nil);
-    });
-}
-
-#pragma mark - Decoupled phase API (see this file's header)
-
-+ (nullable NSData *)bds_findOriginalBundleDataForModdedBundleAtPath:(NSString *)moddedBundlePath {
-    NSError *cabError = nil;
-    NSString *cab = [UnityCacheLocator cabForBundleAtPath:moddedBundlePath error:&cabError];
-    if (!cab) {
-        ZLog(@"[ZTranscoderService] shader-restore: couldn't read a CAB off the modded bundle (%@) - skipping.", cabError.localizedDescription);
-        return nil;
-    }
-
-    NSError *locateError = nil;
-    NSString *originalPath = [UnityCacheLocator locateBundlePathForCAB:cab error:&locateError];
-    if (!originalPath) {
-        ZLog(@"[ZTranscoderService] shader-restore: no cached original found for CAB %@ (%@) - skipping.", cab, locateError.localizedDescription);
-        return nil;
-    }
-
-    NSError *readError = nil;
-    NSData *originalData = [NSData dataWithContentsOfFile:originalPath options:0 error:&readError];
-    if (!originalData) {
-
-        ZLog(@"[ZTranscoderService] shader-restore: resolved original at %@ but couldn't read it (%@) - skipping.", originalPath, readError.localizedDescription);
-        return nil;
-    }
-
-    ZLog(@"[ZTranscoderService] shader-restore: matched CAB %@ -> %@ (%lu bytes).", cab, originalPath, (unsigned long)originalData.length);
-    return originalData;
-}
-
-+ (nullable NSData *)bds_findOriginalGameFileDataForHash1:(NSString *)hash1 hash2:(NSString *)hash2 {
-    NSError *locateError = nil;
-    NSString *originalPath = [UnityCacheLocator locateGameFilePathForHash1:hash1 hash2:hash2 error:&locateError];
-    if (!originalPath) {
-        ZLog(@"[ZTranscoderService] Carra2 dispatch: no matching game file found for hash %@/%@ (%@) - skipping original upload.",
-             hash1, hash2, locateError.localizedDescription);
-        return nil;
-    }
-
-    BOOL isDir = NO;
-    if (![NSFileManager.defaultManager fileExistsAtPath:originalPath isDirectory:&isDir] || isDir) {
-        ZLog(@"[ZTranscoderService] Carra2 dispatch: resolved target %@ isn't a regular file - skipping original upload.", originalPath);
-        return nil;
-    }
-
-    NSError *readError = nil;
-    NSData *originalData = [NSData dataWithContentsOfFile:originalPath options:0 error:&readError];
-    if (!originalData) {
-        ZLog(@"[ZTranscoderService] Carra2 dispatch: resolved target at %@ but couldn't read it (%@) - skipping.",
-             originalPath, readError.localizedDescription);
-        return nil;
-    }
-
-    ZLog(@"[ZTranscoderService] Carra2 dispatch: matched hash %@/%@ -> %@ (%lu bytes).",
-         hash1, hash2, originalPath, (unsigned long)originalData.length);
-    return originalData;
-}
-
-+ (void)dispatchBundleAtURL:(NSURL *)moddedBundleURL
-                  carra2Hash1:(nullable NSString *)carra2Hash1
-                  carra2Hash2:(nullable NSString *)carra2Hash2
-                       config:(ZTranscoderConfig *)rawConfig
-        previousScratchBranch:(nullable NSString *)previousScratchBranch
-               uploadProgress:(void (^)(int64_t, int64_t))uploadProgress
-                   completion:(void (^)(ZTranscoderHandle * _Nullable, NSError * _Nullable))completion {
-    BOOL isCarra2 = carra2Hash1.length > 0 && carra2Hash2.length > 0;
-    __block int64_t totalBytesToSend = 0;
-    void (^reportProgress)(int64_t) = ^(int64_t bytesSent) {
-        if (!uploadProgress) return;
-        int64_t total = totalBytesToSend;
-        dispatch_async(dispatch_get_main_queue(), ^{ uploadProgress(bytesSent, total); });
-    };
-    void (^finish)(ZTranscoderHandle * _Nullable, NSError * _Nullable) = ^(ZTranscoderHandle * _Nullable handle, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(handle, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                 description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-
-        BOOL scoped = [moddedBundleURL startAccessingSecurityScopedResource];
-        NSData *moddedData = [NSData dataWithContentsOfURL:moddedBundleURL options:0 error:&error];
-        if (scoped) [moddedBundleURL stopAccessingSecurityScopedResource];
-        if (!moddedData) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorCantReadModdedBundle
-                                     description:error.localizedDescription ?: @"Couldn't read the modded bundle."]);
-            return;
-        }
-
-        unsigned long long compressedByteSize = 0;
-        NSData *uploadData = moddedData;
-        if (!isCarra2) {
-            uploadData = bds_prepareBundleDataForUpload(moddedData, &compressedByteSize, &error);
-            if (!uploadData) {
-                finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                         description:error.localizedDescription ?: @"Couldn't prepare the bundle for upload."]);
-                return;
-            }
-        } else {
-            ZLog(@"[ZTranscoderService] %@ is a Carra2 mod file - leaving its bytes untouched for upload (LZ4HC recompression skipped).",
-                 moddedBundleURL.lastPathComponent);
-        }
-
-        NSData *originalData = isCarra2
-            ? [self bds_findOriginalGameFileDataForHash1:carra2Hash1 hash2:carra2Hash2]
-            : [self bds_findOriginalBundleDataForModdedBundleAtPath:moddedBundleURL.path];
-
-        NSString *cabIdentifier = nil;
-        if (!isCarra2) {
-            NSError *cabError = nil;
-            cabIdentifier = [UnityBundleCAB primaryCABForBundleAtPath:moddedBundleURL.path error:&cabError];
-            if (!cabIdentifier) {
-                ZLog(@"[ZTranscoderService] couldn't resolve a CAB identifier for %@ (%@) - tag will just be a bare UUID.",
-                     moddedBundleURL.path.lastPathComponent, cabError.localizedDescription);
-            }
-        }
-
-        if (previousScratchBranch.length > 0 && [self bds_releaseAtTagHasOutputAsset:previousScratchBranch config:config]) {
-            ZLog(@"[ZTranscoderService] resume hit on %@ - this entry's earlier submission already finished, skipping upload/dispatch.", previousScratchBranch);
-            ZTranscoderHandle *cachedHandle = [[ZTranscoderHandle alloc] initWithScratchBranch:previousScratchBranch alreadyComplete:YES];
-            cachedHandle.compressedByteSize = compressedByteSize;
-            finish(cachedHandle, nil);
-            return;
-        }
-
-        NSString *scratchBranch = bds_uniqueTagForCAB(cabIdentifier);
-        ZLog(@"[ZTranscoderService] dispatching %@/%@, scratch branch %@ (original bundle for shader-restore: %@)",
-              config.repoOwner, config.repoName, scratchBranch, originalData ? @"found" : @"not found");
-
-        NSString *baseCommitSHA = nil;
-        if (![self bds_resolveBaseCommitSHA:&baseCommitSHA config:config error:&error]) {
-            finish(nil, error);
-            return;
-        }
-
-        if (![self bds_createBranch:scratchBranch atCommitSHA:baseCommitSHA config:config error:&error]) {
-            finish(nil, error);
-            return;
-        }
-
-        NSString *uploadURLTemplate = nil;
-        if (![self bds_createReleaseWithTagName:scratchBranch targetCommitish:scratchBranch
-                                          config:config outUploadURLTemplate:&uploadURLTemplate error:&error]) {
-            [self bds_deleteBranch:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        unsigned long long moddedBytes = uploadData.length;
-        unsigned long long originalBytes = originalData.length;
-        totalBytesToSend = (int64_t)(moddedBytes + originalBytes);
-        void (^reportModdedProgress)(int64_t) = ^(int64_t bytesSent) {
-            reportProgress(bytesSent);
-        };
-        void (^reportOriginalProgress)(int64_t) = ^(int64_t bytesSent) {
-            reportProgress((int64_t)moddedBytes + bytesSent);
-        };
-
-        NSString *inputAssetName = isCarra2 ? kBDSCarra2AssetName : kBDSInputAssetName;
-        if (![self bds_uploadReleaseAssetData:uploadData name:inputAssetName
-                             uploadURLTemplate:uploadURLTemplate progress:reportModdedProgress
-                                        config:config error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-        if (!originalData) reportProgress((int64_t)moddedBytes);
-
-        if (originalData) {
-            NSError *originalUploadError = nil;
-            if (![self bds_uploadReleaseAssetData:originalData name:kBDSOriginalAssetName
-                                 uploadURLTemplate:uploadURLTemplate progress:reportOriginalProgress
-                                            config:config error:&originalUploadError]) {
-                ZLog(@"[ZTranscoderService] couldn't upload original.bundle (proceeding without shader-restore): %@",
-                     originalUploadError.localizedDescription);
-            }
-            reportProgress((int64_t)(moddedBytes + originalBytes));
-        }
-
-        if (![self bds_dispatchWorkflowOnBranch:scratchBranch config:config error:&error]) {
-            [self bds_cleanupScratchSubmission:scratchBranch config:config];
-            finish(nil, error);
-            return;
-        }
-
-        ZTranscoderHandle *handle = [[ZTranscoderHandle alloc] initWithScratchBranch:scratchBranch];
-        handle.compressedByteSize = compressedByteSize;
-        finish(handle, nil);
-    });
-}
-
-+ (void)resolveRunForHandle:(ZTranscoderHandle *)handle
-                       config:(ZTranscoderConfig *)rawConfig
-                   completion:(void (^)(BOOL, NSError * _Nullable))completion {
-    void (^finish)(BOOL, NSError * _Nullable) = ^(BOOL found, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(found, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(NO, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-
-        NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/workflows/%@/runs?branch=%@&event=workflow_dispatch&per_page=10",
-                              config.repoOwner, config.repoName, config.workflowFile,
-                              [handle.scratchBranch stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-
-        NSError *error = nil;
-        id result = [self bds_getJSON:urlPath config:config error:&error];
-        if (!result) {
-            finish(NO, error);
-            return;
-        }
-
-        NSArray *runs = result[@"workflow_runs"];
-        if ([runs isKindOfClass:NSArray.class] && runs.count > 0) {
-
-            NSDictionary *best = nil;
-            NSDate *bestDate = nil;
-            NSDateFormatter *iso = [self bds_iso8601Formatter];
-            for (NSDictionary *run in runs) {
-                if (![run isKindOfClass:NSDictionary.class]) continue;
-                NSDate *createdAt = [iso dateFromString:run[@"created_at"] ?: @""];
-                if (!best || (createdAt && (!bestDate || [createdAt compare:bestDate] == NSOrderedDescending))) {
-                    best = run;
-                    bestDate = createdAt;
-                }
-            }
-            if (best) {
-                handle.runID = [best[@"id"] stringValue];
-                handle.runURL = best[@"html_url"];
-                ZLog(@"[ZTranscoderService] resolved run id %@ for scratch branch %@", handle.runID, handle.scratchBranch);
-                finish(YES, nil);
-                return;
-            }
-        }
-
-        finish(NO, nil);
-    });
-}
-
-+ (void)fetchRunStatusForHandle:(ZTranscoderHandle *)handle
-                           config:(ZTranscoderConfig *)rawConfig
-                       completion:(void (^)(ZTranscoderRunStatus, double, NSError * _Nullable))completion {
-    void (^finish)(ZTranscoderRunStatus, double, NSError * _Nullable) = ^(ZTranscoderRunStatus status, double percent, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(status, percent, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (handle.runID.length == 0) {
-        finish(ZTranscoderRunStatusQueued, 0.0, [self bds_errorWithCode:ZTranscoderServiceErrorRunNotFound
-                                                              description:@"No run id on this handle yet - call +resolveRunForHandle:config:completion: first."]);
-        return;
-    }
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(ZTranscoderRunStatusQueued, 0.0, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                                              description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *runPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/runs/%@", config.repoOwner, config.repoName, handle.runID];
-        NSError *error = nil;
-        id run = [self bds_getJSON:runPath config:config error:&error];
-        if (!run) {
-            finish(ZTranscoderRunStatusQueued, 0.0, error);
-            return;
-        }
-
-        NSString *runStatus = run[@"status"];
-        if ([runStatus isEqualToString:@"completed"]) {
-            NSString *conclusion = run[@"conclusion"];
-            if ([conclusion isEqualToString:@"success"]) {
-                ZLog(@"[ZTranscoderService] run %@ completed successfully", handle.runID);
-                finish(ZTranscoderRunStatusSucceeded, 1.0, nil);
-            } else {
-                ZLog(@"[ZTranscoderService] run %@ finished with conclusion \"%@\"", handle.runID, conclusion ?: @"unknown");
-                NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-                userInfo[NSLocalizedDescriptionKey] = [NSString stringWithFormat:@"Workflow run finished with conclusion \"%@\".", conclusion ?: @"unknown"];
-                if (handle.runURL) userInfo[ZTranscoderServiceRunURLKey] = handle.runURL;
-                NSError *runError = [NSError errorWithDomain:ZTranscoderServiceErrorDomain code:ZTranscoderServiceErrorRunFailed userInfo:userInfo];
-                finish(ZTranscoderRunStatusFailed, 0.0, runError);
-            }
-            return;
-        }
-
-        NSString *jobsPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/runs/%@/jobs", config.repoOwner, config.repoName, handle.runID];
-        id jobsResult = [self bds_getJSON:jobsPath config:config error:nil];
-        double percent = 0.0;
-        NSArray *jobs = [jobsResult isKindOfClass:NSDictionary.class] ? jobsResult[@"jobs"] : nil;
-        if ([jobs isKindOfClass:NSArray.class]) {
-            NSInteger totalSteps = 0, completedSteps = 0;
-            for (NSDictionary *job in jobs) {
-                if (![job isKindOfClass:NSDictionary.class]) continue;
-                NSArray *steps = job[@"steps"];
-                if (![steps isKindOfClass:NSArray.class]) continue;
-                for (NSDictionary *step in steps) {
-                    if (![step isKindOfClass:NSDictionary.class]) continue;
-                    totalSteps++;
-                    if ([step[@"status"] isEqualToString:@"completed"]) completedSteps++;
-                }
-            }
-            if (totalSteps > 0) percent = (double)completedSteps / (double)totalSteps;
-        }
-
-        ZTranscoderRunStatus status = percent > 0.0 ? ZTranscoderRunStatusInProgress : ZTranscoderRunStatusQueued;
-        finish(status, percent, nil);
-    });
-}
-
-+ (void)fetchDoctoredBundleForHandle:(ZTranscoderHandle *)handle
-                                config:(ZTranscoderConfig *)rawConfig
-                              progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))downloadProgress
-                            completion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
-    void (^reportProgress)(int64_t, int64_t) = ^(int64_t bytesWritten, int64_t totalBytesExpected) {
-        if (!downloadProgress) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ downloadProgress(bytesWritten, totalBytesExpected); });
-    };
-    void (^finish)(NSURL * _Nullable, NSError * _Nullable) = ^(NSURL * _Nullable url, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(url, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                 description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSError *error = nil;
-        NSData *doctoredData = nil;
-        if (![self bds_downloadReleaseAssetNamed:kBDSOutputAssetName fromReleaseTag:handle.scratchBranch
-                                           config:config progress:reportProgress data:&doctoredData error:&error]) {
-            finish(nil, error);
-            return;
-        }
-        reportProgress((int64_t)doctoredData.length, (int64_t)doctoredData.length);
-
-        [self bds_cleanupScratchSubmission:handle.scratchBranch config:config];
-
-        NSString *tempName = [NSString stringWithFormat:@"doctored-%@.bundle", [NSUUID UUID].UUIDString];
-        NSURL *tempURL = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:tempName]];
-        NSError *writeError = nil;
-        if (![doctoredData writeToURL:tempURL options:NSDataWritingAtomic error:&writeError]) {
-            finish(nil, [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                     description:writeError.localizedDescription ?: @"Couldn't write doctored bundle to a temp file."]);
-            return;
-        }
-
-        ZLog(@"[ZTranscoderService] doctored bundle ready at %@ (%lu bytes)", tempURL.path, (unsigned long)doctoredData.length);
-
-        finish(tempURL, nil);
-    });
-}
-
-#pragma mark - Credential check
-
-+ (void)verifyCredentialsForConfig:(ZTranscoderConfig *)rawConfig
-                          completion:(void (^)(BOOL, NSError * _Nullable))completion {
-    void (^finish)(BOOL, NSError * _Nullable) = ^(BOOL valid, NSError * _Nullable error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(valid, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(NO, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-
-        NSString *path = [NSString stringWithFormat:@"/repos/%@/%@", config.repoOwner, config.repoName];
-        NSError *error = nil;
-        id repo = [self bds_getJSON:path config:config error:&error];
-        ZLog(@"[ZTranscoderService] credential verification against %@/%@: %@", config.repoOwner, config.repoName, repo != nil ? @"OK" : @"FAILED");
-        finish(repo != nil, error);
-    });
-}
-
-#pragma mark - Delete every stored release (8)
-
-+ (void)deleteAllReleasesForConfig:(ZTranscoderConfig *)rawConfig
-                          completion:(void (^)(NSInteger deletedCount, NSError * _Nullable error))completion {
-    void (^finish)(NSInteger, NSError * _Nullable) = ^(NSInteger deletedCount, NSError *error) {
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(deletedCount, error); });
-    };
-
-    ZTranscoderConfig *config = [rawConfig normalizedConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        finish(0, [self bds_errorWithCode:ZTranscoderServiceErrorInvalidConfig
-                                description:@"Set a GitHub repository link and Personal Access Token under Mods \u2192 Auth first."]);
-        return;
-    }
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-
-        static const NSInteger kPerPage = 100;
-        NSMutableArray<NSDictionary *> *allReleases = [NSMutableArray array];
-        NSInteger page = 1;
-        for (;;) {
-            NSString *path = [NSString stringWithFormat:@"/repos/%@/%@/releases?per_page=%ld&page=%ld",
-                               config.repoOwner, config.repoName, (long)kPerPage, (long)page];
+        @autoreleasepool {
+            NSURL *output = nil;
             NSError *error = nil;
-            id result = [self bds_getJSON:path config:config error:&error];
-            if (!result) {
-                finish(0, error);
-                return;
-            }
-            NSArray *pageReleases = [result isKindOfClass:NSArray.class] ? result : @[];
-            for (NSDictionary *release in pageReleases) {
-                if ([release isKindOfClass:NSDictionary.class]) [allReleases addObject:release];
-            }
-            if (pageReleases.count < kPerPage) break;
-            page++;
+            if (progress) progress(0.0, @"Verifying the mod bundle and locating the stock target");
+            BOOL ok = zt_process_bundle(moddedBundleURL, config, progress, &output, &error);
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(ok ? output : nil, error); });
         }
-
-        NSInteger deletedCount = 0;
-        for (NSDictionary *release in allReleases) {
-            NSString *releaseID = [release[@"id"] stringValue];
-            NSString *tagName = [release[@"tag_name"] isKindOfClass:NSString.class] ? release[@"tag_name"] : nil;
-
-            if (releaseID.length > 0) {
-                NSString *deletePath = [NSString stringWithFormat:@"/repos/%@/%@/releases/%@",
-                                         config.repoOwner, config.repoName, releaseID];
-                NSError *deleteError = nil;
-                if ([self bds_deleteJSON:deletePath config:config error:&deleteError]) {
-                    deletedCount++;
-                } else {
-                    ZLog(@"[ZTranscoderService] couldn't delete release %@ (tag %@) while clearing the proxy: %@", releaseID, tagName, deleteError);
-                }
-            }
-
-            if (tagName.length > 0) {
-                NSString *escapedTag = [tagName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-                NSString *tagRefPath = [NSString stringWithFormat:@"/repos/%@/%@/git/refs/tags/%@",
-                                         config.repoOwner, config.repoName, escapedTag];
-                NSError *tagDeleteError = nil;
-                if (![self bds_deleteJSON:tagRefPath config:config error:&tagDeleteError]) {
-                    ZLog(@"[ZTranscoderService] couldn't delete release tag ref %@ while clearing the proxy: %@", tagName, tagDeleteError);
-                }
-            }
-        }
-
-        ZLog(@"[ZTranscoderService] deleted %ld of %lu release(s) for %@/%@", (long)deletedCount, (unsigned long)allReleases.count, config.repoOwner, config.repoName);
-        finish(deletedCount, nil);
     });
 }
 
-#pragma mark - Git Data API steps
-
-+ (BOOL)bds_resolveBaseCommitSHA:(NSString **)outCommitSHA
-                          config:(ZTranscoderConfig *)config
-                           error:(NSError **)error {
-    NSString *path = [NSString stringWithFormat:@"/repos/%@/%@/git/ref/heads/%@",
-                       config.repoOwner, config.repoName, config.ref];
-    id ref = [self bds_getJSON:path config:config error:error];
-    if (!ref) return NO;
-
-    NSString *commitSHA = [ref valueForKeyPath:@"object.sha"];
-    if (![commitSHA isKindOfClass:[NSString class]]) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorAPIError
-                                         description:@"Unexpected response resolving the base branch ref."];
-        return NO;
-    }
-
-    if (outCommitSHA) *outCommitSHA = commitSHA;
-    return YES;
-}
-
-+ (BOOL)bds_createBranch:(NSString *)branchName
-              atCommitSHA:(NSString *)commitSHA
-                   config:(ZTranscoderConfig *)config
-                    error:(NSError **)error {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/git/refs", config.repoOwner, config.repoName];
-    NSDictionary *body = @{
-        @"ref": [NSString stringWithFormat:@"refs/heads/%@", branchName],
-        @"sha": commitSHA,
-    };
-    NSError *createError = nil;
-    if ([self bds_postJSON:urlPath body:body config:config error:&createError] != nil) return YES;
-
-    if ([self bds_errorIsAlreadyExists:createError]) {
-        ZLog(@"[ZTranscoderService] scratch branch %@ already exists (racing/leftover submission for the same bundle) - reusing it.", branchName);
-        return YES;
-    }
-    if (error) *error = createError;
-    return NO;
-}
-
-+ (BOOL)bds_errorIsAlreadyExists:(NSError *)error {
-    if (![error.domain isEqualToString:ZTranscoderServiceErrorDomain]) return NO;
-    if (error.code != ZTranscoderServiceErrorAPIError) return NO;
-    if (![error.userInfo[ZTranscoderServiceHTTPStatusKey] isEqual:@422]) return NO;
-    NSString *body = error.userInfo[ZTranscoderServiceResponseBodyKey];
-    return [body rangeOfString:@"already exists" options:NSCaseInsensitiveSearch].location != NSNotFound;
-}
-
-+ (void)bds_deleteBranch:(NSString *)branchName config:(ZTranscoderConfig *)config {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/git/refs/heads/%@",
-                          config.repoOwner, config.repoName, branchName];
-    NSError *deleteError = nil;
-    if (![self bds_deleteJSON:urlPath config:config error:&deleteError]) {
-
-        ZLog(@"[ZTranscoderService] couldn't delete scratch branch %@: %@", branchName, deleteError);
-    }
-}
-
-#pragma mark - Releases API steps (input/output transport)
-
-+ (BOOL)bds_createReleaseWithTagName:(NSString *)tagName
-                       targetCommitish:(NSString *)targetCommitish
-                                config:(ZTranscoderConfig *)config
-                  outUploadURLTemplate:(NSString **)outUploadURLTemplate
-                                 error:(NSError **)error {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/releases", config.repoOwner, config.repoName];
-    NSDictionary *body = @{
-        @"tag_name": tagName,
-        @"target_commitish": targetCommitish,
-        @"name": tagName,
-        @"body": @"Scratch release for the ZTranscoder pipeline - holds one submission's input/output bundle assets. Safe to delete; +bds_cleanupScratchSubmission:config: removes it once the doctored bundle has been read back.",
-
-        @"draft": @NO,
-        @"prerelease": @YES,
-    };
-    NSError *createError = nil;
-    id result = [self bds_postJSON:urlPath body:body config:config error:&createError];
-    if (!result) {
-
-        if ([self bds_errorIsAlreadyExists:createError]) {
-            ZLog(@"[ZTranscoderService] release tagged %@ already exists (racing/leftover submission for the same bundle) - reusing it.", tagName);
-            NSError *lookupError = nil;
-            NSDictionary *existing = [self bds_fetchReleaseByTag:tagName config:config error:&lookupError];
-            NSString *existingUploadURLTemplate = existing[@"upload_url"];
-            if ([existingUploadURLTemplate isKindOfClass:NSString.class]) {
-                if (outUploadURLTemplate) *outUploadURLTemplate = existingUploadURLTemplate;
-                return YES;
-            }
-            if (error) *error = lookupError ?: [self bds_errorWithCode:ZTranscoderServiceErrorAPIError description:@"Existing release had no upload_url."];
-            return NO;
++ (void)dispatchBundleAtURL:(NSURL *)moddedBundleURL carra2Hash1:(NSString *)carra2Hash1 carra2Hash2:(NSString *)carra2Hash2 config:(ZTranscoderConfig *)config previousScratchBranch:(NSString *)previousScratchBranch uploadProgress:(void (^)(int64_t, int64_t))uploadProgress completion:(void (^)(ZTranscoderHandle *, NSError *))completion {
+    (void)carra2Hash1; (void)carra2Hash2; (void)previousScratchBranch;
+    [self ztranscoderBundleAtURL:moddedBundleURL config:config progress:^(double fraction, NSString *stage) {
+        if (uploadProgress) {
+            uint64_t total = zt_file_size(moddedBundleURL.path);
+            if (total > INT64_MAX) total = INT64_MAX;
+            uploadProgress((int64_t)((double)total * fraction), (int64_t)total);
         }
-        if (error) *error = createError;
-        return NO;
-    }
-
-    NSString *uploadURLTemplate = result[@"upload_url"];
-    if (![uploadURLTemplate isKindOfClass:NSString.class]) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorAPIError description:@"Release creation didn't return an upload_url."];
-        return NO;
-    }
-    if (outUploadURLTemplate) *outUploadURLTemplate = uploadURLTemplate;
-    return YES;
-}
-
-+ (BOOL)bds_uploadReleaseAssetData:(NSData *)data
-                                name:(NSString *)name
-                   uploadURLTemplate:(NSString *)uploadURLTemplate
-                            progress:(nullable void (^)(int64_t bytesSent))progress
-                              config:(ZTranscoderConfig *)config
-                               error:(NSError **)error {
-    NSRange templateStart = [uploadURLTemplate rangeOfString:@"{"];
-    NSString *baseURLString = templateStart.location == NSNotFound ? uploadURLTemplate
-                                                                    : [uploadURLTemplate substringToIndex:templateStart.location];
-    NSString *escapedName = [name stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]];
-    NSString *urlString = [NSString stringWithFormat:@"%@?name=%@", baseURLString, escapedName];
-
-    NSMutableURLRequest *request = [self bds_requestForAbsoluteURLString:urlString config:config];
-    if (!request) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed description:@"Couldn't build the release asset upload URL."];
-        return NO;
-    }
-    request.HTTPMethod = @"POST";
-    [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
-
-    BDSUploadProgressDelegate *delegate = [BDSUploadProgressDelegate new];
-    delegate.onProgress = progress;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
-                                                             delegate:delegate
-                                                        delegateQueue:nil];
-
-    __block NSData *responseData = nil;
-    __block NSHTTPURLResponse *httpResponse = nil;
-    __block NSError *transportError = nil;
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    NSURLSessionUploadTask *task = [session uploadTaskWithRequest:request fromData:data
-                                                  completionHandler:^(NSData *taskData, NSURLResponse *taskResponse, NSError *taskError) {
-
-        responseData = taskData;
-        httpResponse = [taskResponse isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)taskResponse : nil;
-        transportError = taskError;
-        dispatch_semaphore_signal(sema);
+    } completion:^(NSURL *outputURL, NSError *error) {
+        if (!outputURL) { completion(nil, error); return; }
+        ZTranscoderHandle *handle = [ZTranscoderHandle new];
+        handle.scratchBranch = outputURL.path;
+        handle.alreadyComplete = YES;
+        handle.compressedByteSize = zt_file_size(outputURL.path);
+        completion(handle, nil);
     }];
-    [task resume];
-    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-    [session finishTasksAndInvalidate];
-
-    if (transportError) {
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorRequestFailed
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: transportError.localizedDescription ?: @"Network request failed.",
-                                          NSUnderlyingErrorKey: transportError,
-                                      }];
-        }
-        return NO;
-    }
-
-    NSInteger status = httpResponse.statusCode;
-    if (status < 200 || status >= 300) {
-        NSString *bodyString = responseData ? [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding] : @"";
-        if (bodyString.length > 500) bodyString = [bodyString substringToIndex:500];
-        ZLog(@"[ZTranscoderService] POST %@ -> %ld: %@", urlString, (long)status, bodyString);
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorAPIError
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: [NSString stringWithFormat:@"GitHub API returned %ld.", (long)status],
-                                          ZTranscoderServiceHTTPStatusKey: @(status),
-                                          ZTranscoderServiceResponseBodyKey: bodyString,
-                                      }];
-        }
-        return NO;
-    }
-
-    return YES;
 }
 
-+ (nullable NSDictionary *)bds_fetchReleaseByTag:(NSString *)tagName config:(ZTranscoderConfig *)config error:(NSError **)error {
-    NSString *escapedTag = [tagName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/releases/tags/%@", config.repoOwner, config.repoName, escapedTag];
-    id result = [self bds_getJSON:urlPath config:config error:error];
-    return [result isKindOfClass:NSDictionary.class] ? result : nil;
++ (void)resolveRunForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config completion:(void (^)(BOOL, NSError *))completion {
+    (void)config;
+    BOOL exists = handle.scratchBranch.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:handle.scratchBranch];
+    completion(exists, exists ? nil : ZTMakeTranscoderError(ZTranscoderServiceErrorRunNotFound, @"The locally transcoded bundle is no longer available."));
 }
 
-+ (BOOL)bds_releaseAtTagHasOutputAsset:(NSString *)tagName config:(ZTranscoderConfig *)config {
-    NSError *lookupError = nil;
-    NSDictionary *release = [self bds_fetchReleaseByTag:tagName config:config error:&lookupError];
-    if (!release) return NO;
-    NSArray *assets = release[@"assets"];
-    if (![assets isKindOfClass:NSArray.class]) return NO;
-    for (NSDictionary *asset in assets) {
-        if ([asset isKindOfClass:NSDictionary.class] && [asset[@"name"] isEqual:kBDSOutputAssetName]) return YES;
-    }
-    return NO;
++ (void)fetchRunStatusForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config completion:(void (^)(ZTranscoderRunStatus, double, NSError *))completion {
+    (void)config;
+    BOOL exists = handle.scratchBranch.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:handle.scratchBranch];
+    completion(exists ? ZTranscoderRunStatusSucceeded : ZTranscoderRunStatusFailed, exists ? 1.0 : 0.0, exists ? nil : ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The locally transcoded bundle no longer exists."));
 }
 
-+ (BOOL)bds_downloadReleaseAssetNamed:(NSString *)name
-                       fromReleaseTag:(NSString *)releaseTag
-                               config:(ZTranscoderConfig *)config
-                             progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))progress
-                                 data:(NSData **)outData
-                                error:(NSError **)error {
-    NSDictionary *release = [self bds_fetchReleaseByTag:releaseTag config:config error:error];
-    if (!release) {
-
-        if (error && (*error).code == ZTranscoderServiceErrorAPIError &&
-            [(*error).userInfo[ZTranscoderServiceHTTPStatusKey] isEqual:@404]) {
-            *error = [self bds_errorWithCode:ZTranscoderServiceErrorOutputMissing
-                                  description:[NSString stringWithFormat:@"Run succeeded but the release tagged %@ wasn't found afterward.", releaseTag]];
-        }
-        return NO;
-    }
-
-    NSArray *assets = release[@"assets"];
-    NSDictionary *asset = nil;
-    if ([assets isKindOfClass:NSArray.class]) {
-        for (NSDictionary *candidate in assets) {
-            if ([candidate isKindOfClass:NSDictionary.class] && [candidate[@"name"] isEqual:name]) {
-                asset = candidate;
-                break;
-            }
-        }
-    }
-    if (!asset) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorOutputMissing
-                                         description:[NSString stringWithFormat:@"Run succeeded but %@ wasn't on release %@ afterward - check the workflow uploads its output there.", name, releaseTag]];
-        return NO;
-    }
-
-    NSString *assetAPIURL = asset[@"url"];
-    if (![assetAPIURL isKindOfClass:NSString.class]) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorAPIError description:@"Release asset had no API url."];
-        return NO;
-    }
-
-    id assetSizeValue = asset[@"size"];
-    int64_t knownTotalBytes = [assetSizeValue respondsToSelector:@selector(longLongValue)] ? [assetSizeValue longLongValue] : 0;
-
-    NSData *data = [self bds_downloadBinaryAtAbsoluteURLString:assetAPIURL config:config
-                                                 knownTotalBytes:knownTotalBytes progress:progress error:error];
-    if (!data) return NO;
-    if (outData) *outData = data;
-    return YES;
++ (void)fetchDoctoredBundleForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config progress:(void (^)(int64_t, int64_t))downloadProgress completion:(void (^)(NSURL *, NSError *))completion {
+    (void)config;
+    NSString *path = handle.scratchBranch;
+    if (!path.length || ![NSFileManager.defaultManager fileExistsAtPath:path]) { completion(nil, ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The local transcode output is missing.")); return; }
+    uint64_t size = zt_file_size(path);
+    if (downloadProgress) downloadProgress((int64_t)size, (int64_t)size);
+    completion([NSURL fileURLWithPath:path], nil);
 }
 
-+ (void)bds_deleteReleaseWithTag:(NSString *)tagName config:(ZTranscoderConfig *)config {
-    NSError *lookupError = nil;
-    NSDictionary *release = [self bds_fetchReleaseByTag:tagName config:config error:&lookupError];
-    if (!release) {
-
-        return;
-    }
-
-    NSString *releaseID = [release[@"id"] stringValue];
-    if (releaseID.length > 0) {
-        NSString *deletePath = [NSString stringWithFormat:@"/repos/%@/%@/releases/%@", config.repoOwner, config.repoName, releaseID];
-        NSError *deleteError = nil;
-        if (![self bds_deleteJSON:deletePath config:config error:&deleteError]) {
-            ZLog(@"[ZTranscoderService] couldn't delete scratch release %@: %@", tagName, deleteError);
-        }
-    }
-
-    NSString *escapedTag = [tagName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
-    NSString *tagRefPath = [NSString stringWithFormat:@"/repos/%@/%@/git/refs/tags/%@", config.repoOwner, config.repoName, escapedTag];
-    NSError *tagDeleteError = nil;
-    if (![self bds_deleteJSON:tagRefPath config:config error:&tagDeleteError]) {
-        ZLog(@"[ZTranscoderService] couldn't delete scratch release tag ref %@: %@", tagName, tagDeleteError);
-    }
-}
-
-+ (void)bds_cleanupScratchSubmission:(NSString *)scratchBranch config:(ZTranscoderConfig *)config {
-    [self bds_deleteReleaseWithTag:scratchBranch config:config];
-    [self bds_deleteBranch:scratchBranch config:config];
-}
-
-#pragma mark - Actions API steps
-
-+ (BOOL)bds_dispatchWorkflowOnBranch:(NSString *)branchName
-                                config:(ZTranscoderConfig *)config
-                                 error:(NSError **)error {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/workflows/%@/dispatches",
-                          config.repoOwner, config.repoName, config.workflowFile];
-
-    NSDictionary *body = @{
-        @"ref": branchName,
-        @"inputs": @{
-            kBDSReleaseTagInputKey: branchName,
-            kBDSInputFormatKey: config.outputFormat,
-        },
-    };
-
-    return [self bds_postJSON:urlPath body:body config:config error:error] != nil;
-}
-
-+ (BOOL)bds_findRunOnBranch:(NSString *)branchName
-             dispatchedAfter:(NSDate *)dispatchedAt
-                      config:(ZTranscoderConfig *)config
-                       runID:(NSString **)outRunID
-                      runURL:(NSString **)outRunURL
-                       error:(NSError **)error {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/workflows/%@/runs?branch=%@&event=workflow_dispatch&per_page=10",
-                          config.repoOwner, config.repoName, config.workflowFile,
-                          [branchName stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLQueryAllowedCharacterSet]]];
-
-    NSDate *deadline = [dispatchedAt dateByAddingTimeInterval:kBDSRunDiscoveryTimeout];
-    NSDateFormatter *iso = [self bds_iso8601Formatter];
-
-    while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
-        id result = [self bds_getJSON:urlPath config:config error:error];
-        if (!result) return NO;
-
-        NSArray *runs = result[@"workflow_runs"];
-        if ([runs isKindOfClass:[NSArray class]]) {
-            for (NSDictionary *run in runs) {
-                NSString *createdAtString = run[@"created_at"];
-                NSDate *createdAt = [iso dateFromString:createdAtString ?: @""];
-
-                if (createdAt && [createdAt compare:[dispatchedAt dateByAddingTimeInterval:-5.0]] != NSOrderedAscending) {
-                    if (outRunID) *outRunID = [run[@"id"] stringValue];
-                    if (outRunURL) *outRunURL = run[@"html_url"];
-                    ZLog(@"[ZTranscoderService] found dispatched run %@ on branch %@", [run[@"id"] stringValue], branchName);
-                    return YES;
-                }
-            }
-        }
-
-        [NSThread sleepForTimeInterval:kBDSRunDiscoveryPollInterval];
-    }
-
-    if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRunNotFound
-                                     description:@"Dispatched the workflow but no matching run showed up in time."];
-    ZLog(@"[ZTranscoderService] gave up looking for a dispatched run on branch %@ after %.0fs", branchName, kBDSRunDiscoveryTimeout);
-    return NO;
-}
-
-+ (BOOL)bds_waitForRunCompletion:(NSString *)runID
-                            runURL:(NSString *)runURL
-                            config:(ZTranscoderConfig *)config
-                             error:(NSError **)error {
-    NSString *urlPath = [NSString stringWithFormat:@"/repos/%@/%@/actions/runs/%@", config.repoOwner, config.repoName, runID];
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kBDSRunCompletionTimeout];
-
-    while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
-        id run = [self bds_getJSON:urlPath config:config error:error];
-        if (!run) return NO;
-
-        NSString *status = run[@"status"];
-        if ([status isEqualToString:@"completed"]) {
-            NSString *conclusion = run[@"conclusion"];
-            if ([conclusion isEqualToString:@"success"]) {
-                ZLog(@"[ZTranscoderService] run %@ completed successfully (sync wait)", runID);
-                return YES;
-            }
-
-            ZLog(@"[ZTranscoderService] run %@ finished with conclusion \"%@\" (sync wait)", runID, conclusion ?: @"unknown");
-            if (error) {
-                NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-                userInfo[NSLocalizedDescriptionKey] = [NSString stringWithFormat:@"Workflow run finished with conclusion \"%@\".", conclusion ?: @"unknown"];
-                if (runURL) userInfo[ZTranscoderServiceRunURLKey] = runURL;
-                *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                              code:ZTranscoderServiceErrorRunFailed
-                                          userInfo:userInfo];
-            }
-            return NO;
-        }
-
-        [NSThread sleepForTimeInterval:kBDSRunCompletionPollInterval];
-    }
-
-    if (error) {
-        NSMutableDictionary *userInfo = [NSMutableDictionary dictionary];
-        userInfo[NSLocalizedDescriptionKey] = @"Timed out waiting for the workflow run to finish.";
-        if (runURL) userInfo[ZTranscoderServiceRunURLKey] = runURL;
-        *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain code:ZTranscoderServiceErrorTimedOut userInfo:userInfo];
-    }
-    ZLog(@"[ZTranscoderService] timed out after %.0fs waiting for run %@ to finish (sync wait)", kBDSRunCompletionTimeout, runID);
-    return NO;
-}
-
-#pragma mark - HTTP plumbing
-
-+ (nullable NSMutableURLRequest *)bds_requestForAbsoluteURLString:(NSString *)urlString config:(ZTranscoderConfig *)config {
-    NSURL *url = [NSURL URLWithString:urlString];
-    if (!url) return nil;
-
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-
-    [request setValue:@"ZSingularity-ZTranscoder" forHTTPHeaderField:@"User-Agent"];
-    [request setValue:@"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
-    [request setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
-    [request setValue:[NSString stringWithFormat:@"Bearer %@", config.authToken] forHTTPHeaderField:@"Authorization"];
-    return request;
-}
-
-+ (nullable NSMutableURLRequest *)bds_requestForPath:(NSString *)path config:(ZTranscoderConfig *)config {
-    return [self bds_requestForAbsoluteURLString:[@"https://api.github.com" stringByAppendingString:path] config:config];
-}
-
-+ (nullable NSData *)bds_downloadBinaryAtAbsoluteURLString:(NSString *)urlString
-                                                       config:(ZTranscoderConfig *)config
-                                              knownTotalBytes:(int64_t)knownTotalBytes
-                                                     progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))progress
-                                                        error:(NSError **)error {
-    NSMutableURLRequest *request = [self bds_requestForAbsoluteURLString:urlString config:config];
-    if (!request) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed description:@"Couldn't build request URL."];
-        return nil;
-    }
-    [request setValue:@"application/octet-stream" forHTTPHeaderField:@"Accept"];
-    request.HTTPMethod = @"GET";
-
-    __block NSData *responseData = nil;
-    __block NSHTTPURLResponse *httpResponse = nil;
-    __block NSError *transportError = nil;
-
-    BDSDownloadProgressDelegate *delegate = [BDSDownloadProgressDelegate new];
-    delegate.knownTotalBytesExpected = knownTotalBytes;
-    delegate.onProgress = progress;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:NSURLSessionConfiguration.defaultSessionConfiguration
-                                                             delegate:delegate
-                                                        delegateQueue:nil];
-
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    NSURLSessionDownloadTask *task = [session downloadTaskWithRequest:request
-                                                      completionHandler:^(NSURL *location, NSURLResponse *response, NSError *taskError) {
-        httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        transportError = taskError;
-        if (location) {
-            NSError *readError = nil;
-            responseData = [NSData dataWithContentsOfURL:location options:0 error:&readError];
-            if (!responseData) {
-                ZLog(@"[ZTranscoderService] couldn't read downloaded temp file at %@: %@", location, readError);
-            }
-        }
-        dispatch_semaphore_signal(sema);
-    }];
-    [task resume];
-    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-    [session finishTasksAndInvalidate];
-
-    if (transportError) {
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorRequestFailed
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: transportError.localizedDescription ?: @"Network request failed.",
-                                          NSUnderlyingErrorKey: transportError,
-                                      }];
-        }
-        return nil;
-    }
-
-    NSInteger status = httpResponse.statusCode;
-    if (status < 200 || status >= 300) {
-        NSString *bodyString = responseData ? [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding] : @"";
-        if (bodyString.length > 500) bodyString = [bodyString substringToIndex:500];
-        ZLog(@"[ZTranscoderService] GET %@ -> %ld: %@", urlString, (long)status, bodyString);
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorAPIError
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: [NSString stringWithFormat:@"GitHub API returned %ld.", (long)status],
-                                          ZTranscoderServiceHTTPStatusKey: @(status),
-                                          ZTranscoderServiceResponseBodyKey: bodyString,
-                                      }];
-        }
-        return nil;
-    }
-
-    if (!responseData) {
-
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                         description:@"Download succeeded but the temp file couldn't be read."];
-        return nil;
-    }
-
-    return responseData;
-}
-
-+ (nullable id)bds_getJSON:(NSString *)path config:(ZTranscoderConfig *)config error:(NSError **)error {
-    NSMutableURLRequest *request = [self bds_requestForPath:path config:config];
-    if (!request) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed description:@"Couldn't build request URL."];
-        return nil;
-    }
-    request.HTTPMethod = @"GET";
-    return [self bds_performJSONRequest:request expectBody:YES error:error];
-}
-
-+ (nullable id)bds_postJSON:(NSString *)path body:(NSDictionary *)body config:(ZTranscoderConfig *)config error:(NSError **)error {
-    NSMutableURLRequest *request = [self bds_requestForPath:path config:config];
-    if (!request) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed description:@"Couldn't build request URL."];
-        return nil;
-    }
-    request.HTTPMethod = @"POST";
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-
-    NSError *encodeError = nil;
-    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&encodeError];
-    if (!bodyData) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                         description:encodeError.localizedDescription ?: @"Couldn't encode request body."];
-        return nil;
-    }
-    request.HTTPBody = bodyData;
-
-    return [self bds_performJSONRequest:request expectBody:NO error:error];
-}
-
-+ (BOOL)bds_deleteJSON:(NSString *)path config:(ZTranscoderConfig *)config error:(NSError **)error {
-    NSMutableURLRequest *request = [self bds_requestForPath:path config:config];
-    if (!request) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed description:@"Couldn't build request URL."];
-        return NO;
-    }
-    request.HTTPMethod = @"DELETE";
-    return [self bds_performJSONRequest:request expectBody:NO error:error] != nil;
-}
-
-static const NSTimeInterval kBDSSynchronousRequestTimeout = 45.0;
-
-+ (nullable id)bds_performJSONRequest:(NSURLRequest *)request expectBody:(BOOL)expectBody error:(NSError **)error {
-    __block NSData *responseData = nil;
-    __block NSHTTPURLResponse *httpResponse = nil;
-    __block NSError *transportError = nil;
-
-    dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-    NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
-                                                                    completionHandler:^(NSData *data, NSURLResponse *response, NSError *taskError) {
-        responseData = data;
-        httpResponse = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        transportError = taskError;
-        dispatch_semaphore_signal(sema);
-    }];
-    [task resume];
-
-    long timedOut = dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kBDSSynchronousRequestTimeout * NSEC_PER_SEC)));
-    if (timedOut != 0) {
-
-        [task cancel];
-        if (error) {
-            *error = [self bds_errorWithCode:ZTranscoderServiceErrorRequestFailed
-                                  description:@"Timed out waiting for a response from GitHub."];
-        }
-        return nil;
-    }
-
-    if (transportError) {
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorRequestFailed
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: transportError.localizedDescription ?: @"Network request failed.",
-                                          NSUnderlyingErrorKey: transportError,
-                                      }];
-        }
-        return nil;
-    }
-
-    NSInteger status = httpResponse.statusCode;
-    if (status < 200 || status >= 300) {
-        NSString *bodyString = responseData ? [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding] : @"";
-        if (bodyString.length > 500) bodyString = [bodyString substringToIndex:500];
-        ZLog(@"[ZTranscoderService] %@ %@ -> %ld: %@", request.HTTPMethod, request.URL.path, (long)status, bodyString);
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderServiceErrorDomain
-                                          code:ZTranscoderServiceErrorAPIError
-                                      userInfo:@{
-                                          NSLocalizedDescriptionKey: [NSString stringWithFormat:@"GitHub API returned %ld.", (long)status],
-                                          ZTranscoderServiceHTTPStatusKey: @(status),
-                                          ZTranscoderServiceResponseBodyKey: bodyString,
-                                      }];
-        }
-        return nil;
-    }
-
-    if (responseData.length == 0) {
-
-        return expectBody ? @{} : @{};
-    }
-
-    NSError *parseError = nil;
-    id parsed = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&parseError];
-    if (!parsed) {
-        if (error) *error = [self bds_errorWithCode:ZTranscoderServiceErrorAPIError
-                                         description:parseError.localizedDescription ?: @"Couldn't parse GitHub API response."];
-        return nil;
-    }
-    return parsed;
-}
-
-+ (NSDateFormatter *)bds_iso8601Formatter {
-    static NSDateFormatter *formatter;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        formatter = [NSDateFormatter new];
-        formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
-        formatter.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
-        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    });
-    return formatter;
-}
-
-+ (NSError *)bds_errorWithCode:(ZTranscoderServiceErrorCode)code description:(NSString *)description {
-    return [NSError errorWithDomain:ZTranscoderServiceErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: description}];
-}
-
++ (BOOL)isUploadCompressionEnabled { return NO; }
++ (void)setUploadCompressionEnabled:(BOOL)enabled { (void)enabled; }
++ (void)deleteAllReleasesForConfig:(ZTranscoderConfig *)config completion:(void (^)(NSInteger, NSError *))completion { (void)config; completion(0, nil); }
++ (void)verifyCredentialsForConfig:(ZTranscoderConfig *)config completion:(void (^)(BOOL, NSError *))completion { (void)config; completion(YES, nil); }
 @end
 
 #pragma mark - ZTranscoderInstaller

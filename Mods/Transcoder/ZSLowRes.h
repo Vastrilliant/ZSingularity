@@ -49,6 +49,7 @@ typedef struct {
 - (ZSLowResStatus)status;
 - (NSString *)statusLine;
 - (NSString *)summary;
++ (nullable NSData *)encodeRGBA8DataToASTC6:(NSData *)rgbaData width:(uint32_t)width height:(uint32_t)height sRGB:(BOOL)sRGB error:(NSError **)error;
 
 @end
 

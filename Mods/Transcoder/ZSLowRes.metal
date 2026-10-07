@@ -1841,3 +1841,12 @@ kernel void zslr_astc_encode_fast_12(
     uint2 gid [[thread_position_in_grid]]) {
     zslr_encode_kernel<12, true>(source, encoded, metrics, params, gid);
 }
+
+kernel void zslr_astc_encode_fast_6(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<6, true>(source, encoded, metrics, params, gid);
+}
