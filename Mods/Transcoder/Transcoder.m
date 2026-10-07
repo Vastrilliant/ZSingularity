@@ -1569,6 +1569,8 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSUInteger assetCount = 0;
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) if (sourceObject.classID == 28 || sourceObject.classID == 213 || sourceObject.classID == 687) assetCount++;
     NSUInteger processedAssets = 0;
+    NSUInteger skippedAssets = 0;
+    NSUInteger matchedAssets = 0;
     ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
@@ -1577,10 +1579,12 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
         ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
         if (!targetObject) {
-            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Required mod asset class=%d PathID=%lld is not present in the original bundle.", sourceObject.classID, (long long)sourceObject.pathID]);
-            [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
-            return NO;
+            skippedAssets++;
+            ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): not present in the original bundle, nothing in the game can reference it", sourceObject.classID, (long long)sourceObject.pathID, key);
+            if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+            continue;
         }
+        matchedAssets++;
         if (sourceObject.classID == 28) {
             ZTTextureRecord *sourceTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
             ZTTextureRecord *targetTexture = targetTextureMap[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]];
@@ -1639,6 +1643,12 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             if (sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
         }
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+    }
+    ZLog(@"[ZTranscoder] asset matching finished: matched=%lu skipped=%lu replacementTextures=%lu", (unsigned long)matchedAssets, (unsigned long)skippedAssets, (unsigned long)replacements.count);
+    if (matchedAssets == 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteAtlas assets exist in the original bundle.");
+        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+        return NO;
     }
     NSString *resSOutput = [workDir stringByAppendingPathComponent:@"target.resS"];
     uint64_t newResSSize = 0;
