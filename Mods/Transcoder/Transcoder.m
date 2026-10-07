@@ -2,6 +2,7 @@
 #import "ZTweakLog.h"
 #import "UnityBundleTools.h"
 #import "Mods.h"
+#import "ZSEngine.h"
 #import "ZSLowRes.h"
 #import "IL2CppIntrospection.h"
 #import <CommonCrypto/CommonDigest.h>
