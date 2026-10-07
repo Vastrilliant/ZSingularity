@@ -31,16 +31,12 @@ static const uint32_t kZSTranscoderMaxTextureDimension = 16384u;
 static const int32_t kZTClassTexture2D = 28;
 static const int32_t kZTClassSprite = 213;
 static const int32_t kZTClassSpriteAtlas = 687078895;
-static const int32_t kZTClassSpriteRenderer = 212;
-static const int32_t kZTClassSpriteMask = 331;
 static const int32_t kZTClassTextAsset = 49;
 
 static BOOL zt_class_is_transcoded(int32_t classID) {
     return classID == kZTClassTexture2D
         || classID == kZTClassSprite
         || classID == kZTClassSpriteAtlas
-        || classID == kZTClassSpriteRenderer
-        || classID == kZTClassSpriteMask
         || classID == kZTClassTextAsset;
 }
 
@@ -50,6 +46,8 @@ static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
     switch (classID) {
         case 0:
         case 48:
+        case 212:
+        case 331:
         case 72:
         case 115:
         case 142:
@@ -1649,7 +1647,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
     NSUInteger matchedAssets = 0;
-    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas/SpriteRenderer/SpriteMask/TextAsset object(s)", (unsigned long)assetCount);
+    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas/TextAsset object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         if (!zt_class_is_transplantable(sourceObject.classID, layoutShared)) continue;
@@ -1768,7 +1766,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         ZLog(@"[ZTranscoder] added %lu object(s) missing from the original bundle (%lu Texture2D)", (unsigned long)addedObjects.count, (unsigned long)addedTextures.count);
     }
     if (matchedAssets == 0) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteAtlas/SpriteRenderer/SpriteMask/TextAsset assets exist in the original bundle.");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteAtlas/TextAsset assets exist in the original bundle.");
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
         return NO;
     }
