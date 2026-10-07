@@ -64,24 +64,36 @@ jobs:
         id: crunch-cache
         uses: actions/cache@v4
         with:
-          path: |
-            crn_decomp.h
-            crunch-checksums.txt
-          key: crunch-${{ env.CRUNCH_REF }}
+          path: crunch-inc
+          key: crunch-v2-${{ env.CRUNCH_REF }}
 
       - name: Fetch Crunch decoder
         if: steps.crunch-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          curl -fsSL "https://raw.githubusercontent.com/Unity-Technologies/crunch/${CRUNCH_REF}/inc/crn_decomp.h" -o crn_decomp.h
-          test -s crn_decomp.h
-          grep -q "crnd_unpack_level" crn_decomp.h
-          shasum -a 256 crn_decomp.h > crunch-checksums.txt
-          shasum -a 256 -c crunch-checksums.txt
+          BASE="https://raw.githubusercontent.com/Unity-Technologies/crunch/${CRUNCH_REF}/inc"
+          rm -rf crunch-inc
+          mkdir -p crunch-inc
+          files=("crn_decomp.h")
+          i=0
+          while [ "$i" -lt "${#files[@]}" ]; do
+            f="${files[$i]}"
+            curl -fsSL "${BASE}/${f}" -o "crunch-inc/${f}"
+            test -s "crunch-inc/${f}"
+            for inc in $(grep -oE '#include "[^"]+"' "crunch-inc/${f}" | sed -E 's/#include "([^"]+)"/\1/'); do
+              if [[ " ${files[*]} " != *" ${inc} "* ]]; then
+                files+=("$inc")
+              fi
+            done
+            i=$((i + 1))
+          done
+          grep -q "crnd_unpack_level" crunch-inc/crn_decomp.h
+          (cd crunch-inc && shasum -a 256 *.h > checksums.txt && shasum -a 256 -c checksums.txt)
+          ls -l crunch-inc
 
-      - name: Verify cached Crunch checksum
+      - name: Verify cached Crunch checksums
         if: steps.crunch-cache.outputs.cache-hit == 'true'
-        run: shasum -a 256 -c crunch-checksums.txt
+        run: (cd crunch-inc && shasum -a 256 -c checksums.txt)
 
       - name: Compile Metal transcoder
         run: |
@@ -119,7 +131,7 @@ jobs:
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
             -Wl,-sectcreate,__DATA,__zslrmetal,ZSLowRes.metallib \
             -I. \
-            -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
+            -Icrunch-inc -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
             Mods/BundleTools/UnityBundleTools.m \
             Mods/BundleTools/AssetExplorer.m \
             Core/IL2CppIntrospection.m \
