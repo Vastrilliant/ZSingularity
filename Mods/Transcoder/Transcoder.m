@@ -1680,8 +1680,11 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         @autoreleasepool {
             NSURL *output = nil;
             NSError *error = nil;
-            if (progress) progress(0.0, @"Verifying the mod bundle and locating the stock target");
-            BOOL ok = zt_process_bundle(moddedBundleURL, config, progress, &output, &error);
+            void (^mainProgress)(double, NSString *) = progress ? ^(double fraction, NSString *stage) {
+                dispatch_async(dispatch_get_main_queue(), ^{ progress(fraction, stage); });
+            } : nil;
+            if (mainProgress) mainProgress(0.0, @"Verifying the mod bundle and locating the stock target");
+            BOOL ok = zt_process_bundle(moddedBundleURL, config, mainProgress, &output, &error);
             dispatch_async(dispatch_get_main_queue(), ^{ completion(ok ? output : nil, error); });
         }
     });
