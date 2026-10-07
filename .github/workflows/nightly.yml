@@ -14,6 +14,7 @@ on:
 
 env:
   LZ4_REF: v1.10.0
+  CRUNCH_REF: unity
 
 jobs:
   nightly:
@@ -58,6 +59,29 @@ jobs:
       - name: Verify cached LZ4 checksums
         if: steps.lz4-cache.outputs.cache-hit == 'true'
         run: shasum -a 256 -c lz4-checksums.txt
+
+      - name: Cache Crunch decoder
+        id: crunch-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            crn_decomp.h
+            crunch-checksums.txt
+          key: crunch-${{ env.CRUNCH_REF }}
+
+      - name: Fetch Crunch decoder
+        if: steps.crunch-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://raw.githubusercontent.com/Unity-Technologies/crunch/${CRUNCH_REF}/inc/crn_decomp.h" -o crn_decomp.h
+          test -s crn_decomp.h
+          grep -q "crnd_unpack_level" crn_decomp.h
+          shasum -a 256 crn_decomp.h > crunch-checksums.txt
+          shasum -a 256 -c crunch-checksums.txt
+
+      - name: Verify cached Crunch checksum
+        if: steps.crunch-cache.outputs.cache-hit == 'true'
+        run: shasum -a 256 -c crunch-checksums.txt
 
       - name: Compile Metal transcoder
         run: |
@@ -106,6 +130,7 @@ jobs:
             Mods/Mods.m \
             Mods/Transcoder/Transcoder.m \
             Mods/Transcoder/ZSLowRes.m \
+            Mods/Transcoder/ZSCrunch.mm \
             Network/PatchManifestNetwork.m \
             Network/ZSUpdater.m \
             UI/UserInterface.m \

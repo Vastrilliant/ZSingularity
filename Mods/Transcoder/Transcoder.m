@@ -4,6 +4,7 @@
 #import "Mods.h"
 #import "ZSEngine.h"
 #import "ZSLowRes.h"
+#import "ZSCrunch.h"
 #import "IL2CppIntrospection.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <Metal/Metal.h>
@@ -690,20 +691,6 @@ static BOOL zt_decode_dxt(NSData *pixels, uint8_t *dst, uint32_t width, uint32_t
     return YES;
 }
 
-static void zt_flip_rgba_vertical(uint8_t *pixels, uint32_t width, uint32_t height) {
-    size_t rowBytes = (size_t)width * 4u;
-    uint8_t *row = malloc(rowBytes);
-    if (!row) return;
-    for (uint32_t y = 0; y < height / 2u; y++) {
-        uint8_t *a = pixels + (size_t)y * rowBytes;
-        uint8_t *b = pixels + (size_t)(height - 1u - y) * rowBytes;
-        memcpy(row, a, rowBytes);
-        memcpy(a, b, rowBytes);
-        memcpy(b, row, rowBytes);
-    }
-    free(row);
-}
-
 static id<MTLDevice> g_zstDecodeDevice;
 static id<MTLCommandQueue> g_zstDecodeQueue;
 static id<MTLComputePipelineState> g_zstDecodePipeline;
@@ -771,70 +758,43 @@ static BOOL zt_metal_decode(MTLPixelFormat pixelFormat, uint32_t blockWidth, uin
     return YES;
 }
 
-static BOOL zt_decode_crunched_with_unity(NSData *pixels, uint32_t width, uint32_t height, int32_t format, int32_t mipCount, int32_t colorSpace, NSMutableData *rgba, NSError **error) {
-    if (mipCount != 1) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunched Texture2D %ux%u has %d mip levels; the runtime fallback only supports single-mip Crunch.", width, height, mipCount]);
+static BOOL zt_decode_crunched(int32_t format, NSData *payload, uint32_t width, uint32_t height, int32_t mipLevel, NSMutableData *rgba, NSError **error) {
+    NSString *failure = nil;
+    uint32_t levelWidth = 0, levelHeight = 0, bytesPerBlock = 0;
+    NSData *blocks = ZSCrunchUnpackLevel(payload, (uint32_t)mipLevel, &levelWidth, &levelHeight, &bytesPerBlock, &failure);
+    if (!blocks) {
+        ZLog(@"[ZTranscoder] Crunch decode failed for %@ mip %d: %@", zt_format_name(format), mipLevel, failure ?: @"unknown");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunch decode failed: %@", failure ?: @"unknown error"]);
         return NO;
     }
-    if (![IL2CppBridge resolveSymbols]) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"IL2CPP symbols are unavailable for Crunch decoding.");
+    if (levelWidth != width || levelHeight != height) {
+        ZLog(@"[ZTranscoder] Crunch level %d is %ux%u but the texture expects %ux%u", mipLevel, levelWidth, levelHeight, width, height);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunch level %d is %ux%u, expected %ux%u.", mipLevel, levelWidth, levelHeight, width, height]);
         return NO;
     }
-    __block NSData *decoded = nil;
-    __block NSString *failure = nil;
-    void (^work)(void) = ^{
-        void *klass = [IL2CppBridge classNamed:"Texture2D" inNamespace:"UnityEngine" assemblyContains:"CoreModule"];
-        if (!klass) { failure = @"UnityEngine.Texture2D class not found."; return; }
-        const void *ctor = [IL2CppBridge methodOnClass:klass name:".ctor" argCount:5];
-        const void *load = [IL2CppBridge methodOnClass:klass name:"LoadRawTextureData" argCount:2];
-        const void *apply = [IL2CppBridge methodOnClass:klass name:"Apply" argCount:2];
-        const void *getPixels = [IL2CppBridge methodOnClass:klass name:"GetPixels32" argCount:0];
-        if (!ctor || !load || !apply || !getPixels) { failure = @"Required Unity Texture2D methods for Crunch decoding were not found."; return; }
-        void *texture = [IL2CppBridge newObjectForClass:klass];
-        if (!texture) { failure = @"Unity failed to allocate a Texture2D for Crunch decoding."; return; }
-        int32_t w = (int32_t)width;
-        int32_t h = (int32_t)height;
-        int32_t texFormat = format;
-        BOOL mipChain = NO;
-        BOOL linear = colorSpace == 0;
-        void *ctorArgs[5] = {&w, &h, &texFormat, &mipChain, &linear};
-        void *exception = NULL;
-        [IL2CppBridge invokeMethod:ctor onInstance:texture args:ctorArgs outException:&exception];
-        if (exception) { failure = @"Unity Texture2D constructor rejected the Crunch texture format."; return; }
-        void *ptr = (void *)pixels.bytes;
-        int32_t byteCount = (int32_t)pixels.length;
-        void *loadArgs[2] = {&ptr, &byteCount};
-        exception = NULL;
-        [IL2CppBridge invokeMethod:load onInstance:texture args:loadArgs outException:&exception];
-        if (exception) { failure = @"Unity Texture2D rejected the Crunch payload through LoadRawTextureData."; return; }
-        BOOL updateMipmaps = NO;
-        BOOL makeNoLongerReadable = NO;
-        void *applyArgs[2] = {&updateMipmaps, &makeNoLongerReadable};
-        exception = NULL;
-        [IL2CppBridge invokeMethod:apply onInstance:texture args:applyArgs outException:&exception];
-        if (exception) { failure = @"Unity Texture2D failed while applying the Crunch payload."; return; }
-        exception = NULL;
-        void *pixelsArray = [IL2CppBridge invokeMethod:getPixels onInstance:texture args:NULL outException:&exception];
-        if (exception || !pixelsArray) { failure = @"Unity Texture2D could not return decoded Crunch pixels."; return; }
-        uint32_t count = *(uint32_t *)((uint8_t *)pixelsArray + 0x18);
-        size_t expected = (size_t)width * height;
-        if (count < expected) { failure = @"Unity returned fewer pixels than expected for the Crunch texture."; return; }
-        NSData *data = [NSData dataWithBytes:(uint8_t *)pixelsArray + 0x20 length:expected * 4u];
-        if (!data) { failure = @"Couldn't copy Unity Crunch pixels."; return; }
-        decoded = data;
-    };
-    if ([NSThread isMainThread]) work();
-    else dispatch_sync(dispatch_get_main_queue(), work);
-    if (!decoded) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, failure ?: @"Crunch decoding failed.");
-        return NO;
+    BOOL ok = NO;
+    switch (format) {
+        case 28:
+            ok = bytesPerBlock == 8u && zt_decode_dxt(blocks, rgba.mutableBytes, width, height, NO);
+            break;
+        case 29:
+            ok = bytesPerBlock == 16u && zt_decode_dxt(blocks, rgba.mutableBytes, width, height, YES);
+            break;
+        case 64:
+            ok = bytesPerBlock == 8u && zt_metal_decode(MTLPixelFormatETC2_RGB8, 4, 8, blocks, width, height, rgba, error);
+            break;
+        case 65:
+            ok = bytesPerBlock == 16u && zt_metal_decode(MTLPixelFormatEAC_RGBA8, 4, 16, blocks, width, height, rgba, error);
+            break;
+        default:
+            break;
     }
-    [rgba setData:decoded];
-    zt_flip_rgba_vertical(rgba.mutableBytes, width, height);
-    return YES;
+    ZLog(@"[ZTranscoder] Crunch %@ mip %d decoded to RGBA %ux%u ok=%@ (bytesPerBlock=%u)", zt_format_name(format), mipLevel, width, height, ok ? @"YES" : @"NO", bytesPerBlock);
+    if (!ok && error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Crunch block layout (%u bytes) doesn't match %@.", bytesPerBlock, zt_format_name(format)]);
+    return ok;
 }
 
-static BOOL zt_decode_texture_mip(ZTTextureRecord *texture, NSData *payload, uint32_t width, uint32_t height, int32_t colorSpace, NSMutableData **outRGBA, NSError **error) {
+static BOOL zt_decode_texture_mip(ZTTextureRecord *texture, NSData *payload, uint32_t width, uint32_t height, int32_t mipLevel, NSMutableData **outRGBA, NSError **error) {
     if (!texture || !payload || width == 0 || height == 0 || width > kZSTranscoderMaxTextureDimension || height > kZSTranscoderMaxTextureDimension) return NO;
     size_t pixelCount = (size_t)width * height;
     NSMutableData *rgba = [NSMutableData dataWithLength:pixelCount * 4u];
@@ -900,7 +860,7 @@ static BOOL zt_decode_texture_mip(ZTTextureRecord *texture, NSData *payload, uin
             }
             break;
         default:
-            if (zt_format_is_crunched(texture.format)) ok = zt_decode_crunched_with_unity(payload, width, height, texture.format, texture.mipCount, colorSpace, rgba, error);
+            if (zt_format_is_crunched(texture.format)) ok = zt_decode_crunched(texture.format, payload, width, height, mipLevel, rgba, error);
             break;
     }
     if (!ok && error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Unsupported or malformed Texture2D format %@ (%d).", zt_format_name(texture.format), texture.format]);
@@ -981,7 +941,7 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
         }
         NSMutableData *rgba = nil;
         NSError *decodeError = nil;
-        if (!zt_decode_texture_mip(source, mipData, mw, mh, source.colorSpace, &rgba, &decodeError)) {
+        if (!zt_decode_texture_mip(source, mipData, mw, mh, mip, &rgba, &decodeError)) {
             if (error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
             ok = NO;
             break;
