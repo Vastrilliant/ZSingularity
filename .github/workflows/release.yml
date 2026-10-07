@@ -10,7 +10,6 @@ on:
 
 env:
   LZ4_REF: v1.10.0
-  CRUNCH_REF: unity
 
 jobs:
   release:
@@ -105,46 +104,28 @@ jobs:
         if: steps.lz4-cache.outputs.cache-hit == 'true'
         run: shasum -a 256 -c lz4-checksums.txt
 
-      - name: Cache Crunch decoder
-        id: crunch-cache
-        uses: actions/cache@v4
-        with:
-          path: crunch-inc
-          key: crunch-v2-${{ env.CRUNCH_REF }}
-
-      - name: Fetch Crunch decoder
-        if: steps.crunch-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          BASE="https://raw.githubusercontent.com/Unity-Technologies/crunch/${CRUNCH_REF}/inc"
-          rm -rf crunch-inc
-          mkdir -p crunch-inc
-          files=("crn_decomp.h")
-          i=0
-          while [ "$i" -lt "${#files[@]}" ]; do
-            f="${files[$i]}"
-            curl -fsSL "${BASE}/${f}" -o "crunch-inc/${f}"
-            test -s "crunch-inc/${f}"
-            for inc in $(grep -oE '#include "[^"]+"' "crunch-inc/${f}" | sed -E 's/#include "([^"]+)"/\1/'); do
-              if [[ " ${files[*]} " != *" ${inc} "* ]]; then
-                files+=("$inc")
-              fi
-            done
-            i=$((i + 1))
-          done
-          grep -q "crnd_unpack_level" crunch-inc/crn_decomp.h
-          (cd crunch-inc && shasum -a 256 *.h > checksums.txt && shasum -a 256 -c checksums.txt)
-          ls -l crunch-inc
-
-      - name: Verify cached Crunch checksums
-        if: steps.crunch-cache.outputs.cache-hit == 'true'
-        run: (cd crunch-inc && shasum -a 256 -c checksums.txt)
-
       - name: Compile Metal transcoder
         run: |
           set -euo pipefail
           xcrun -sdk iphoneos metal -c -O3 -std=metal3.0 -target air64-apple-ios15.0 Mods/Transcoder/ZSLowRes.metal -o ZSLowRes.air
           xcrun -sdk iphoneos metallib ZSLowRes.air -o ZSLowRes.metallib
+
+      - name: Compile Crunch decoder
+        run: |
+          set -euo pipefail
+          clang \
+            -c \
+            -std=gnu++17 \
+            -O3 \
+            -fno-strict-aliasing \
+            -fobjc-arc \
+            -fmodules \
+            -isysroot "${{ steps.sdk.outputs.path }}" \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -I. -IDiagnostics -IMods/Transcoder \
+            Mods/Transcoder/ZSCrunch.mm \
+            -o ZSCrunch.o
 
       - name: Compile tweak dylib
         run: |
@@ -176,7 +157,7 @@ jobs:
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
             -Wl,-sectcreate,__DATA,__zslrmetal,ZSLowRes.metallib \
             -I. \
-            -Icrunch-inc -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
+            -ICore -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
             Mods/BundleTools/UnityBundleTools.m \
             Mods/BundleTools/AssetExplorer.m \
             Core/IL2CppIntrospection.m \
@@ -187,7 +168,7 @@ jobs:
             Mods/Mods.m \
             Mods/Transcoder/Transcoder.m \
             Mods/Transcoder/ZSLowRes.m \
-            Mods/Transcoder/ZSCrunch.mm \
+            ZSCrunch.o \
             Network/PatchManifestNetwork.m \
             Network/ZSUpdater.m \
             UI/UserInterface.m \

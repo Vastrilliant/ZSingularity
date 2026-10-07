@@ -1,7 +1,13 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Weverything"
 #pragma clang diagnostic ignored "-Wregister"
-#include "crn_decomp.h"
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <limits.h>
+#include <math.h>
+#include "Crunch/crn_decomp.h"
 #pragma clang diagnostic pop
 
 #import "ZSCrunch.h"
