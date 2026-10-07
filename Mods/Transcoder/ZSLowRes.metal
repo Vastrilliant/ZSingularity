@@ -1635,7 +1635,12 @@ static float zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
     for (uint c = 0; c < dims; c++) {
         uint v0 = uint(round(clamp(c0[c], 0.0f, 1.0f) * 255.0f));
         uint v1 = uint(round(clamp(c1[c], 0.0f, 1.0f) * 255.0f));
-        if (rgba) {
+        if (BW == 6u) {
+            i0[c] = v0;
+            i1[c] = v1;
+            d0v[c] = v0;
+            d1v[c] = v1;
+        } else if (rgba) {
             i0[c] = kZSLREnc48[v0];
             i1[c] = kZSLREnc48[v1];
             d0v[c] = kZSLRDec48[i0[c]];
@@ -1669,8 +1674,8 @@ static float zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
 
     uint node[64];
     for (uint i = 0; i < 64; i++) node[i] = 0u;
-    if (BW == 8u) {
-        for (uint i = 0; i < 64; i++) node[i] = lab[i];
+    if (BW <= 8u) {
+        for (uint i = 0; i < N; i++) node[i] = lab[i];
     } else {
         float num[64];
         float den[64];
@@ -1707,9 +1712,13 @@ static float zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
         vals[c * 2] = i0[c];
         vals[c * 2 + 1] = i1[c];
     }
-    zslr_put(out, 0, 11, 0x544u);
+    zslr_put(out, 0, 11, BW == 6u ? 0x104u : 0x544u);
     zslr_put(out, 13, 4, rgba ? 12u : 8u);
-    zslr_put_trits(out, 17, vals, dims * 2u, rgba ? 4u : 6u);
+    if (BW == 6u) {
+        for (uint i = 0; i < dims * 2u; i++) zslr_put(out, 17u + i * 8u, 8, vals[i]);
+    } else {
+        zslr_put_trits(out, 17, vals, dims * 2u, rgba ? 4u : 6u);
+    }
     for (uint i = 0; i < 64; i++) {
         if (node[i]) out[(127u - i) >> 5] |= 1u << ((127u - i) & 31u);
     }

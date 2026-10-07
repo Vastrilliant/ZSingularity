@@ -1087,8 +1087,12 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     NSMutableArray<NSNumber *> *newStarts = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
     NSMutableArray<NSNumber *> *newSizes = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
     uint64_t cursor = targetDoc.dataOffset;
+    uint64_t originalObjectsEnd = targetDoc.dataOffset;
     for (ZTSerializedObject *object in targetDoc.objects) {
-        cursor = zt_align_up(cursor, 8u);
+        uint64_t objectEnd = object.objectStart + object.byteSize;
+        if (objectEnd > originalObjectsEnd) originalObjectsEnd = objectEnd;
+        uint64_t relativeCursor = zt_align_up(cursor - targetDoc.dataOffset, 8u);
+        cursor = relativeCursor == UINT64_MAX ? UINT64_MAX : targetDoc.dataOffset + relativeCursor;
         if (cursor == UINT64_MAX || cursor < targetDoc.dataOffset) {
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile output offset overflowed.");
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
@@ -1125,7 +1129,18 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         return NO;
     }
     const uint8_t *base = targetDoc.data.bytes;
-    if (!zt_copy_range_to_handle(out, base, 0, targetDoc.objectTableOffset, error)) {
+    uint64_t tableEnd = targetDoc.objectTableOffset + (uint64_t)targetDoc.objects.count * 24u;
+    uint64_t tailLength = (originalObjectsEnd < targetDoc.data.length) ? (uint64_t)targetDoc.data.length - originalObjectsEnd : 0;
+    uint64_t expectedFileSize = cursor + tailLength;
+    NSMutableData *headerBytes = [NSMutableData dataWithBytes:base length:(NSUInteger)targetDoc.objectTableOffset];
+    if (headerBytes.length >= 40 && zt_be32(base + 8) >= 22u) {
+        uint8_t *hb = headerBytes.mutableBytes;
+        for (NSUInteger b = 0; b < 8; b++) hb[24 + b] = (uint8_t)(expectedFileSize >> (8 * (7 - b)));
+    } else if (headerBytes.length >= 8) {
+        uint8_t *hb = headerBytes.mutableBytes;
+        for (NSUInteger b = 0; b < 4; b++) hb[4 + b] = (uint8_t)(expectedFileSize >> (8 * (3 - b)));
+    }
+    if (!zt_write_all(out, headerBytes.bytes, headerBytes.length, error)) {
         [out closeFile];
         [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
         return NO;
@@ -1154,14 +1169,13 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
         return NO;
     }
-    while (written < targetDoc.dataOffset) {
-        uint8_t zero = 0;
-        if (!zt_write_all(out, &zero, 1, error)) {
+    if (targetDoc.dataOffset > tableEnd) {
+        if (!zt_copy_range_to_handle(out, base, tableEnd, targetDoc.dataOffset - tableEnd, error)) {
             [out closeFile];
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
             return NO;
         }
-        written++;
+        written = targetDoc.dataOffset;
     }
     for (NSUInteger i = 0; i < targetDoc.objects.count; i++) {
         ZTSerializedObject *object = targetDoc.objects[i];
@@ -1201,6 +1215,14 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             return NO;
         }
         written += objectData.length;
+    }
+    if (tailLength > 0) {
+        if (!zt_copy_range_to_handle(out, base, originalObjectsEnd, tailLength, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        written += tailLength;
     }
     @try { [out closeFile]; } @catch (__unused NSException *exception) {}
     NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:outputPath error:nil];
