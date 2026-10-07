@@ -249,6 +249,8 @@ static NSString *zt_format_name(int32_t format) {
 @property (nonatomic, copy) NSArray<ZTSerializedObject *> *objects;
 @property (nonatomic, copy) NSArray<ZTTextureRecord *> *textures;
 @property (nonatomic, assign) uint32_t parseFailures;
+@property (nonatomic, assign) NSUInteger originalObjectCount;
+@property (nonatomic, copy) NSDictionary<NSNumber *, NSNumber *> *classTypeIndex;
 @end
 
 @implementation ZTSerializedDocument
@@ -562,6 +564,14 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
     document.objects = objects;
     document.textures = textures;
     document.parseFailures = failures;
+    document.originalObjectCount = objects.count;
+    NSMutableDictionary<NSNumber *, NSNumber *> *classTypeIndex = [NSMutableDictionary dictionary];
+    for (int32_t i = 0; i < typeCount; i++) {
+        if (classIDs[i] == 114) continue;
+        NSNumber *classKey = @(classIDs[i]);
+        if (!classTypeIndex[classKey]) classTypeIndex[classKey] = @(i);
+    }
+    document.classTypeIndex = classTypeIndex;
     for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
     free(trees); free(classIDs);
     return document;
@@ -1086,19 +1096,33 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     for (ZTTextureRecord *texture in targetDoc.textures) textureByObject[[NSString stringWithFormat:@"%lld", (long long)texture.object.pathID]] = texture;
     NSMutableArray<NSNumber *> *newStarts = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
     NSMutableArray<NSNumber *> *newSizes = [NSMutableArray arrayWithCapacity:targetDoc.objects.count];
-    uint64_t cursor = targetDoc.dataOffset;
+    const uint8_t *headerSource = targetDoc.data.bytes;
+    NSUInteger addedCount = targetDoc.objects.count > targetDoc.originalObjectCount ? targetDoc.objects.count - targetDoc.originalObjectCount : 0;
+    uint64_t originalTableEnd = targetDoc.objectTableOffset + (uint64_t)targetDoc.originalObjectCount * 24u;
+    uint64_t newDataOffset = targetDoc.dataOffset;
+    if (addedCount > 0) {
+        if (targetDoc.data.length < 40 || zt_be32(headerSource + 8) < 22u || originalTableEnd > targetDoc.dataOffset) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile layout doesn't support adding objects.");
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        uint64_t trailingLength = targetDoc.dataOffset - originalTableEnd;
+        uint64_t grown = zt_align_up(targetDoc.objectTableOffset + (uint64_t)targetDoc.objects.count * 24u + trailingLength, 16u);
+        if (grown != UINT64_MAX && grown > newDataOffset) newDataOffset = grown;
+    }
+    uint64_t cursor = newDataOffset;
     uint64_t originalObjectsEnd = targetDoc.dataOffset;
     for (ZTSerializedObject *object in targetDoc.objects) {
         uint64_t objectEnd = object.objectStart + object.byteSize;
         if (objectEnd > originalObjectsEnd) originalObjectsEnd = objectEnd;
-        uint64_t relativeCursor = zt_align_up(cursor - targetDoc.dataOffset, 8u);
-        cursor = relativeCursor == UINT64_MAX ? UINT64_MAX : targetDoc.dataOffset + relativeCursor;
-        if (cursor == UINT64_MAX || cursor < targetDoc.dataOffset) {
+        uint64_t relativeCursor = zt_align_up(cursor - newDataOffset, 8u);
+        cursor = relativeCursor == UINT64_MAX ? UINT64_MAX : newDataOffset + relativeCursor;
+        if (cursor == UINT64_MAX || cursor < newDataOffset) {
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile output offset overflowed.");
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
             return NO;
         }
-        [newStarts addObject:@(cursor - targetDoc.dataOffset)];
+        [newStarts addObject:@(cursor - newDataOffset)];
         NSData *objectData = nil;
         NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
         ZTTextureRecord *targetTexture = textureByObject[key];
@@ -1129,13 +1153,18 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         return NO;
     }
     const uint8_t *base = targetDoc.data.bytes;
-    uint64_t tableEnd = targetDoc.objectTableOffset + (uint64_t)targetDoc.objects.count * 24u;
+    uint64_t tableEnd = originalTableEnd;
     uint64_t tailLength = (originalObjectsEnd < targetDoc.data.length) ? (uint64_t)targetDoc.data.length - originalObjectsEnd : 0;
     uint64_t expectedFileSize = cursor + tailLength;
     NSMutableData *headerBytes = [NSMutableData dataWithBytes:base length:(NSUInteger)targetDoc.objectTableOffset];
     if (headerBytes.length >= 40 && zt_be32(base + 8) >= 22u) {
         uint8_t *hb = headerBytes.mutableBytes;
         for (NSUInteger b = 0; b < 8; b++) hb[24 + b] = (uint8_t)(expectedFileSize >> (8 * (7 - b)));
+        if (addedCount > 0) {
+            uint32_t metadataSize = zt_be32(base + 20) + (uint32_t)(addedCount * 24u);
+            for (NSUInteger b = 0; b < 4; b++) hb[20 + b] = (uint8_t)(metadataSize >> (8 * (3 - b)));
+            for (NSUInteger b = 0; b < 8; b++) hb[32 + b] = (uint8_t)(newDataOffset >> (8 * (7 - b)));
+        }
     } else if (headerBytes.length >= 8) {
         uint8_t *hb = headerBytes.mutableBytes;
         for (NSUInteger b = 0; b < 4; b++) hb[4 + b] = (uint8_t)(expectedFileSize >> (8 * (3 - b)));
@@ -1163,7 +1192,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         }
     }
     uint64_t written = targetDoc.objectTableOffset + targetDoc.objects.count * 24u;
-    if (written > targetDoc.dataOffset) {
+    if (written > newDataOffset) {
         [out closeFile];
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile object table exceeds data offset after rebuild.");
         [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
@@ -1175,11 +1204,20 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
             return NO;
         }
-        written = targetDoc.dataOffset;
+        written += targetDoc.dataOffset - tableEnd;
+    }
+    while (written < newDataOffset) {
+        uint8_t zero = 0;
+        if (!zt_write_all(out, &zero, 1, error)) {
+            [out closeFile];
+            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+            return NO;
+        }
+        written++;
     }
     for (NSUInteger i = 0; i < targetDoc.objects.count; i++) {
         ZTSerializedObject *object = targetDoc.objects[i];
-        uint64_t desiredStart = [newStarts[i] unsignedLongLongValue] + targetDoc.dataOffset;
+        uint64_t desiredStart = [newStarts[i] unsignedLongLongValue] + newDataOffset;
         while (written < desiredStart) {
             uint8_t zero = 0;
             if (!zt_write_all(out, &zero, 1, error)) {
@@ -1232,7 +1270,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
         return NO;
     }
-    ZLog(@"[ZTranscoder] rebuilt SerializedFile: objects=%lu dataOffset=%llu output=%llu", (unsigned long)targetDoc.objects.count, (unsigned long long)targetDoc.dataOffset, (unsigned long long)finalSize);
+    ZLog(@"[ZTranscoder] rebuilt SerializedFile: objects=%lu dataOffset=%llu output=%llu", (unsigned long)targetDoc.objects.count, (unsigned long long)newDataOffset, (unsigned long long)finalSize);
     return YES;
 }
 
@@ -1545,7 +1583,14 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         for (ZTSerializedObject *object in targetDoc.objects) map[[NSString stringWithFormat:@"%d:%lld", object.classID, (long long)object.pathID]] = object;
         return map;
     }();
-    NSDictionary *targetTextureMap = zt_texture_map(targetDoc.textures);
+    NSMutableDictionary *targetTextureMap = [zt_texture_map(targetDoc.textures) mutableCopy];
+    NSMutableArray<ZTSerializedObject *> *addedObjects = [NSMutableArray array];
+    NSMutableArray<ZTTextureRecord *> *addedTextures = [NSMutableArray array];
+    NSString *defaultStreamPath = nil;
+    for (ZTTextureRecord *existingTexture in targetDoc.textures) {
+        if (existingTexture.streamPath.length) { defaultStreamPath = existingTexture.streamPath; break; }
+    }
+    if (!defaultStreamPath.length) defaultStreamPath = [NSString stringWithFormat:@"archive:/%@/%@", targetCABNode.path, targetResS.path];
     NSMutableDictionary<NSString *, ZTTextureReplacement *> *replacements = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSNumber *> *streamOffsets = [NSMutableDictionary dictionary];
     NSUInteger assetCount = 0;
@@ -1560,16 +1605,43 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         processedAssets++;
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
         ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
+        BOOL isNewAsset = NO;
         if (!targetObject) {
-            skippedAssets++;
-            ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): not present in the original bundle, nothing in the game can reference it", sourceObject.classID, (long long)sourceObject.pathID, key);
-            if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
-            continue;
+            NSNumber *newTypeIndex = targetDoc.classTypeIndex[@(sourceObject.classID)];
+            if (!newTypeIndex) {
+                skippedAssets++;
+                ZLog(@"[ZTranscoder] skipping class=%d PathID=%lld (%@): the original bundle has no type to add it under", sourceObject.classID, (long long)sourceObject.pathID, key);
+                if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                continue;
+            }
+            ZTSerializedObject *addedObject = [ZTSerializedObject new];
+            addedObject.classID = sourceObject.classID;
+            addedObject.typeIndex = newTypeIndex.intValue;
+            addedObject.pathID = sourceObject.pathID;
+            [addedObjects addObject:addedObject];
+            targetObject = addedObject;
+            isNewAsset = YES;
+            ZLog(@"[ZTranscoder] adding class=%d PathID=%lld (%@) to the bundle: not present in the original", sourceObject.classID, (long long)sourceObject.pathID, key);
         }
         matchedAssets++;
         if (sourceObject.classID == 28) {
             ZTTextureRecord *sourceTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
             ZTTextureRecord *targetTexture = targetTextureMap[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]];
+            if (isNewAsset && sourceTexture) {
+                ZTTextureRecord *syntheticTexture = [ZTTextureRecord new];
+                syntheticTexture.object = targetObject;
+                syntheticTexture.name = sourceTexture.name;
+                syntheticTexture.format = sourceTexture.format;
+                syntheticTexture.mipCount = sourceTexture.mipCount;
+                syntheticTexture.width = sourceTexture.width;
+                syntheticTexture.height = sourceTexture.height;
+                syntheticTexture.imageDataLength = sourceTexture.isInline ? sourceTexture.imageDataLength : 0;
+                syntheticTexture.streamSize = sourceTexture.isStreamed ? MAX(sourceTexture.streamSize, 1u) : 0;
+                syntheticTexture.streamPath = defaultStreamPath;
+                [addedTextures addObject:syntheticTexture];
+                targetTextureMap[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]] = syntheticTexture;
+                targetTexture = syntheticTexture;
+            }
             if (!sourceTexture || !targetTexture) {
                 if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D PathID=%lld could not be parsed from both bundles.", (long long)sourceObject.pathID]);
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
@@ -1577,7 +1649,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             }
             NSData *sourcePayload = nil;
             NSData *targetPayload = nil;
-            if (!zt_texture_payload(sourceTexture, sourceArchive, sourceDoc.data, &sourcePayload, error) || !zt_texture_payload(targetTexture, targetArchive, targetDoc.data, &targetPayload, error)) {
+            if (!zt_texture_payload(sourceTexture, sourceArchive, sourceDoc.data, &sourcePayload, error) || (!isNewAsset && !zt_texture_payload(targetTexture, targetArchive, targetDoc.data, &targetPayload, error))) {
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
@@ -1587,7 +1659,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             NSData *targetObjectData = zt_object_data(targetObject, targetDoc.data);
             NSString *sourceObjectHash = zt_sha256(sourceObjectData);
             NSString *targetObjectHash = zt_sha256(targetObjectData);
-            BOOL exact = sourceObjectData.length == targetObjectData.length && [sourceObjectHash isEqualToString:targetObjectHash];
+            BOOL exact = !isNewAsset && sourceObjectData.length == targetObjectData.length && [sourceObjectHash isEqualToString:targetObjectHash];
             ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ objectBytes source=%lu target=%lu imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d imageHash=%@ objectMatch=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO", exact ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
             if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; retaining PathID matching", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
             if (exact) continue;
@@ -1627,6 +1699,11 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
     }
     ZLog(@"[ZTranscoder] asset matching finished: matched=%lu skipped=%lu replacementTextures=%lu", (unsigned long)matchedAssets, (unsigned long)skippedAssets, (unsigned long)replacements.count);
+    if (addedObjects.count) {
+        targetDoc.objects = [targetDoc.objects arrayByAddingObjectsFromArray:addedObjects];
+        targetDoc.textures = [targetDoc.textures arrayByAddingObjectsFromArray:addedTextures];
+        ZLog(@"[ZTranscoder] added %lu object(s) missing from the original bundle (%lu Texture2D)", (unsigned long)addedObjects.count, (unsigned long)addedTextures.count);
+    }
     if (matchedAssets == 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteAtlas assets exist in the original bundle.");
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
