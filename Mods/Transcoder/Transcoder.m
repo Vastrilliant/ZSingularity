@@ -1753,7 +1753,8 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             NSString *sourceHash = zt_sha256(sourceObjectData);
             NSString *targetHash = zt_sha256(targetObjectData);
             ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu hashMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO");
-            if (sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
+            BOOL alwaysTransplant = sourceObject.classID == kZTClassSprite || sourceObject.classID == kZTClassSpriteAtlas;
+            if (alwaysTransplant || sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
         }
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
     }
