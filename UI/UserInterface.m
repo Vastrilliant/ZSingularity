@@ -9268,6 +9268,9 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *egoAutoSpeedRow = zs_make_switch_row(@"Auto speed up EGO animations", ZSEgoAutoSpeed.isEnabled);
+    [egoAutoSpeedRow.toggle addTarget:self action:@selector(egoAutoSpeedChanged:) forControlEvents:UIControlEventValueChanged];
+
     UIButton *assetExplorerButton = zs_make_grouped_action_button(@"Asset Explorer", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [assetExplorerButton addTarget:self action:@selector(assetExplorerTapped) forControlEvents:UIControlEventTouchUpInside];
 
@@ -9276,6 +9279,7 @@ static const CGFloat kContentFadeHeight = 22;
         uidRedactorRow,
         disableLiquidGlassRow,
         disableEnkephalinRow,
+        egoAutoSpeedRow,
         assetExplorerButton,
     ]);
     miscCard.layer.borderWidth = 1;
@@ -20096,6 +20100,10 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 - (void)uidRedactorChanged:(UISwitch *)toggle {
     [UIDRedactor setEnabled:toggle.on];
+}
+
+- (void)egoAutoSpeedChanged:(UISwitch *)toggle {
+    [ZSEgoAutoSpeed setEnabled:toggle.on];
 }
 
 - (void)disableLiquidGlassChanged:(UISwitch *)toggle {
