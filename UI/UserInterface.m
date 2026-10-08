@@ -15802,9 +15802,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     UITextView *textView = [[UITextView alloc] init];
     textView.translatesAutoresizingMaskIntoConstraints = NO;
-    textView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.28];
-    textView.layer.cornerRadius = 10;
-    textView.layer.cornerCurve = kCACornerCurveContinuous;
+    textView.backgroundColor = UIColor.clearColor;
     textView.editable = NO;
     textView.selectable = YES;
     textView.font = zs_mono_font(10, UIFontWeightRegular);
