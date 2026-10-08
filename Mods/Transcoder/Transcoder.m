@@ -4,6 +4,7 @@
 #import "Mods.h"
 #import "ZSLowRes.h"
 #import "ZSCrunch.h"
+#import "ZSEngine.h"
 #import "IL2CppIntrospection.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <Metal/Metal.h>
