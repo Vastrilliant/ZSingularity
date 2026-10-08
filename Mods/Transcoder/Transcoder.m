@@ -1724,15 +1724,6 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
         processedAssets++;
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
-        if (sourceObject.classID == kZTClassTexture2D) {
-            ZTTextureRecord *inlineCheck = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
-            if (!inlineCheck || !inlineCheck.isInline) {
-                skippedAssets++;
-                ZLog(@"[ZTranscoder] skipping Texture2D PathID=%lld (%@): the mod's image data is not inline", (long long)sourceObject.pathID, inlineCheck.name.length ? inlineCheck.name : @"<unnamed>");
-                if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
-                continue;
-            }
-        }
         ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
         BOOL isNewAsset = NO;
         if (!targetObject) {
