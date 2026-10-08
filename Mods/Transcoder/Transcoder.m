@@ -30,12 +30,16 @@ static const uint32_t kZSTranscoderUnityFSCompressionMask = 0x3fu;
 static const uint32_t kZSTranscoderMaxTextureDimension = 16384u;
 static const int32_t kZTClassTexture2D = 28;
 static const int32_t kZTClassSprite = 213;
+static const int32_t kZTClassSpriteRenderer = 212;
+static const int32_t kZTClassSpriteMask = 331;
 static const int32_t kZTClassSpriteAtlas = 687078895;
 static const int32_t kZTClassTextAsset = 49;
 
 static BOOL zt_class_is_transcoded(int32_t classID) {
     return classID == kZTClassTexture2D
         || classID == kZTClassSprite
+        || classID == kZTClassSpriteRenderer
+        || classID == kZTClassSpriteMask
         || classID == kZTClassSpriteAtlas
         || classID == kZTClassTextAsset;
 }
@@ -46,8 +50,6 @@ static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
     switch (classID) {
         case 0:
         case 48:
-        case 212:
-        case 331:
         case 72:
         case 115:
         case 142:
@@ -1020,8 +1022,8 @@ static BOOL zt_patch_u32_relative(NSMutableData *data, uint64_t base, uint64_t a
     return zt_write_u32_at(data, (NSUInteger)(absolutePosition - base), value);
 }
 
-static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTextureRecord *target, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize, uint64_t streamOffset) {
-    if (!source || !target || !sourceObject || !encodedData) return nil;
+static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize) {
+    if (!source || !sourceObject || !encodedData) return nil;
     uint64_t base = source.object.objectStart;
     NSUInteger imageField = (NSUInteger)(source.imageDataPosition - base);
     if (imageField > sourceObject.length || sourceObject.length - imageField < 4) return nil;
@@ -1031,38 +1033,15 @@ static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, ZTTe
     NSUInteger oldStreamStart = (NSUInteger)(source.streamOffsetPosition - base);
     if (oldStreamStart > sourceObject.length || oldStreamStart < oldImageEnd) return nil;
     NSMutableData *out = [NSMutableData data];
-    if (!target.isStreamed) {
-        [out appendBytes:sourceObject.bytes length:imageField];
-        uint8_t imageLength[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
-        [out appendBytes:imageLength length:4];
-        [out appendData:encodedData];
-        while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
-        uint8_t streamZero[12] = {0};
-        [out appendBytes:streamZero length:12];
-        uint8_t emptyPathLength[4] = {0};
-        [out appendBytes:emptyPathLength length:4];
-        if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
-        if (!zt_patch_u32_relative(out, base, source.mipCountPosition, 1u)) return nil;
-        if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
-        return out;
-    }
     [out appendBytes:sourceObject.bytes length:imageField];
-    uint8_t zeroLength[4] = {0};
-    [out appendBytes:zeroLength length:4];
+    uint8_t imageLength[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
+    [out appendBytes:imageLength length:4];
+    [out appendData:encodedData];
     while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
-    uint8_t streamOffsetBytes[8] = {
-        (uint8_t)streamOffset, (uint8_t)(streamOffset >> 8), (uint8_t)(streamOffset >> 16), (uint8_t)(streamOffset >> 24),
-        (uint8_t)(streamOffset >> 32), (uint8_t)(streamOffset >> 40), (uint8_t)(streamOffset >> 48), (uint8_t)(streamOffset >> 56)
-    };
-    [out appendBytes:streamOffsetBytes length:8];
-    uint8_t streamSizeBytes[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
-    [out appendBytes:streamSizeBytes length:4];
-    NSData *pathData = [target.streamPath dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
-    uint32_t pathLength = (uint32_t)pathData.length;
-    uint8_t pathLengthBytes[4] = {(uint8_t)pathLength, (uint8_t)(pathLength >> 8), (uint8_t)(pathLength >> 16), (uint8_t)(pathLength >> 24)};
-    [out appendBytes:pathLengthBytes length:4];
-    [out appendData:pathData];
-    while (out.length & 3u) { uint8_t zero = 0; [out appendBytes:&zero length:1]; }
+    uint8_t streamZero[12] = {0};
+    [out appendBytes:streamZero length:12];
+    uint8_t emptyPathLength[4] = {0};
+    [out appendBytes:emptyPathLength length:4];
     if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
     if (!zt_patch_u32_relative(out, base, source.mipCountPosition, 1u)) return nil;
     if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
@@ -1106,66 +1085,17 @@ static NSData *zt_object_data(ZTSerializedObject *object, NSData *data) {
     return [NSData dataWithBytes:(const uint8_t *)data.bytes + object.objectStart length:object.byteSize];
 }
 
-static BOOL zt_repack_resS(UnityBundleArchive *targetArchive, ZTSerializedDocument *targetDoc, NSDictionary<NSString *, ZTTextureReplacement *> *replacements, NSString *outputPath, NSMutableDictionary<NSString *, NSNumber *> *streamOffsets, uint64_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
-    UnityBundleNode *resS = zt_resS_node(targetArchive, error);
-    if (!resS) return NO;
-    NSArray<ZTTextureRecord *> *sorted = [targetDoc.textures sortedArrayUsingComparator:^NSComparisonResult(ZTTextureRecord *a, ZTTextureRecord *b) {
-        return a.object.pathID < b.object.pathID ? NSOrderedAscending : (a.object.pathID > b.object.pathID ? NSOrderedDescending : NSOrderedSame);
-    }];
-    if (![[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil]) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create replacement .resS at %@.", outputPath]);
-        return NO;
-    }
-    NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:outputPath];
-    uint64_t cursor = 0;
-    const uint8_t *streamBytes = targetArchive.data.bytes + resS.offset;
-    for (NSUInteger i = 0; i < sorted.count; i++) {
-        ZTTextureRecord *texture = sorted[i];
-        if (!texture.isStreamed) continue;
-        uint64_t aligned = zt_align_up(cursor, 16u);
-        if (aligned == UINT64_MAX) { if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @".resS output size overflowed."); [out closeFile]; return NO; }
-        while (cursor < aligned) { uint8_t zero = 0; if (!zt_write_all(out, &zero, 1, error)) { [out closeFile]; return NO; } cursor++; }
-        NSString *key = [NSString stringWithFormat:@"%lld", (long long)texture.object.pathID];
-        streamOffsets[key] = @(aligned);
-        ZTTextureReplacement *replacement = replacements[key];
-        if (replacement) {
-            if (!zt_copy_file_to_handle(out, replacement.encodedPath, error)) { [out closeFile]; return NO; }
-            cursor += replacement.encodedSize;
-            ZLog(@"[ZTranscoder] .resS transplant PathID=%@ original=%u new=%u offset=%llu", key, texture.streamSize, replacement.encodedSize, (unsigned long long)aligned);
-        } else {
-            if (texture.streamOffset > (uint64_t)resS.size || texture.streamSize > (uint64_t)resS.size - texture.streamOffset) { [out closeFile]; if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Target .resS texture reference is out of range."); return NO; }
-            if (!zt_copy_range_to_handle(out, streamBytes, texture.streamOffset, texture.streamSize, error)) { [out closeFile]; return NO; }
-            cursor += texture.streamSize;
-        }
-        if (progress) progress(sorted.count ? (double)(i + 1) / (double)sorted.count : 1.0, [NSString stringWithFormat:@"Repacking .resS texture %lu/%lu", (unsigned long)(i + 1), (unsigned long)sorted.count]);
-    }
-    @try { [out closeFile]; } @catch (__unused NSException *exception) {}
-    if (outSize) *outSize = cursor;
-    ZLog(@"[ZTranscoder] rebuilt existing .resS node %@: %llu bytes", resS.path, (unsigned long long)cursor);
-    return YES;
-}
-
-static NSData *zt_rebuilt_object_data(ZTSerializedObject *object, ZTTextureRecord *targetTexture, ZTTextureReplacement *replacement, ZTSerializedDocument *targetDoc, NSDictionary<NSString *, NSNumber *> *streamOffsets, NSString *key) {
+static NSData *zt_rebuilt_object_data(ZTSerializedObject *object, ZTTextureRecord *targetTexture, ZTTextureReplacement *replacement, ZTSerializedDocument *targetDoc) {
     if (replacement && targetTexture) {
         NSData *sourceRawObject = replacement.sourceObjectData;
         NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
-        uint64_t streamOffset = [streamOffsets[key] unsignedLongLongValue];
-        return sourceRawObject && encoded ? zt_build_texture_object_from_source(replacement.source, targetTexture, sourceRawObject, encoded, replacement.encodedSize, streamOffset) : nil;
+        return sourceRawObject && encoded ? zt_build_texture_object_from_source(replacement.source, sourceRawObject, encoded, replacement.encodedSize) : nil;
     }
     if (object.replacementObject) return object.replacementObject;
-    NSData *original = zt_object_data(object, targetDoc.data);
-    NSNumber *relocated = streamOffsets[key];
-    if (!original || !targetTexture || !targetTexture.isStreamed || !relocated || relocated.unsignedLongLongValue == targetTexture.streamOffset) return original;
-    uint64_t position = targetTexture.streamOffsetPosition;
-    if (position < object.objectStart || position - object.objectStart > original.length || original.length - (position - object.objectStart) < 8) return original;
-    NSMutableData *patched = [original mutableCopy];
-    uint64_t newOffset = relocated.unsignedLongLongValue;
-    uint8_t *bytes = (uint8_t *)patched.mutableBytes + (position - object.objectStart);
-    for (NSUInteger b = 0; b < 8; b++) bytes[b] = (uint8_t)(newOffset >> (8 * b));
-    return patched;
+    return zt_object_data(object, targetDoc.data);
 }
 
-static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSDictionary<NSString *, ZTTextureReplacement *> *replacements, NSMutableDictionary<NSString *, NSNumber *> *streamOffsets, NSString *outputPath, NSError **error) {
+static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSDictionary<NSString *, ZTTextureReplacement *> *replacements, NSString *outputPath, NSError **error) {
     if (![[NSFileManager defaultManager] createFileAtPath:outputPath contents:nil attributes:nil]) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create replacement SerializedFile at %@.", outputPath]);
         return NO;
@@ -1209,7 +1139,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
         ZTTextureRecord *targetTexture = textureByObject[key];
         ZTTextureReplacement *replacement = replacements[key];
-        objectData = zt_rebuilt_object_data(object, targetTexture, replacement, targetDoc, streamOffsets, key);
+        objectData = zt_rebuilt_object_data(object, targetTexture, replacement, targetDoc);
         if (!objectData || objectData.length > UINT32_MAX) {
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't size rebuilt object PathID=%lld.", (long long)object.pathID]);
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
@@ -1325,7 +1255,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         ZTTextureRecord *targetTexture = textureByObject[key];
         ZTTextureReplacement *replacement = replacements[key];
         NSData *objectData = nil;
-        objectData = zt_rebuilt_object_data(object, targetTexture, replacement, targetDoc, streamOffsets, key);
+        objectData = zt_rebuilt_object_data(object, targetTexture, replacement, targetDoc);
         if (!objectData || objectData.length != [newSizes[i] unsignedIntegerValue]) {
             [out closeFile];
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Rebuilt object PathID=%lld changed size between passes.", (long long)object.pathID]);
@@ -1359,7 +1289,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     return YES;
 }
 
-static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *originalArchive, NSString *serializedPath, NSString *resSPath, NSString *outputPath, NSError **error) {
+static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *originalArchive, NSString *serializedPath, NSString *outputPath, NSError **error) {
     NSData *headerData = [NSData dataWithContentsOfFile:templateBundlePath];
     if (!headerData || headerData.length < 48 || memcmp(headerData.bytes, "UnityFS", 7) != 0) {
         if (error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Template bundle has an invalid UnityFS header.");
@@ -1398,10 +1328,10 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template does not expose a serialized CAB node.");
         return NO;
     }
-    NSString *resPath = nil;
-    for (UnityBundleNode *node in originalArchive.nodes) if ([node.path hasSuffix:@".resS"]) resPath = node.path;
-    if (!resPath) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template has no .resS node.");
+    UnityBundleNode *originalResS = nil;
+    for (UnityBundleNode *node in originalArchive.nodes) if ([node.path hasSuffix:@".resS"]) originalResS = node;
+    if (!originalResS || originalResS.offset < 0 || originalResS.size < 0 || (uint64_t)originalResS.offset > originalArchive.data.length || (uint64_t)originalResS.size > originalArchive.data.length - (uint64_t)originalResS.offset) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template has no readable .resS node.");
         return NO;
     }
     NSString *blockDataPath = [[outputPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:[NSString stringWithFormat:@"blocks-%@", NSUUID.UUID.UUIDString]];
@@ -1410,7 +1340,8 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     NSMutableData *blockUsizes = [NSMutableData data];
     NSMutableData *blockCsizes = [NSMutableData data];
     NSMutableData *blockFlags = [NSMutableData data];
-    uint64_t nodeLengths[2] = {zt_file_size(serializedPath), zt_file_size(resSPath)};
+    uint64_t serializedLength = zt_file_size(serializedPath);
+    uint64_t resSLength = (uint64_t)originalResS.size;
     __block uint64_t compressedTotal = 0;
     BOOL blockReadFailed = NO;
     NSMutableData *pending = [NSMutableData dataWithCapacity:kZSTranscoderBlockSize];
@@ -1437,9 +1368,23 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
         }
     };
     for (UnityBundleNode *node in originalArchive.nodes) {
-        NSString *path = [node.path hasSuffix:@".resS"] ? resSPath : serializedPath;
-        uint64_t nodeSize = [node.path hasSuffix:@".resS"] ? nodeLengths[1] : nodeLengths[0];
-        NSFileHandle *input = [NSFileHandle fileHandleForReadingAtPath:path];
+        if (node == originalResS) {
+            const uint8_t *resSBytes = (const uint8_t *)originalArchive.data.bytes + (uint64_t)originalResS.offset;
+            uint64_t consumed = 0;
+            while (consumed < resSLength) {
+                NSUInteger room = (NSUInteger)kZSTranscoderBlockSize - pending.length;
+                NSUInteger n = (NSUInteger)MIN((uint64_t)room, resSLength - consumed);
+                [pending appendBytes:resSBytes + consumed length:n];
+                consumed += n;
+                if (pending.length == kZSTranscoderBlockSize) {
+                    emitBlock(pending);
+                    [pending setLength:0];
+                }
+            }
+            continue;
+        }
+        uint64_t nodeSize = serializedLength;
+        NSFileHandle *input = [NSFileHandle fileHandleForReadingAtPath:serializedPath];
         if (!input) {
             [blockOutput closeFile];
             [[NSFileManager defaultManager] removeItemAtPath:blockDataPath error:nil];
@@ -1485,7 +1430,7 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     uint64_t nodeOffset = 0;
     for (NSUInteger i = 0; i < originalArchive.nodes.count; i++) {
         UnityBundleNode *node = originalArchive.nodes[i];
-        uint64_t size = [node.path hasSuffix:@".resS"] ? nodeLengths[1] : nodeLengths[0];
+        uint64_t size = node == originalResS ? resSLength : serializedLength;
         zt_put_be64(info, nodeOffset);
         zt_put_be64(info, size);
         zt_put_be32(info, node.flags);
@@ -1685,13 +1630,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSMutableDictionary *targetTextureMap = [zt_texture_map(targetDoc.textures) mutableCopy];
     NSMutableArray<ZTSerializedObject *> *addedObjects = [NSMutableArray array];
     NSMutableArray<ZTTextureRecord *> *addedTextures = [NSMutableArray array];
-    NSString *defaultStreamPath = nil;
-    for (ZTTextureRecord *existingTexture in targetDoc.textures) {
-        if (existingTexture.streamPath.length) { defaultStreamPath = existingTexture.streamPath; break; }
-    }
-    if (!defaultStreamPath.length) defaultStreamPath = [NSString stringWithFormat:@"archive:/%@/%@", targetCABNode.path, targetResS.path];
     NSMutableDictionary<NSString *, ZTTextureReplacement *> *replacements = [NSMutableDictionary dictionary];
-    NSMutableDictionary<NSString *, NSNumber *> *streamOffsets = [NSMutableDictionary dictionary];
     NSUInteger assetCount = 0;
     BOOL layoutShared = sourceDoc.trailer.length > 0 && [sourceDoc.trailer isEqualToData:targetDoc.trailer];
     ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
@@ -1702,7 +1641,7 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
     NSUInteger matchedAssets = 0;
-    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteAtlas/TextAsset object(s)", (unsigned long)assetCount);
+    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
@@ -1753,7 +1692,6 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
                 syntheticTexture.height = sourceTexture.height;
                 syntheticTexture.imageDataLength = sourceTexture.isInline ? sourceTexture.imageDataLength : 0;
                 syntheticTexture.streamSize = sourceTexture.isStreamed ? MAX(sourceTexture.streamSize, 1u) : 0;
-                syntheticTexture.streamPath = defaultStreamPath;
                 [addedTextures addObject:syntheticTexture];
                 targetTextureMap[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]] = syntheticTexture;
                 targetTexture = syntheticTexture;
@@ -1824,26 +1762,21 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
         ZLog(@"[ZTranscoder] added %lu object(s) missing from the original bundle (%lu Texture2D)", (unsigned long)addedObjects.count, (unsigned long)addedTextures.count);
     }
     if (matchedAssets == 0) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteAtlas/TextAsset assets exist in the original bundle.");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset assets exist in the original bundle.");
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
         return NO;
     }
-    NSString *resSOutput = [workDir stringByAppendingPathComponent:@"target.resS"];
-    uint64_t newResSSize = 0;
-    if (!zt_repack_resS(targetArchive, targetDoc, replacements, resSOutput, streamOffsets, &newResSSize, error, ^(double f, NSString *stage) {
-        if (progress) progress(0.8 + 0.05 * f, stage);
-    })) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
     NSString *serializedOutput = [workDir stringByAppendingPathComponent:@"target.cab"];
-    if (!zt_rebuild_serialized_correctly(targetDoc, replacements, streamOffsets, serializedOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    if (!zt_rebuild_serialized_correctly(targetDoc, replacements, serializedOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
     ZLog(@"[ZTranscoder] rebuilt SerializedFile node: original=%lld new=%llu", (long long)targetCABNode.size, (unsigned long long)zt_file_size(serializedOutput));
     NSString *bundleOutput = [workDir stringByAppendingPathComponent:@"modded.bundle"];
-    if (!zt_write_unityfs(originalCopy, targetArchive, serializedOutput, resSOutput, bundleOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
+    if (!zt_write_unityfs(originalCopy, targetArchive, serializedOutput, bundleOutput, error)) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
     if (zt_file_size(bundleOutput) == 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"UnityFS output bundle is empty.");
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
         return NO;
     }
-    ZLog(@"[ZTranscoder] final UnityFS output=%llu bytes targetOriginal=%llu bytes resS=%llu bytes", (unsigned long long)zt_file_size(bundleOutput), (unsigned long long)zt_file_size(originalCopy), (unsigned long long)newResSSize);
+    ZLog(@"[ZTranscoder] final UnityFS output=%llu bytes targetOriginal=%llu bytes resS=%lld bytes (unchanged)", (unsigned long long)zt_file_size(bundleOutput), (unsigned long long)zt_file_size(originalCopy), (long long)targetResS.size);
     NSString *replacementInput = [inputPath stringByAppendingString:@".zst-out"];
     [[NSFileManager defaultManager] removeItemAtPath:replacementInput error:nil];
     if (![[NSFileManager defaultManager] copyItemAtPath:bundleOutput toPath:replacementInput error:error]) { [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil]; return NO; }
