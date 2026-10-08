@@ -93,6 +93,37 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve tweak version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CHANNEL: ${{ inputs.dylib_channel }}
+        run: |
+          set -euo pipefail
+          TWEAK_VERSION=""
+
+          if [[ "$CHANNEL" == "nightly" ]]; then
+            REF="$(gh release view nightly --repo "$REPO" --json targetCommitish -q .targetCommitish || true)"
+            HEADER=""
+            if [[ -n "$REF" ]]; then
+              HEADER="$(gh api "repos/$REPO/contents/Core/ZSVersion.h?ref=$REF" -H 'Accept: application/vnd.github.raw' || true)"
+            fi
+            if [[ -z "$HEADER" ]]; then
+              HEADER="$(cat Core/ZSVersion.h)"
+            fi
+            part() { printf '%s' "$HEADER" | grep -oE "#define ZS_VERSION_$1 [0-9]+" | grep -oE '[0-9]+$'; }
+            TWEAK_VERSION="$(part MAJOR).$(part MINOR).$(part PATCH)"
+          else
+            TAG_NAME="$(gh release view --repo "$REPO" --json tagName -q .tagName)"
+            TWEAK_VERSION="${TAG_NAME#v}"
+          fi
+
+          if [[ -z "$TWEAK_VERSION" ]]; then
+            echo "::error::Could not determine the tweak version." >&2
+            exit 1
+          fi
+          echo "TWEAK_VERSION=$TWEAK_VERSION" >> "$GITHUB_ENV"
+
       - name: Ad-hoc codesign
         run: codesign -f -s - ZSingularity.dylib
 
@@ -112,6 +143,16 @@ jobs:
             exit 1
           fi
           echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Read game version
+        run: |
+          set -euo pipefail
+          GAME_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Info.plist")"
+          if [[ -z "$GAME_VERSION" ]]; then
+            echo "::error::CFBundleShortVersionString is missing from the game's Info.plist." >&2
+            exit 1
+          fi
+          echo "GAME_VERSION=$GAME_VERSION" >> "$GITHUB_ENV"
 
       - name: Copy dylib into app bundle
         run: |
@@ -179,7 +220,7 @@ jobs:
       - name: Repackage .ipa
         run: |
           set -euo pipefail
-          OUT_IPA="ZSingularity-Injected.ipa"
+          OUT_IPA="LC${GAME_VERSION}—ZS${TWEAK_VERSION}.ipa"
           pushd ipa/extracted
           rm -f "../../$OUT_IPA"
           zip -qry "../../$OUT_IPA" Payload
@@ -187,14 +228,61 @@ jobs:
           echo "OUT_IPA=$OUT_IPA" >> "$GITHUB_ENV"
 
       - name: Publish injected .ipa as a GitHub release
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TAG="ipa-${{ github.run_number }}"
-          gh release create "$TAG" "$OUT_IPA" \
-            --repo "${{ github.repository }}" \
-            --title "Injected IPA build ${{ github.run_number }}" \
-            --notes "ZSingularity injected into the provided .ipa (build ${{ github.run_number }}, commit ${{ github.sha }})." \
-            --prerelease \
-            --target "${{ github.sha }}"
+          TAG="ipa"
+          TITLE="LimbusCompany v${GAME_VERSION} — ZS v${TWEAK_VERSION}"
+          NOTES="ZSingularity v${TWEAK_VERSION} injected into LimbusCompany v${GAME_VERSION} (build ${{ github.run_number }}, commit ${{ github.sha }})."
+
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            gh release view "$TAG" --repo "$REPO" --json assets -q '.assets[].name' | while IFS= read -r NAME; do
+              if [[ "$NAME" == *.ipa ]]; then
+                gh release delete-asset "$TAG" "$NAME" --repo "$REPO" --yes
+              fi
+            done
+            gh release edit "$TAG" \
+              --repo "$REPO" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --prerelease
+            gh release upload "$TAG" "$OUT_IPA" --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" "$OUT_IPA" \
+              --repo "$REPO" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --prerelease \
+              --target "${{ github.sha }}"
+          fi
+
+          URL="$(gh release view "$TAG" --repo "$REPO" --json url -q .url)"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Discord webhook
+        id: webhook
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [[ "$DISCORD_WEBHOOK_URL" =~ ^https://(www\.|ptb\.|canary\.)?(discord|discordapp)\.com/api(/v[0-9]+)?/webhooks/[0-9]+/[A-Za-z0-9._-]+/?$ ]]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post release link to Discord
+        if: steps.webhook.outputs.valid == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RELEASE_URL: ${{ steps.publish.outputs.url }}
+        run: |
+          set -euo pipefail
+          CONTENT="$(printf 'LimbusCompany v%s\nZS v%s\n\n%s' "$GAME_VERSION" "$TWEAK_VERSION" "$RELEASE_URL")"
+          PAYLOAD="$(jq -n --arg content "$CONTENT" '{content: $content}')"
+          curl -fsS --retry 3 --retry-all-errors \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD" \
+            "$DISCORD_WEBHOOK_URL" > /dev/null
