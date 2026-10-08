@@ -205,6 +205,10 @@ static BOOL zt_format_is_crunched(int32_t format) {
     return format == 28 || format == 29 || format == 64 || format == 65;
 }
 
+static BOOL zt_format_is_transplant_only(int32_t format) {
+    return format == 4 || format == 45 || format == 46 || format == 47;
+}
+
 static NSString *zt_format_name(int32_t format) {
     switch (format) {
         case 3: return @"RGB24";
@@ -1724,6 +1728,15 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
         processedAssets++;
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
+        if (sourceObject.classID == kZTClassTexture2D) {
+            ZTTextureRecord *probeTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
+            if (probeTexture && !probeTexture.isInline) {
+                skippedAssets++;
+                ZLog(@"[ZTranscoder] skipping Texture2D PathID=%lld name=%@: image data is stored in .resS, leaving it untouched", (long long)sourceObject.pathID, probeTexture.name.length ? probeTexture.name : @"<unnamed>");
+                if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                continue;
+            }
+        }
         ZTSerializedObject *targetObject = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID);
         BOOL isNewAsset = NO;
         if (!targetObject) {
@@ -1791,6 +1804,12 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ objectBytes source=%lu target=%lu imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d imageHash=%@ objectMatch=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO", exact ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
             if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; retaining PathID matching", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
             if (exact) continue;
+            if (zt_format_is_transplant_only(sourceTexture.format)) {
+                if (sourceObjectData) targetObject.replacementObject = sourceObjectData;
+                ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only; copied inline object without transcoding (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourceObjectData.length);
+                if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                continue;
+            }
             ZTTextureReplacement *replacement = [ZTTextureReplacement new];
             replacement.source = sourceTexture;
             replacement.target = targetTexture;
@@ -1822,8 +1841,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             NSString *sourceHash = zt_sha256(sourceObjectData);
             NSString *targetHash = zt_sha256(targetObjectData);
             ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu hashMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO");
-            BOOL alwaysTransplant = sourceObject.classID == kZTClassSprite || sourceObject.classID == kZTClassSpriteAtlas || sourceObject.classID == kZTClassTextAsset || sourceObject.classID == kZTClassAssetBundle;
-            if (alwaysTransplant || sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
+            if (isNewAsset || sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
         }
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
     }
