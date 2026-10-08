@@ -30,6 +30,7 @@ static const int32_t kZTClassSpriteRenderer = 212;
 static const int32_t kZTClassSpriteMask = 331;
 static const int32_t kZTClassSpriteAtlas = 687078895;
 static const int32_t kZTClassTextAsset = 49;
+static const int32_t kZTClassAssetBundle = 142;
 
 static BOOL zt_class_is_transcoded(int32_t classID) {
     return classID == kZTClassTexture2D
@@ -37,7 +38,8 @@ static BOOL zt_class_is_transcoded(int32_t classID) {
         || classID == kZTClassSpriteRenderer
         || classID == kZTClassSpriteMask
         || classID == kZTClassSpriteAtlas
-        || classID == kZTClassTextAsset;
+        || classID == kZTClassTextAsset
+        || classID == kZTClassAssetBundle;
 }
 
 static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
@@ -1713,7 +1715,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
     NSUInteger matchedAssets = 0;
-    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset object(s)", (unsigned long)assetCount);
+    ZLog(@"[ZTranscoder] extracted %lu source Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset/AssetBundle object(s)", (unsigned long)assetCount);
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
@@ -1829,7 +1831,8 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             NSString *sourceHash = zt_sha256(sourceObjectData);
             NSString *targetHash = zt_sha256(targetObjectData);
             ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu hashMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO");
-            targetObject.replacementObject = sourceObjectData;
+            BOOL alwaysTransplant = sourceObject.classID == kZTClassSprite || sourceObject.classID == kZTClassSpriteAtlas || sourceObject.classID == kZTClassTextAsset || sourceObject.classID == kZTClassAssetBundle;
+            if (alwaysTransplant || sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
         }
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
     }
@@ -1842,7 +1845,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         ZLog(@"[ZTranscoder] added %lu object(s) missing from the original bundle (%lu Texture2D)", (unsigned long)addedObjects.count, (unsigned long)addedTextures.count);
     }
     if (matchedAssets == 0) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset assets exist in the original bundle.");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the mod's Texture2D/Sprite/SpriteRenderer/SpriteMask/SpriteAtlas/TextAsset/AssetBundle assets exist in the original bundle.");
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
         return NO;
     }
