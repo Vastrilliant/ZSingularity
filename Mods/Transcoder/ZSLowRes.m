@@ -2396,6 +2396,8 @@ static double g_zslrRateSmooth = 0;
 static double g_zslrRateBest = 0;
 #define ZSLR_TRANSCODE_REJECTED 1
 
+static const uint32_t kZSLRTranscodeQuality = 7u;
+
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
 static id<MTLCommandQueue> g_zslrMetalQueue;
@@ -3620,24 +3622,24 @@ static NSString *zslr_bytes(uint64_t bytes) {
         if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:2 userInfo:@{NSLocalizedDescriptionKey: why[0] ? [NSString stringWithUTF8String:why] : @"Metal ASTC encoder initialization failed."}];
         return nil;
     }
-    static id<MTLComputePipelineState> g_astc6FastPipeline;
+    static id<MTLComputePipelineState> g_astc6Pipeline;
     static dispatch_once_t onceToken;
     static NSString *pipelineError;
     dispatch_once(&onceToken, ^{
         os_unfair_lock_lock(&g_zslrMetalLock);
         NSError *pipelineCreateError = nil;
-        id<MTLFunction> function = [g_zslrMetalLibrary newFunctionWithName:@"zslr_astc_encode_fast_6"];
+        id<MTLFunction> function = [g_zslrMetalLibrary newFunctionWithName:@"zslr_astc_encode_6"];
         if (!function) pipelineError = @"Metal ASTC 6x6 encoder function is missing.";
         else {
             MTLComputePipelineDescriptor *descriptor = [MTLComputePipelineDescriptor new];
             descriptor.computeFunction = function;
             descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
-            g_astc6FastPipeline = [g_zslrMetalDevice newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&pipelineCreateError];
-            if (!g_astc6FastPipeline) pipelineError = pipelineCreateError.localizedDescription ?: @"Metal ASTC 6x6 encoder pipeline creation failed.";
+            g_astc6Pipeline = [g_zslrMetalDevice newComputePipelineStateWithDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&pipelineCreateError];
+            if (!g_astc6Pipeline) pipelineError = pipelineCreateError.localizedDescription ?: @"Metal ASTC 6x6 encoder pipeline creation failed.";
         }
         os_unfair_lock_unlock(&g_zslrMetalLock);
     });
-    if (!g_astc6FastPipeline) {
+    if (!g_astc6Pipeline) {
         if (error) *error = [NSError errorWithDomain:@"ZSLowResErrorDomain" code:3 userInfo:@{NSLocalizedDescriptionKey: pipelineError ?: @"Metal ASTC 6x6 encoder pipeline is unavailable."}];
         return nil;
     }
@@ -3663,7 +3665,7 @@ static NSString *zslr_bytes(uint64_t bytes) {
     }
     [sourceTexture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:rgbaData.bytes bytesPerRow:(NSUInteger)width * 4u];
     char gpuWhy[256] = {0};
-    int rc = zslr_gpu_run(g_zslrMetalQueue, g_astc6FastPipeline, sourceTexture, outputBuffer, metricBuffer, width, height, 6u, blocksX, blocksY, sRGB ? 1 : 0, 0u, gpuWhy, sizeof(gpuWhy));
+    int rc = zslr_gpu_run(g_zslrMetalQueue, g_astc6Pipeline, sourceTexture, outputBuffer, metricBuffer, width, height, 6u, blocksX, blocksY, sRGB ? 1 : 0, kZSLRTranscodeQuality, gpuWhy, sizeof(gpuWhy));
     zslr_pool_give_buffer(metricBuffer);
     NSData *result = nil;
     if (rc == 0) result = [NSData dataWithBytes:outputBuffer.contents length:outputLength];
