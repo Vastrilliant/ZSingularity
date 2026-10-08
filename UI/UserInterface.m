@@ -13784,6 +13784,33 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [field becomeFirstResponder];
 }
 
+- (void)zs_keyboardWillChangeFrame:(NSNotification *)note {
+    UIView *unityView = zs_ui_host_view();
+    NSDictionary *info = note.userInfo;
+    NSValue *endValue = info[UIKeyboardFrameEndUserInfoKey];
+    if (!unityView || !endValue) return;
+
+    CGRect endFrame = [unityView convertRect:endValue.CGRectValue fromView:nil];
+    CGFloat inset = CGRectGetHeight(unityView.bounds) - CGRectGetMinY(endFrame);
+    BOOL visible = inset >= 8 && !CGRectIsEmpty(endFrame);
+    self.zs_lastKeyboardFrame = visible ? endFrame : CGRectZero;
+
+    NSLayoutConstraint *bottom = self.zsFloatingFieldBottomConstraint;
+    if (!bottom || !self.zsFloatingFieldContainer) return;
+
+    CGFloat bottomInset = visible ? inset : unityView.safeAreaInsets.bottom;
+    bottom.constant = -(bottomInset + 8);
+
+    NSTimeInterval duration = [info[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    NSInteger curve = [info[UIKeyboardAnimationCurveUserInfoKey] integerValue];
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:(UIViewAnimationOptions)(curve << 16) | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        [unityView layoutIfNeeded];
+    } completion:nil];
+}
+
 - (void)zs_commitFloatingFieldSaving:(BOOL)saving {
     void (^completion)(NSString * _Nullable) = self.zsFloatingFieldCompletion;
     NSString *trimmed = [(self.zsFloatingField.text ?: @"")
