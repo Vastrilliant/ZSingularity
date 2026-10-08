@@ -17,25 +17,9 @@ typedef NS_ENUM(NSInteger, ZTranscoderServiceErrorCode) {
     ZTranscoderServiceErrorOutputMissing,
 };
 
-extern NSString * const ZTranscoderServiceHTTPStatusKey;
-extern NSString * const ZTranscoderServiceResponseBodyKey;
-extern NSString * const ZTranscoderServiceRunURLKey;
-
-typedef NS_ENUM(NSInteger, ZTranscoderRunStatus) {
-    ZTranscoderRunStatusQueued = 0,
-    ZTranscoderRunStatusInProgress,
-    ZTranscoderRunStatusSucceeded,
-    ZTranscoderRunStatusFailed,
-};
 
 @interface ZTranscoderConfig : NSObject
-@property (nonatomic, copy, nullable) NSString *repoOwner;
-@property (nonatomic, copy, nullable) NSString *repoName;
-@property (nonatomic, copy, nullable) NSString *ref;
-@property (nonatomic, copy, nullable) NSString *workflowFile;
-@property (nonatomic, copy, nullable) NSString *outputFormat;
 @property (nonatomic, copy, nullable) NSString *targetBundlePath;
-@property (nonatomic, copy, nullable) NSString *authToken;
 - (ZTranscoderConfig *)normalizedConfig;
 @end
 
@@ -64,27 +48,8 @@ typedef NS_ENUM(NSInteger, ZTranscoderRunStatus) {
                 uploadProgress:(nullable void (^)(int64_t bytesSent, int64_t totalBytesExpected))uploadProgress
                     completion:(void (^)(ZTranscoderHandle * _Nullable handle, NSError * _Nullable error))completion;
 
-+ (void)resolveRunForHandle:(ZTranscoderHandle *)handle
-                     config:(nullable ZTranscoderConfig *)config
-                 completion:(void (^)(BOOL found, NSError * _Nullable error))completion;
-
-+ (void)fetchRunStatusForHandle:(ZTranscoderHandle *)handle
-                         config:(nullable ZTranscoderConfig *)config
-                     completion:(void (^)(ZTranscoderRunStatus status, double percentComplete, NSError * _Nullable error))completion;
-
-+ (void)fetchDoctoredBundleForHandle:(ZTranscoderHandle *)handle
-                              config:(nullable ZTranscoderConfig *)config
-                            progress:(nullable void (^)(int64_t bytesWritten, int64_t totalBytesExpected))downloadProgress
-                          completion:(void (^)(NSURL * _Nullable doctoredBundleURL, NSError * _Nullable error))completion;
-
 + (BOOL)isUploadCompressionEnabled;
 + (void)setUploadCompressionEnabled:(BOOL)enabled;
-
-+ (void)deleteAllReleasesForConfig:(nullable ZTranscoderConfig *)config
-                          completion:(void (^)(NSInteger deletedCount, NSError * _Nullable error))completion;
-
-+ (void)verifyCredentialsForConfig:(nullable ZTranscoderConfig *)config
-                          completion:(void (^)(BOOL valid, NSError * _Nullable error))completion;
 
 @end
 
@@ -107,19 +72,5 @@ typedef NS_ENUM(NSInteger, ZTranscoderInstallerErrorCode) {
 + (BOOL)cacheOriginalBackForStockBundleURL:(NSURL *)stockBundleURL error:(NSError **)error;
 @end
 
-extern NSString * const ZTranscoderSettingsErrorDomain;
-
-typedef NS_ENUM(NSInteger, ZTranscoderSettingsErrorCode) {
-    ZTranscoderSettingsErrorWriteFailed = 1,
-    ZTranscoderSettingsErrorKeychainWriteFailed,
-    ZTranscoderSettingsErrorKeychainDeleteFailed,
-};
-
-@interface ZTranscoderSettings : NSObject
-+ (BOOL)hasStoredConfig;
-+ (ZTranscoderConfig *)loadConfig;
-+ (BOOL)saveConfig:(ZTranscoderConfig *)config error:(NSError **)error;
-+ (BOOL)clearAllWithError:(NSError **)error;
-@end
 
 NS_ASSUME_NONNULL_END

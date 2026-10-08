@@ -1,6 +1,5 @@
 
 #import <UIKit/UIKit.h>
-#import "Transcoder.h"
 
 #pragma mark - Remote docs fetching
 
@@ -76,7 +75,6 @@ static NSDictionary<NSString *, NSString *> *zs_docs_section_files(void) {
             @"Particles": @"Particles.md",
             @"Miscellaneous": @"Miscellaneous.md",
             @"Mods": @"Mods.md",
-            @"Auth": @"Auth.md",
             @"Config": @"Config.md",
         };
     });
@@ -150,17 +148,9 @@ static NSString *zs_docs_cached_content(NSString *key) {
 }
 
 static void zs_docs_perform_markdown_fetch(NSURL *url, NSString *filename, NSString *key,
-                                            NSString * _Nullable authToken, BOOL isRetry,
-                                            ZSDocsFetchCompletion completion);
-
-static void zs_docs_perform_markdown_fetch(NSURL *url, NSString *filename, NSString *key,
-                                            NSString * _Nullable authToken, BOOL isRetry,
                                             ZSDocsFetchCompletion completion) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
-    if (authToken.length > 0) {
-        [request setValue:[NSString stringWithFormat:@"Bearer %@", authToken] forHTTPHeaderField:@"Authorization"];
-    }
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
@@ -178,10 +168,6 @@ static void zs_docs_perform_markdown_fetch(NSURL *url, NSString *filename, NSStr
                 return;
             }
 
-            if (authToken.length > 0 && !isRetry) {
-                zs_docs_perform_markdown_fetch(url, filename, key, nil, YES, completion);
-                return;
-            }
 
             NSError *finalError = error ?: [NSError errorWithDomain:@"ZSDocsRemote" code:http ? http.statusCode : 2
                 userInfo:@{NSLocalizedDescriptionKey:
@@ -208,8 +194,7 @@ static void zs_docs_fetch_latest(NSString *key, ZSDocsFetchCompletion completion
         return;
     }
 
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
-    zs_docs_perform_markdown_fetch(url, filename, key, authToken, NO, completion);
+    zs_docs_perform_markdown_fetch(url, filename, key, completion);
 }
 
 #pragma mark - Images
@@ -262,16 +247,10 @@ static UIImage *zs_docs_cached_image(NSString *filename) {
     return image;
 }
 
-static void zs_docs_perform_image_fetch(NSURL *url, NSString *filename, NSString * _Nullable authToken,
-                                         BOOL isRetry, void (^completion)(UIImage * _Nullable image));
-
-static void zs_docs_perform_image_fetch(NSURL *url, NSString *filename, NSString * _Nullable authToken,
-                                         BOOL isRetry, void (^completion)(UIImage * _Nullable image)) {
+static void zs_docs_perform_image_fetch(NSURL *url, NSString *filename,
+                                         void (^completion)(UIImage * _Nullable image)) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
-    if (authToken.length > 0) {
-        [request setValue:[NSString stringWithFormat:@"Bearer %@", authToken] forHTTPHeaderField:@"Authorization"];
-    }
 
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
@@ -289,10 +268,6 @@ static void zs_docs_perform_image_fetch(NSURL *url, NSString *filename, NSString
                 return;
             }
 
-            if (authToken.length > 0 && !isRetry) {
-                zs_docs_perform_image_fetch(url, filename, nil, YES, completion);
-                return;
-            }
 
             if (completion) {
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(nil); });
@@ -310,8 +285,7 @@ static void zs_docs_fetch_image(NSString *filename, void (^completion)(UIImage *
         return;
     }
 
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
-    zs_docs_perform_image_fetch(url, filename, authToken, NO, completion);
+    zs_docs_perform_image_fetch(url, filename, completion);
 }
 
 #pragma mark - Minimal markdown renderer

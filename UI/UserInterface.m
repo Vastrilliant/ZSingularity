@@ -822,44 +822,6 @@ static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *imag
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
-static void zs_style_auth_verify_button(UIButton *button, NSString *title) {
-    zs_style_button_as_native_glass_with_font(button, title, zs_accent_green_color(), zs_mono_font(11, UIFontWeightSemibold));
-}
-
-static void zs_crossfade_auth_verify_button_title(UIButton *button, NSString *title) {
-    [UIView transitionWithView:button
-                       duration:0.2
-                        options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        zs_style_auth_verify_button(button, title);
-    }
-                     completion:nil];
-}
-
-static void zs_style_auth_remove_button(UIButton *button, NSString *title) {
-    zs_style_button_as_native_glass_with_font(button, title, [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0], zs_mono_font(11, UIFontWeightSemibold));
-}
-
-static void zs_crossfade_auth_button_to_remove(UIButton *button) {
-    [UIView transitionWithView:button
-                       duration:0.2
-                        options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        zs_style_auth_remove_button(button, @"Remove");
-    }
-                     completion:nil];
-}
-
-static void zs_crossfade_auth_button_to_verify(UIButton *button) {
-    [UIView transitionWithView:button
-                       duration:0.2
-                        options:UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        zs_style_auth_verify_button(button, @"Verify");
-    }
-                     completion:nil];
-}
-
 static void zs_remove_tap_to_confirm(UIButton *button) {
     [button removeTarget:nil action:@selector(zs_handleTapToConfirm:) forControlEvents:UIControlEventTouchUpInside];
 }
@@ -4593,55 +4555,6 @@ static ZSRow *zs_make_full_width_glass_field_row(UITextField *field) {
     return row;
 }
 
-static BOOL zs_parse_github_repo_link(NSString *raw, NSString **outOwner, NSString **outName) {
-    NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (s.length == 0) return NO;
-
-    if ([s hasPrefix:@"git@github.com:"]) {
-        s = [s substringFromIndex:@"git@github.com:".length];
-    } else {
-
-        NSRange schemeRange = [s rangeOfString:@"://"];
-        if (schemeRange.location != NSNotFound) {
-            s = [s substringFromIndex:NSMaxRange(schemeRange)];
-        }
-        if ([s.lowercaseString hasPrefix:@"github.com/"]) {
-            s = [s substringFromIndex:@"github.com/".length];
-        }
-    }
-
-    if ([s hasSuffix:@"/"]) s = [s substringToIndex:s.length - 1];
-    if ([s.lowercaseString hasSuffix:@".git"]) s = [s substringToIndex:s.length - @".git".length];
-
-    NSArray<NSString *> *parts = [s componentsSeparatedByString:@"/"];
-    if (parts.count != 2) return NO;
-
-    NSString *owner = parts[0];
-    NSString *name = parts[1];
-    if (owner.length == 0 || name.length == 0) return NO;
-
-    if (outOwner) *outOwner = owner;
-    if (outName) *outName = name;
-    return YES;
-}
-
-static NSString *zs_format_github_repo_link(NSString *owner, NSString *name) {
-    if (owner.length == 0 || name.length == 0) return @"";
-    return [NSString stringWithFormat:@"%@/%@", owner, name];
-}
-
-static NSString *zs_sanitize_personal_access_token(NSString *raw) {
-    NSString *s = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSArray<NSString *> *schemePrefixes = @[@"bearer ", @"token "];
-    for (NSString *prefix in schemePrefixes) {
-        if (s.length > prefix.length && [[s substringToIndex:prefix.length].lowercaseString isEqualToString:prefix]) {
-            return [[s substringFromIndex:prefix.length]
-                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        }
-    }
-    return s;
-}
-
 static ZSRow *zs_make_labeled_glass_field_row(NSString *placeholder, BOOL secure, UIButton *trailingButton) {
     ZSRow *row = [[ZSRow alloc] initWithFrame:CGRectZero];
     row.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5947,19 +5860,6 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 @property (nonatomic, strong) UILabel *syslogBlacklistStatusLabel;
 @property (nonatomic, strong) UIStackView *syslogBlacklistEntriesStack;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *syslogBlacklist;
-
-@property (nonatomic, strong) UITextField *authRepoLinkField;
-@property (nonatomic, strong) UITextField *authTokenField;
-
-@property (nonatomic, strong) UIView *authRepoLinkFieldContainer;
-@property (nonatomic, strong) UIView *authTokenFieldContainer;
-@property (nonatomic, strong) UIButton *authVerifyButton;
-
-@property (nonatomic, strong) UILabel *authStatusLabel;
-
-@property (nonatomic, assign) BOOL authInRemoveMode;
-
-@property (nonatomic, assign) BOOL authCredentialsStale;
 
 @property (nonatomic, strong) UIControl *customGreetingRow;
 
@@ -8141,13 +8041,6 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.syslogRenderDeferred = NO;
     self.syslogCopyToastView = nil;
 
-    self.authRepoLinkField = nil;
-    self.authTokenField = nil;
-    self.authRepoLinkFieldContainer = nil;
-    self.authTokenFieldContainer = nil;
-    self.authVerifyButton = nil;
-    self.authStatusLabel = nil;
-
     self.customGreetingRow = nil;
 
     self.modsOptionsDropdownOverlay = nil;
@@ -8403,124 +8296,6 @@ static UIView *zs_make_syslog_blacklist_card(UIView *syslogRow, UILabel *blackli
 }
 
 #pragma mark - Experimental settings index mapping
-
-static UIView *zs_make_auth_credentials_card(UITextField *repoField, UITextField *tokenField, UIButton *verifyButton, UILabel *statusLabel) {
-    UIView *card;
-    UIView *host;
-
-    if (zs_has_liquid_glass()) {
-        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        glass.translatesAutoresizingMaskIntoConstraints = NO;
-        zs_configure_glass_corners(glass, 12, NO);
-        glass.layer.borderWidth = 1;
-        glass.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-        zs_register_suspendable_glass(glass);
-        card = glass;
-        host = glass.contentView;
-    } else {
-        UIView *plain = [[UIView alloc] init];
-        plain.translatesAutoresizingMaskIntoConstraints = NO;
-        plain.backgroundColor = [UIColor colorWithWhite:0.07 alpha:0.96];
-        plain.layer.cornerRadius = 12;
-        plain.layer.cornerCurve = kCACornerCurveContinuous;
-        plain.layer.borderWidth = 1;
-        plain.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-        plain.clipsToBounds = YES;
-        card = plain;
-        host = plain;
-    }
-
-    UILabel *repoLabel = [[UILabel alloc] init];
-    repoLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    repoLabel.text = @"REPOSITORY";
-    repoLabel.font = zs_mono_font(8.5, UIFontWeightSemibold);
-    repoLabel.textColor = [UIColor colorWithWhite:1 alpha:0.38];
-    [host addSubview:repoLabel];
-
-    UILabel *tokenLabel = [[UILabel alloc] init];
-    tokenLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    tokenLabel.text = @"ACCESS TOKEN";
-    tokenLabel.font = zs_mono_font(8.5, UIFontWeightSemibold);
-    tokenLabel.textColor = [UIColor colorWithWhite:1 alpha:0.38];
-    [host addSubview:tokenLabel];
-
-    repoField.translatesAutoresizingMaskIntoConstraints = NO;
-    repoField.font = zs_mono_font(11, UIFontWeightRegular);
-    repoField.textColor = UIColor.whiteColor;
-    repoField.tintColor = zs_accent_green_color();
-    repoField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"owner/repository" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.28]}];
-    repoField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    repoField.autocorrectionType = UITextAutocorrectionTypeNo;
-    repoField.spellCheckingType = UITextSpellCheckingTypeNo;
-    repoField.returnKeyType = UIReturnKeyDone;
-    repoField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    [host addSubview:repoField];
-
-    tokenField.translatesAutoresizingMaskIntoConstraints = NO;
-    tokenField.font = zs_mono_font(11, UIFontWeightRegular);
-    tokenField.textColor = UIColor.whiteColor;
-    tokenField.tintColor = zs_accent_green_color();
-    tokenField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"personal access token" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.28]}];
-    tokenField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    tokenField.autocorrectionType = UITextAutocorrectionTypeNo;
-    tokenField.spellCheckingType = UITextSpellCheckingTypeNo;
-    tokenField.returnKeyType = UIReturnKeyDone;
-    tokenField.secureTextEntry = YES;
-    tokenField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    [host addSubview:tokenField];
-
-    UIView *separator = [[UIView alloc] init];
-    separator.translatesAutoresizingMaskIntoConstraints = NO;
-    separator.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
-    [host addSubview:separator];
-
-    verifyButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [host addSubview:verifyButton];
-
-    statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    statusLabel.font = zs_mono_font(9.5, UIFontWeightRegular);
-    statusLabel.numberOfLines = 0;
-    statusLabel.hidden = YES;
-    [host addSubview:statusLabel];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [repoLabel.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [repoLabel.topAnchor constraintEqualToAnchor:host.topAnchor constant:12],
-        [repoLabel.widthAnchor constraintEqualToConstant:78],
-
-        [repoField.leadingAnchor constraintEqualToAnchor:repoLabel.trailingAnchor constant:8],
-        [repoField.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [repoField.centerYAnchor constraintEqualToAnchor:repoLabel.centerYAnchor],
-        [repoField.heightAnchor constraintEqualToConstant:24],
-
-        [separator.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [separator.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [separator.topAnchor constraintEqualToAnchor:repoField.bottomAnchor constant:7],
-        [separator.heightAnchor constraintEqualToConstant:1],
-
-        [tokenLabel.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [tokenLabel.topAnchor constraintEqualToAnchor:separator.bottomAnchor constant:10],
-        [tokenLabel.widthAnchor constraintEqualToConstant:78],
-
-        [tokenField.leadingAnchor constraintEqualToAnchor:tokenLabel.trailingAnchor constant:8],
-        [tokenField.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [tokenField.centerYAnchor constraintEqualToAnchor:tokenLabel.centerYAnchor],
-        [tokenField.heightAnchor constraintEqualToConstant:24],
-
-        [verifyButton.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-12],
-        [verifyButton.topAnchor constraintEqualToAnchor:tokenField.bottomAnchor constant:10],
-        [verifyButton.widthAnchor constraintEqualToConstant:72],
-        [verifyButton.heightAnchor constraintEqualToConstant:26],
-
-        [statusLabel.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:12],
-        [statusLabel.trailingAnchor constraintLessThanOrEqualToAnchor:verifyButton.leadingAnchor constant:-10],
-        [statusLabel.centerYAnchor constraintEqualToAnchor:verifyButton.centerYAnchor],
-        [statusLabel.bottomAnchor constraintLessThanOrEqualToAnchor:host.bottomAnchor constant:-10],
-        [verifyButton.bottomAnchor constraintEqualToAnchor:host.bottomAnchor constant:-10],
-    ]];
-
-    return card;
-}
 
 static NSInteger zs_exp_idx_QualityAA(int32_t v) { if (v == 1) return 0; if (v == 2) return 1; if (v == 4) return 2; if (v == 8) return 3; return 0; }
 static NSInteger zs_exp_idx_URPMSAA(int32_t v) { if (v == 1) return 0; if (v == 2) return 1; if (v == 4) return 2; if (v == 8) return 3; return 0; }
@@ -10556,7 +10331,6 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
         @[@"Particles", @"PA"],
         @[@"Memory management", @"MM"],
         @[@"Mods", @"MO"],
-        @[@"Auth", @"AU"],
         @[@"Developer", @"DV"],
         @[@"Miscellaneous", @"MS"],
         @[@"Config", @"CN"],
@@ -12692,7 +12466,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 
     ZLog(@"[Mods Library] starting on-device transcode for %@ (previous scratch branch=%@ ignored).", entryPath.lastPathComponent, previousScratchBranch ?: @"none");
     NSURL *bundleURL = [NSURL fileURLWithPath:entryPath];
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
+    ZTranscoderConfig *config = [ZTranscoderConfig new];
     if (entry.resolvedInstallTargetPath.length > 0) {
         config.targetBundlePath = [NSHomeDirectory() stringByAppendingPathComponent:entry.resolvedInstallTargetPath];
         ZLog(@"[Mods Library] local transcode target for %@: %@", entry.fileName, config.targetBundlePath);
@@ -12793,31 +12567,14 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
                                            error:(NSError *)error {
     [self.doctorUploadProgressLastUpdate removeObjectForKey:entryPath];
 
-    if (!handle) {
+    if (error) {
         [self zs_doctorFailEntryAtPath:entryPath inFolder:folderName error:error];
         return;
     }
 
-    if (handle.alreadyComplete) {
-        NSError *stateError = nil;
-        ModAssetLibraryEntry *updated = [ModAssetLibrary updateDoctorStateForEntry:zs_mods_entry_placeholder_for_path(entryPath)
-                                                                            inFolder:folderName
-                                                                          applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-            entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusReadyToDownload;
-
-            entryToMutate.doctorProcessProgress = 1.0;
-            entryToMutate.doctorScratchBranch = handle.scratchBranch;
-            entryToMutate.doctorRunID = nil;
-            entryToMutate.doctorRunURL = nil;
-            entryToMutate.doctorDispatchCompressedByteSize = handle.compressedByteSize;
-        }
-                                                                               error:&stateError];
-        if (!updated) {
-            ZLog(@"[Mods Library] cache-hit dispatch finished for %@ but its manifest entry is gone (deleted mid-upload?).", entryPath.lastPathComponent);
-            return;
-        }
-        ZLog(@"[Mods Library] %@ was a cache hit, ready to download immediately (scratch branch=%@).", entryPath.lastPathComponent, handle.scratchBranch);
-        [self zs_rebuildModsLibrary];
+    if (handle.scratchBranch.length == 0 || ![NSFileManager.defaultManager fileExistsAtPath:handle.scratchBranch]) {
+        [self zs_doctorFailEntryAtPath:entryPath inFolder:folderName
+                                 error:ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The local transcode completed without producing an installable bundle.")];
         return;
     }
 
@@ -12826,21 +12583,23 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
                                                                         inFolder:folderName
                                                                       applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
         entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusProcessing;
-
-        entryToMutate.doctorProcessProgress = 0.0;
+        entryToMutate.doctorProcessProgress = 1.0;
         entryToMutate.doctorScratchBranch = handle.scratchBranch;
-        entryToMutate.doctorRunID = handle.runID;
-        entryToMutate.doctorRunURL = handle.runURL;
+        entryToMutate.doctorRunID = nil;
+        entryToMutate.doctorRunURL = nil;
         entryToMutate.doctorDispatchCompressedByteSize = handle.compressedByteSize;
+        entryToMutate.doctorLastError = nil;
     }
                                                                            error:&stateError];
     if (!updated) {
-        ZLog(@"[Mods Library] dispatch finished for %@ but its manifest entry is gone (deleted mid-upload?) - not arming a poll timer.", entryPath.lastPathComponent);
+        ZLog(@"[Mods Library] transcode finished for %@ but its manifest entry is gone.", entryPath.lastPathComponent);
         return;
     }
-    ZLog(@"[Mods Library] %@ uploaded, now processing (run=%@, scratch branch=%@) - arming poll timer.", entryPath.lastPathComponent, handle.runID, handle.scratchBranch);
     [self zs_rebuildModsLibrary];
-    [self zs_armDoctorPollTimerForEntryPath:entryPath inFolder:folderName];
+    ZLog(@"[Mods Library] %@ transcode finished, installing immediately from %@.", entryPath.lastPathComponent, handle.scratchBranch);
+    [self zs_doctorInstallUsingKnownTargetForDoctoredURL:[NSURL fileURLWithPath:handle.scratchBranch]
+                                               entryPath:entryPath
+                                                inFolder:folderName];
 }
 
 - (void)zs_doctorFailEntryAtPath:(NSString *)entryPath inFolder:(NSString *)folderName error:(NSError *)error {
@@ -12938,18 +12697,20 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
                     entryToMutate.doctorLastError = @"On-device transcoding was interrupted (the app was closed or backgrounded mid-transcode). Tap Retry to run it again.";
                 }
                                                        error:nil];
-            } else if (entry.doctorStatus == ModAssetLibraryDoctorStatusProcessing) {
+            } else if (entry.doctorStatus == ModAssetLibraryDoctorStatusProcessing || entry.doctorStatus == ModAssetLibraryDoctorStatusReadyToDownload) {
                 NSString *outputPath = entry.doctorScratchBranch;
                 if (outputPath.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:outputPath]) {
                     recoveredOutputs++;
                     [ModAssetLibrary updateDoctorStateForEntry:entry
                                                         inFolder:folderName
                                                       applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-                        entryToMutate.doctorStatus = ModAssetLibraryDoctorStatusReadyToDownload;
                         entryToMutate.doctorProcessProgress = 1.0;
                         entryToMutate.doctorLastError = nil;
                     }
                                                            error:nil];
+                    [self zs_doctorInstallUsingKnownTargetForDoctoredURL:[NSURL fileURLWithPath:outputPath]
+                                                               entryPath:entry.path
+                                                                inFolder:folderName];
                 } else {
                     interruptedTranscodes++;
                     [ModAssetLibrary updateDoctorStateForEntry:entry
@@ -12964,7 +12725,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         }
     }
     if (interruptedTranscodes > 0 || recoveredOutputs > 0) {
-        ZLog(@"[Mods Library] launch recovery: %ld interrupted local transcode(s) marked Failed, %ld completed output(s) recovered as ReadyToDownload.",
+        ZLog(@"[Mods Library] launch recovery: %ld interrupted local transcode(s) marked Failed, %ld completed output(s) sent directly to install.",
              (long)interruptedTranscodes, (long)recoveredOutputs);
     }
 }
@@ -14269,7 +14030,7 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         return;
     }
 
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
+    ZTranscoderConfig *config = [ZTranscoderConfig new];
     ZTranscoderHandle *handle = [ZTranscoderHandle handleFromDictionaryRepresentation:@{
         @"scratchBranch": entry.doctorScratchBranch ?: @"",
         @"runID": entry.doctorRunID ?: @"",
@@ -18158,300 +17919,7 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
     [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
 }
 
-#pragma mark Auth
-
-- (void)zs_loadAuthFields {
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    self.authRepoLinkField.text = zs_format_github_repo_link(config.repoOwner, config.repoName);
-    self.authTokenField.text = config.authToken ?: @"";
-}
-
-- (void)zs_persistAuthFields {
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-
-    NSString *linkRaw = [self.authRepoLinkField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (linkRaw.length == 0) {
-        config.repoOwner = nil;
-        config.repoName = nil;
-    } else {
-        NSString *owner = nil, *name = nil;
-        if (zs_parse_github_repo_link(linkRaw, &owner, &name)) {
-            config.repoOwner = owner;
-            config.repoName = name;
-
-            self.authRepoLinkField.text = zs_format_github_repo_link(owner, name);
-        } else {
-
-            ZLog(@"[UserInterface] Auth: couldn't parse GitHub repo link \"%@\" - keeping previously saved repo, if any", linkRaw);
-        }
-    }
-
-    NSString *tokenSanitized = zs_sanitize_personal_access_token(self.authTokenField.text ?: @"");
-    config.authToken = tokenSanitized.length > 0 ? tokenSanitized : nil;
-    self.authTokenField.text = tokenSanitized;
-
-    NSError *error = nil;
-    if (![ZTranscoderSettings saveConfig:config error:&error]) {
-        ZLog(@"[UserInterface] Auth: failed to save ZTranscoder config: %@", error);
-    }
-}
-
-- (void)zs_setAuthStatusLabelText:(NSString *)text color:(UIColor *)color {
-    self.authStatusLabel.text = text ?: @"";
-    self.authStatusLabel.textColor = color;
-    self.authStatusLabel.hidden = (text.length == 0);
-    if ([color isEqual:zs_accent_green_color()]) {
-        zs_apply_gif_text_tint(self.authStatusLabel);
-    } else {
-        zs_remove_gif_text_tint(self.authStatusLabel);
-    }
-}
-
-- (void)zs_setAuthFieldsLocked:(BOOL)locked {
-    self.authRepoLinkField.enabled = !locked;
-    self.authTokenField.enabled = !locked;
-
-    UIColor *textColor = locked ? [UIColor colorWithWhite:1 alpha:0.35] : UIColor.whiteColor;
-    self.authRepoLinkField.textColor = textColor;
-    self.authTokenField.textColor = textColor;
-
-    NSArray<UIView *> *fieldContainers = @[self.authRepoLinkFieldContainer, self.authTokenFieldContainer];
-    for (UIView *container in fieldContainers) {
-        if (!container) continue;
-        container.alpha = locked ? 0.5 : 1.0;
-        if (zs_has_liquid_glass() && [container isKindOfClass:[UIVisualEffectView class]]) {
-            ((UIVisualEffectView *)container).effect = zs_make_glass_effect(!locked);
-        }
-    }
-}
-
-- (void)zs_authEnterVerifiedState {
-    self.authCredentialsStale = NO;
-    self.authInRemoveMode = YES;
-    [self zs_setAuthFieldsLocked:YES];
-
-    [self.authVerifyButton removeTarget:self action:@selector(zs_authVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-    zs_remove_tap_to_confirm(self.authVerifyButton);
-    __weak typeof(self) weakSelf = self;
-    zs_attach_tap_to_confirm(self.authVerifyButton, self,
-        @"Remove Credentials?", @"Your stored GitHub credentials will be removed from this device.", @"Remove", YES, ^{
-        [weakSelf zs_authRemoveCredentialsConfirmed];
-    });
-    self.authVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_remove(self.authVerifyButton);
-
-    [self zs_setAuthStatusLabelText:@"Credentials confirmed." color:zs_accent_green_color()];
-    ZLog(@"[UserInterface] Auth: credentials verified");
-}
-
-- (void)zs_authEnterStaleState {
-    self.authCredentialsStale = YES;
-    self.authInRemoveMode = YES;
-    [self zs_setAuthFieldsLocked:YES];
-
-    [self.authVerifyButton removeTarget:self action:@selector(zs_authVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-    zs_remove_tap_to_confirm(self.authVerifyButton);
-    __weak typeof(self) weakSelf = self;
-    zs_attach_tap_to_confirm(self.authVerifyButton, self,
-        @"Remove Credentials?", @"Your stored GitHub credentials will be removed from this device.", @"Remove", YES, ^{
-        [weakSelf zs_authRemoveCredentialsConfirmed];
-    });
-    self.authVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_remove(self.authVerifyButton);
-
-    [self zs_setAuthStatusLabelText:@"Your credentials are no longer valid."
-                               color:[UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0]];
-    ZLog(@"[UserInterface] Auth: stored credentials are no longer valid");
-}
-
-- (void)zs_authRemoveCredentialsConfirmed {
-    NSError *error = nil;
-    if (![ZTranscoderSettings clearAllWithError:&error]) {
-        ZLog(@"[UserInterface] Auth: failed to wipe stored credentials: %@", error);
-    } else {
-        ZLog(@"[UserInterface] Auth: credentials removed");
-    }
-
-    self.authInRemoveMode = NO;
-    self.authCredentialsStale = NO;
-    zs_remove_tap_to_confirm(self.authVerifyButton);
-    [self.authVerifyButton addTarget:self action:@selector(zs_authVerifyTapped:) forControlEvents:UIControlEventTouchUpInside];
-
-    self.authRepoLinkField.text = @"";
-    self.authTokenField.text = @"";
-    [self zs_setAuthFieldsLocked:NO];
-
-    self.authVerifyButton.enabled = YES;
-    zs_crossfade_auth_button_to_verify(self.authVerifyButton);
-
-    [self zs_setAuthStatusLabelText:nil color:nil];
-}
-
-- (void)zs_authRunBootVerification {
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        return;
-    }
-
-    __weak typeof(self) weakSelf = self;
-    [ZTranscoderService verifyCredentialsForConfig:config completion:^(BOOL valid, NSError *verifyError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (valid) {
-            [strongSelf zs_authEnterVerifiedState];
-        } else {
-            [strongSelf zs_authEnterStaleState];
-        }
-    }];
-}
-
-- (void)zs_animateCardSwapFrom:(UIView *)outgoing to:(UIView *)incoming completion:(void (^)(void))completion {
-    incoming.hidden = NO;
-    __weak typeof(self) weakSelf = self;
-    [UIView animateWithDuration:0.28
-                          delay:0
-                        options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
-                     animations:^{
-        outgoing.alpha = 0;
-        incoming.alpha = 1;
-        [weakSelf.stack setNeedsLayout];
-        [weakSelf.stack layoutIfNeeded];
-        [weakSelf.glassContainer layoutIfNeeded];
-        [weakSelf.panel layoutIfNeeded];
-        [weakSelf.scrollViewport layoutIfNeeded];
-    } completion:^(BOOL finished) {
-        outgoing.hidden = YES;
-        [weakSelf zs_updateSliderGlassVisibility];
-        if (completion) completion();
-    }];
-}
-
-- (void)zs_presentOptionsInCard:(UIView *)card titles:(NSArray<NSString *> *)titles selectedIndex:(NSInteger)selectedIndex action:(SEL)action {
-    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
-    NSLayoutConstraint *innerBottom = objc_getAssociatedObject(card, "zs_innerBottom");
-    if (!inner || !innerBottom || titles.count == 0) return;
-    if (objc_getAssociatedObject(card, "zs_optionsStack")) return;
-
-    UIView *host = [card isKindOfClass:[UIVisualEffectView class]] ? ((UIVisualEffectView *)card).contentView : card;
-    host.clipsToBounds = YES;
-
-    UIStackView *options = zs_make_card_options_stack(titles, selectedIndex, self, action);
-    options.alpha = 0;
-    [host addSubview:options];
-
-    CGFloat rowsHeight = titles.count * kZSGroupedCardRowHeight + (titles.count - 1);
-    options.frame = CGRectMake(kZSGroupedCardHorizontalPadding, 0,
-                               MAX(CGRectGetWidth(host.bounds) - 2 * kZSGroupedCardHorizontalPadding, 0),
-                               rowsHeight);
-
-    NSLayoutConstraint *optionsBottom = [options.bottomAnchor constraintEqualToAnchor:host.bottomAnchor];
-    innerBottom.active = NO;
-    [NSLayoutConstraint activateConstraints:@[
-        [options.topAnchor constraintEqualToAnchor:host.topAnchor],
-        [options.leadingAnchor constraintEqualToAnchor:host.leadingAnchor constant:kZSGroupedCardHorizontalPadding],
-        [options.trailingAnchor constraintEqualToAnchor:host.trailingAnchor constant:-kZSGroupedCardHorizontalPadding],
-        optionsBottom,
-    ]];
-
-    objc_setAssociatedObject(card, "zs_optionsStack", options, OBJC_ASSOCIATION_RETAIN);
-    objc_setAssociatedObject(card, "zs_optionsBottom", optionsBottom, OBJC_ASSOCIATION_RETAIN);
-    inner.userInteractionEnabled = NO;
-
-    [self zs_animateCardSwapFrom:inner to:options completion:nil];
-}
-
-- (void)zs_restoreCardFromOptions:(UIView *)card {
-    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
-    NSLayoutConstraint *innerBottom = objc_getAssociatedObject(card, "zs_innerBottom");
-    UIStackView *options = objc_getAssociatedObject(card, "zs_optionsStack");
-    NSLayoutConstraint *optionsBottom = objc_getAssociatedObject(card, "zs_optionsBottom");
-    if (!inner || !innerBottom || !options) return;
-
-    objc_setAssociatedObject(card, "zs_optionsStack", nil, OBJC_ASSOCIATION_RETAIN);
-    objc_setAssociatedObject(card, "zs_optionsBottom", nil, OBJC_ASSOCIATION_RETAIN);
-
-    options.userInteractionEnabled = NO;
-    optionsBottom.active = NO;
-    innerBottom.active = YES;
-    inner.userInteractionEnabled = YES;
-
-    [self zs_animateCardSwapFrom:options to:inner completion:^{
-        [options removeFromSuperview];
-    }];
-}
-
-- (void)zs_authVerifyTapped:(UIButton *)sender {
-    if (self.authInRemoveMode) return;
-
-    [self zs_persistAuthFields];
-
-    ZTranscoderConfig *config = [ZTranscoderSettings loadConfig];
-    if (config.repoOwner.length == 0 || config.repoName.length == 0 || config.authToken.length == 0) {
-        [self zs_presentModsAlertWithTitle:@"Auth Not Configured"
-                                    message:@"Set a GitHub Repository Link and Personal Access Token above first."];
-        return;
-    }
-
-    sender.enabled = NO;
-    zs_crossfade_auth_verify_button_title(sender, @"Verifying\u2026");
-
-    __weak typeof(self) weakSelf = self;
-    [ZTranscoderService verifyCredentialsForConfig:config completion:^(BOOL valid, NSError *verifyError) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        if (valid) {
-            [strongSelf zs_authEnterVerifiedState];
-        } else {
-            sender.enabled = YES;
-            zs_crossfade_auth_verify_button_title(sender, @"Verify");
-            ZLog(@"[UserInterface] Auth: manual verification failed: %@", verifyError.localizedDescription ?: @"Couldn't verify the repository link and token.");
-            [strongSelf zs_presentModsAlertWithTitle:@"Verification Failed"
-                                              message:verifyError.localizedDescription ?: @"Couldn't verify the repository link and token."];
-        }
-    }];
-}
-
-- (void)zs_keyboardWillChangeFrame:(NSNotification *)note {
-    UIView *unityView = zs_ui_host_view();
-    if (!unityView) return;
-
-    CGRect endFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
-    CGRect endFrameInWindow = [unityView convertRect:endFrame fromView:nil];
-    self.zs_lastKeyboardFrame = endFrameInWindow;
-
-    BOOL keyboardVisible = CGRectGetMinY(endFrameInWindow) < CGRectGetMaxY(unityView.bounds);
-    NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
-    if (duration <= 0) duration = 0.25;
-
-    if (self.zsFloatingField && keyboardVisible) {
-        CGFloat bottomInset = CGRectGetHeight(unityView.bounds) - CGRectGetMinY(endFrameInWindow);
-        self.zsFloatingFieldBottomConstraint.constant = -(bottomInset + 8);
-        [UIView animateWithDuration:duration animations:^{
-            [unityView layoutIfNeeded];
-        }];
-    } else if (self.zsFloatingField && !keyboardVisible) {
-        [self.zsFloatingField resignFirstResponder];
-    }
-}
-
 - (BOOL)textFieldShouldBeginEditing:(UITextField *)textField {
-    if (textField == self.authRepoLinkField || textField == self.authTokenField) {
-        __weak typeof(self) weakSelf = self;
-        __weak UITextField *weakField = textField;
-        [self zs_presentFloatingTextFieldWithInitialText:textField.text
-                                              placeholder:textField.placeholder
-                                                   secure:textField.secureTextEntry
-                                               completion:^(NSString * _Nullable trimmedText) {
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            __strong UITextField *strongField = weakField;
-            if (!strongSelf || !strongField) return;
-            strongField.text = trimmedText ?: @"";
-            [strongSelf zs_persistAuthFields];
-        }];
-        return NO;
-    }
     return YES;
 }
 

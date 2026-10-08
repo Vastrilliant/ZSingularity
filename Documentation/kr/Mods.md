@@ -1,30 +1,25 @@
 # MODS
-Mods 섹션은 "mod folders"의 로컬 라이브러리입니다. 각 폴더에는 가져온 mod 파일과 처리 상태가 저장되며, 여기에서 mod를 전송/설치/복원할 수 있습니다.
+Mods 섹션은 로컬 "mod 폴더" 라이브러리입니다. 각 폴더에는 가져온 mod 파일과 처리 상태가 저장되며, 여기에서 배포, 설치 및 복원을 수행할 수 있습니다.
 
-이 기능을 사용하려면 Transcoder Proxy 저장소를 fork해야 합니다.
+## Mods 불러오기
 
-[https://github.com/vastrilliant/transcoder-proxy/](https://github.com/vastrilliant/transcoder-proxy/)
-
-또한 이를 사용하려면 PAT (personal access token)를 제공해야 합니다. 자세한 내용은 [personal access token](Auth.md#personal-access-token)을 참고하세요.
-
-## Load Mods
-
-원하는 mod 라이브러리에서 가져온 modded bundle을 불러옵니다. [NexusMods](https://www.nexusmods.com/games/limbuscompany)를 권장합니다.
+사용하는 mod 라이브러리에서 수정된 bundle을 가져옵니다. [NexusMods](https://www.nexusmods.com/games/limbuscompany)를 권장합니다.
 
 지원 형식:
-`__data` unity asset bundles
+`__data` Unity AssetBundle
 `.assets.bank` FMOD Sound Bank
-`Lunartique` .zip archives
-`Carra2` archives
-`*.json` localization files 
-`translation` packages
+`Lunartique` .zip 아카이브
+`Carra2` 아카이브
+`*.json` 로컬라이제이션 파일
+`translation` 패키지
 
-## Processing
+## 처리
 
-- **Unity AssetBundles**는 일반적으로 그대로 설치할 수 없습니다. 보통 다른 플랫폼의 텍스처 압축 방식으로 빌드되어 있기 때문에 다시 인코딩하지 않으면 게임이 로드하지 못합니다. 업로드 버튼을 눌러 repo로 보내고 transcoding을 진행하세요.
+- **Unity AssetBundle**은 일반적으로 그대로 설치할 수 없습니다. 다른 플랫폼용 텍스처 압축으로 만들어지는 경우가 많아 게임에서 로드하려면 다시 인코딩해야 합니다. 이제 tweak은 지원되는 bundle을 기기에서 직접 트랜스코딩합니다.
 
-## The Transcoder pipeline
+## 트랜스코더 파이프라인
 
-bundle을 transcoding하면 [Auth](Auth.md)에 설정된 GitHub 저장소로 전송되며, GitHub Actions workflow가 [Config → Transcode Format](Config.md)에서 선택한 형식으로 텍스처를 다시 인코딩합니다.
+온디바이스 트랜스코더는 가져온 bundle과 게임의 원본 bundle을 읽고 관련 asset을 매칭한 뒤 필요한 텍스처를 ASTC 6x6으로 다시 인코딩합니다. GitHub 저장소, PAT 또는 원격 workflow가 필요하지 않습니다.
 
-실행이 성공적으로 끝나면 tweak가 처리된 bundle을 다운로드하여 원본 대신 설치합니다. 원본 stock bundle은 먼저 `ZTranscoderInstaller`를 통해 백업되므로 나중에 복원할 수 있습니다.
+트랜스코딩이 끝나면 처리된 bundle은 즉시 원본 대신 설치됩니다. 원본 bundle은 나중에 복원할 수 있도록 `ZTranscoderInstaller`가 먼저 백업합니다.
+

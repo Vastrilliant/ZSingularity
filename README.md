@@ -10,7 +10,7 @@
 ---
 **ZSingularity** is a jailed iOS tweak for **Limbus Company** that gives you direct, fine-grained control over the game's graphical and performance settings by hooking into public classes exposed in Assembly-CSharp — settings the game's own menu never lets you touch.
 
-Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's historically been desktop-only. Modded asset bundles are sent to a private GitHub repository running AssetTools.NET, re-encoded and re-targeted for mobile, then returned to the tweak and installed directly into the game.
+Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's historically been desktop-only. Modded asset bundles are transcoded locally on-device and installed directly after processing.
 
 Need some help, have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
 

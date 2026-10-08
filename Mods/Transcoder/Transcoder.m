@@ -2,7 +2,6 @@
 #import "ZTweakLog.h"
 #import "UnityBundleTools.h"
 #import "Mods.h"
-#import "ZSEngine.h"
 #import "ZSLowRes.h"
 #import "ZSCrunch.h"
 #import "IL2CppIntrospection.h"
@@ -16,12 +15,7 @@
 #import <unistd.h>
 
 NSString * const ZTranscoderServiceErrorDomain = @"ZTranscoderServiceErrorDomain";
-NSString * const ZTranscoderServiceHTTPStatusKey = @"ZTranscoderServiceHTTPStatusKey";
-NSString * const ZTranscoderServiceResponseBodyKey = @"ZTranscoderServiceResponseBodyKey";
-NSString * const ZTranscoderServiceRunURLKey = @"ZTranscoderServiceRunURLKey";
 
-static NSString * const kSettingsSection = @"transcoder";
-static NSString * const kUploadCompressionEnabledKey = @"uploadCompressionEnabled";
 static NSString * const kZSTranscoderTempPrefix = @"zst-local-transcoder-";
 static const uint32_t kZSTranscoderBlockSize = 131072u;
 static const uint32_t kZSTranscoderUnityFSFlagsPaddingAtStart = 0x200u;
@@ -1641,13 +1635,7 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
 @implementation ZTranscoderConfig
 - (ZTranscoderConfig *)normalizedConfig {
     ZTranscoderConfig *copy = [ZTranscoderConfig new];
-    copy.repoOwner = self.repoOwner;
-    copy.repoName = self.repoName;
-    copy.ref = self.ref.length ? self.ref : @"main";
-    copy.workflowFile = self.workflowFile.length ? self.workflowFile : @"ztranscoder.yml";
-    copy.outputFormat = @"ASTC_RGBA_6x6";
     copy.targetBundlePath = self.targetBundlePath;
-    copy.authToken = self.authToken;
     return copy;
 }
 @end
@@ -1975,31 +1963,8 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
     }];
 }
 
-+ (void)resolveRunForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config completion:(void (^)(BOOL, NSError *))completion {
-    (void)config;
-    BOOL exists = handle.scratchBranch.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:handle.scratchBranch];
-    completion(exists, exists ? nil : ZTMakeTranscoderError(ZTranscoderServiceErrorRunNotFound, @"The locally transcoded bundle is no longer available."));
-}
-
-+ (void)fetchRunStatusForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config completion:(void (^)(ZTranscoderRunStatus, double, NSError *))completion {
-    (void)config;
-    BOOL exists = handle.scratchBranch.length > 0 && [NSFileManager.defaultManager fileExistsAtPath:handle.scratchBranch];
-    completion(exists ? ZTranscoderRunStatusSucceeded : ZTranscoderRunStatusFailed, exists ? 1.0 : 0.0, exists ? nil : ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The locally transcoded bundle no longer exists."));
-}
-
-+ (void)fetchDoctoredBundleForHandle:(ZTranscoderHandle *)handle config:(ZTranscoderConfig *)config progress:(void (^)(int64_t, int64_t))downloadProgress completion:(void (^)(NSURL *, NSError *))completion {
-    (void)config;
-    NSString *path = handle.scratchBranch;
-    if (!path.length || ![NSFileManager.defaultManager fileExistsAtPath:path]) { completion(nil, ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The local transcode output is missing.")); return; }
-    uint64_t size = zt_file_size(path);
-    if (downloadProgress) downloadProgress((int64_t)size, (int64_t)size);
-    completion([NSURL fileURLWithPath:path], nil);
-}
-
 + (BOOL)isUploadCompressionEnabled { return NO; }
 + (void)setUploadCompressionEnabled:(BOOL)enabled { (void)enabled; }
-+ (void)deleteAllReleasesForConfig:(ZTranscoderConfig *)config completion:(void (^)(NSInteger, NSError *))completion { (void)config; completion(0, nil); }
-+ (void)verifyCredentialsForConfig:(ZTranscoderConfig *)config completion:(void (^)(BOOL, NSError *))completion { (void)config; completion(YES, nil); }
 @end
 
 #pragma mark - ZTranscoderInstaller
@@ -2227,159 +2192,6 @@ static NSString * const kManifestFileName = @"manifest.json";
 
     ZLog(@"[ZTranscoderInstaller] cached %@ - live bytes swapped back to the backed-up original", stockBundleURL.lastPathComponent);
     return YES;
-}
-
-@end
-
-#pragma mark - ZTranscoderSettings
-
-NSString * const ZTranscoderSettingsErrorDomain = @"ZTranscoderSettingsErrorDomain";
-
-static NSString * const kKeychainService = @"com.120F.ZTranscoderService";
-static NSString * const kKeychainAccount = @"githubAuthToken";
-
-@implementation ZTranscoderSettings
-
-#pragma mark - Shared settings.json (non-sensitive fields)
-
-static NSDictionary *bds_load_json_dictionary(void) {
-    return zs_settings_section(kSettingsSection);
-}
-
-static BOOL bds_write_json_dictionary(NSDictionary *dict, NSError **error) {
-    zs_write_settings_section(kSettingsSection, dict);
-    return YES;
-}
-
-#pragma mark - Keychain (authToken only)
-
-static NSString *_Nullable bds_read_token(void) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kKeychainService,
-        (__bridge id)kSecAttrAccount: kKeychainAccount,
-        (__bridge id)kSecReturnData: @YES,
-        (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne,
-    };
-
-    CFTypeRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
-
-    if (status == errSecItemNotFound) {
-        return nil;
-    }
-    if (status != errSecSuccess) {
-        ZLog(@"[ZTranscoderSettings] Keychain read failed (OSStatus %d) - see this file's header caveat on injected-dylib Keychain access", (int)status);
-        return nil;
-    }
-
-    NSData *data = (__bridge_transfer NSData *)result;
-    if (![data isKindOfClass:[NSData class]]) return nil;
-    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-}
-
-static BOOL bds_write_token(NSString *token, NSError **error) {
-    NSData *tokenData = [token dataUsingEncoding:NSUTF8StringEncoding];
-
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kKeychainService,
-        (__bridge id)kSecAttrAccount: kKeychainAccount,
-    };
-
-    NSDictionary *attributesToUpdate = @{
-        (__bridge id)kSecValueData: tokenData,
-    };
-
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)query, (__bridge CFDictionaryRef)attributesToUpdate);
-
-    if (status == errSecItemNotFound) {
-        NSMutableDictionary *addQuery = [query mutableCopy];
-        addQuery[(__bridge id)kSecValueData] = tokenData;
-
-        addQuery[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
-        status = SecItemAdd((__bridge CFDictionaryRef)addQuery, NULL);
-    }
-
-    if (status != errSecSuccess) {
-        ZLog(@"[ZTranscoderSettings] Keychain token write failed (OSStatus %d)", (int)status);
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderSettingsErrorDomain
-                                          code:ZTranscoderSettingsErrorKeychainWriteFailed
-                                      userInfo:@{NSLocalizedDescriptionKey:
-                                                     [NSString stringWithFormat:@"Keychain write failed (OSStatus %d).", (int)status]}];
-        }
-        return NO;
-    }
-    return YES;
-}
-
-static BOOL bds_delete_token(NSError **error) {
-    NSDictionary *query = @{
-        (__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-        (__bridge id)kSecAttrService: kKeychainService,
-        (__bridge id)kSecAttrAccount: kKeychainAccount,
-    };
-
-    OSStatus status = SecItemDelete((__bridge CFDictionaryRef)query);
-    if (status != errSecSuccess && status != errSecItemNotFound) {
-        ZLog(@"[ZTranscoderSettings] Keychain token delete failed (OSStatus %d)", (int)status);
-        if (error) {
-            *error = [NSError errorWithDomain:ZTranscoderSettingsErrorDomain
-                                          code:ZTranscoderSettingsErrorKeychainDeleteFailed
-                                      userInfo:@{NSLocalizedDescriptionKey:
-                                                     [NSString stringWithFormat:@"Keychain delete failed (OSStatus %d).", (int)status]}];
-        }
-        return NO;
-    }
-    return YES;
-}
-
-#pragma mark - Public API
-
-+ (BOOL)hasStoredConfig {
-    return bds_load_json_dictionary().count > 0;
-}
-
-+ (ZTranscoderConfig *)loadConfig {
-    NSDictionary *dict = bds_load_json_dictionary();
-
-    ZTranscoderConfig *config = [ZTranscoderConfig new];
-    config.repoOwner     = dict[@"repoOwner"];
-    config.repoName      = dict[@"repoName"];
-    config.ref           = dict[@"ref"];
-    config.workflowFile  = dict[@"workflowFile"];
-    config.outputFormat  = dict[@"outputFormat"];
-    config.authToken     = bds_read_token();
-
-    return config;
-}
-
-+ (BOOL)saveConfig:(ZTranscoderConfig *)config error:(NSError **)error {
-    ZLog(@"[ZTranscoderSettings] saving transcoder config (repo=%@/%@ ref=%@ format=%@)",
-         config.repoOwner, config.repoName, config.ref, config.outputFormat);
-    NSMutableDictionary *dict = [NSMutableDictionary dictionary];
-    if (config.repoOwner.length > 0)    dict[@"repoOwner"] = config.repoOwner;
-    if (config.repoName.length > 0)     dict[@"repoName"] = config.repoName;
-    if (config.ref.length > 0)          dict[@"ref"] = config.ref;
-    if (config.workflowFile.length > 0) dict[@"workflowFile"] = config.workflowFile;
-    if (config.outputFormat.length > 0) dict[@"outputFormat"] = config.outputFormat;
-
-    if (!bds_write_json_dictionary(dict, error)) {
-        return NO;
-    }
-
-    if (config.authToken.length > 0) {
-        return bds_write_token(config.authToken, error);
-    } else {
-        return bds_delete_token(error);
-    }
-}
-
-+ (BOOL)clearAllWithError:(NSError **)error {
-    ZLog(@"[ZTranscoderSettings] clearing all stored transcoder config and keychain token");
-    zs_write_settings_section(kSettingsSection, @{});
-    return bds_delete_token(error);
 }
 
 @end

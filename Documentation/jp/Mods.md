@@ -1,30 +1,25 @@
 # MODS
-Mods セクションは "mod folders" のローカルライブラリです。各フォルダにはインポートした mod ファイルと処理状態が保存され、ここから mod の送信・インストール・復元を行います。
+Mods セクションはローカルの「mod フォルダ」ライブラリです。各フォルダにはインポートした mod ファイルと処理状態が保存され、ここから派生処理、インストール、復元を行えます。
 
-この機能を使用するには、Transcoder Proxy リポジトリを fork する必要があります。
+## Mod の読み込み
 
-[https://github.com/vastrilliant/transcoder-proxy/](https://github.com/vastrilliant/transcoder-proxy/)
+利用している mod ライブラリから改造済み bundle をインポートします。[NexusMods](https://www.nexusmods.com/games/limbuscompany) を推奨します。
 
-また、PAT (personal access token) を提供する必要があります。詳しくは [personal access token](Auth.md#personal-access-token) を参照してください。
-
-## Load Mods
-
-任意の mod ライブラリから取得した modded bundle をインポートします。[NexusMods](https://www.nexusmods.com/games/limbuscompany) を推奨します。
-
-対応形式:
-`__data` unity asset bundles
+対応形式：
+`__data` Unity AssetBundle
 `.assets.bank` FMOD Sound Bank
-`Lunartique` .zip archives
-`Carra2` archives
-`*.json` localization files 
-`translation` packages
+`Lunartique` .zip アーカイブ
+`Carra2` アーカイブ
+`*.json` ローカライズファイル
+`translation` パッケージ
 
-## Processing
+## 処理
 
-- **Unity AssetBundles** は通常、そのままではインストールできません。別のプラットフォーム向けのテクスチャ圧縮でビルドされていることが多いため、再エンコードしないとゲームがロードできません。アップロードボタンを押して repo に送信し、transcoding を行ってください。
+- **Unity AssetBundle** は通常そのままではインストールできません。別プラットフォーム向けのテクスチャ圧縮で作られていることが多いため、ゲームで読み込むには再エンコードが必要です。現在は対応する bundle をデバイス上で直接トランスコードします。
 
-## The Transcoder pipeline
+## トランスコードの流れ
 
-bundle を transcoding すると、[Auth](Auth.md) で設定された GitHub リポジトリへ送信され、GitHub Actions workflow が [Config → Transcode Format](Config.md) で選択した形式へテクスチャを再エンコードします。
+デバイス上のトランスコーダーがインポートされた bundle とゲーム標準の bundle を読み込み、対応する asset を照合して必要なテクスチャを ASTC 6x6 に再エンコードします。GitHub リポジトリ、PAT、リモート workflow は不要です。
 
-実行が正常に完了すると、tweak が処理済み bundle をダウンロードし、元の bundle の代わりにインストールします。元の stock bundle は `ZTranscoderInstaller` を通じて先にバックアップされるため、後で復元できます。
+トランスコードが完了すると、処理済み bundle は元のファイルの代わりに直ちにインストールされます。元の bundle は後で復元できるよう `ZTranscoderInstaller` により先にバックアップされます。
+
