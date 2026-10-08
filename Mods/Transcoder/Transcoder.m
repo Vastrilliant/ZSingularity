@@ -30,16 +30,12 @@ static const uint32_t kZSTranscoderUnityFSCompressionMask = 0x3fu;
 static const uint32_t kZSTranscoderMaxTextureDimension = 16384u;
 static const int32_t kZTClassTexture2D = 28;
 static const int32_t kZTClassSprite = 213;
-static const int32_t kZTClassSpriteRenderer = 212;
-static const int32_t kZTClassSpriteMask = 331;
 static const int32_t kZTClassSpriteAtlas = 687078895;
 static const int32_t kZTClassTextAsset = 49;
 
 static BOOL zt_class_is_transcoded(int32_t classID) {
     return classID == kZTClassTexture2D
         || classID == kZTClassSprite
-        || classID == kZTClassSpriteRenderer
-        || classID == kZTClassSpriteMask
         || classID == kZTClassSpriteAtlas
         || classID == kZTClassTextAsset;
 }
@@ -297,12 +293,13 @@ static NSString *zt_format_name(int32_t format) {
 
 @interface ZTTextureReplacement : NSObject
 @property (nonatomic, strong) ZTTextureRecord *source;
+@property (nonatomic, strong) ZTTextureRecord *basis;
 @property (nonatomic, strong) ZTTextureRecord *target;
 @property (nonatomic, copy) NSString *encodedPath;
 @property (nonatomic, assign) uint32_t encodedSize;
 @property (nonatomic, assign) uint64_t targetStreamOffset;
 @property (nonatomic, copy, nullable) NSData *replacementObject;
-@property (nonatomic, copy, nullable) NSData *sourceObjectData;
+@property (nonatomic, copy, nullable) NSData *basisObjectData;
 @end
 
 @implementation ZTTextureReplacement
@@ -958,7 +955,42 @@ static uint64_t zt_expected_mip_size(int32_t format, uint32_t width, uint32_t he
     }
 }
 
-static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
+static NSData *zt_resample_bilinear(NSData *src, uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight) {
+    if (!src || srcWidth == 0 || srcHeight == 0 || dstWidth == 0 || dstHeight == 0) return nil;
+    if (src.length < (size_t)srcWidth * srcHeight * 4u) return nil;
+    NSMutableData *out = [NSMutableData dataWithLength:(size_t)dstWidth * dstHeight * 4u];
+    if (!out) return nil;
+    const uint8_t *in = src.bytes;
+    uint8_t *dst = out.mutableBytes;
+    for (uint32_t dy = 0; dy < dstHeight; dy++) {
+        double sy = ((double)dy + 0.5) * (double)srcHeight / (double)dstHeight - 0.5;
+        int64_t y0 = (int64_t)floor(sy);
+        double fy = sy - (double)y0;
+        int64_t y0c = MAX((int64_t)0, MIN(y0, (int64_t)srcHeight - 1));
+        int64_t y1c = MAX((int64_t)0, MIN(y0 + 1, (int64_t)srcHeight - 1));
+        for (uint32_t dx = 0; dx < dstWidth; dx++) {
+            double sx = ((double)dx + 0.5) * (double)srcWidth / (double)dstWidth - 0.5;
+            int64_t x0 = (int64_t)floor(sx);
+            double fx = sx - (double)x0;
+            int64_t x0c = MAX((int64_t)0, MIN(x0, (int64_t)srcWidth - 1));
+            int64_t x1c = MAX((int64_t)0, MIN(x0 + 1, (int64_t)srcWidth - 1));
+            const uint8_t *i00 = in + ((size_t)y0c * srcWidth + (size_t)x0c) * 4u;
+            const uint8_t *i10 = in + ((size_t)y0c * srcWidth + (size_t)x1c) * 4u;
+            const uint8_t *i01 = in + ((size_t)y1c * srcWidth + (size_t)x0c) * 4u;
+            const uint8_t *i11 = in + ((size_t)y1c * srcWidth + (size_t)x1c) * 4u;
+            uint8_t *o = dst + ((size_t)dy * dstWidth + dx) * 4u;
+            for (int c = 0; c < 4; c++) {
+                double top = (double)i00[c] * (1.0 - fx) + (double)i10[c] * fx;
+                double bot = (double)i01[c] * (1.0 - fx) + (double)i11[c] * fx;
+                double v = top * (1.0 - fy) + bot * fy;
+                o[c] = (uint8_t)MAX(0.0, MIN(255.0, nearbyint(v)));
+            }
+        }
+    }
+    return out;
+}
+
+static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, uint32_t outWidth, uint32_t outHeight, BOOL sRGB, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
     if (source.mipCount <= 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
         return NO;
@@ -994,7 +1026,12 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
     uint64_t totalOutput = 0;
     if (ok) {
         NSError *encodeError = nil;
-        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:source.width height:source.height sRGB:(source.colorSpace != 0) error:&encodeError];
+        NSData *encodeInput = rgba;
+        if (outWidth != source.width || outHeight != source.height) {
+            encodeInput = zt_resample_bilinear(rgba, source.width, source.height, outWidth, outHeight);
+            ZLog(@"[ZTranscoder] resampled %@ from %ux%u to the original %ux%u", source.name.length ? source.name : @"<unnamed>", source.width, source.height, outWidth, outHeight);
+        }
+        NSData *astc = encodeInput ? [ZSLowRes encodeRGBA8DataToASTC6:encodeInput width:outWidth height:outHeight sRGB:sRGB error:&encodeError] : nil;
         if (!astc) {
             if (error) *error = encodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
             ok = NO;
@@ -1022,7 +1059,7 @@ static BOOL zt_patch_u32_relative(NSMutableData *data, uint64_t base, uint64_t a
     return zt_write_u32_at(data, (NSUInteger)(absolutePosition - base), value);
 }
 
-static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize) {
+static NSData *zt_build_inline_texture_object(ZTTextureRecord *source, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize) {
     if (!source || !sourceObject || !encodedData) return nil;
     uint64_t base = source.object.objectStart;
     NSUInteger imageField = (NSUInteger)(source.imageDataPosition - base);
@@ -1087,9 +1124,9 @@ static NSData *zt_object_data(ZTSerializedObject *object, NSData *data) {
 
 static NSData *zt_rebuilt_object_data(ZTSerializedObject *object, ZTTextureRecord *targetTexture, ZTTextureReplacement *replacement, ZTSerializedDocument *targetDoc) {
     if (replacement && targetTexture) {
-        NSData *sourceRawObject = replacement.sourceObjectData;
+        NSData *sourceRawObject = replacement.basisObjectData;
         NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
-        return sourceRawObject && encoded ? zt_build_texture_object_from_source(replacement.source, sourceRawObject, encoded, replacement.encodedSize) : nil;
+        return sourceRawObject && encoded ? zt_build_inline_texture_object(replacement.basis, sourceRawObject, encoded, replacement.encodedSize) : nil;
     }
     if (object.replacementObject) return object.replacementObject;
     return zt_object_data(object, targetDoc.data);
@@ -1720,10 +1757,12 @@ static BOOL zt_process_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void 
             ZTTextureReplacement *replacement = [ZTTextureReplacement new];
             replacement.source = sourceTexture;
             replacement.target = targetTexture;
-            replacement.sourceObjectData = zt_object_data(sourceTexture.object, sourceDoc.data);
+            ZTTextureRecord *basisTexture = isNewAsset ? sourceTexture : targetTexture;
+            replacement.basis = basisTexture;
+            replacement.basisObjectData = isNewAsset ? zt_object_data(sourceTexture.object, sourceDoc.data) : zt_object_data(targetTexture.object, targetDoc.data);
             NSString *encodedPath = nil;
             uint32_t encodedSize = 0;
-            if (!zt_make_astc_replacement(sourceTexture, sourcePayload, workDir, &encodedPath, &encodedSize, error, ^(double f, NSString *stage) {
+            if (!zt_make_astc_replacement(sourceTexture, sourcePayload, basisTexture.width, basisTexture.height, basisTexture.colorSpace != 0, workDir, &encodedPath, &encodedSize, error, ^(double f, NSString *stage) {
                 if (progress) {
                     double base = assetCount ? ((double)(processedAssets - 1u) / (double)assetCount) : 0.0;
                     double span = assetCount ? (1.0 / (double)assetCount) : 1.0;
