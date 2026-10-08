@@ -14057,20 +14057,23 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
     ZLog(@"[Mods Library] installing locally transcoded bundle for %@.", entryPath.lastPathComponent);
     __weak typeof(self) weakSelf = self;
-    [ZTranscoderService fetchDoctoredBundleForHandle:handle config:config
-        progress:^(int64_t bytesWritten, int64_t totalBytesExpected) {
-            [weakSelf zs_doctorHandleDownloadProgress:bytesWritten totalBytesExpected:totalBytesExpected forEntryPath:entryPath inFolder:folderName];
-        }
-        completion:^(NSURL * _Nullable doctoredBundleURL, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        if (!doctoredBundleURL) {
-            [strongSelf zs_doctorDownloadFailedForEntryPath:entryPath inFolder:folderName error:error];
-            return;
-        }
-        ZLog(@"[Mods Library] download finished for %@, proceeding to install.", entryPath.lastPathComponent);
-        [strongSelf zs_doctorInstallUsingKnownTargetForDoctoredURL:doctoredBundleURL entryPath:entryPath inFolder:folderName];
-    }];
+    NSURL *doctoredBundleURL = [NSURL fileURLWithPath:handle.scratchBranch];
+    if (!handle.alreadyComplete || ![[NSFileManager defaultManager] fileExistsAtPath:doctoredBundleURL.path]) {
+        [self.doctorDownloadInFlightPaths removeObject:entryPath];
+        [self zs_doctorDownloadFailedForEntryPath:entryPath inFolder:folderName error:
+            ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The locally transcoded bundle is no longer available.")];
+        return;
+    }
+
+    ZLog(@"[Mods Library] local transcode output found for %@, proceeding to install.", entryPath.lastPathComponent);
+    unsigned long long outputSize = 0;
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:doctoredBundleURL.path error:nil];
+    if (attrs) outputSize = [attrs[NSFileSize] unsignedLongLongValue];
+    [self zs_doctorHandleDownloadProgress:(int64_t)MIN(outputSize, (unsigned long long)INT64_MAX)
+                       totalBytesExpected:(int64_t)MIN(outputSize, (unsigned long long)INT64_MAX)
+                            forEntryPath:entryPath
+                               inFolder:folderName];
+    [self zs_doctorInstallUsingKnownTargetForDoctoredURL:doctoredBundleURL entryPath:entryPath inFolder:folderName];
 }
 
 - (void)zs_doctorHandleDownloadProgress:(int64_t)bytesWritten totalBytesExpected:(int64_t)totalBytesExpected forEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName {
