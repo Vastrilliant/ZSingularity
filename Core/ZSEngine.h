@@ -448,14 +448,6 @@ void zs_set_custom_greeting_text(NSString * _Nullable text);
 
 @end
 
-@interface ZSEgoAutoSpeed : NSObject
-
-+ (void)install;
-+ (BOOL)isEnabled;
-+ (void)setEnabled:(BOOL)enabled;
-
-@end
-
 #pragma mark - Shared IL2CPP helpers
 
 void *mt_class(const char *ns, const char *name, const char *assemblySubstring);
