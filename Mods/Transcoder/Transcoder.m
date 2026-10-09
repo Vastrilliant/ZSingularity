@@ -173,14 +173,6 @@ static uint64_t zt_file_size(NSString *path) {
     return [attrs[NSFileSize] unsignedLongLongValue];
 }
 
-static NSString *zt_sha256(NSData *data) {
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
-    NSMutableString *text = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
-    for (NSUInteger i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [text appendFormat:@"%02x", digest[i]];
-    return text;
-}
-
 static NSString *zt_sha256_range(const uint8_t *base, uint64_t offset, uint64_t length) {
     CC_SHA256_CTX ctx;
     CC_SHA256_Init(&ctx);
@@ -315,7 +307,10 @@ static NSString *zt_format_name(int32_t format) {
 @property (nonatomic, assign) uint32_t encodedSize;
 @property (nonatomic, assign) uint64_t targetStreamOffset;
 @property (nonatomic, copy, nullable) NSData *replacementObject;
-@property (nonatomic, copy, nullable) NSData *sourceObjectData;
+@property (nonatomic, strong, nullable) ZTTextureRecord *baseTexture;
+@property (nonatomic, copy, nullable) NSData *baseObjectData;
+@property (nonatomic, assign) int32_t outputFormat;
+@property (nonatomic, assign) int32_t outputMipCount;
 @end
 
 @implementation ZTTextureReplacement
@@ -978,9 +973,175 @@ static uint64_t zt_expected_mip_size(int32_t format, uint32_t width, uint32_t he
     }
 }
 
-static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
+static BOOL zt_decode_base_level(ZTTextureRecord *texture, NSData *payload, NSMutableData **outRGBA, NSError **error) {
+    if (!texture || !payload) return NO;
+    NSData *levelData = payload;
+    if (!zt_format_is_crunched(texture.format)) {
+        uint64_t baseSize = zt_expected_mip_size(texture.format, texture.width, texture.height);
+        if (baseSize == 0 || baseSize > payload.length) return NO;
+        levelData = [payload subdataWithRange:NSMakeRange(0, (NSUInteger)baseSize)];
+    }
+    return zt_decode_texture_mip(texture, levelData, texture.width, texture.height, 0, outRGBA, error);
+}
+
+static BOOL zt_texture_pixels_match(ZTTextureRecord *source, ZTTextureRecord *target, NSData *sourcePayload, NSData *targetPayload) {
+    if (!source || !target || !sourcePayload || !targetPayload) return NO;
+    if (source.width != target.width || source.height != target.height) return NO;
+    if (source.format == target.format && source.mipCount == target.mipCount) return [sourcePayload isEqualToData:targetPayload];
+    NSMutableData *sourcePixels = nil;
+    NSMutableData *targetPixels = nil;
+    if (!zt_decode_base_level(source, sourcePayload, &sourcePixels, NULL)) return NO;
+    if (!zt_decode_base_level(target, targetPayload, &targetPixels, NULL)) return NO;
+    return [sourcePixels isEqualToData:targetPixels];
+}
+
+typedef struct {
+    int32_t start;
+    int32_t count;
+} ZTResizeSpan;
+
+static BOOL zt_build_resize_spans(uint32_t srcSize, uint32_t dstSize, ZTResizeSpan **outSpans, float **outWeights, uint32_t *outStride) {
+    double scale = (double)srcSize / (double)dstSize;
+    double support = MAX(1.0, scale);
+    uint32_t stride = (uint32_t)ceil(support * 2.0) + 3u;
+    ZTResizeSpan *spans = calloc(dstSize, sizeof(ZTResizeSpan));
+    float *weights = calloc((size_t)dstSize * stride, sizeof(float));
+    if (!spans || !weights) {
+        free(spans);
+        free(weights);
+        return NO;
+    }
+    for (uint32_t i = 0; i < dstSize; i++) {
+        double center = ((double)i + 0.5) * scale;
+        int64_t lo = (int64_t)floor(center - support);
+        int64_t hi = (int64_t)ceil(center + support);
+        if (lo < 0) lo = 0;
+        if (hi > (int64_t)srcSize - 1) hi = (int64_t)srcSize - 1;
+        float *row = weights + (size_t)i * stride;
+        uint32_t count = 0;
+        double total = 0.0;
+        for (int64_t j = lo; j <= hi && count < stride; j++) {
+            double d = fabs(((double)j + 0.5 - center) / support);
+            double v = d < 1.0 ? 1.0 - d : 0.0;
+            row[count++] = (float)v;
+            total += v;
+        }
+        if (total <= 0.0) {
+            int64_t nearest = (int64_t)floor(center);
+            if (nearest < 0) nearest = 0;
+            if (nearest > (int64_t)srcSize - 1) nearest = (int64_t)srcSize - 1;
+            lo = nearest;
+            row[0] = 1.0f;
+            count = 1;
+            total = 1.0;
+        }
+        for (uint32_t k = 0; k < count; k++) row[k] = (float)((double)row[k] / total);
+        spans[i].start = (int32_t)lo;
+        spans[i].count = (int32_t)count;
+    }
+    *outSpans = spans;
+    *outWeights = weights;
+    *outStride = stride;
+    return YES;
+}
+
+static NSMutableData *zt_resize_rgba(NSData *rgba, uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight) {
+    if (!rgba || srcWidth == 0 || srcHeight == 0 || dstWidth == 0 || dstHeight == 0) return nil;
+    if (rgba.length < (size_t)srcWidth * srcHeight * 4u) return nil;
+    ZTResizeSpan *hSpans = NULL, *vSpans = NULL;
+    float *hWeights = NULL, *vWeights = NULL;
+    uint32_t hStride = 0, vStride = 0;
+    if (!zt_build_resize_spans(srcWidth, dstWidth, &hSpans, &hWeights, &hStride)) return nil;
+    if (!zt_build_resize_spans(srcHeight, dstHeight, &vSpans, &vWeights, &vStride)) {
+        free(hSpans);
+        free(hWeights);
+        return nil;
+    }
+    const size_t lane = 5u;
+    size_t rowFloats = (size_t)dstWidth * lane;
+    float *cache = malloc((size_t)vStride * rowFloats * sizeof(float));
+    float *accumulator = malloc(rowFloats * sizeof(float));
+    int64_t *tags = malloc((size_t)vStride * sizeof(int64_t));
+    NSMutableData *output = [NSMutableData dataWithLength:(size_t)dstWidth * dstHeight * 4u];
+    if (!cache || !accumulator || !tags || !output) {
+        free(hSpans); free(hWeights); free(vSpans); free(vWeights);
+        free(cache); free(accumulator); free(tags);
+        return nil;
+    }
+    for (uint32_t i = 0; i < vStride; i++) tags[i] = -1;
+    const float bias = 0.004f;
+    const uint8_t *src = rgba.bytes;
+    uint8_t *dst = output.mutableBytes;
+    for (uint32_t y = 0; y < dstHeight; y++) {
+        memset(accumulator, 0, rowFloats * sizeof(float));
+        ZTResizeSpan vs = vSpans[y];
+        const float *vw = vWeights + (size_t)y * vStride;
+        for (int32_t k = 0; k < vs.count; k++) {
+            float wv = vw[k];
+            if (wv == 0.0f) continue;
+            int64_t srcRow = (int64_t)vs.start + k;
+            size_t slot = (size_t)(srcRow % (int64_t)vStride);
+            float *cached = cache + slot * rowFloats;
+            if (tags[slot] != srcRow) {
+                const uint8_t *rowPixels = src + (size_t)srcRow * srcWidth * 4u;
+                for (uint32_t x = 0; x < dstWidth; x++) {
+                    ZTResizeSpan hs = hSpans[x];
+                    const float *hw = hWeights + (size_t)x * hStride;
+                    float r = 0, g = 0, b = 0, a = 0, n = 0;
+                    for (int32_t j = 0; j < hs.count; j++) {
+                        float w = hw[j];
+                        if (w == 0.0f) continue;
+                        const uint8_t *px = rowPixels + (size_t)(hs.start + j) * 4u;
+                        float alpha = (float)px[3] * (1.0f / 255.0f);
+                        float cw = w * (alpha + bias);
+                        r += cw * (float)px[0];
+                        g += cw * (float)px[1];
+                        b += cw * (float)px[2];
+                        a += w * alpha;
+                        n += cw;
+                    }
+                    float *cell = cached + (size_t)x * lane;
+                    cell[0] = r; cell[1] = g; cell[2] = b; cell[3] = a; cell[4] = n;
+                }
+                tags[slot] = srcRow;
+            }
+            for (size_t f = 0; f < rowFloats; f++) accumulator[f] += wv * cached[f];
+        }
+        uint8_t *outRow = dst + (size_t)y * dstWidth * 4u;
+        for (uint32_t x = 0; x < dstWidth; x++) {
+            const float *cell = accumulator + (size_t)x * lane;
+            float n = cell[4] > 0.0f ? cell[4] : 1.0f;
+            float values[4] = { cell[0] / n, cell[1] / n, cell[2] / n, cell[3] * 255.0f };
+            for (int c = 0; c < 4; c++) {
+                float v = values[c];
+                if (v < 0.0f) v = 0.0f;
+                if (v > 255.0f) v = 255.0f;
+                outRow[(size_t)x * 4u + (size_t)c] = (uint8_t)(v + 0.5f);
+            }
+        }
+    }
+    free(hSpans); free(hWeights); free(vSpans); free(vWeights);
+    free(cache); free(accumulator); free(tags);
+    return output;
+}
+
+static BOOL zt_stage_texture_data(NSData *data, NSString *workDir, int64_t pathID, NSString **outPath, NSError **error) {
+    NSString *path = [workDir stringByAppendingPathComponent:[NSString stringWithFormat:@"texture-%lld.raw", (long long)pathID]];
+    if (![data writeToFile:path options:NSDataWritingAtomic error:nil]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't stage Texture2D image data for PathID=%lld.", (long long)pathID]);
+        return NO;
+    }
+    if (outPath) *outPath = path;
+    return YES;
+}
+
+static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *destination, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
     if (source.mipCount <= 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
+        return NO;
+    }
+    if (destination.width == 0 || destination.height == 0 || destination.width > kZSTranscoderMaxTextureDimension || destination.height > kZSTranscoderMaxTextureDimension) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Texture2D %@ has unsupported output dimensions %ux%u.", source.name, destination.width, destination.height]);
         return NO;
     }
     uint64_t baseSize = 0;
@@ -1006,15 +1167,26 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't create temporary ASTC output for %@.", source.name]);
         return NO;
     }
-    NSData *baseData = zt_format_is_crunched(source.format) ? payload : [payload subdataWithRange:NSMakeRange(0, (NSUInteger)baseSize)];
     NSMutableData *rgba = nil;
     NSError *decodeError = nil;
-    BOOL ok = zt_decode_texture_mip(source, baseData, source.width, source.height, 0, &rgba, &decodeError);
+    BOOL ok = zt_decode_base_level(source, payload, &rgba, &decodeError);
     if (!ok && error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
+    uint32_t outWidth = destination.width;
+    uint32_t outHeight = destination.height;
+    if (ok && (source.width != outWidth || source.height != outHeight)) {
+        NSMutableData *resized = zt_resize_rgba(rgba, source.width, source.height, outWidth, outHeight);
+        if (resized) {
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld resized %ux%u -> %ux%u to match the original", (long long)source.object.pathID, source.width, source.height, outWidth, outHeight);
+            rgba = resized;
+        } else {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't resize Texture2D %@ from %ux%u to %ux%u.", source.name, source.width, source.height, outWidth, outHeight]);
+            ok = NO;
+        }
+    }
     uint64_t totalOutput = 0;
     if (ok) {
         NSError *encodeError = nil;
-        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:source.width height:source.height sRGB:(source.colorSpace != 0) error:&encodeError];
+        NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:outWidth height:outHeight sRGB:(destination.colorSpace != 0) error:&encodeError];
         if (!astc) {
             if (error) *error = encodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
             ok = NO;
@@ -1022,7 +1194,7 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, NSData *payload, N
             ok = NO;
         } else {
             totalOutput = astc.length;
-            if (progress) progress(1.0, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", source.name.length ? source.name : @"<unnamed>"]);
+            if (progress) progress(1.0, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", destination.name.length ? destination.name : (source.name.length ? source.name : @"<unnamed>")]);
         }
     }
     @try { [writer closeFile]; } @catch (__unused NSException *exception) {}
@@ -1042,18 +1214,22 @@ static BOOL zt_patch_u32_relative(NSMutableData *data, uint64_t base, uint64_t a
     return zt_write_u32_at(data, (NSUInteger)(absolutePosition - base), value);
 }
 
-static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, NSData *sourceObject, NSData *encodedData, uint32_t encodedSize) {
-    if (!source || !sourceObject || !encodedData) return nil;
-    uint64_t base = source.object.objectStart;
-    NSUInteger imageField = (NSUInteger)(source.imageDataPosition - base);
-    if (imageField > sourceObject.length || sourceObject.length - imageField < 4) return nil;
+static NSData *zt_build_texture_object_overwrite(ZTTextureRecord *base, NSData *baseObject, int32_t format, int32_t mipCount, NSData *encodedData, uint32_t encodedSize) {
+    if (!base || !baseObject || !encodedData) return nil;
+    uint64_t origin = base.object.objectStart;
+    if (base.imageDataPosition < origin || base.streamOffsetPosition < origin) return nil;
+    NSUInteger imageField = (NSUInteger)(base.imageDataPosition - origin);
+    if (imageField > baseObject.length || baseObject.length - imageField < 4) return nil;
     NSUInteger oldImageStart = imageField + 4u;
-    NSUInteger oldImageEnd = oldImageStart + source.imageDataLength;
-    if (oldImageEnd > sourceObject.length) return nil;
-    NSUInteger oldStreamStart = (NSUInteger)(source.streamOffsetPosition - base);
-    if (oldStreamStart > sourceObject.length || oldStreamStart < oldImageEnd) return nil;
+    NSUInteger oldImageEnd = oldImageStart + base.imageDataLength;
+    if (oldImageEnd > baseObject.length) return nil;
+    NSUInteger oldStreamStart = (NSUInteger)(base.streamOffsetPosition - origin);
+    if (oldStreamStart > baseObject.length || oldStreamStart < oldImageEnd) return nil;
+    NSUInteger streamEnd = oldStreamStart + 16u + base.streamPathLength;
+    if (streamEnd > baseObject.length) return nil;
+    NSUInteger tailStart = MIN((streamEnd + 3u) & ~(NSUInteger)3u, baseObject.length);
     NSMutableData *out = [NSMutableData data];
-    [out appendBytes:sourceObject.bytes length:imageField];
+    [out appendBytes:baseObject.bytes length:imageField];
     uint8_t imageLength[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
     [out appendBytes:imageLength length:4];
     [out appendData:encodedData];
@@ -1062,9 +1238,10 @@ static NSData *zt_build_texture_object_from_source(ZTTextureRecord *source, NSDa
     [out appendBytes:streamZero length:12];
     uint8_t emptyPathLength[4] = {0};
     [out appendBytes:emptyPathLength length:4];
-    if (!zt_patch_u32_relative(out, base, source.formatPosition, 50u)) return nil;
-    if (!zt_patch_u32_relative(out, base, source.mipCountPosition, 1u)) return nil;
-    if (!zt_patch_u32_relative(out, base, source.completeSizePosition, encodedSize)) return nil;
+    if (tailStart < baseObject.length) [out appendBytes:(const uint8_t *)baseObject.bytes + tailStart length:baseObject.length - tailStart];
+    if (!zt_patch_u32_relative(out, origin, base.formatPosition, (uint32_t)format)) return nil;
+    if (!zt_patch_u32_relative(out, origin, base.mipCountPosition, (uint32_t)mipCount)) return nil;
+    if (!zt_patch_u32_relative(out, origin, base.completeSizePosition, encodedSize)) return nil;
     return out;
 }
 
@@ -1109,8 +1286,7 @@ static NSData *zt_rebuilt_object_data(ZTSerializedObject *object, ZTTextureRepla
     if (replacement) {
         NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
         if (!encoded) return nil;
-        NSData *sourceRawObject = replacement.sourceObjectData;
-        return sourceRawObject ? zt_build_texture_object_from_source(replacement.source, sourceRawObject, encoded, replacement.encodedSize) : nil;
+        return replacement.baseObjectData ? zt_build_texture_object_overwrite(replacement.baseTexture, replacement.baseObjectData, replacement.outputFormat, replacement.outputMipCount, encoded, replacement.encodedSize) : nil;
     }
     if (object.replacementObject) return object.replacementObject;
     return zt_object_data(object, targetDoc.data);
@@ -1824,48 +2000,85 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
-            NSString *sourceHash = zt_sha256(sourcePayload);
-            NSString *targetHash = zt_sha256(targetPayload);
             NSData *sourceObjectData = zt_object_data(sourceObject, sourceDoc.data);
             NSData *targetObjectData = zt_object_data(targetObject, targetDoc.data);
-            NSString *sourceObjectHash = zt_sha256(sourceObjectData);
-            NSString *targetObjectHash = zt_sha256(targetObjectData);
-            BOOL exact = !isNewAsset && sourceObjectData.length == targetObjectData.length && [sourceObjectHash isEqualToString:targetObjectHash] && [sourceHash isEqualToString:targetHash];
-            ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ objectBytes source=%lu target=%lu imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d imageHash=%@ objectMatch=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO", exact ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
-            if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; retaining PathID matching", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
-            if (exact) continue;
-            if (zt_format_is_transplant_only(sourceTexture.format)) {
-                if (!sourceTexture.isInline) {
-                    skippedAssets++;
-                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only and streamed from .resS; leaving it untouched", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
+            if (!isNewAsset && !targetObjectData) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't extract the original Texture2D PathID=%lld.", (long long)sourceObject.pathID]);
+                [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                return NO;
+            }
+            BOOL identical = !isNewAsset && zt_texture_pixels_match(sourceTexture, targetTexture, sourcePayload, targetPayload);
+            BOOL dimensionsMatch = isNewAsset || (sourceTexture.width == targetTexture.width && sourceTexture.height == targetTexture.height);
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ size source=%ux%u target=%ux%u imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d pixelsIdentical=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", sourceTexture.width, sourceTexture.height, targetTexture.width, targetTexture.height, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, identical ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
+            if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; keeping the original's name", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
+            if (identical) continue;
+            NSString *replacementKey = [NSString stringWithFormat:@"%lld", (long long)targetObject.pathID];
+            if (zt_format_is_transplant_only(sourceTexture.format) && dimensionsMatch) {
+                if (isNewAsset) {
+                    if (!sourceTexture.isInline) {
+                        skippedAssets++;
+                        ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only and streamed from .resS; leaving it untouched", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
+                        if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                        continue;
+                    }
+                    if (sourceObjectData) targetObject.replacementObject = sourceObjectData;
+                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only; added inline object without transcoding (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourceObjectData.length);
                     if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                     continue;
                 }
-                if (sourceObjectData) targetObject.replacementObject = sourceObjectData;
-                ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only; copied inline object without transcoding (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourceObjectData.length);
+                NSString *rawPath = nil;
+                if (!zt_stage_texture_data(sourcePayload, workDir, sourceObject.pathID, &rawPath, error)) {
+                    [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+                    return NO;
+                }
+                ZTTextureReplacement *rawReplacement = [ZTTextureReplacement new];
+                rawReplacement.source = sourceTexture;
+                rawReplacement.target = targetTexture;
+                rawReplacement.baseTexture = targetTexture;
+                rawReplacement.baseObjectData = targetObjectData;
+                rawReplacement.outputFormat = sourceTexture.format;
+                rawReplacement.outputMipCount = sourceTexture.mipCount;
+                rawReplacement.encodedPath = rawPath;
+                rawReplacement.encodedSize = (uint32_t)sourcePayload.length;
+                replacements[replacementKey] = rawReplacement;
+                ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only; wrote its pixel data into the original object without transcoding (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourcePayload.length);
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                 continue;
             }
+            ZTTextureRecord *layoutTexture = isNewAsset ? sourceTexture : targetTexture;
+            NSData *layoutObjectData = isNewAsset ? sourceObjectData : targetObjectData;
             ZTTextureReplacement *replacement = [ZTTextureReplacement new];
             replacement.source = sourceTexture;
             replacement.target = targetTexture;
-            replacement.sourceObjectData = zt_object_data(sourceTexture.object, sourceDoc.data);
+            replacement.baseTexture = layoutTexture;
+            replacement.baseObjectData = layoutObjectData;
+            replacement.outputFormat = 50;
+            replacement.outputMipCount = 1;
             NSString *encodedPath = nil;
             uint32_t encodedSize = 0;
-            if (!zt_make_astc_replacement(sourceTexture, sourcePayload, workDir, &encodedPath, &encodedSize, error, ^(double f, NSString *stage) {
+            NSError *transcodeError = nil;
+            BOOL transcoded = zt_make_astc_replacement(sourceTexture, layoutTexture, sourcePayload, workDir, &encodedPath, &encodedSize, &transcodeError, ^(double f, NSString *stage) {
                 if (progress) {
                     double base = assetCount ? ((double)(processedAssets - 1u) / (double)assetCount) : 0.0;
                     double span = assetCount ? (1.0 / (double)assetCount) : 1.0;
                     progress(0.1 + 0.7 * (base + span * f), stage);
                 }
-            })) {
+            });
+            if (!transcoded) {
+                if (zt_format_is_transplant_only(sourceTexture.format)) {
+                    skippedAssets++;
+                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ couldn't be resized to the original's %ux%u (%@); leaving it untouched", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), targetTexture.width, targetTexture.height, transcodeError.localizedDescription ?: @"unknown error");
+                    if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                    continue;
+                }
+                if (error) *error = transcodeError;
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
             replacement.encodedPath = encodedPath;
             replacement.encodedSize = encodedSize;
-            replacements[[NSString stringWithFormat:@"%lld", (long long)targetObject.pathID]] = replacement;
-            ZLog(@"[ZTranscoder] Texture2D PathID=%lld transcoded to ASTC 6x6: %lu -> %u bytes", (long long)sourceObject.pathID, (unsigned long)sourcePayload.length, encodedSize);
+            replacements[replacementKey] = replacement;
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld pixel data written as ASTC 6x6 at %ux%u: %lu -> %u bytes", (long long)sourceObject.pathID, layoutTexture.width, layoutTexture.height, (unsigned long)sourcePayload.length, encodedSize);
         } else {
             NSData *sourceObjectData = zt_object_data(sourceObject, sourceDoc.data);
             NSData *targetObjectData = zt_object_data(targetObject, targetDoc.data);
@@ -1874,11 +2087,9 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
-            NSString *sourceHash = zt_sha256(sourceObjectData);
-            NSString *targetHash = zt_sha256(targetObjectData);
-            ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu hashMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, [sourceHash isEqualToString:targetHash] ? @"YES" : @"NO");
-            BOOL alwaysReplace = sourceObject.classID == kZTClassSpriteAtlas || sourceObject.classID == kZTClassSprite;
-            if (isNewAsset || alwaysReplace || sourceObjectData.length != targetObjectData.length || ![sourceHash isEqualToString:targetHash]) targetObject.replacementObject = sourceObjectData;
+            BOOL bytesMatch = [sourceObjectData isEqualToData:targetObjectData];
+            ZLog(@"[ZTranscoder] class=%d PathID=%lld objectBytes source=%lu target=%lu bytesMatch=%@", sourceObject.classID, (long long)sourceObject.pathID, (unsigned long)sourceObjectData.length, (unsigned long)targetObjectData.length, bytesMatch ? @"YES" : @"NO");
+            if (isNewAsset || !bytesMatch) targetObject.replacementObject = sourceObjectData;
         }
         if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
     }
