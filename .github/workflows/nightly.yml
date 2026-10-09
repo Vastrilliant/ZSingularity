@@ -3,8 +3,6 @@ name: Build Nightly release
 on:
   workflow_dispatch:
   push:
-    branches:
-      - TranscodeTest
     paths-ignore:
       - 'Documentation/**'
       - 'README.md'
