@@ -1514,6 +1514,35 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         init1[c] = clamp(mean[c] + axis[c] * tmax, 0.0f, 1.0f);
     }
 
+    float seed0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float seed1[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    uint seedChannel = 0u;
+    for (uint c = 1u; c < dims; c++) {
+        if (hi[c] - lo[c] > hi[seedChannel] - lo[seedChannel]) seedChannel = c;
+    }
+    uint seedMinIndex = 0u;
+    uint seedMaxIndex = 0u;
+    float seedMinValue = 2.0f;
+    float seedMaxValue = -1.0f;
+    for (uint i = 0; i < N; i++) {
+        if (zslr_vw(vm, i) <= 0.0f) continue;
+        float4 p = zslr_unpack(pk[i]);
+        if (p[seedChannel] < seedMinValue) {
+            seedMinValue = p[seedChannel];
+            seedMinIndex = i;
+        }
+        if (p[seedChannel] > seedMaxValue) {
+            seedMaxValue = p[seedChannel];
+            seedMaxIndex = i;
+        }
+    }
+    float4 seedPixel0 = zslr_unpack(pk[seedMinIndex]);
+    float4 seedPixel1 = zslr_unpack(pk[seedMaxIndex]);
+    for (uint c = 0; c < dims; c++) {
+        seed0[c] = seedPixel0[c];
+        seed1[c] = seedPixel1[c];
+    }
+
     ZSLRTuning tune = kZSLRTunings[min(quality, 10u)];
     uint sPasses = tune.sPasses;
     uint sIterA = tune.sIterA;
@@ -1527,11 +1556,13 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
     cfgCount = min(cfgCount, uint(tune.cfgCount));
 
     float scores[16];
+    bool configUsesExtremaSeed[16];
     float bestErr = 1e30f;
     uint bestCfg = 0;
     uint bestEp[8];
     uchar bestGridBytes[64];
     uint bestLevels = 256u;
+    for (uint i = 0; i < 16u; i++) configUsesExtremaSeed[i] = false;
     for (uint i = 0; i < 8; i++) bestEp[i] = 0u;
     for (uint i = 0; i < 64; i++) bestGridBytes[i] = 0;
     bool done = false;
@@ -1544,6 +1575,21 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         float err = zslr_eval_config<BW>(pk, vm, ivT + ci * N, ipwT + ci * N, denT + ci * 64u, full,
                                          cfgs[ci].wx, cfgs[ci].wy, cfgs[ci].bits, levels, dims,
                                          init0, init1, sPasses, sIterA, sIterB, tmpEp, tmpGrid);
+        bool useExtremaSeed = false;
+        if (BW == 6u) {
+            uint altEp[8];
+            uchar altGrid[64];
+            float altErr = zslr_eval_config<BW>(pk, vm, ivT + ci * N, ipwT + ci * N, denT + ci * 64u, full,
+                                                cfgs[ci].wx, cfgs[ci].wy, cfgs[ci].bits, levels, dims,
+                                                seed0, seed1, sPasses, sIterA, sIterB, altEp, altGrid);
+            if (altErr < err) {
+                err = altErr;
+                useExtremaSeed = true;
+                for (uint j = 0; j < dims * 2u; j++) tmpEp[j] = altEp[j];
+                for (uint j = 0; j < cfgs[ci].wx * cfgs[ci].wy; j++) tmpGrid[j] = altGrid[j];
+            }
+        }
+        configUsesExtremaSeed[ci] = useExtremaSeed;
         scores[ci] = err;
         if (err < bestErr) {
             bestErr = err;
@@ -1575,9 +1621,16 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         uint levels = rgba ? cfgs[pick].levelsRGBA : cfgs[pick].levelsRGB;
         uint tmpEp[8];
         uchar tmpGrid[64];
-        float err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
-                                         cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
-                                         init0, init1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        float err;
+        if (configUsesExtremaSeed[pick]) {
+            err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
+                                       cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
+                                       seed0, seed1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        } else {
+            err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
+                                       cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
+                                       init0, init1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        }
         if (err < bestErr) {
             bestErr = err;
             bestCfg = pick;

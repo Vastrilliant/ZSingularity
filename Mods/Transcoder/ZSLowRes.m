@@ -2396,7 +2396,7 @@ static double g_zslrRateSmooth = 0;
 static double g_zslrRateBest = 0;
 #define ZSLR_TRANSCODE_REJECTED 1
 
-static const uint32_t kZSLRTranscodeQuality = 7u;
+static const uint32_t kZSLRTranscodeQuality = 10u;
 
 static os_unfair_lock g_zslrMetalLock = OS_UNFAIR_LOCK_INIT;
 static id<MTLDevice> g_zslrMetalDevice;
