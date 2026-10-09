@@ -31,6 +31,8 @@ static const int32_t kZTClassSpriteMask = 331;
 static const int32_t kZTClassSpriteAtlas = 687078895;
 static const int32_t kZTClassTextAsset = 49;
 static const int32_t kZTClassAssetBundle = 142;
+static const int32_t kZTClassShader = 48;
+static const uint32_t kZTTargetPlatformIOS = 9u;
 
 static BOOL zt_class_is_transcoded(int32_t classID) {
     return classID == kZTClassTexture2D
@@ -283,6 +285,10 @@ static NSString *zt_format_name(int32_t format) {
 @property (nonatomic, copy) NSDictionary<NSString *, NSNumber *> *typeIndexByKey;
 @property (nonatomic, copy) NSData *trailer;
 @property (nonatomic, assign) uint64_t typeCountOffset;
+@property (nonatomic, assign) uint64_t targetPlatformOffset;
+@property (nonatomic, assign) uint32_t targetPlatform;
+@property (nonatomic, assign) BOOL rewritesPlatform;
+@property (nonatomic, assign) uint32_t outputPlatform;
 @property (nonatomic, copy) NSArray<NSValue *> *typeRanges;
 @property (nonatomic, strong) NSMutableArray<NSData *> *injectedTypes;
 @property (nonatomic, copy) NSDictionary<NSNumber *, NSDictionary<NSString *, NSData *> *> *textureTrees;
@@ -502,6 +508,8 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile metadata is truncated.");
         return nil;
     }
+    uint64_t targetPlatformOffset = pos;
+    uint32_t targetPlatform = zt_le32(buf + pos);
     pos += 4;
     uint8_t enableTypeTree = buf[pos++];
     if (!enableTypeTree) {
@@ -642,6 +650,8 @@ static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) 
     document.typeKeys = typeKeys;
     document.typeRanges = typeRanges;
     document.typeCountOffset = typeCountOffset;
+    document.targetPlatformOffset = targetPlatformOffset;
+    document.targetPlatform = targetPlatform;
     document.injectedTypes = [NSMutableArray array];
     document.textureTrees = textureTrees;
     NSMutableDictionary<NSString *, NSNumber *> *typeIndexByKey = [NSMutableDictionary dictionary];
@@ -1313,7 +1323,7 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
     uint64_t newTableOffset = targetDoc.objectTableOffset;
     if (injectedBytes.length) newTableOffset = (targetDoc.objectCountOffset + injectedBytes.length + 4u + 3u) & ~3ULL;
     uint64_t newDataOffset = targetDoc.dataOffset;
-    if (addedCount > 0) {
+    if (addedCount > 0 || injectedBytes.length > 0) {
         if (targetDoc.data.length < 40 || zt_be32(headerSource + 8) < 22u || originalTableEnd > targetDoc.dataOffset) {
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"SerializedFile layout doesn't support adding objects.");
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
@@ -1381,10 +1391,14 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
         uint32_t newObjectCount = (uint32_t)targetDoc.objects.count;
         for (NSUInteger b = 0; b < 4; b++) countBytes[b] = (uint8_t)(newObjectCount >> (8 * b));
     }
+    if (targetDoc.rewritesPlatform && targetDoc.targetPlatformOffset + 4u <= headerBytes.length) {
+        uint8_t *platformBytes = (uint8_t *)headerBytes.mutableBytes + targetDoc.targetPlatformOffset;
+        for (NSUInteger b = 0; b < 4; b++) platformBytes[b] = (uint8_t)(targetDoc.outputPlatform >> (8 * b));
+    }
     if (headerBytes.length >= 40 && zt_be32(base + 8) >= 22u) {
         uint8_t *hb = headerBytes.mutableBytes;
         for (NSUInteger b = 0; b < 8; b++) hb[24 + b] = (uint8_t)(expectedFileSize >> (8 * (7 - b)));
-        if (addedCount > 0) {
+        if (addedCount > 0 || injectedBytes.length > 0) {
             uint32_t metadataSize = zt_be32(base + 20) + (uint32_t)(addedCount * 24u) + (uint32_t)(newTableOffset - targetDoc.objectTableOffset);
             for (NSUInteger b = 0; b < 4; b++) hb[20 + b] = (uint8_t)(metadataSize >> (8 * (3 - b)));
             for (NSUInteger b = 0; b < 8; b++) hb[32 + b] = (uint8_t)(newDataOffset >> (8 * (7 - b)));
@@ -1856,9 +1870,244 @@ static ZTSerializedDocument *zt_build_carra2_document(NSArray<ZTCarra2Item *> *i
     return document;
 }
 
+static BOOL zt_texture_needs_conversion(int32_t format) {
+    switch (format) {
+        case 4:
+        case 45:
+        case 47:
+        case 48:
+        case 50:
+        case 51:
+            return NO;
+        default:
+            return YES;
+    }
+}
+
+static BOOL zt_texture_has_pixel_data(ZTTextureRecord *texture) {
+    return texture.isInline || texture.isStreamed;
+}
+
+static void zt_restore_shaders(ZTSerializedDocument *doc, ZTSerializedDocument *originalDoc, NSUInteger *outTotal, NSUInteger *outRestored) {
+    NSMutableDictionary<NSNumber *, ZTSerializedObject *> *originalShaders = [NSMutableDictionary dictionary];
+    for (ZTSerializedObject *object in originalDoc.objects) {
+        if (object.classID == kZTClassShader) originalShaders[@(object.pathID)] = object;
+    }
+    NSUInteger total = 0;
+    NSUInteger restored = 0;
+    for (ZTSerializedObject *object in doc.objects) {
+        if (object.classID != kZTClassShader) continue;
+        total++;
+        ZTSerializedObject *original = originalShaders[@(object.pathID)];
+        if (!original) {
+            ZLog(@"[ZTranscoder] Shader PathID=%lld not found in the original bundle; leaving this object's bytes as-is", (long long)object.pathID);
+            continue;
+        }
+        NSData *originalBytes = zt_object_data(original, originalDoc.data);
+        if (!originalBytes) {
+            ZLog(@"[ZTranscoder] Shader PathID=%lld could not be read from the original bundle; leaving this object's bytes as-is", (long long)object.pathID);
+            continue;
+        }
+        NSString *originalTypeKey = (original.typeIndex >= 0 && (NSUInteger)original.typeIndex < originalDoc.typeKeys.count) ? originalDoc.typeKeys[(NSUInteger)original.typeIndex] : nil;
+        NSString *currentTypeKey = (object.typeIndex >= 0 && (NSUInteger)object.typeIndex < doc.typeKeys.count) ? doc.typeKeys[(NSUInteger)object.typeIndex] : nil;
+        int32_t newTypeIndex = object.typeIndex;
+        if (originalTypeKey && ![originalTypeKey isEqualToString:currentTypeKey]) {
+            NSNumber *adopted = doc.typeIndexByKey[originalTypeKey] ?: zt_inject_type(doc, originalDoc, original.typeIndex);
+            if (!adopted) {
+                ZLog(@"[ZTranscoder] Shader PathID=%lld: the original's type couldn't be adopted; leaving this object's bytes as-is", (long long)object.pathID);
+                continue;
+            }
+            newTypeIndex = adopted.intValue;
+        }
+        object.typeIndex = newTypeIndex;
+        object.replacementObject = originalBytes;
+        restored++;
+    }
+    if (outTotal) *outTotal = total;
+    if (outRestored) *outRestored = restored;
+}
+
+static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *expected, NSUInteger *outTextureCount, NSError **error) {
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    NSError *parseError = nil;
+    ZTSerializedDocument *rebuilt = data ? zt_parse_serialized(data, &parseError) : nil;
+    if (!rebuilt) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile could not be read back: %@", parseError.localizedDescription ?: @"unknown error"]);
+        return NO;
+    }
+    if (rebuilt.targetPlatform != kZTTargetPlatformIOS) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile still targets platform %u; expected %u.", rebuilt.targetPlatform, kZTTargetPlatformIOS]);
+        return NO;
+    }
+    if (rebuilt.objects.count != expected.objects.count) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile has %lu object(s); expected %lu.", (unsigned long)rebuilt.objects.count, (unsigned long)expected.objects.count]);
+        return NO;
+    }
+    NSUInteger remaining = 0;
+    for (ZTTextureRecord *texture in rebuilt.textures) {
+        if (zt_texture_has_pixel_data(texture) && zt_texture_needs_conversion(texture.format)) remaining++;
+    }
+    if (remaining) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile still contains %lu texture(s) in a format that should have been converted.", (unsigned long)remaining]);
+        return NO;
+    }
+    if (outTextureCount) *outTextureCount = rebuilt.textures.count;
+    return YES;
+}
+
+static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath, ZTranscoderConfig *config, void (^progress)(double, NSString *), NSError **error) {
+    if (progress) progress(0.0, @"Reading the mod bundle");
+    NSError *archiveError = nil;
+    UnityBundleArchive *sourceArchive = [UnityBundleCAB decompressedArchiveAtPath:inputPath error:&archiveError];
+    if (!sourceArchive) {
+        if (error) *error = archiveError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't read the mod bundle.");
+        return NO;
+    }
+    if (sourceArchive.nodes.count != 2) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The mod bundle does not contain exactly the expected serialized + .resS node pair.");
+        return NO;
+    }
+    UnityBundleNode *sourceCABNode = nil;
+    for (UnityBundleNode *node in sourceArchive.nodes) if (node.flags & 4u) sourceCABNode = node;
+    if (!sourceCABNode || sourceCABNode.offset < 0 || sourceCABNode.size < 0 || (uint64_t)sourceCABNode.offset > sourceArchive.data.length || (uint64_t)sourceCABNode.size > sourceArchive.data.length - (uint64_t)sourceCABNode.offset) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The mod bundle has no readable serialized CAB node.");
+        return NO;
+    }
+    NSData *sourceView = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)sourceArchive.data.bytes + sourceCABNode.offset) length:(NSUInteger)sourceCABNode.size freeWhenDone:NO];
+    ZTSerializedDocument *doc = zt_parse_serialized(sourceView, &archiveError);
+    if (!doc) {
+        if (error) *error = archiveError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't parse the mod's SerializedFile.");
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] mod objects=%lu Texture2D=%lu TargetPlatform=%u", (unsigned long)doc.objects.count, (unsigned long)doc.textures.count, doc.targetPlatform);
+    doc.rewritesPlatform = YES;
+    doc.outputPlatform = kZTTargetPlatformIOS;
+
+    NSUInteger shadersTotal = 0;
+    NSUInteger shadersRestored = 0;
+    if (progress) progress(0.05, @"Locating the original bundle");
+    NSString *targetPath = nil;
+    NSString *cab = nil;
+    NSError *targetError = nil;
+    BOOL haveTarget = zt_verify_target(inputPath, config, &targetPath, &cab, &targetError) && targetPath.length > 0;
+    if (haveTarget) {
+        UnityBundleArchive *targetArchive = [UnityBundleCAB decompressedArchiveAtPath:targetPath error:&targetError];
+        UnityBundleNode *targetCABNode = nil;
+        if (targetArchive) for (UnityBundleNode *node in targetArchive.nodes) if (node.flags & 4u) targetCABNode = node;
+        ZTSerializedDocument *originalDoc = nil;
+        if (targetCABNode && targetCABNode.offset >= 0 && targetCABNode.size >= 0 && (uint64_t)targetCABNode.offset <= targetArchive.data.length && (uint64_t)targetCABNode.size <= targetArchive.data.length - (uint64_t)targetCABNode.offset) {
+            NSData *targetView = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)targetArchive.data.bytes + targetCABNode.offset) length:(NSUInteger)targetCABNode.size freeWhenDone:NO];
+            originalDoc = zt_parse_serialized(targetView, &targetError);
+        }
+        if (originalDoc) {
+            zt_restore_shaders(doc, originalDoc, &shadersTotal, &shadersRestored);
+            ZLog(@"[ZTranscoder] original %@ loaded for shader restore: %lu/%lu shader(s) restored", targetPath.lastPathComponent, (unsigned long)shadersRestored, (unsigned long)shadersTotal);
+        } else {
+            ZLog(@"[ZTranscoder] the original bundle could not be read (%@); shaders will not be restored", targetError.localizedDescription ?: @"unknown error");
+        }
+    } else {
+        ZLog(@"[ZTranscoder] no original bundle could be located (%@); shaders will not be restored", targetError.localizedDescription ?: @"unknown error");
+    }
+
+    NSMutableArray<ZTTextureRecord *> *pending = [NSMutableArray array];
+    for (ZTTextureRecord *texture in doc.textures) {
+        if (!zt_texture_needs_conversion(texture.format)) continue;
+        if (!zt_texture_has_pixel_data(texture)) {
+            ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ has no pixel data; leaving it untouched", (long long)texture.object.pathID, texture.name.length ? texture.name : @"<unnamed>");
+            continue;
+        }
+        [pending addObject:texture];
+    }
+    NSMutableDictionary<NSString *, ZTTextureReplacement *> *replacements = [NSMutableDictionary dictionaryWithCapacity:pending.count];
+    NSUInteger completed = 0;
+    for (ZTTextureRecord *texture in pending) {
+        @autoreleasepool {
+            NSData *payload = nil;
+            if (!zt_texture_payload(texture, sourceArchive, doc.data, &payload, error)) return NO;
+            NSData *objectData = zt_object_data(texture.object, doc.data);
+            if (!objectData) {
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't extract Texture2D PathID=%lld.", (long long)texture.object.pathID]);
+                return NO;
+            }
+            double base = (double)completed / (double)pending.count;
+            double span = 1.0 / (double)pending.count;
+            NSString *encodedPath = nil;
+            uint32_t encodedSize = 0;
+            NSError *transcodeError = nil;
+            BOOL transcoded = zt_make_astc_replacement(texture, texture, payload, workDir, &encodedPath, &encodedSize, &transcodeError, ^(double f, NSString *stage) {
+                if (progress) progress(0.1 + 0.75 * (base + span * f), stage);
+            });
+            if (!transcoded) {
+                if (error) *error = transcodeError;
+                return NO;
+            }
+            ZTTextureReplacement *replacement = [ZTTextureReplacement new];
+            replacement.source = texture;
+            replacement.target = texture;
+            replacement.baseTexture = texture;
+            replacement.baseObjectData = objectData;
+            replacement.outputFormat = 50;
+            replacement.outputMipCount = 1;
+            replacement.encodedPath = encodedPath;
+            replacement.encodedSize = encodedSize;
+            replacements[[NSString stringWithFormat:@"%lld", (long long)texture.object.pathID]] = replacement;
+            ZLog(@"[ZTranscoder] Texture2D '%@' PathID=%lld %ux%u: %@ (%d) -> ASTC 6x6 (50), %lu -> %u bytes", texture.name.length ? texture.name : @"<unnamed>", (long long)texture.object.pathID, texture.width, texture.height, zt_format_name(texture.format), texture.format, (unsigned long)payload.length, encodedSize);
+        }
+        completed++;
+    }
+
+    if (progress) progress(0.85, @"Rebuilding the SerializedFile");
+    NSString *serializedOutput = [workDir stringByAppendingPathComponent:@"target.cab"];
+    if (!zt_rebuild_serialized_correctly(doc, replacements, serializedOutput, error)) return NO;
+    NSUInteger verifiedTextures = 0;
+    if (!zt_verify_rebuilt_serialized(serializedOutput, doc, &verifiedTextures, error)) return NO;
+    ZLog(@"[ZTranscoder] verify: Texture2D=%lu, TargetPlatform=%u, all converted-source formats removed", (unsigned long)verifiedTextures, kZTTargetPlatformIOS);
+
+    if (progress) progress(0.9, @"Writing the UnityFS bundle");
+    NSString *bundleOutput = [workDir stringByAppendingPathComponent:@"output.bundle"];
+    if (!zt_write_unityfs(inputPath, sourceArchive, serializedOutput, bundleOutput, error)) return NO;
+    if (zt_file_size(bundleOutput) == 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"UnityFS output bundle is empty.");
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] converted %lu/%lu textures; retargeted %u -> %u; restored %lu/%lu shader(s); wrote %llu bytes", (unsigned long)replacements.count, (unsigned long)doc.textures.count, doc.targetPlatform, kZTTargetPlatformIOS, (unsigned long)shadersRestored, (unsigned long)shadersTotal, (unsigned long long)zt_file_size(bundleOutput));
+
+    NSString *replacementInput = [inputPath stringByAppendingString:@".zst-out"];
+    [[NSFileManager defaultManager] removeItemAtPath:replacementInput error:nil];
+    if (![[NSFileManager defaultManager] copyItemAtPath:bundleOutput toPath:replacementInput error:error]) return NO;
+    NSURL *inputURL = [NSURL fileURLWithPath:inputPath];
+    NSURL *replacementURL = [NSURL fileURLWithPath:replacementInput];
+    if (![[NSFileManager defaultManager] replaceItemAtURL:inputURL withItemAtURL:replacementURL backupItemName:nil options:NSFileManagerItemReplacementUsingNewMetadataOnly resultingItemURL:nil error:error]) {
+        [[NSFileManager defaultManager] removeItemAtPath:replacementInput error:nil];
+        return NO;
+    }
+    ZLog(@"[ZTranscoder] replaced input bundle with locally transcoded output %@", inputPath);
+    if (progress) progress(1.0, @"Local bundle transcode complete");
+    return YES;
+}
+
+static BOOL zt_process_modded_bundle(NSURL *moddedURL, ZTranscoderConfig *config, void (^progress)(double, NSString *), NSURL **outputURL, NSError **error) {
+    NSString *inputPath = moddedURL.path;
+    ZLog(@"[ZTranscoder] starting local transcode of %@", inputPath);
+    if (![[NSFileManager defaultManager] fileExistsAtPath:inputPath]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Provided mod bundle does not exist: %@", inputPath]);
+        return NO;
+    }
+    NSString *workDir = zt_temp_directory();
+    if (!workDir) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Couldn't create the on-device transcoder workspace.");
+        return NO;
+    }
+    BOOL ok = zt_transcode_modded_bundle_in(workDir, inputPath, config, progress, error);
+    [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
+    if (ok && outputURL) *outputURL = [NSURL fileURLWithPath:inputPath];
+    return ok;
+}
+
 static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, NSArray<ZTCarra2Item *> *carra2Items, void (^progress)(double, NSString *), NSURL **outputURL, NSError **error) {
     BOOL carra2Mode = carra2Items != nil;
     if (!config) config = [ZTranscoderConfig new];
+    if (!carra2Mode) return zt_process_modded_bundle(moddedURL, config, progress, outputURL, error);
     NSString *inputPath = moddedURL.path;
     ZLog(@"[ZTranscoder] starting local visual-mod transcode for %@", inputPath);
     NSString *targetPath = nil;
