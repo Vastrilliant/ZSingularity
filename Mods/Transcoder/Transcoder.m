@@ -42,7 +42,8 @@ static BOOL zt_class_is_transcoded(int32_t classID) {
         || classID == kZTClassAssetBundle;
 }
 
-static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
+static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared, ZTranscoderConfig *config) {
+    if (![config allowsTransplantOfClass:classID]) return NO;
     if (zt_class_is_transcoded(classID)) return YES;
     if (!layoutShared) return NO;
     switch (classID) {
@@ -1520,10 +1521,38 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
 }
 
 @implementation ZTranscoderConfig
+- (instancetype)init {
+    if ((self = [super init])) {
+        _inlineOnly = YES;
+    }
+    return self;
+}
 - (ZTranscoderConfig *)normalizedConfig {
     ZTranscoderConfig *copy = [ZTranscoderConfig new];
+    [copy copyTranscodeOptionsFrom:self];
     copy.targetBundlePath = self.targetBundlePath;
     return copy;
+}
+- (void)copyTranscodeOptionsFrom:(ZTranscoderConfig *)other {
+    if (!other) return;
+    self.inlineOnly = other.inlineOnly;
+    self.transplantSprites = other.transplantSprites;
+    self.transplantSpriteAtlases = other.transplantSpriteAtlases;
+    self.transplantSpriteRenderers = other.transplantSpriteRenderers;
+    self.transplantSpriteMasks = other.transplantSpriteMasks;
+    self.transplantTextAssets = other.transplantTextAssets;
+    self.transplantAssetBundle = other.transplantAssetBundle;
+}
+- (BOOL)allowsTransplantOfClass:(int32_t)classID {
+    switch (classID) {
+        case kZTClassSprite: return self.transplantSprites;
+        case kZTClassSpriteAtlas: return self.transplantSpriteAtlases;
+        case kZTClassSpriteRenderer: return self.transplantSpriteRenderers;
+        case kZTClassSpriteMask: return self.transplantSpriteMasks;
+        case kZTClassTextAsset: return self.transplantTextAssets;
+        case kZTClassAssetBundle: return self.transplantAssetBundle;
+        default: return YES;
+    }
 }
 @end
 
@@ -1647,6 +1676,7 @@ static ZTSerializedDocument *zt_build_carra2_document(NSArray<ZTCarra2Item *> *i
 
 static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, NSArray<ZTCarra2Item *> *carra2Items, void (^progress)(double, NSString *), NSURL **outputURL, NSError **error) {
     BOOL carra2Mode = carra2Items != nil;
+    if (!config) config = [ZTranscoderConfig new];
     NSString *inputPath = moddedURL.path;
     ZLog(@"[ZTranscoder] starting local visual-mod transcode for %@", inputPath);
     NSString *targetPath = nil;
@@ -1714,7 +1744,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL present = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (zt_class_is_transplantable(sourceObject.classID, layoutShared) || (!present && zt_class_is_transplantable(sourceObject.classID, YES))) assetCount++;
+        if (zt_class_is_transplantable(sourceObject.classID, layoutShared, config) || (!present && zt_class_is_transplantable(sourceObject.classID, YES, config))) assetCount++;
     }
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
@@ -1723,14 +1753,14 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES))) continue;
+        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared, config) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES, config))) continue;
         BOOL legacyClass = zt_class_is_transcoded(sourceObject.classID);
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
         processedAssets++;
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
         if (sourceObject.classID == kZTClassTexture2D) {
             ZTTextureRecord *probeTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
-            if (probeTexture && !probeTexture.isInline) {
+            if (config.inlineOnly && probeTexture && !probeTexture.isInline) {
                 skippedAssets++;
                 ZLog(@"[ZTranscoder] skipping Texture2D PathID=%lld name=%@: image data is stored in .resS, leaving it untouched", (long long)sourceObject.pathID, probeTexture.name.length ? probeTexture.name : @"<unnamed>");
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
@@ -1805,6 +1835,12 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             if (sourceTexture.name.length && targetTexture.name.length && ![sourceTexture.name isEqualToString:targetTexture.name]) ZLog(@"[ZTranscoder] Texture2D PathID=%lld name differs source=%@ target=%@; retaining PathID matching", (long long)sourceObject.pathID, sourceTexture.name, targetTexture.name);
             if (exact) continue;
             if (zt_format_is_transplant_only(sourceTexture.format)) {
+                if (!sourceTexture.isInline) {
+                    skippedAssets++;
+                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only and streamed from .resS; leaving it untouched", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
+                    if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
+                    continue;
+                }
                 if (sourceObjectData) targetObject.replacementObject = sourceObjectData;
                 ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ is transplant-only; copied inline object without transcoding (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourceObjectData.length);
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
@@ -2121,6 +2157,7 @@ static BOOL zt_load_carra2(NSURL *archiveURL, NSString **outBundlePath, NSArray<
                     workURL = [NSURL fileURLWithPath:stagedPath];
                 } else {
                     workConfig = [ZTranscoderConfig new];
+                    [workConfig copyTranscodeOptionsFrom:config];
                     workConfig.targetBundlePath = config.targetBundlePath;
                     BOOL targetExists = NO;
                     if (workConfig.targetBundlePath.length > 0) {
