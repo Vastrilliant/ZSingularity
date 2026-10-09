@@ -1,11 +1,5 @@
 # MODS
-The Mods section is a local library of "mod folders" — each folder holds the modded files you've imported, along with their processing status, and is where you dispatch/install/restore them from.
-
-To access this feature, you must fork the Transcoder Proxy repository. 
-
-[https://github.com/vastrilliant/transcoder-proxy/](https://github.com/vastrilliant/transcoder-proxy/)
-
-To use this, you must also need to provide a PAT (personal access token), see [personal access token](Auth.md#personal-access-token)
+The Mods section is a local library of "mod folders" — each folder holds the modded files you have imported, along with their processing status, and is where you dispatch/install/restore them from.
 
 ## Load Mods
 
@@ -21,10 +15,11 @@ Supported Formats:
 
 ## Processing
 
-- **Unity AssetBundles** usually can't be installed as-is — they're normally built for a different platform's texture compression, so the game won't load them until they're re-encoded. Click the upload button to dispatch it to the repo for transcoding.
+- **Unity AssetBundles** usually can't be installed as-is — they're normally built for a different platform's texture compression, so the game won't load them until they're re-encoded. The tweak now transcodes eligible bundles locally on-device.
 
 ## The Transcoder pipeline
 
-Transcoding a bundle sends it to the GitHub repository configured under [Auth](Auth.md), where a GitHub Actions workflow re-encodes its textures into the format chosen under [Config → Transcode Format](Config.md).
+The on-device transcoder reads the imported bundle and the game's stock bundle, matches the relevant assets, and re-encodes the required textures to ASTC 6x6. No GitHub repository, PAT, or remote workflow is required.
 
-Once a run finishes successfully, the tweak downloads the processed bundle and installs it in place of the original — the original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later.
+Once transcoding finishes, the processed bundle is installed immediately in place of the original. The original stock bundle is backed up first (via `ZTranscoderInstaller`) so it can be restored later.
+

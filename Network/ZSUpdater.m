@@ -3,7 +3,6 @@
 #import <mach-o/dyld.h>
 #import <dlfcn.h>
 #import "ZSVersion.h"
-#import "Transcoder.h"
 
 #pragma mark - ZSDylibUpdater
 
@@ -187,29 +186,19 @@ static NSComparisonResult ZSCompareVersionStrings(NSString *a, NSString *b) {
 
 #pragma mark - Shared request helpers
 
-static NSMutableURLRequest *zs_update_gh_request(NSURL *url, NSString * _Nullable authToken, NSString * _Nullable accept) {
+static NSMutableURLRequest *zs_update_gh_request(NSURL *url, NSString * _Nullable accept) {
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     [request setValue:@"ZSingularity-UpdateChecker" forHTTPHeaderField:@"User-Agent"];
     [request setValue:accept ?: @"application/vnd.github+json" forHTTPHeaderField:@"Accept"];
     [request setValue:@"2022-11-28" forHTTPHeaderField:@"X-GitHub-Api-Version"];
-    if (authToken.length > 0) {
-        [request setValue:[NSString stringWithFormat:@"Bearer %@", authToken] forHTTPHeaderField:@"Authorization"];
-    }
     return request;
 }
 
-static void zs_update_gh_json_get(NSURL *url, NSString * _Nullable authToken, BOOL isRetry,
-                                   void (^completion)(id _Nullable json, NSError * _Nullable error)) {
-    NSMutableURLRequest *request = zs_update_gh_request(url, authToken, nil);
+static void zs_update_gh_json_get(NSURL *url, void (^completion)(id _Nullable json, NSError * _Nullable error)) {
+    NSMutableURLRequest *request = zs_update_gh_request(url, nil);
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-
-        if ((error || !data || (http && http.statusCode != 200)) && authToken.length > 0 && !isRetry) {
-            zs_update_gh_json_get(url, nil, YES, completion);
-            return;
-        }
-
         if (error || !data || (http && http.statusCode != 200)) {
             NSError *finalError = error ?: [NSError errorWithDomain:@"ZSUpdateChecker" code:http ? http.statusCode : 2
                 userInfo:@{NSLocalizedDescriptionKey:
@@ -217,7 +206,6 @@ static void zs_update_gh_json_get(NSURL *url, NSString * _Nullable authToken, BO
             completion(nil, finalError);
             return;
         }
-
         NSError *jsonError = nil;
         id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         completion(root, root ? nil : jsonError);
@@ -225,18 +213,12 @@ static void zs_update_gh_json_get(NSURL *url, NSString * _Nullable authToken, BO
     [task resume];
 }
 
-static void zs_update_gh_data_get(NSURL *url, NSString * _Nullable authToken, NSString * _Nullable accept, BOOL isRetry,
+static void zs_update_gh_data_get(NSURL *url, NSString * _Nullable accept,
                                    void (^completion)(NSData * _Nullable data, NSError * _Nullable error)) {
-    NSMutableURLRequest *request = zs_update_gh_request(url, authToken, accept);
+    NSMutableURLRequest *request = zs_update_gh_request(url, accept);
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-
-        if ((error || !data || (http && http.statusCode != 200)) && authToken.length > 0 && !isRetry) {
-            zs_update_gh_data_get(url, nil, accept, YES, completion);
-            return;
-        }
-
         if (error || !data || (http && http.statusCode != 200)) {
             NSError *finalError = error ?: [NSError errorWithDomain:@"ZSUpdateChecker" code:http ? http.statusCode : 2
                 userInfo:@{NSLocalizedDescriptionKey:
@@ -244,24 +226,17 @@ static void zs_update_gh_data_get(NSURL *url, NSString * _Nullable authToken, NS
             completion(nil, finalError);
             return;
         }
-
         completion(data, nil);
     }];
     [task resume];
 }
 
-static void zs_update_gh_json_list_get(NSURL *url, NSString * _Nullable authToken, BOOL isRetry,
+static void zs_update_gh_json_list_get(NSURL *url,
                                         void (^completion)(id _Nullable json, BOOL hasNextPage, NSError * _Nullable error)) {
-    NSMutableURLRequest *request = zs_update_gh_request(url, authToken, nil);
+    NSMutableURLRequest *request = zs_update_gh_request(url, nil);
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request
         completionHandler:^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
         NSHTTPURLResponse *http = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-
-        if ((error || !data || (http && http.statusCode != 200)) && authToken.length > 0 && !isRetry) {
-            zs_update_gh_json_list_get(url, nil, YES, completion);
-            return;
-        }
-
         if (error || !data || (http && http.statusCode != 200)) {
             NSError *finalError = error ?: [NSError errorWithDomain:@"ZSUpdateChecker" code:http ? http.statusCode : 2
                 userInfo:@{NSLocalizedDescriptionKey:
@@ -269,10 +244,8 @@ static void zs_update_gh_json_list_get(NSURL *url, NSString * _Nullable authToke
             completion(nil, NO, finalError);
             return;
         }
-
         NSString *linkHeader = http.allHeaderFields[@"Link"] ?: http.allHeaderFields[@"link"];
         BOOL hasNextPage = [linkHeader containsString:@"rel=\"next\""];
-
         NSError *jsonError = nil;
         id root = [NSJSONSerialization JSONObjectWithData:data options:0 error:&jsonError];
         completion(root, hasNextPage, root ? nil : jsonError);
@@ -297,7 +270,7 @@ static NSString *zs_releases_latest_url_string(void) {
             kZSUpdateRepoOwner, kZSUpdateRepoName];
 }
 
-static void zs_update_find_release_by_tag(NSString *tag, NSUInteger page, NSString * _Nullable authToken,
+static void zs_update_find_release_by_tag(NSString *tag, NSUInteger page,
                                            void (^completion)(id _Nullable release, NSError * _Nullable error)) {
     if (page > kZSNightlyLookupMaxPages) {
         completion(nil, [NSError errorWithDomain:@"ZSUpdateChecker" code:404
@@ -309,7 +282,7 @@ static void zs_update_find_release_by_tag(NSString *tag, NSUInteger page, NSStri
         kZSUpdateRepoOwner, kZSUpdateRepoName, (unsigned long)kZSReleaseListPageSize, (unsigned long)page];
     NSURL *url = [NSURL URLWithString:urlString];
 
-    zs_update_gh_json_list_get(url, authToken, NO, ^(id root, BOOL hasNextPage, NSError *error) {
+    zs_update_gh_json_list_get(url, ^(id root, BOOL hasNextPage, NSError *error) {
         NSArray *releases = [root isKindOfClass:[NSArray class]] ? root : nil;
         for (NSDictionary *release in releases) {
             if (![release isKindOfClass:[NSDictionary class]]) continue;
@@ -332,18 +305,18 @@ static void zs_update_find_release_by_tag(NSString *tag, NSUInteger page, NSStri
             return;
         }
 
-        zs_update_find_release_by_tag(tag, page + 1, authToken, completion);
+        zs_update_find_release_by_tag(tag, page + 1, completion);
     });
 }
 
 static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray<NSDictionary *> *accumulated,
-                                                  NSUInteger minimumCount, NSString * _Nullable authToken,
+                                                  NSUInteger minimumCount,
                                                   void (^completion)(NSArray<NSDictionary *> *releases, NSError * _Nullable error)) {
     NSString *urlString = [NSString stringWithFormat:kZSReleasesListURLFormat,
         kZSUpdateRepoOwner, kZSUpdateRepoName, (unsigned long)kZSReleaseListPageSize, (unsigned long)page];
     NSURL *url = [NSURL URLWithString:urlString];
 
-    zs_update_gh_json_list_get(url, authToken, NO, ^(id root, BOOL hasNextPage, NSError *error) {
+    zs_update_gh_json_list_get(url, ^(id root, BOOL hasNextPage, NSError *error) {
         NSArray *releases = [root isKindOfClass:[NSArray class]] ? root : nil;
         for (NSDictionary *release in releases) {
             if (![release isKindOfClass:[NSDictionary class]]) continue;
@@ -363,7 +336,7 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
             return;
         }
 
-        zs_update_fetch_non_nightly_releases(page + 1, accumulated, minimumCount, authToken, completion);
+        zs_update_fetch_non_nightly_releases(page + 1, accumulated, minimumCount, completion);
     });
 }
 
@@ -373,7 +346,6 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
 
 + (void)checkForUpdateWithMode:(ZSUpdateCheckMode)mode
                      completion:(void (^)(ZSUpdateCheckResult result, NSString * _Nullable latestVersion))completion {
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
 
     void (^handleRoot)(id, NSError *) = ^(id root, NSError *error) {
         NSString *tagName = [root isKindOfClass:[NSDictionary class]] ? root[@"tag_name"] : nil;
@@ -404,7 +376,7 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
     };
 
     if (mode == ZSUpdateCheckModeNightlyReleases) {
-        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, authToken, handleRoot);
+        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, handleRoot);
         return;
     }
 
@@ -413,14 +385,13 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
         dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(ZSUpdateCheckResultUpToDate, nil); });
         return;
     }
-    zs_update_gh_json_get(url, authToken, NO, handleRoot);
+    zs_update_gh_json_get(url, handleRoot);
 }
 
 #pragma mark - Release info (docs panel)
 
 + (void)fetchReleaseInfoWithMode:(ZSUpdateCheckMode)mode
                        completion:(void (^)(ZSReleaseInfo * _Nullable, NSError * _Nullable))completion {
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
 
     void (^handleRoot)(id, NSError *) = ^(id root, NSError *error) {
         if (![root isKindOfClass:[NSDictionary class]]) {
@@ -449,12 +420,12 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
     };
 
     if (mode == ZSUpdateCheckModeNightlyReleases) {
-        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, authToken, handleRoot);
+        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, handleRoot);
         return;
     }
 
     NSURL *url = [NSURL URLWithString:zs_releases_latest_url_string()];
-    zs_update_gh_json_get(url, authToken, NO, handleRoot);
+    zs_update_gh_json_get(url, handleRoot);
 }
 
 + (void)fetchReleaseInfoAtIndex:(NSUInteger)index
@@ -469,10 +440,9 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
         return;
     }
 
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
     NSMutableArray<NSDictionary *> *accumulated = [NSMutableArray array];
 
-    zs_update_fetch_non_nightly_releases(1, accumulated, index + 2, authToken, ^(NSArray<NSDictionary *> *releases, NSError * _Nullable error) {
+    zs_update_fetch_non_nightly_releases(1, accumulated, index + 2, ^(NSArray<NSDictionary *> *releases, NSError * _Nullable error) {
         NSDictionary *release = releases.count > index ? releases[index] : nil;
         if (![release isKindOfClass:[NSDictionary class]]) {
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(nil, NO, hasNewer, error); });
@@ -504,7 +474,6 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
 
 + (void)fetchLatestDylibDataWithMode:(ZSUpdateCheckMode)mode
                            completion:(void (^)(NSData * _Nullable, NSError * _Nullable))completion {
-    NSString *authToken = [ZTranscoderSettings loadConfig].authToken;
 
     void (^handleRoot)(id, NSError *) = ^(id root, NSError *error) {
         NSArray *assets = [root isKindOfClass:[NSDictionary class]] && [root[@"assets"] isKindOfClass:[NSArray class]]
@@ -525,18 +494,18 @@ static void zs_update_fetch_non_nightly_releases(NSUInteger page, NSMutableArray
             return;
         }
 
-        zs_update_gh_data_get(assetURL, authToken, @"application/octet-stream", NO, ^(NSData *data, NSError *downloadError) {
+        zs_update_gh_data_get(assetURL, @"application/octet-stream", ^(NSData *data, NSError *downloadError) {
             dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(data, downloadError); });
         });
     };
 
     if (mode == ZSUpdateCheckModeNightlyReleases) {
-        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, authToken, handleRoot);
+        zs_update_find_release_by_tag(kZSNightlyReleaseTag, 1, handleRoot);
         return;
     }
 
     NSURL *url = [NSURL URLWithString:zs_releases_latest_url_string()];
-    zs_update_gh_json_get(url, authToken, NO, handleRoot);
+    zs_update_gh_json_get(url, handleRoot);
 }
 
 @end

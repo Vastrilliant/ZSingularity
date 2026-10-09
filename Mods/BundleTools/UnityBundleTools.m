@@ -1284,55 +1284,8 @@ static void ucl_search(NSString *dirPath, NSUInteger depthRemaining, NSMutableSe
 }
 
 + (NSArray<NSString *> *)allBundlePathsForCAB:(NSString *)cab {
-
-    if ([ZSFileIndex hasIndex]) {
-        return [ZSFileIndex cachedPathsForCAB:cab] ?: @[];
-    }
-
-    ZLog(@"[UnityCacheLocator] file index not built yet this session - falling back to a live scan for CAB %@", cab);
-
-    NSMutableArray<NSString *> *matches = [NSMutableArray array];
-    NSFileManager *fm = NSFileManager.defaultManager;
-
-    for (NSString *root in [self unityCacheSharedDirectories]) {
-        if (root.length > kUCLMaxPathLength) continue;
-        @try {
-        NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
-        NSString *relPath;
-        while ((relPath = [walker nextObject])) {
-            @autoreleasepool {
-                if (relPath.length > kUCLMaxPathLength) continue;
-                NSDictionary<NSFileAttributeKey, id> *attrs = walker.fileAttributes;
-                if (![attrs[NSFileType] isEqualToString:NSFileTypeRegular]) continue;
-
-                NSString *fullPath = [root stringByAppendingPathComponent:relPath];
-                if (fullPath.length > kUCLMaxPathLength) continue;
-
-                NSError *fileErr = nil;
-                NSString *fileCAB = [UnityBundleCAB primaryCABForBundleAtPath:fullPath error:&fileErr];
-                if (fileCAB && [fileCAB isEqualToString:cab]) {
-                    [matches addObject:fullPath];
-                }
-            }
-        }
-        } @catch (NSException *exception) {
-            ZLog(@"[UnityCacheLocator] skipping root %@ after Foundation threw during enumeration: %@", root, exception);
-            continue;
-        }
-    }
-
-    [matches sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
-        NSDate *da = [fm attributesOfItemAtPath:a error:nil][NSFileModificationDate];
-        NSDate *db = [fm attributesOfItemAtPath:b error:nil][NSFileModificationDate];
-        return [db compare:da ?: NSDate.distantPast];
-    }];
-
-    if (matches.count > 0) {
-        ZLog(@"[UnityCacheLocator] CAB %@ matched %lu cached file(s), using %@",
-             cab, (unsigned long)matches.count, matches.firstObject);
-    }
-
-    return matches;
+    [ZSFileIndex ensureIndexUpToDate];
+    return [ZSFileIndex cachedPathsForCAB:cab] ?: @[];
 }
 
 + (nullable NSString *)locateBundlePathForCAB:(NSString *)cab error:(NSError **)error {

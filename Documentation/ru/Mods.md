@@ -1,30 +1,25 @@
 # MODS
-Раздел Mods — это локальная библиотека "mod folders". Каждая папка содержит импортированные mod-файлы и их статус обработки; отсюда их можно отправлять, устанавливать и восстанавливать.
+Раздел Mods представляет собой локальную библиотеку «папок модов». В каждой папке хранятся импортированные файлы мода и их статус обработки; отсюда их можно отправлять на обработку, устанавливать и восстанавливать.
 
-Для использования этой функции необходимо fork-нуть репозиторий Transcoder Proxy.
+## Загрузка модов
 
-[https://github.com/vastrilliant/transcoder-proxy/](https://github.com/vastrilliant/transcoder-proxy/)
-
-Также потребуется PAT (personal access token). См. [personal access token](Auth.md#personal-access-token).
-
-## Load Mods
-
-Импортирует modded bundle из выбранной вами библиотеки модов. Рекомендуется [NexusMods](https://www.nexusmods.com/games/limbuscompany).
+Импортируйте изменённые bundle из выбранной библиотеки модов. Рекомендуется [NexusMods](https://www.nexusmods.com/games/limbuscompany).
 
 Поддерживаемые форматы:
-`__data` unity asset bundles
+`__data` Unity AssetBundle
 `.assets.bank` FMOD Sound Bank
-`Lunartique` .zip archives
-`Carra2` archives
-`*.json` localization files 
-`translation` packages
+`Lunartique` .zip архивы
+`Carra2` архивы
+`*.json` файлы локализации
+`translation` пакеты
 
-## Processing
+## Обработка
 
-- **Unity AssetBundles** обычно нельзя установить как есть. Они обычно собраны с использованием сжатия текстур для другой платформы, поэтому игра не сможет загрузить их до повторного кодирования. Нажмите кнопку загрузки, чтобы отправить bundle в repo для transcoding.
+- **Unity AssetBundle** обычно нельзя установить как есть. Обычно они созданы с компрессией текстур для другой платформы, поэтому перед загрузкой в игру их необходимо перекодировать. Теперь поддерживаемые bundle транскодируются прямо на устройстве.
 
-## The Transcoder pipeline
+## Конвейер транскодирования
 
-Transcoding bundle отправляет его в GitHub-репозиторий, настроенный в [Auth](Auth.md), где GitHub Actions workflow перекодирует его текстуры в формат, выбранный в [Config → Transcode Format](Config.md).
+Локальный транскодер читает импортированный bundle и оригинальный bundle игры, сопоставляет нужные assets и перекодирует необходимые текстуры в ASTC 6x6. GitHub-репозиторий, PAT и удалённый workflow больше не нужны.
 
-После успешного завершения запуска tweak загружает обработанный bundle и устанавливает его вместо оригинала. Исходный stock bundle сначала сохраняется через `ZTranscoderInstaller`, чтобы его можно было восстановить позже.
+После завершения транскодирования обработанный bundle сразу устанавливается вместо оригинала. Оригинальный bundle сначала резервируется через `ZTranscoderInstaller`, чтобы его можно было восстановить позже.
+

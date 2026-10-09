@@ -993,6 +993,133 @@ constant ZSLRConfig kZSLRConfigs12[10] = {
 };
 
 
+constant uchar kZSLRIv6[360] = {
+0,0,1,2,3,4,0,0,1,2,3,4,5,5,6,7,
+8,9,10,10,11,12,13,14,15,15,16,17,18,19,20,20,
+21,22,23,24,0,1,2,3,4,5,6,7,8,9,10,11,
+12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,
+28,29,30,31,32,33,34,35,0,1,2,3,4,5,0,1,
+2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,
+18,19,20,21,22,23,24,25,26,27,28,29,0,1,2,3,
+4,5,0,1,2,3,4,5,6,7,8,9,10,11,6,7,
+8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,
+0,0,1,2,3,4,0,0,1,2,3,4,5,5,6,7,
+8,9,10,10,11,12,13,14,15,15,16,17,18,19,20,20,
+21,22,23,24,0,0,1,2,3,4,0,0,1,2,3,4,
+5,5,6,7,8,9,5,5,6,7,8,9,10,10,11,12,
+13,14,15,15,16,17,18,19,0,1,2,3,4,5,0,1,
+2,3,4,5,0,1,2,3,4,5,6,7,8,9,10,11,
+6,7,8,9,10,11,12,13,14,15,16,17,0,0,1,2,
+3,4,0,0,1,2,3,4,0,0,1,2,3,4,5,5,
+6,7,8,9,5,5,6,7,8,9,10,10,11,12,13,14,
+0,0,1,1,2,3,0,0,1,1,2,3,4,4,5,5,
+6,7,4,4,5,5,6,7,8,8,9,9,10,11,12,12,
+13,13,14,15,0,1,2,3,4,5,0,1,2,3,4,5,
+0,1,2,3,4,5,0,1,2,3,4,5,0,1,2,3,
+4,5,6,7,8,9,10,11
+};
+constant uint kZSLRIpw6[360] = {
+0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,0x000D0003u,0x0B020201u,
+0x08050201u,0x05080102u,0x020B0102u,0x000D0003u,0x000A0006u,0x08020501u,0x06040402u,0x04060204u,
+0x02080105u,0x000A0006u,0x0006000Au,0x05010802u,0x04020604u,0x02040406u,0x01050208u,0x0006000Au,
+0x0003000Du,0x02010B02u,0x02010805u,0x01020508u,0x0102020Bu,0x0003000Du,0x00000010u,0x00000D03u,
+0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x000D0003u,0x000D0003u,
+0x000D0003u,0x000D0003u,0x000D0003u,0x000D0003u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,
+0x000A0006u,0x000A0006u,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,
+0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,
+0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x000D0003u,0x000D0003u,
+0x000D0003u,0x000D0003u,0x000D0003u,0x000D0003u,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,
+0x0006000Au,0x0006000Au,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,0x000D0003u,0x0B020201u,
+0x08050201u,0x05080102u,0x020B0102u,0x000D0003u,0x000A0006u,0x08020501u,0x06040402u,0x04060204u,
+0x02080105u,0x000A0006u,0x0006000Au,0x05010802u,0x04020604u,0x02040406u,0x01050208u,0x0006000Au,
+0x0003000Du,0x02010B02u,0x02010805u,0x01020508u,0x0102020Bu,0x0003000Du,0x00000010u,0x00000D03u,
+0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,
+0x0000030Du,0x00000010u,0x000A0006u,0x08020501u,0x06040402u,0x04060204u,0x02080105u,0x000A0006u,
+0x0003000Du,0x02010B02u,0x02010805u,0x01020508u,0x0102020Bu,0x0003000Du,0x000D0003u,0x0B020201u,
+0x08050201u,0x05080102u,0x020B0102u,0x000D0003u,0x0006000Au,0x05010802u,0x04020604u,0x02040406u,
+0x01050208u,0x0006000Au,0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x0006000Au,0x0006000Au,
+0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x000D0003u,0x000D0003u,0x000D0003u,0x000D0003u,
+0x000D0003u,0x000D0003u,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,
+0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,
+0x0000030Du,0x00000010u,0x0006000Au,0x05010802u,0x04020604u,0x02040406u,0x01050208u,0x0006000Au,
+0x000D0003u,0x0B020201u,0x08050201u,0x05080102u,0x020B0102u,0x000D0003u,0x0003000Du,0x02010B02u,
+0x02010805u,0x01020508u,0x0102020Bu,0x0003000Du,0x000A0006u,0x08020501u,0x06040402u,0x04060204u,
+0x02080105u,0x000A0006u,0x00000010u,0x00000D03u,0x00000A06u,0x0000060Au,0x0000030Du,0x00000010u,
+0x00000010u,0x00000A06u,0x0000030Du,0x00000D03u,0x0000060Au,0x00000010u,0x000A0006u,0x06040402u,
+0x02080105u,0x08020501u,0x04060204u,0x000A0006u,0x0003000Du,0x02010805u,0x0102020Bu,0x02010B02u,
+0x01020508u,0x0003000Du,0x000D0003u,0x08050201u,0x020B0102u,0x0B020201u,0x05080102u,0x000D0003u,
+0x0006000Au,0x04020604u,0x01050208u,0x05010802u,0x02040406u,0x0006000Au,0x00000010u,0x00000A06u,
+0x0000030Du,0x00000D03u,0x0000060Au,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,
+0x00000010u,0x00000010u,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,0x0003000Du,
+0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x0006000Au,0x000A0006u,0x000A0006u,
+0x000A0006u,0x000A0006u,0x000A0006u,0x000A0006u,0x000D0003u,0x000D0003u,0x000D0003u,0x000D0003u,
+0x000D0003u,0x000D0003u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u,0x00000010u
+};
+constant float kZSLRDen6[640] = {
+1.074219f,0.820312f,0.8125f,0.820312f,1.074219f,0.820312f,0.683594f,0.625f,0.683594f,0.820312f,0.8125f,0.625f,0.5625f,0.625f,0.8125f,0.820312f,
+0.683594f,0.625f,0.683594f,0.820312f,1.074219f,0.820312f,0.8125f,0.820312f,1.074219f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,
+1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,1.0f,
+1.0f,1.0f,1.0f,1.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.035156f,1.035156f,1.035156f,1.035156f,1.035156f,1.035156f,0.800781f,0.800781f,0.800781f,0.800781f,0.800781f,0.800781f,0.78125f,0.78125f,0.78125f,0.78125f,
+0.78125f,0.78125f,0.800781f,0.800781f,0.800781f,0.800781f,0.800781f,0.800781f,1.035156f,1.035156f,1.035156f,1.035156f,1.035156f,1.035156f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.140625f,1.140625f,1.140625f,1.140625f,1.140625f,1.140625f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,1.085938f,
+1.085938f,1.085938f,1.140625f,1.140625f,1.140625f,1.140625f,1.140625f,1.140625f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.074219f,0.820312f,0.8125f,0.820312f,1.074219f,0.820312f,0.683594f,0.625f,0.683594f,0.820312f,0.8125f,0.625f,0.5625f,0.625f,0.8125f,0.820312f,
+0.683594f,0.625f,0.683594f,0.820312f,1.074219f,0.820312f,0.8125f,0.820312f,1.074219f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.179688f,0.914062f,0.90625f,0.914062f,1.179688f,1.121094f,0.902344f,0.8125f,0.902344f,1.121094f,1.121094f,0.902344f,0.8125f,0.902344f,1.121094f,1.179688f,
+0.914062f,0.90625f,0.914062f,1.179688f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.425781f,1.425781f,1.425781f,1.425781f,1.425781f,1.425781f,1.601562f,1.601562f,1.601562f,1.601562f,1.601562f,1.601562f,1.425781f,1.425781f,1.425781f,1.425781f,
+1.425781f,1.425781f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.480469f,1.132812f,1.09375f,1.132812f,1.480469f,1.640625f,1.367188f,1.25f,1.367188f,1.640625f,1.480469f,1.132812f,1.09375f,1.132812f,1.480469f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+1.296875f,1.25f,1.25f,1.296875f,1.25f,1.179688f,1.179688f,1.25f,1.25f,1.179688f,1.179688f,1.25f,1.296875f,1.25f,1.25f,1.296875f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,2.226562f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,
+0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f,0.0f
+};
+constant ZSLRConfig kZSLRConfigs6[10] = {
+{5,5,2,0,226,256,192},
+{6,6,1,0,260,256,256},
+{6,5,2,0,354,256,0},
+{6,4,2,0,322,256,192},
+{5,5,3,0,243,64,0},
+{5,4,3,0,211,256,0},
+{6,3,3,0,307,256,0},
+{5,3,3,0,179,256,256},
+{4,4,4,0,578,192,48},
+{6,2,4,0,770,256,192}
+};
+
 static float zslr_linear_to_srgb(float value) {
     value = clamp(value, 0.0f, 1.0f);
     return value <= 0.0031308f ? value * 12.92f : 1.055f * pow(value, 1.0f / 2.4f) - 0.055f;
@@ -1387,6 +1514,35 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         init1[c] = clamp(mean[c] + axis[c] * tmax, 0.0f, 1.0f);
     }
 
+    float seed0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float seed1[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    uint seedChannel = 0u;
+    for (uint c = 1u; c < dims; c++) {
+        if (hi[c] - lo[c] > hi[seedChannel] - lo[seedChannel]) seedChannel = c;
+    }
+    uint seedMinIndex = 0u;
+    uint seedMaxIndex = 0u;
+    float seedMinValue = 2.0f;
+    float seedMaxValue = -1.0f;
+    for (uint i = 0; i < N; i++) {
+        if (zslr_vw(vm, i) <= 0.0f) continue;
+        float4 p = zslr_unpack(pk[i]);
+        if (p[seedChannel] < seedMinValue) {
+            seedMinValue = p[seedChannel];
+            seedMinIndex = i;
+        }
+        if (p[seedChannel] > seedMaxValue) {
+            seedMaxValue = p[seedChannel];
+            seedMaxIndex = i;
+        }
+    }
+    float4 seedPixel0 = zslr_unpack(pk[seedMinIndex]);
+    float4 seedPixel1 = zslr_unpack(pk[seedMaxIndex]);
+    for (uint c = 0; c < dims; c++) {
+        seed0[c] = seedPixel0[c];
+        seed1[c] = seedPixel1[c];
+    }
+
     ZSLRTuning tune = kZSLRTunings[min(quality, 10u)];
     uint sPasses = tune.sPasses;
     uint sIterA = tune.sIterA;
@@ -1400,11 +1556,13 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
     cfgCount = min(cfgCount, uint(tune.cfgCount));
 
     float scores[16];
+    bool configUsesExtremaSeed[16];
     float bestErr = 1e30f;
     uint bestCfg = 0;
     uint bestEp[8];
     uchar bestGridBytes[64];
     uint bestLevels = 256u;
+    for (uint i = 0; i < 16u; i++) configUsesExtremaSeed[i] = false;
     for (uint i = 0; i < 8; i++) bestEp[i] = 0u;
     for (uint i = 0; i < 64; i++) bestGridBytes[i] = 0;
     bool done = false;
@@ -1417,6 +1575,21 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         float err = zslr_eval_config<BW>(pk, vm, ivT + ci * N, ipwT + ci * N, denT + ci * 64u, full,
                                          cfgs[ci].wx, cfgs[ci].wy, cfgs[ci].bits, levels, dims,
                                          init0, init1, sPasses, sIterA, sIterB, tmpEp, tmpGrid);
+        bool useExtremaSeed = false;
+        if (BW == 6u) {
+            uint altEp[8];
+            uchar altGrid[64];
+            float altErr = zslr_eval_config<BW>(pk, vm, ivT + ci * N, ipwT + ci * N, denT + ci * 64u, full,
+                                                cfgs[ci].wx, cfgs[ci].wy, cfgs[ci].bits, levels, dims,
+                                                seed0, seed1, sPasses, sIterA, sIterB, altEp, altGrid);
+            if (altErr < err) {
+                err = altErr;
+                useExtremaSeed = true;
+                for (uint j = 0; j < dims * 2u; j++) tmpEp[j] = altEp[j];
+                for (uint j = 0; j < cfgs[ci].wx * cfgs[ci].wy; j++) tmpGrid[j] = altGrid[j];
+            }
+        }
+        configUsesExtremaSeed[ci] = useExtremaSeed;
         scores[ci] = err;
         if (err < bestErr) {
             bestErr = err;
@@ -1448,9 +1621,16 @@ static float zslr_encode_block(thread const uint *pk, thread const uint *vm, boo
         uint levels = rgba ? cfgs[pick].levelsRGBA : cfgs[pick].levelsRGB;
         uint tmpEp[8];
         uchar tmpGrid[64];
-        float err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
-                                         cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
-                                         init0, init1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        float err;
+        if (configUsesExtremaSeed[pick]) {
+            err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
+                                       cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
+                                       seed0, seed1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        } else {
+            err = zslr_eval_config<BW>(pk, vm, ivT + pick * N, ipwT + pick * N, denT + pick * 64u, full,
+                                       cfgs[pick].wx, cfgs[pick].wy, cfgs[pick].bits, levels, dims,
+                                       init0, init1, rPasses, rIterA, rIterB, tmpEp, tmpGrid);
+        }
         if (err < bestErr) {
             bestErr = err;
             bestCfg = pick;
@@ -1716,6 +1896,252 @@ static float zslr_encode_block_fast(thread const uint *pk, thread uint *out) {
     return fastErr;
 }
 
+static float zslr_encode_block_fast6(thread const uint *pk, thread uint *out) {
+    const uint N = 36u;
+    const uint GW = 5u;
+    out[0] = 0u;
+    out[1] = 0u;
+    out[2] = 0u;
+    out[3] = 0u;
+
+    float px[144];
+    for (uint i = 0; i < N; i++) {
+        float4 p = zslr_unpack(pk[i]);
+        px[i * 4] = p.x;
+        px[i * 4 + 1] = p.y;
+        px[i * 4 + 2] = p.z;
+        px[i * 4 + 3] = p.w;
+    }
+
+    float lo[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float hi[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float mean[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint i = 0; i < N; i++) {
+        for (uint c = 0; c < 4; c++) {
+            float v = px[i * 4 + c];
+            lo[c] = min(lo[c], v);
+            hi[c] = max(hi[c], v);
+            mean[c] += v;
+        }
+    }
+    float range = 0.0f;
+    for (uint c = 0; c < 4; c++) {
+        mean[c] /= float(N);
+        range = max(range, hi[c] - lo[c]);
+    }
+
+    if (range <= 1.5f / 255.0f) {
+        uint q[4];
+        for (uint c = 0; c < 4; c++) q[c] = uint(round(clamp(mean[c], 0.0f, 1.0f) * 65535.0f));
+        out[0] = 0xFFFFFDFCu;
+        out[1] = 0xFFFFFFFFu;
+        out[2] = q[0] | (q[1] << 16);
+        out[3] = q[2] | (q[3] << 16);
+        float voidErr = 0.0f;
+        for (uint i = 0; i < N; i++) {
+            for (uint c = 0; c < 4; c++) {
+                float d = px[i * 4 + c] * 255.0f - float(q[c] >> 8);
+                voidErr += d * d;
+            }
+        }
+        return voidErr;
+    }
+
+    bool rgba = lo[3] < 0.998f;
+    uint dims = rgba ? 4u : 3u;
+
+    float cov[16];
+    for (uint i = 0; i < 16; i++) cov[i] = 0.0f;
+    for (uint i = 0; i < N; i++) {
+        float d[4];
+        for (uint c = 0; c < dims; c++) d[c] = px[i * 4 + c] - mean[c];
+        for (uint a = 0; a < dims; a++) {
+            for (uint b = 0; b < dims; b++) cov[a * 4 + b] += d[a] * d[b];
+        }
+    }
+    float axis[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (uint c = 0; c < dims; c++) axis[c] = hi[c] - lo[c];
+    for (uint it = 0; it < 6; it++) {
+        float nv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float len = 0.0f;
+        for (uint a = 0; a < dims; a++) {
+            for (uint b = 0; b < dims; b++) nv[a] += cov[a * 4 + b] * axis[b];
+            len += nv[a] * nv[a];
+        }
+        len = sqrt(len);
+        if (len < 1e-12f) break;
+        for (uint a = 0; a < dims; a++) axis[a] = nv[a] / len;
+    }
+
+    float tmin = 1e30f;
+    float tmax = -1e30f;
+    for (uint i = 0; i < N; i++) {
+        float t = 0.0f;
+        for (uint c = 0; c < dims; c++) t += (px[i * 4 + c] - mean[c]) * axis[c];
+        tmin = min(tmin, t);
+        tmax = max(tmax, t);
+    }
+    float e0[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    float e1[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    for (uint c = 0; c < dims; c++) {
+        e0[c] = clamp(mean[c] + axis[c] * tmin, 0.0f, 1.0f);
+        e1[c] = clamp(mean[c] + axis[c] * tmax, 0.0f, 1.0f);
+    }
+
+    uint v0s[36];
+    uint ws[144];
+    uint ds = (1024u + 3u) / 5u;
+    for (uint t = 0; t < 6; t++) {
+        for (uint s = 0; s < 6; s++) {
+            uint gs = ((ds * s) * (GW - 1u) + 32u) >> 6;
+            uint gt = ((ds * t) * (GW - 1u) + 32u) >> 6;
+            uint fs = gs & 15u;
+            uint ft = gt & 15u;
+            uint n = t * 6u + s;
+            uint w11 = (fs * ft + 8u) >> 4;
+            v0s[n] = (gs >> 4) + GW * (gt >> 4);
+            ws[n * 4u] = 16u - fs - ft + w11;
+            ws[n * 4u + 1u] = fs - w11;
+            ws[n * 4u + 2u] = ft - w11;
+            ws[n * 4u + 3u] = w11;
+        }
+    }
+    uint offs[4] = { 0u, 1u, GW, GW + 1u };
+    uint dq[4] = { 0u, 21u, 43u, 64u };
+
+    float bestErr = 1e30f;
+    uint bI0[4] = { 0u, 0u, 0u, 0u };
+    uint bI1[4] = { 0u, 0u, 0u, 0u };
+    uint bQ[25];
+    for (uint i = 0; i < 25; i++) bQ[i] = 0u;
+
+    for (uint pass = 0; pass < 4; pass++) {
+        uint i0[4] = { 0u, 0u, 0u, 0u };
+        uint i1[4] = { 0u, 0u, 0u, 0u };
+        uint d0[4] = { 0u, 0u, 0u, 255u };
+        uint d1[4] = { 0u, 0u, 0u, 255u };
+        for (uint c = 0; c < dims; c++) {
+            uint v0 = uint(round(clamp(e0[c], 0.0f, 1.0f) * 255.0f));
+            uint v1 = uint(round(clamp(e1[c], 0.0f, 1.0f) * 255.0f));
+            if (rgba) {
+                i0[c] = kZSLREnc192[v0];
+                i1[c] = kZSLREnc192[v1];
+                d0[c] = kZSLRDec192[i0[c]];
+                d1[c] = kZSLRDec192[i1[c]];
+            } else {
+                i0[c] = v0;
+                i1[c] = v1;
+                d0[c] = v0;
+                d1[c] = v1;
+            }
+        }
+        if (d1[0] + d1[1] + d1[2] < d0[0] + d0[1] + d0[2]) {
+            for (uint c = 0; c < dims; c++) {
+                uint t = i0[c]; i0[c] = i1[c]; i1[c] = t;
+                t = d0[c]; d0[c] = d1[c]; d1[c] = t;
+            }
+        }
+
+        float dir[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float dd = 0.0f;
+        for (uint c = 0; c < dims; c++) {
+            dir[c] = float(d1[c]) - float(d0[c]);
+            dd += dir[c] * dir[c];
+        }
+
+        float num[25];
+        float den[25];
+        for (uint g = 0; g < 25; g++) {
+            num[g] = 0.0f;
+            den[g] = 0.0f;
+        }
+        for (uint i = 0; i < N; i++) {
+            float u = 0.0f;
+            if (dd > 1e-6f) {
+                float dot = 0.0f;
+                for (uint c = 0; c < dims; c++) dot += (px[i * 4 + c] * 255.0f - float(d0[c])) * dir[c];
+                u = clamp(dot / dd, 0.0f, 1.0f);
+            }
+            for (uint k = 0; k < 4; k++) {
+                uint w = ws[i * 4u + k];
+                if (w != 0u) {
+                    num[v0s[i] + offs[k]] += float(w) * u;
+                    den[v0s[i] + offs[k]] += float(w);
+                }
+            }
+        }
+        uint q[25];
+        for (uint g = 0; g < 25; g++) {
+            float v = den[g] > 0.0f ? num[g] / den[g] : 0.0f;
+            q[g] = uint(round(clamp(v, 0.0f, 1.0f) * 3.0f));
+        }
+
+        float err = 0.0f;
+        float aa = 0.0f;
+        float ab = 0.0f;
+        float bb = 0.0f;
+        float ap[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        float bp[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (uint i = 0; i < N; i++) {
+            uint acc = 0u;
+            for (uint k = 0; k < 4; k++) {
+                uint w = ws[i * 4u + k];
+                if (w != 0u) acc += w * dq[q[v0s[i] + offs[k]]];
+            }
+            uint wt = (acc + 8u) >> 4;
+            float wb = float(wt) / 64.0f;
+            float wa = 1.0f - wb;
+            aa += wa * wa;
+            ab += wa * wb;
+            bb += wb * wb;
+            for (uint c = 0; c < dims; c++) {
+                float target = px[i * 4 + c];
+                ap[c] += wa * target;
+                bp[c] += wb * target;
+                uint dec = (d0[c] * (64u - wt) + d1[c] * wt + 32u) >> 6;
+                float diff = float(dec) - target * 255.0f;
+                err += diff * diff;
+            }
+        }
+        if (err < bestErr) {
+            bestErr = err;
+            for (uint c = 0; c < 4; c++) {
+                bI0[c] = i0[c];
+                bI1[c] = i1[c];
+            }
+            for (uint g = 0; g < 25; g++) bQ[g] = q[g];
+        }
+        float det = aa * bb - ab * ab;
+        if (det < 1e-4f) break;
+        for (uint c = 0; c < dims; c++) {
+            e0[c] = clamp((bb * ap[c] - ab * bp[c]) / det, 0.0f, 1.0f);
+            e1[c] = clamp((aa * bp[c] - ab * ap[c]) / det, 0.0f, 1.0f);
+        }
+    }
+
+    uint vals[8];
+    for (uint c = 0; c < dims; c++) {
+        vals[c * 2] = bI0[c];
+        vals[c * 2 + 1] = bI1[c];
+    }
+    zslr_put(out, 0, 11, 0xE2u);
+    zslr_put(out, 13, 4, rgba ? 12u : 8u);
+    if (rgba) {
+        zslr_put_trits(out, 17, vals, 8u, 6u);
+    } else {
+        for (uint i = 0; i < 6u; i++) zslr_put(out, 17u + i * 8u, 8, vals[i]);
+    }
+    for (uint g = 0; g < 25; g++) {
+        for (uint b = 0; b < 2; b++) {
+            if ((bQ[g] >> b) & 1u) {
+                uint pos = 127u - (g * 2u + b);
+                out[pos >> 5] |= 1u << (pos & 31u);
+            }
+        }
+    }
+    return bestErr;
+}
+
 template <uint BW, bool FAST>
 static void zslr_encode_kernel(texture2d<float, access::sample> source, device uint *encoded,
                                device float *metrics, constant ZSLRGPUParams &params, uint2 gid) {
@@ -1751,7 +2177,9 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
 
     uint blk[4];
     if (FAST) {
-        float fastBlockErr = zslr_encode_block_fast<BW>(pk, blk);
+        float fastBlockErr;
+        if (BW == 6u) fastBlockErr = zslr_encode_block_fast6(pk, blk);
+        else fastBlockErr = zslr_encode_block_fast<BW>(pk, blk);
         metrics[blockY * params.blocksX + gid.x] = fastBlockErr;
         uint fastIndex = (blockY * params.blocksX + gid.x) * 4;
         encoded[fastIndex] = blk[0];
@@ -1765,7 +2193,12 @@ static void zslr_encode_kernel(texture2d<float, access::sample> source, device u
     constant uchar *ivT = kZSLRIv8;
     constant uint *ipwT = kZSLRIpw8;
     constant float *denT = kZSLRDen8;
-    if (BW == 10u) {
+    if (BW == 6u) {
+        cfgs = kZSLRConfigs6;
+        ivT = kZSLRIv6;
+        ipwT = kZSLRIpw6;
+        denT = kZSLRDen6;
+    } else if (BW == 10u) {
         cfgs = kZSLRConfigs10;
         ivT = kZSLRIv10;
         ipwT = kZSLRIpw10;
@@ -1840,4 +2273,22 @@ kernel void zslr_astc_encode_fast_12(
     device float *metrics [[buffer(2)]],
     uint2 gid [[thread_position_in_grid]]) {
     zslr_encode_kernel<12, true>(source, encoded, metrics, params, gid);
+}
+
+kernel void zslr_astc_encode_6(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<6, false>(source, encoded, metrics, params, gid);
+}
+
+kernel void zslr_astc_encode_fast_6(
+    texture2d<float, access::sample> source [[texture(0)]],
+    device uint *encoded [[buffer(0)]],
+    constant ZSLRGPUParams &params [[buffer(1)]],
+    device float *metrics [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    zslr_encode_kernel<6, true>(source, encoded, metrics, params, gid);
 }

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - TranscodeTest
     paths-ignore:
       - 'Documentation/**'
       - 'README.md'
@@ -65,6 +65,23 @@ jobs:
           xcrun -sdk iphoneos metal -c -O3 -std=metal3.0 -target air64-apple-ios15.0 Mods/Transcoder/ZSLowRes.metal -o ZSLowRes.air
           xcrun -sdk iphoneos metallib ZSLowRes.air -o ZSLowRes.metallib
 
+      - name: Compile Crunch decoder
+        run: |
+          set -euo pipefail
+          clang \
+            -c \
+            -std=gnu++17 \
+            -O3 \
+            -fno-strict-aliasing \
+            -fobjc-arc \
+            -fmodules \
+            -isysroot "${{ steps.sdk.outputs.path }}" \
+            -arch arm64 \
+            -miphoneos-version-min=15.0 \
+            -I. -IDiagnostics -IMods/Transcoder \
+            Mods/Transcoder/ZSCrunch.mm \
+            -o ZSCrunch.o
+
       - name: Compile tweak dylib
         run: |
           clang \
@@ -106,6 +123,7 @@ jobs:
             Mods/Mods.m \
             Mods/Transcoder/Transcoder.m \
             Mods/Transcoder/ZSLowRes.m \
+            ZSCrunch.o \
             Network/PatchManifestNetwork.m \
             Network/ZSUpdater.m \
             UI/UserInterface.m \
