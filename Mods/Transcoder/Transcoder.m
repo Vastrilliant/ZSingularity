@@ -44,8 +44,22 @@ static BOOL zt_class_is_transcoded(int32_t classID) {
         || classID == kZTClassAssetBundle;
 }
 
-static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared, ZTranscoderConfig *config) {
-    if (![config allowsTransplantOfClass:classID]) return NO;
+static BOOL zt_class_transplant_enabled(int32_t classID) {
+    switch (classID) {
+        case kZTClassSprite:
+        case kZTClassSpriteAtlas:
+        case kZTClassSpriteRenderer:
+        case kZTClassSpriteMask:
+        case kZTClassTextAsset:
+        case kZTClassAssetBundle:
+            return NO;
+        default:
+            return YES;
+    }
+}
+
+static BOOL zt_class_is_transplantable(int32_t classID, BOOL layoutShared) {
+    if (!zt_class_transplant_enabled(classID)) return NO;
     if (zt_class_is_transcoded(classID)) return YES;
     if (!layoutShared) return NO;
     switch (classID) {
@@ -126,7 +140,7 @@ static NSString *zt_temp_directory(void) {
 static BOOL zt_write_all(NSFileHandle *handle, const void *bytes, NSUInteger length, NSError **error) {
     if (!handle) return NO;
     @try {
-        if (length) [handle writeData:[NSData dataWithBytes:bytes length:length]];
+        if (length) [handle writeData:[NSData dataWithBytesNoCopy:(void *)bytes length:length freeWhenDone:NO]];
         return YES;
     } @catch (NSException *exception) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, exception.reason ?: @"File write failed.");
@@ -153,12 +167,16 @@ static BOOL zt_copy_file_to_handle(NSFileHandle *output, NSString *path, NSError
         return NO;
     }
     @try {
-        while (YES) {
-            NSData *chunk = [input readDataOfLength:1024u * 1024u];
-            if (chunk.length == 0) break;
-            if (!zt_write_all(output, chunk.bytes, chunk.length, error)) {
-                [input closeFile];
-                return NO;
+        BOOL finished = NO;
+        while (!finished) {
+            @autoreleasepool {
+                NSData *chunk = [input readDataOfLength:1024u * 1024u];
+                if (chunk.length == 0) {
+                    finished = YES;
+                } else if (!zt_write_all(output, chunk.bytes, chunk.length, error)) {
+                    [input closeFile];
+                    return NO;
+                }
             }
         }
     } @catch (NSException *exception) {
@@ -200,8 +218,8 @@ static BOOL zt_format_is_crunched(int32_t format) {
     return format == 28 || format == 29 || format == 64 || format == 65;
 }
 
-static BOOL zt_format_is_transplant_only(int32_t format) {
-    return format == 4 || format == 45 || format == 46 || format == 47;
+static BOOL zt_format_is_astc(int32_t format) {
+    return (format >= 48 && format <= 59);
 }
 
 static NSString *zt_format_name(int32_t format) {
@@ -690,7 +708,7 @@ static BOOL zt_texture_payload(ZTTextureRecord *texture, UnityBundleArchive *arc
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Inline Texture2D image data exceeds its SerializedFile object.");
             return NO;
         }
-        *outPayload = [NSData dataWithBytes:base + texture.imageDataPosition + 4 length:texture.imageDataLength];
+        *outPayload = [NSData dataWithBytesNoCopy:(void *)(base + texture.imageDataPosition + 4) length:texture.imageDataLength freeWhenDone:NO];
         return YES;
     }
     if (!archive) {
@@ -703,7 +721,7 @@ static BOOL zt_texture_payload(ZTTextureRecord *texture, UnityBundleArchive *arc
         ZLog(@"[ZTranscoder] streamed path mismatch: object path=%@ node=%@", texture.streamPath, resS.path);
     }
     const uint8_t *streamBase = archive.data.bytes + resS.offset;
-    *outPayload = [NSData dataWithBytes:streamBase + texture.streamOffset length:texture.streamSize];
+    *outPayload = [NSData dataWithBytesNoCopy:(void *)(streamBase + texture.streamOffset) length:texture.streamSize freeWhenDone:NO];
     return YES;
 }
 
@@ -991,24 +1009,11 @@ static uint64_t zt_expected_mip_size(int32_t format, uint32_t width, uint32_t he
 
 static BOOL zt_decode_base_level(ZTTextureRecord *texture, NSData *payload, NSMutableData **outRGBA, NSError **error) {
     if (!texture || !payload) return NO;
-    NSData *levelData = payload;
     if (!zt_format_is_crunched(texture.format)) {
         uint64_t baseSize = zt_expected_mip_size(texture.format, texture.width, texture.height);
         if (baseSize == 0 || baseSize > payload.length) return NO;
-        levelData = [payload subdataWithRange:NSMakeRange(0, (NSUInteger)baseSize)];
     }
-    return zt_decode_texture_mip(texture, levelData, texture.width, texture.height, 0, outRGBA, error);
-}
-
-static BOOL zt_texture_pixels_match(ZTTextureRecord *source, ZTTextureRecord *target, NSData *sourcePayload, NSData *targetPayload) {
-    if (!source || !target || !sourcePayload || !targetPayload) return NO;
-    if (source.width != target.width || source.height != target.height) return NO;
-    if (source.format == target.format && source.mipCount == target.mipCount) return [sourcePayload isEqualToData:targetPayload];
-    NSMutableData *sourcePixels = nil;
-    NSMutableData *targetPixels = nil;
-    if (!zt_decode_base_level(source, sourcePayload, &sourcePixels, NULL)) return NO;
-    if (!zt_decode_base_level(target, targetPayload, &targetPixels, NULL)) return NO;
-    return [sourcePixels isEqualToData:targetPixels];
+    return zt_decode_texture_mip(texture, payload, texture.width, texture.height, 0, outRGBA, error);
 }
 
 typedef struct {
@@ -1141,16 +1146,6 @@ static NSMutableData *zt_resize_rgba(NSData *rgba, uint32_t srcWidth, uint32_t s
     return output;
 }
 
-static BOOL zt_stage_texture_data(NSData *data, NSString *workDir, int64_t pathID, NSString **outPath, NSError **error) {
-    NSString *path = [workDir stringByAppendingPathComponent:[NSString stringWithFormat:@"texture-%lld.raw", (long long)pathID]];
-    if (![data writeToFile:path options:NSDataWritingAtomic error:nil]) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't stage Texture2D image data for PathID=%lld.", (long long)pathID]);
-        return NO;
-    }
-    if (outPath) *outPath = path;
-    return YES;
-}
-
 static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *destination, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *)) {
     if (source.mipCount <= 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
@@ -1203,6 +1198,7 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *d
     if (ok) {
         NSError *encodeError = nil;
         NSData *astc = [ZSLowRes encodeRGBA8DataToASTC6:rgba width:outWidth height:outHeight sRGB:(destination.colorSpace != 0) error:&encodeError];
+        rgba = nil;
         if (!astc) {
             if (error) *error = encodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
             ok = NO;
@@ -1230,21 +1226,39 @@ static BOOL zt_patch_u32_relative(NSMutableData *data, uint64_t base, uint64_t a
     return zt_write_u32_at(data, (NSUInteger)(absolutePosition - base), value);
 }
 
-static NSData *zt_build_texture_object_overwrite(ZTTextureRecord *base, NSData *baseObject, int32_t format, int32_t mipCount, NSData *encodedData, uint32_t encodedSize) {
-    if (!base || !baseObject || !encodedData) return nil;
+static BOOL zt_texture_overwrite_layout(ZTTextureRecord *base, NSUInteger baseLength, uint32_t encodedSize, NSUInteger *outImageField, NSUInteger *outTailStart, NSUInteger *outTotal) {
+    if (!base) return NO;
     uint64_t origin = base.object.objectStart;
-    if (base.imageDataPosition < origin || base.streamOffsetPosition < origin) return nil;
+    if (base.imageDataPosition < origin || base.streamOffsetPosition < origin) return NO;
     NSUInteger imageField = (NSUInteger)(base.imageDataPosition - origin);
-    if (imageField > baseObject.length || baseObject.length - imageField < 4) return nil;
+    if (imageField > baseLength || baseLength - imageField < 4) return NO;
     NSUInteger oldImageStart = imageField + 4u;
     NSUInteger oldImageEnd = oldImageStart + base.imageDataLength;
-    if (oldImageEnd > baseObject.length) return nil;
+    if (oldImageEnd > baseLength) return NO;
     NSUInteger oldStreamStart = (NSUInteger)(base.streamOffsetPosition - origin);
-    if (oldStreamStart > baseObject.length || oldStreamStart < oldImageEnd) return nil;
+    if (oldStreamStart > baseLength || oldStreamStart < oldImageEnd) return NO;
     NSUInteger streamEnd = oldStreamStart + 16u + base.streamPathLength;
-    if (streamEnd > baseObject.length) return nil;
-    NSUInteger tailStart = MIN((streamEnd + 3u) & ~(NSUInteger)3u, baseObject.length);
-    NSMutableData *out = [NSMutableData data];
+    if (streamEnd > baseLength) return NO;
+    NSUInteger tailStart = MIN((streamEnd + 3u) & ~(NSUInteger)3u, baseLength);
+    NSUInteger total = (imageField + 4u + (NSUInteger)encodedSize + 3u) & ~(NSUInteger)3u;
+    total += 16u;
+    if (tailStart < baseLength) total += baseLength - tailStart;
+    uint64_t positions[3] = { base.formatPosition, base.mipCountPosition, base.completeSizePosition };
+    for (int i = 0; i < 3; i++) {
+        if (positions[i] < origin || positions[i] - origin > total || total - (NSUInteger)(positions[i] - origin) < 4) return NO;
+    }
+    if (outImageField) *outImageField = imageField;
+    if (outTailStart) *outTailStart = tailStart;
+    if (outTotal) *outTotal = total;
+    return YES;
+}
+
+static NSData *zt_build_texture_object_overwrite(ZTTextureRecord *base, NSData *baseObject, int32_t format, int32_t mipCount, NSData *encodedData, uint32_t encodedSize) {
+    if (!base || !baseObject || !encodedData || encodedData.length != encodedSize) return nil;
+    NSUInteger imageField = 0, tailStart = 0, total = 0;
+    if (!zt_texture_overwrite_layout(base, baseObject.length, encodedSize, &imageField, &tailStart, &total)) return nil;
+    uint64_t origin = base.object.objectStart;
+    NSMutableData *out = [NSMutableData dataWithCapacity:total];
     [out appendBytes:baseObject.bytes length:imageField];
     uint8_t imageLength[4] = {(uint8_t)encodedSize, (uint8_t)(encodedSize >> 8), (uint8_t)(encodedSize >> 16), (uint8_t)(encodedSize >> 24)};
     [out appendBytes:imageLength length:4];
@@ -1295,12 +1309,29 @@ static NSDictionary<NSString *, ZTTextureRecord *> *zt_texture_map(NSArray<ZTTex
 
 static NSData *zt_object_data(ZTSerializedObject *object, NSData *data) {
     if (object.objectStart > data.length || object.byteSize > data.length - object.objectStart) return nil;
-    return [NSData dataWithBytes:(const uint8_t *)data.bytes + object.objectStart length:object.byteSize];
+    return [NSData dataWithBytesNoCopy:(void *)((const uint8_t *)data.bytes + object.objectStart) length:object.byteSize freeWhenDone:NO];
+}
+
+static BOOL zt_rebuilt_object_size(ZTSerializedObject *object, ZTTextureReplacement *replacement, ZTSerializedDocument *targetDoc, uint64_t *outSize) {
+    if (replacement) {
+        if (!replacement.baseObjectData || !replacement.encodedPath) return NO;
+        NSUInteger total = 0;
+        if (!zt_texture_overwrite_layout(replacement.baseTexture, replacement.baseObjectData.length, replacement.encodedSize, NULL, NULL, &total)) return NO;
+        *outSize = total;
+        return YES;
+    }
+    if (object.replacementObject) {
+        *outSize = object.replacementObject.length;
+        return YES;
+    }
+    if (object.objectStart > targetDoc.data.length || object.byteSize > targetDoc.data.length - object.objectStart) return NO;
+    *outSize = object.byteSize;
+    return YES;
 }
 
 static NSData *zt_rebuilt_object_data(ZTSerializedObject *object, ZTTextureReplacement *replacement, ZTSerializedDocument *targetDoc) {
     if (replacement) {
-        NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath];
+        NSData *encoded = [NSData dataWithContentsOfFile:replacement.encodedPath options:NSDataReadingMappedIfSafe error:nil];
         if (!encoded) return nil;
         return replacement.baseObjectData ? zt_build_texture_object_overwrite(replacement.baseTexture, replacement.baseObjectData, replacement.outputFormat, replacement.outputMipCount, encoded, replacement.encodedSize) : nil;
     }
@@ -1346,18 +1377,16 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             return NO;
         }
         [newStarts addObject:@(cursor - newDataOffset)];
-        NSData *objectData = nil;
         NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
         ZTTextureReplacement *replacement = replacements[key];
-        objectData = zt_rebuilt_object_data(object, replacement, targetDoc);
-        if (!objectData || objectData.length > UINT32_MAX) {
+        uint64_t objectSize = 0;
+        if (!zt_rebuilt_object_size(object, replacement, targetDoc, &objectSize) || objectSize > UINT32_MAX) {
             if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Couldn't size rebuilt object PathID=%lld.", (long long)object.pathID]);
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
             return NO;
         }
-        [newSizes addObject:@(objectData.length)];
-        cursor += objectData.length;
-        if (objectData != object.replacementObject && objectData != targetDoc.data) objectData = nil;
+        [newSizes addObject:@(objectSize)];
+        cursor += objectSize;
     }
     NSFileHandle *out = [NSFileHandle fileHandleForWritingAtPath:outputPath];
     if (!out) {
@@ -1465,22 +1494,26 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
             }
             written++;
         }
-        NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
-        ZTTextureReplacement *replacement = replacements[key];
-        NSData *objectData = nil;
-        objectData = zt_rebuilt_object_data(object, replacement, targetDoc);
-        if (!objectData || objectData.length != [newSizes[i] unsignedIntegerValue]) {
-            [out closeFile];
-            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Rebuilt object PathID=%lld changed size between passes.", (long long)object.pathID]);
+        BOOL objectFailed = NO;
+        @autoreleasepool {
+            NSString *key = [NSString stringWithFormat:@"%lld", (long long)object.pathID];
+            ZTTextureReplacement *replacement = replacements[key];
+            NSData *objectData = zt_rebuilt_object_data(object, replacement, targetDoc);
+            if (!objectData || objectData.length != [newSizes[i] unsignedIntegerValue]) {
+                [out closeFile];
+                if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Rebuilt object PathID=%lld changed size between passes.", (long long)object.pathID]);
+                objectFailed = YES;
+            } else if (!zt_write_all(out, objectData.bytes, objectData.length, error)) {
+                [out closeFile];
+                objectFailed = YES;
+            } else {
+                written += objectData.length;
+            }
+        }
+        if (objectFailed) {
             [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
             return NO;
         }
-        if (!zt_write_all(out, objectData.bytes, objectData.length, error)) {
-            [out closeFile];
-            [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
-            return NO;
-        }
-        written += objectData.length;
     }
     if (tailLength > 0) {
         if (!zt_copy_range_to_handle(out, base, originalObjectsEnd, tailLength, error)) {
@@ -1503,7 +1536,12 @@ static BOOL zt_rebuild_serialized_correctly(ZTSerializedDocument *targetDoc, NSD
 }
 
 static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *originalArchive, NSString *serializedPath, NSString *outputPath, NSError **error) {
-    NSData *headerData = [NSData dataWithContentsOfFile:templateBundlePath];
+    NSData *headerData = nil;
+    NSFileHandle *headerHandle = [NSFileHandle fileHandleForReadingAtPath:templateBundlePath];
+    if (headerHandle) {
+        @try { headerData = [headerHandle readDataOfLength:4096u]; } @catch (__unused NSException *exception) { headerData = nil; }
+        [headerHandle closeFile];
+    }
     if (!headerData || headerData.length < 48 || memcmp(headerData.bytes, "UnityFS", 7) != 0) {
         if (error && !*error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Template bundle has an invalid UnityFS header.");
         return NO;
@@ -1558,26 +1596,28 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     __block uint64_t compressedTotal = 0;
     BOOL blockReadFailed = NO;
     NSMutableData *pending = [NSMutableData dataWithCapacity:kZSTranscoderBlockSize];
+    NSMutableData *compressed = [NSMutableData dataWithLength:(NSUInteger)LZ4_compressBound((int)kZSTranscoderBlockSize)];
     void (^emitBlock)(NSData *) = ^(NSData *data) {
-        NSUInteger n = data.length;
-        int bound = LZ4_compressBound((int)n);
-        NSMutableData *compressed = [NSMutableData dataWithLength:(NSUInteger)MAX(bound, (int)n)];
-        int c = 0;
-        if (compression == UnityBundleCABCompressionLZ4HC) c = LZ4_compress_HC(data.bytes, compressed.mutableBytes, (int)n, bound, LZ4HC_CLEVEL_DEFAULT);
-        else if (compression == UnityBundleCABCompressionLZ4) c = LZ4_compress_default(data.bytes, compressed.mutableBytes, (int)n, bound);
-        if (c <= 0 || c >= (int)n) {
-            zt_put_be32(blockUsizes, (uint32_t)n);
-            zt_put_be32(blockCsizes, (uint32_t)n);
-            zt_put_be16(blockFlags, 0);
-            [blockOutput writeData:data];
-            compressedTotal += n;
-        } else {
-            uint16_t fl = compression == UnityBundleCABCompressionLZ4HC ? 3u : 2u;
-            zt_put_be32(blockUsizes, (uint32_t)n);
-            zt_put_be32(blockCsizes, (uint32_t)c);
-            zt_put_be16(blockFlags, fl);
-            [blockOutput writeData:[compressed subdataWithRange:NSMakeRange(0, (NSUInteger)c)]];
-            compressedTotal += (uint64_t)c;
+        @autoreleasepool {
+            NSUInteger n = data.length;
+            int bound = LZ4_compressBound((int)n);
+            int c = 0;
+            if (compression == UnityBundleCABCompressionLZ4HC) c = LZ4_compress_HC(data.bytes, compressed.mutableBytes, (int)n, bound, LZ4HC_CLEVEL_DEFAULT);
+            else if (compression == UnityBundleCABCompressionLZ4) c = LZ4_compress_default(data.bytes, compressed.mutableBytes, (int)n, bound);
+            if (c <= 0 || c >= (int)n) {
+                zt_put_be32(blockUsizes, (uint32_t)n);
+                zt_put_be32(blockCsizes, (uint32_t)n);
+                zt_put_be16(blockFlags, 0);
+                [blockOutput writeData:data];
+                compressedTotal += n;
+            } else {
+                uint16_t fl = compression == UnityBundleCABCompressionLZ4HC ? 3u : 2u;
+                zt_put_be32(blockUsizes, (uint32_t)n);
+                zt_put_be32(blockCsizes, (uint32_t)c);
+                zt_put_be16(blockFlags, fl);
+                [blockOutput writeData:[NSData dataWithBytesNoCopy:compressed.mutableBytes length:(NSUInteger)c freeWhenDone:NO]];
+                compressedTotal += (uint64_t)c;
+            }
         }
     };
     for (UnityBundleNode *node in originalArchive.nodes) {
@@ -1605,16 +1645,21 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
             return NO;
         }
         uint64_t remaining = nodeSize;
-        while (remaining) {
-            NSUInteger room = (NSUInteger)kZSTranscoderBlockSize - pending.length;
-            NSUInteger n = (NSUInteger)MIN((uint64_t)room, remaining);
-            NSData *data = [input readDataOfLength:n];
-            if (data.length != n) { blockReadFailed = YES; break; }
-            [pending appendData:data];
-            remaining -= n;
-            if (pending.length == kZSTranscoderBlockSize) {
-                emitBlock(pending);
-                [pending setLength:0];
+        while (remaining && !blockReadFailed) {
+            @autoreleasepool {
+                NSUInteger room = (NSUInteger)kZSTranscoderBlockSize - pending.length;
+                NSUInteger n = (NSUInteger)MIN((uint64_t)room, remaining);
+                NSData *data = [input readDataOfLength:n];
+                if (data.length != n) {
+                    blockReadFailed = YES;
+                } else {
+                    [pending appendData:data];
+                    remaining -= n;
+                    if (pending.length == kZSTranscoderBlockSize) {
+                        emitBlock(pending);
+                        [pending setLength:0];
+                    }
+                }
             }
         }
         [input closeFile];
@@ -1717,38 +1762,10 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
 }
 
 @implementation ZTranscoderConfig
-- (instancetype)init {
-    if ((self = [super init])) {
-        _inlineOnly = YES;
-    }
-    return self;
-}
 - (ZTranscoderConfig *)normalizedConfig {
     ZTranscoderConfig *copy = [ZTranscoderConfig new];
-    [copy copyTranscodeOptionsFrom:self];
     copy.targetBundlePath = self.targetBundlePath;
     return copy;
-}
-- (void)copyTranscodeOptionsFrom:(ZTranscoderConfig *)other {
-    if (!other) return;
-    self.inlineOnly = other.inlineOnly;
-    self.transplantSprites = other.transplantSprites;
-    self.transplantSpriteAtlases = other.transplantSpriteAtlases;
-    self.transplantSpriteRenderers = other.transplantSpriteRenderers;
-    self.transplantSpriteMasks = other.transplantSpriteMasks;
-    self.transplantTextAssets = other.transplantTextAssets;
-    self.transplantAssetBundle = other.transplantAssetBundle;
-}
-- (BOOL)allowsTransplantOfClass:(int32_t)classID {
-    switch (classID) {
-        case kZTClassSprite: return self.transplantSprites;
-        case kZTClassSpriteAtlas: return self.transplantSpriteAtlases;
-        case kZTClassSpriteRenderer: return self.transplantSpriteRenderers;
-        case kZTClassSpriteMask: return self.transplantSpriteMasks;
-        case kZTClassTextAsset: return self.transplantTextAssets;
-        case kZTClassAssetBundle: return self.transplantAssetBundle;
-        default: return YES;
-    }
 }
 @end
 
@@ -1870,20 +1887,6 @@ static ZTSerializedDocument *zt_build_carra2_document(NSArray<ZTCarra2Item *> *i
     return document;
 }
 
-static BOOL zt_texture_needs_conversion(int32_t format) {
-    switch (format) {
-        case 4:
-        case 45:
-        case 47:
-        case 48:
-        case 50:
-        case 51:
-            return NO;
-        default:
-            return YES;
-    }
-}
-
 static BOOL zt_texture_has_pixel_data(ZTTextureRecord *texture) {
     return texture.isInline || texture.isStreamed;
 }
@@ -1945,7 +1948,7 @@ static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *e
     }
     NSUInteger remaining = 0;
     for (ZTTextureRecord *texture in rebuilt.textures) {
-        if (zt_texture_has_pixel_data(texture) && zt_texture_needs_conversion(texture.format)) remaining++;
+        if (zt_texture_has_pixel_data(texture) && texture.format != 50 && !zt_format_is_astc(texture.format)) remaining++;
     }
     if (remaining) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile still contains %lu texture(s) in a format that should have been converted.", (unsigned long)remaining]);
@@ -2011,7 +2014,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
 
     NSMutableArray<ZTTextureRecord *> *pending = [NSMutableArray array];
     for (ZTTextureRecord *texture in doc.textures) {
-        if (!zt_texture_needs_conversion(texture.format)) continue;
+        if (zt_format_is_astc(texture.format)) continue;
         if (!zt_texture_has_pixel_data(texture)) {
             ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ has no pixel data; leaving it untouched", (long long)texture.object.pathID, texture.name.length ? texture.name : @"<unnamed>");
             continue;
@@ -2175,7 +2178,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL present = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (zt_class_is_transplantable(sourceObject.classID, layoutShared, config) || (!present && zt_class_is_transplantable(sourceObject.classID, YES, config))) assetCount++;
+        if (zt_class_is_transplantable(sourceObject.classID, layoutShared) || (!present && zt_class_is_transplantable(sourceObject.classID, YES))) assetCount++;
     }
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
@@ -2184,7 +2187,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared, config) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES, config))) continue;
+        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES))) continue;
         BOOL legacyClass = zt_class_is_transcoded(sourceObject.classID);
         BOOL wholesaleClass = sourceObject.classID == kZTClassTexture2D || sourceObject.classID == kZTClassSprite || sourceObject.classID == kZTClassSpriteAtlas;
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
@@ -2192,9 +2195,9 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         NSString *key = [NSString stringWithFormat:@"%d:%lld", sourceObject.classID, (long long)sourceObject.pathID];
         if (sourceObject.classID == kZTClassTexture2D) {
             ZTTextureRecord *probeTexture = sourceTexturesByPath[[NSString stringWithFormat:@"%lld", (long long)sourceObject.pathID]];
-            if (config.inlineOnly && probeTexture && !probeTexture.isInline) {
+            if (probeTexture && !probeTexture.isInline && !sourceArchive) {
                 skippedAssets++;
-                ZLog(@"[ZTranscoder] skipping Texture2D PathID=%lld name=%@: image data is stored in .resS, leaving it untouched", (long long)sourceObject.pathID, probeTexture.name.length ? probeTexture.name : @"<unnamed>");
+                ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ has no readable pixel data in this mod (no resource stream was supplied); leaving the original untouched", (long long)sourceObject.pathID, probeTexture.name.length ? probeTexture.name : @"<unnamed>");
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                 continue;
             }
@@ -2258,8 +2261,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
                 return NO;
             }
             NSData *sourcePayload = nil;
-            NSData *targetPayload = nil;
-            if (!zt_texture_payload(sourceTexture, sourceArchive, sourceDoc.data, &sourcePayload, error) || (!isNewAsset && !zt_texture_payload(targetTexture, targetArchive, targetDoc.data, &targetPayload, error))) {
+            if (!zt_texture_payload(sourceTexture, sourceArchive, sourceDoc.data, &sourcePayload, error)) {
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
@@ -2270,31 +2272,10 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
                 return NO;
             }
-            BOOL identical = !isNewAsset && zt_texture_pixels_match(sourceTexture, targetTexture, sourcePayload, targetPayload);
-            ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ size source=%ux%u target=%ux%u imageBytes source=%lu target=%lu sourceFormat=%@ targetFormat=%@ sourceMips=%d targetMips=%d pixelsIdentical=%@ storage=%@->%@", (long long)sourceObject.pathID, sourceTexture.name.length ? sourceTexture.name : @"<unnamed>", sourceTexture.width, sourceTexture.height, targetTexture.width, targetTexture.height, (unsigned long)sourcePayload.length, (unsigned long)targetPayload.length, zt_format_name(sourceTexture.format), zt_format_name(targetTexture.format), sourceTexture.mipCount, targetTexture.mipCount, identical ? @"YES" : @"NO", sourceTexture.isInline ? @"inline" : @"resS", targetTexture.isInline ? @"inline" : @"resS");
             NSString *replacementKey = [NSString stringWithFormat:@"%lld", (long long)targetObject.pathID];
-            if (identical || zt_format_is_transplant_only(sourceTexture.format)) {
-                if (sourceTexture.isInline && sourceObjectData) {
-                    targetObject.replacementObject = sourceObjectData;
-                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ copied wholesale from the mod (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourceObjectData.length);
-                } else {
-                    NSString *rawPath = nil;
-                    if (!zt_stage_texture_data(sourcePayload, workDir, sourceObject.pathID, &rawPath, error)) {
-                        [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
-                        return NO;
-                    }
-                    ZTTextureReplacement *rawReplacement = [ZTTextureReplacement new];
-                    rawReplacement.source = sourceTexture;
-                    rawReplacement.target = targetTexture;
-                    rawReplacement.baseTexture = sourceTexture;
-                    rawReplacement.baseObjectData = sourceObjectData;
-                    rawReplacement.outputFormat = sourceTexture.format;
-                    rawReplacement.outputMipCount = sourceTexture.mipCount;
-                    rawReplacement.encodedPath = rawPath;
-                    rawReplacement.encodedSize = (uint32_t)sourcePayload.length;
-                    replacements[replacementKey] = rawReplacement;
-                    ZLog(@"[ZTranscoder] Texture2D PathID=%lld format=%@ copied wholesale from the mod with its pixel data inlined (%lu bytes)", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format), (unsigned long)sourcePayload.length);
-                }
+            if (zt_format_is_astc(sourceTexture.format) && sourceTexture.isInline && sourceObjectData) {
+                targetObject.replacementObject = sourceObjectData;
+                ZLog(@"[ZTranscoder] Texture2D PathID=%lld is already %@; copied from the mod without re-encoding", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
                 if (progress && assetCount) progress(0.1 + 0.7 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                 continue;
             }
@@ -2310,13 +2291,18 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             NSString *encodedPath = nil;
             uint32_t encodedSize = 0;
             NSError *transcodeError = nil;
-            BOOL transcoded = zt_make_astc_replacement(sourceTexture, layoutTexture, sourcePayload, workDir, &encodedPath, &encodedSize, &transcodeError, ^(double f, NSString *stage) {
-                if (progress) {
-                    double base = assetCount ? ((double)(processedAssets - 1u) / (double)assetCount) : 0.0;
-                    double span = assetCount ? (1.0 / (double)assetCount) : 1.0;
-                    progress(0.1 + 0.7 * (base + span * f), stage);
-                }
-            });
+            BOOL transcoded = NO;
+            @autoreleasepool {
+                NSError *innerError = nil;
+                transcoded = zt_make_astc_replacement(sourceTexture, layoutTexture, sourcePayload, workDir, &encodedPath, &encodedSize, &innerError, ^(double f, NSString *stage) {
+                    if (progress) {
+                        double base = assetCount ? ((double)(processedAssets - 1u) / (double)assetCount) : 0.0;
+                        double span = assetCount ? (1.0 / (double)assetCount) : 1.0;
+                        progress(0.1 + 0.7 * (base + span * f), stage);
+                    }
+                });
+                transcodeError = innerError;
+            }
             if (!transcoded) {
                 if (error) *error = transcodeError;
                 [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
@@ -2616,7 +2602,6 @@ static BOOL zt_load_carra2(NSURL *archiveURL, NSString **outBundlePath, NSArray<
                     workURL = [NSURL fileURLWithPath:stagedPath];
                 } else {
                     workConfig = [ZTranscoderConfig new];
-                    [workConfig copyTranscodeOptionsFrom:config];
                     workConfig.targetBundlePath = config.targetBundlePath;
                     BOOL targetExists = NO;
                     if (workConfig.targetBundlePath.length > 0) {

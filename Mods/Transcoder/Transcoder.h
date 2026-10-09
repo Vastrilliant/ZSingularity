@@ -20,16 +20,7 @@ typedef NS_ENUM(NSInteger, ZTranscoderServiceErrorCode) {
 
 @interface ZTranscoderConfig : NSObject
 @property (nonatomic, copy, nullable) NSString *targetBundlePath;
-@property (nonatomic, assign) BOOL inlineOnly;
-@property (nonatomic, assign) BOOL transplantSprites;
-@property (nonatomic, assign) BOOL transplantSpriteAtlases;
-@property (nonatomic, assign) BOOL transplantSpriteRenderers;
-@property (nonatomic, assign) BOOL transplantSpriteMasks;
-@property (nonatomic, assign) BOOL transplantTextAssets;
-@property (nonatomic, assign) BOOL transplantAssetBundle;
 - (ZTranscoderConfig *)normalizedConfig;
-- (void)copyTranscodeOptionsFrom:(nullable ZTranscoderConfig *)other;
-- (BOOL)allowsTransplantOfClass:(int32_t)classID;
 @end
 
 @interface ZTranscoderHandle : NSObject

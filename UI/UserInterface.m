@@ -267,38 +267,6 @@ static void zs_set_update_uses_nightly_releases(BOOL useNightlyReleases) {
     gZSUpdateUseNightlyReleasesCacheLoaded = YES;
 }
 
-static NSString * const kZSTranscoderSettingsSection = @"transcoder";
-static NSString * const kZSTranscoderInlineOnlyKey = @"inlineOnly";
-static NSString * const kZSTranscoderTransplantSpritesKey = @"transplantSprites";
-static NSString * const kZSTranscoderTransplantSpriteAtlasesKey = @"transplantSpriteAtlases";
-static NSString * const kZSTranscoderTransplantSpriteRenderersKey = @"transplantSpriteRenderers";
-static NSString * const kZSTranscoderTransplantSpriteMasksKey = @"transplantSpriteMasks";
-static NSString * const kZSTranscoderTransplantTextAssetsKey = @"transplantTextAssets";
-static NSString * const kZSTranscoderTransplantAssetBundleKey = @"transplantAssetBundle";
-static const char kZSTranscoderOptionKeyAssoc = 0;
-
-static BOOL zs_transcoder_option(NSString *key, BOOL fallback) {
-    NSDictionary *section = zs_settings_section(kZSTranscoderSettingsSection);
-    id stored = section[key];
-    return stored ? [stored boolValue] : fallback;
-}
-
-static void zs_set_transcoder_option(NSString *key, BOOL value) {
-    NSMutableDictionary *section = [zs_settings_section(kZSTranscoderSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
-    section[key] = @(value);
-    zs_write_settings_section(kZSTranscoderSettingsSection, section);
-}
-
-static void zs_apply_transcoder_options(ZTranscoderConfig *config) {
-    config.inlineOnly = zs_transcoder_option(kZSTranscoderInlineOnlyKey, YES);
-    config.transplantSprites = zs_transcoder_option(kZSTranscoderTransplantSpritesKey, NO);
-    config.transplantSpriteAtlases = zs_transcoder_option(kZSTranscoderTransplantSpriteAtlasesKey, NO);
-    config.transplantSpriteRenderers = zs_transcoder_option(kZSTranscoderTransplantSpriteRenderersKey, NO);
-    config.transplantSpriteMasks = zs_transcoder_option(kZSTranscoderTransplantSpriteMasksKey, NO);
-    config.transplantTextAssets = zs_transcoder_option(kZSTranscoderTransplantTextAssetsKey, NO);
-    config.transplantAssetBundle = zs_transcoder_option(kZSTranscoderTransplantAssetBundleKey, NO);
-}
-
 static ZSUpdateCheckMode zs_update_check_mode(void) {
     return zs_update_uses_nightly_releases() ? ZSUpdateCheckModeNightlyReleases : ZSUpdateCheckModeReleases;
 }
@@ -8896,28 +8864,6 @@ static const CGFloat kContentFadeHeight = 22;
     [self.stack addArrangedSubview:modsActionsCard];
     [self.stack setCustomSpacing:8 afterView:modsActionsCard];
 
-    NSArray<NSArray *> *transcodeOptionSpecs = @[
-        @[@"Transcode inline only", kZSTranscoderInlineOnlyKey, @YES],
-        @[@"Transplant Sprites", kZSTranscoderTransplantSpritesKey, @NO],
-        @[@"Transplant SpriteAtlases", kZSTranscoderTransplantSpriteAtlasesKey, @NO],
-        @[@"Transplant SpriteRenderers", kZSTranscoderTransplantSpriteRenderersKey, @NO],
-        @[@"Transplant SpriteMasks", kZSTranscoderTransplantSpriteMasksKey, @NO],
-        @[@"Transplant TextAssets", kZSTranscoderTransplantTextAssetsKey, @NO],
-        @[@"Transplant AssetBundle", kZSTranscoderTransplantAssetBundleKey, @NO],
-    ];
-    NSMutableArray<UIView *> *transcodeOptionRows = [NSMutableArray arrayWithCapacity:transcodeOptionSpecs.count];
-    for (NSArray *spec in transcodeOptionSpecs) {
-        ZSRow *optionRow = zs_make_switch_row(spec[0], zs_transcoder_option(spec[1], [spec[2] boolValue]));
-        objc_setAssociatedObject(optionRow.toggle, &kZSTranscoderOptionKeyAssoc, spec[1], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        [optionRow.toggle addTarget:self action:@selector(transcoderOptionChanged:) forControlEvents:UIControlEventValueChanged];
-        [transcodeOptionRows addObject:optionRow];
-    }
-    UIView *transcodeOptionsCard = zs_make_grouped_action_card(transcodeOptionRows);
-    transcodeOptionsCard.layer.borderWidth = 1;
-    transcodeOptionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-    [self.stack addArrangedSubview:transcodeOptionsCard];
-    [self.stack setCustomSpacing:8 afterView:transcodeOptionsCard];
-
     self.modsLibraryExpandedFolders = [NSMutableSet set];
     self.modsLibraryExpandedInfoEntries = [NSMutableSet set];
     self.modsLibraryStack = [[UIStackView alloc] init];
@@ -12521,7 +12467,6 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     ZLog(@"[Mods Library] starting on-device transcode for %@ (previous scratch branch=%@ ignored).", entryPath.lastPathComponent, previousScratchBranch ?: @"none");
     NSURL *bundleURL = [NSURL fileURLWithPath:entryPath];
     ZTranscoderConfig *config = [ZTranscoderConfig new];
-    zs_apply_transcoder_options(config);
     if (entry.resolvedInstallTargetPath.length > 0) {
         config.targetBundlePath = [NSHomeDirectory() stringByAppendingPathComponent:entry.resolvedInstallTargetPath];
         ZLog(@"[Mods Library] local transcode target for %@: %@", entry.fileName, config.targetBundlePath);
@@ -19363,11 +19308,6 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 - (void)manifestZeroingChanged:(UISwitch *)toggle {
     [PatchManifestNetwork setZeroAllEnabled:toggle.on];
-}
-
-- (void)transcoderOptionChanged:(UISwitch *)toggle {
-    NSString *key = objc_getAssociatedObject(toggle, &kZSTranscoderOptionKeyAssoc);
-    if (key.length) zs_set_transcoder_option(key, toggle.on);
 }
 
 - (void)overrideTutorialCompletionChanged:(UISwitch *)toggle {
