@@ -196,6 +196,7 @@ jobs:
             Network/Updater.m \
             UI/UserInterface.m \
             UI/GifTint.m \
+            UI/Logo.m \
             lz4.c \
             lz4hc.c \
             -o ZSingularity.dylib

@@ -29,6 +29,7 @@
 #import "EmbeddedSignature.h"
 #import "Docs.h"
 #import "GifTint.h"
+#import "Logo.h"
 #import "DonatedHeap.h"
 
 @class ZSCapsuleSlider, ZSModeSlider, ZSWheelPicker;
@@ -5592,6 +5593,11 @@ static UIFont *zs_excelsior_sans_font(CGFloat size, UIFontWeight weight) {
     return boldDescriptor ? [UIFont fontWithDescriptor:boldDescriptor size:size] : regular;
 }
 
+static UIFont *zs_title_font(CGFloat size, UIFontWeight weight) {
+    UIFont *logoFont = zs_logo_selected_font(size);
+    return logoFont ?: zs_excelsior_sans_font(size, weight);
+}
+
 #ifndef ZS_BUILD_NUMBER
 #define ZS_BUILD_NUMBER 0
 #endif
@@ -5663,6 +5669,39 @@ static UIImageView *zs_make_signature_overlay(void) {
     return view;
 }
 
+static void zs_style_title_header_label(UILabel *label) {
+    NSString *fullTitle = @"ZSingularity";
+    NSString *emphasized = @"ZS";
+
+    NSMutableAttributedString *titleString =
+        [[NSMutableAttributedString alloc] initWithString:fullTitle
+                                                 attributes:@{
+            NSFontAttributeName: zs_title_font(33.75, UIFontWeightBold),
+            NSForegroundColorAttributeName: zs_accent_green_color(),
+        }];
+    [titleString addAttribute:NSFontAttributeName
+                         value:zs_title_font(45, UIFontWeightBold)
+                         range:NSMakeRange(0, emphasized.length)];
+    label.attributedText = titleString;
+}
+
+static UIImage *zs_make_logo_chevron_image(void) {
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightSemibold];
+    UIImage *chevronImage = [UIImage systemImageNamed:@"chevron.down" withConfiguration:symbolConfig];
+    return [chevronImage imageWithTintColor:[UIColor colorWithWhite:1 alpha:0.55]
+                               renderingMode:UIImageRenderingModeAlwaysOriginal];
+}
+
+@interface ZSLogoObserverToken : NSObject
+@property (nonatomic, strong) id observer;
+@end
+
+@implementation ZSLogoObserverToken
+- (void)dealloc {
+    if (_observer) [[NSNotificationCenter defaultCenter] removeObserver:_observer];
+}
+@end
+
 static UIView *zs_make_title_block(void) {
     UIView *container = [[UIView alloc] init];
     container.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5671,26 +5710,26 @@ static UIView *zs_make_title_block(void) {
     headerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     headerLabel.textAlignment = NSTextAlignmentNatural;
 
-    NSString *fullTitle = @"ZSingularity";
-    NSString *emphasized = @"ZS";
-
-    UIFont *bigFont = zs_excelsior_sans_font(45, UIFontWeightBold);
-    UIFont *restFont = zs_excelsior_sans_font(33.75, UIFontWeightBold);
-    UIColor *titleColor = zs_accent_green_color();
-
-    NSMutableAttributedString *titleString =
-        [[NSMutableAttributedString alloc] initWithString:fullTitle
-                                                 attributes:@{
-            NSFontAttributeName: restFont,
-            NSForegroundColorAttributeName: titleColor,
-        }];
-    [titleString addAttribute:NSFontAttributeName
-                         value:bigFont
-                         range:NSMakeRange(0, emphasized.length)];
-
-    headerLabel.attributedText = titleString;
+    zs_style_title_header_label(headerLabel);
     zs_apply_gif_text_tint(headerLabel);
     [container addSubview:headerLabel];
+
+    UIButton *logoChevron = [UIButton buttonWithType:UIButtonTypeSystem];
+    logoChevron.translatesAutoresizingMaskIntoConstraints = NO;
+    [logoChevron setImage:zs_make_logo_chevron_image() forState:UIControlStateNormal];
+    logoChevron.accessibilityLabel = @"Change logo";
+    [container addSubview:logoChevron];
+
+    ZSLogoObserverToken *observerToken = [[ZSLogoObserverToken alloc] init];
+    __weak UILabel *weakHeaderLabel = headerLabel;
+    observerToken.observer = [[NSNotificationCenter defaultCenter] addObserverForName:ZSLogoDidChangeNotification
+                                                                                object:nil
+                                                                                 queue:[NSOperationQueue mainQueue]
+                                                                            usingBlock:^(NSNotification *note) {
+        UILabel *label = weakHeaderLabel;
+        if (label) zs_style_title_header_label(label);
+    }];
+    objc_setAssociatedObject(container, @"zs_logo_observer", observerToken, OBJC_ASSOCIATION_RETAIN);
 
     UIView *updateDot = [[UIView alloc] init];
     updateDot.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5722,13 +5761,20 @@ static UIView *zs_make_title_block(void) {
 
     headerLabel.userInteractionEnabled = YES;
     objc_setAssociatedObject(container, @"zs_header_label", headerLabel, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(container, @"zs_logo_chevron", logoChevron, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(container, @"zs_update_dot", updateDot, OBJC_ASSOCIATION_RETAIN);
     objc_setAssociatedObject(container, @"zs_update_label", updateLabel, OBJC_ASSOCIATION_RETAIN);
 
     [NSLayoutConstraint activateConstraints:@[
         [headerLabel.topAnchor constraintEqualToAnchor:container.topAnchor],
         [headerLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
-        [headerLabel.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor],
+        [headerLabel.trailingAnchor constraintLessThanOrEqualToAnchor:logoChevron.leadingAnchor constant:-2],
+
+        [logoChevron.widthAnchor constraintEqualToConstant:28],
+        [logoChevron.heightAnchor constraintEqualToConstant:28],
+        [logoChevron.centerYAnchor constraintEqualToAnchor:headerLabel.centerYAnchor],
+        [logoChevron.leadingAnchor constraintEqualToAnchor:headerLabel.trailingAnchor constant:2],
+        [logoChevron.trailingAnchor constraintLessThanOrEqualToAnchor:container.trailingAnchor],
 
         [updateLabel.topAnchor constraintEqualToAnchor:headerLabel.bottomAnchor constant:2],
         [updateLabel.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
@@ -6142,6 +6188,11 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, strong) UIView *docsLanguageDropdownOverlay;
 @property (nonatomic, strong) UIControl *docsLanguageDropdownScrim;
 @property (nonatomic, assign) BOOL docsLanguageDropdownOpen;
+@property (nonatomic, weak) UIButton *logoChevronButton;
+@property (nonatomic, strong) UIView *logoDropdownOverlay;
+@property (nonatomic, strong) UIControl *logoDropdownScrim;
+@property (nonatomic, assign) BOOL logoDropdownOpen;
+@property (nonatomic, copy) NSArray<NSString *> *logoDropdownNames;
 @property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingFullConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingToChevronConstraint;
 @property (nonatomic, strong) NSLayoutConstraint *docsTitleTrailingToLanguageConstraint;
@@ -8186,11 +8237,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     NSString *fullTitle = @"ZSingularity";
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
                                                                                  attributes:@{
-        NSFontAttributeName: zs_excelsior_sans_font(20.5, UIFontWeightBold),
+        NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
         NSForegroundColorAttributeName: zs_accent_green_color()
     }];
     [title addAttribute:NSFontAttributeName
-                 value:zs_excelsior_sans_font(27.5, UIFontWeightBold)
+                 value:zs_title_font(27.5, UIFontWeightBold)
                  range:NSMakeRange(0, 2)];
     header.attributedText = title;
     [panelHost addSubview:header];
@@ -8428,11 +8479,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     header.textAlignment = NSTextAlignmentLeft;
     NSMutableAttributedString *headerTitle = [[NSMutableAttributedString alloc] initWithString:@"ZSingularity"
                                                                                      attributes:@{
-        NSFontAttributeName: zs_excelsior_sans_font(20.5, UIFontWeightBold),
+        NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
         NSForegroundColorAttributeName: zs_accent_green_color()
     }];
     [headerTitle addAttribute:NSFontAttributeName
-                        value:zs_excelsior_sans_font(27.5, UIFontWeightBold)
+                        value:zs_title_font(27.5, UIFontWeightBold)
                         range:NSMakeRange(0, 2)];
     header.attributedText = headerTitle;
     [panelHost addSubview:header];
@@ -8742,6 +8793,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     if (!self.panelOpen || !self.glassContainer) return;
     UIView *unityView = zs_ui_host_view();
 
+    [self zs_closeLogoDropdownAnimated:NO];
     self.panelOpen = NO;
     self.docsPanelOpen = NO;
     self.docsActiveKey = nil;
@@ -8915,6 +8967,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.docsLanguageDropdownOverlay = nil;
     self.docsLanguageDropdownScrim = nil;
     self.docsLanguageDropdownOpen = NO;
+    self.logoChevronButton = nil;
+    self.logoDropdownOverlay = nil;
+    self.logoDropdownScrim = nil;
+    self.logoDropdownOpen = NO;
+    self.logoDropdownNames = nil;
     self.docsTitleTrailingFullConstraint = nil;
     self.docsTitleTrailingToChevronConstraint = nil;
     self.docsTitleTrailingToLanguageConstraint = nil;
@@ -9683,6 +9740,8 @@ static const CGFloat kContentFadeHeight = 22;
     UITapGestureRecognizer *updateStatusTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(updateStatusLabelTapped:)];
     [self.updateStatusLabel addGestureRecognizer:updateStatusTap];
     UILabel *titleHeaderLabel = objc_getAssociatedObject(titleBlock, @"zs_header_label");
+    self.logoChevronButton = objc_getAssociatedObject(titleBlock, @"zs_logo_chevron");
+    [self.logoChevronButton addTarget:self action:@selector(zs_logoChevronTapped:) forControlEvents:UIControlEventTouchUpInside];
     UITapGestureRecognizer *developerUnlockTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_titleHeaderTapped:)];
     [titleHeaderLabel addGestureRecognizer:developerUnlockTap];
     UILongPressGestureRecognizer *updateStatusLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(updateStatusLabelLongPressed:)];
@@ -10997,6 +11056,7 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 #pragma mark Docs language switcher
 
 static const CGFloat kZSDocsLanguageDropdownWidth = 132;
+static const CGFloat kZSLogoDropdownWidth = 156;
 
 static UIImage *zs_make_docs_language_globe_image(void) {
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
@@ -22508,6 +22568,168 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     alert.popoverPresentationController.sourceRect = sender.bounds;
 
     [presenter presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)zs_logoChevronTapped:(UIButton *)sender {
+    if (self.logoDropdownOpen) {
+        [self zs_closeLogoDropdownAnimated:YES];
+        return;
+    }
+    [self zs_openLogoDropdownWithNames:zs_logo_cached_names()];
+
+    __weak typeof(self) weakSelf = self;
+    zs_logo_refresh_names(^(NSArray<NSString *> *names) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf.logoDropdownOpen) return;
+        if ([strongSelf.logoDropdownNames isEqualToArray:names]) return;
+        [strongSelf zs_closeLogoDropdownAnimated:NO];
+        [strongSelf zs_openLogoDropdownWithNames:names];
+    });
+}
+
+- (void)zs_openLogoDropdownWithNames:(NSArray<NSString *> *)names {
+    if (!self.logoChevronButton || !self.scrollView || self.logoDropdownOpen || names.count == 0) return;
+
+    self.logoDropdownNames = names;
+    NSString *currentName = zs_logo_selected_name();
+
+    CGRect buttonFrame = [self.logoChevronButton convertRect:self.logoChevronButton.bounds toView:self.scrollView];
+    CGFloat dropdownWidth = kZSLogoDropdownWidth;
+    CGFloat rowHeight = kZSReencodeFieldHeight;
+    CGFloat dropdownHeight = rowHeight * names.count;
+
+    CGFloat originX = CGRectGetMinX(buttonFrame);
+    originX = MIN(originX, CGRectGetWidth(self.scrollView.bounds) - dropdownWidth - kPanelPadding);
+    originX = MAX(originX, kPanelPadding);
+    CGRect dropdownFrame = CGRectMake(originX, CGRectGetMaxY(buttonFrame) + 4, dropdownWidth, dropdownHeight);
+
+    CGSize contentSize = self.scrollView.contentSize;
+    CGRect scrimFrame = CGRectMake(0, 0,
+                                   MAX(contentSize.width, CGRectGetWidth(self.scrollView.bounds)),
+                                   MAX(contentSize.height, CGRectGetHeight(self.scrollView.bounds)));
+    UIControl *scrim = [[UIControl alloc] initWithFrame:scrimFrame];
+    scrim.backgroundColor = UIColor.clearColor;
+    [scrim addTarget:self action:@selector(zs_logoDropdownScrimTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self.scrollView addSubview:scrim];
+    self.logoDropdownScrim = scrim;
+
+    UIView *overlay;
+    UIVisualEffectView *glassOverlay = nil;
+    if (zs_has_liquid_glass()) {
+        glassOverlay = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(YES)];
+        glassOverlay.frame = dropdownFrame;
+        glassOverlay.clipsToBounds = YES;
+        zs_configure_glass_corners(glassOverlay, kZSAuthFieldCornerRadius, NO);
+        glassOverlay.layer.borderWidth = 1;
+        glassOverlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        zs_register_suspendable_glass(glassOverlay);
+        overlay = glassOverlay;
+    } else {
+        overlay = [[UIView alloc] initWithFrame:dropdownFrame];
+        overlay.clipsToBounds = YES;
+        overlay.layer.cornerRadius = kZSAuthFieldCornerRadius;
+        overlay.layer.cornerCurve = kCACornerCurveContinuous;
+        overlay.layer.borderWidth = 1;
+        overlay.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
+        overlay.backgroundColor = [UIColor colorWithWhite:0.11 alpha:0.98];
+    }
+    [self.scrollView addSubview:overlay];
+    self.logoDropdownOverlay = overlay;
+
+    UIView *rowHost = glassOverlay ? glassOverlay.contentView : overlay;
+
+    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
+        NSString *name = names[i];
+        BOOL selected = [name isEqualToString:currentName];
+        UIButton *optionButton = zs_make_docs_language_option_button(@{@"name": name}, selected, i, self,
+                                                                       @selector(zs_logoDropdownOptionTapped:));
+        optionButton.frame = CGRectMake(0, i * rowHeight, dropdownWidth, rowHeight);
+        optionButton.alpha = 0;
+        [rowHost addSubview:optionButton];
+
+        if (i > 0) {
+            CGFloat hairline = 1.0 / MAX(UIScreen.mainScreen.scale, (CGFloat)1.0);
+            UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, i * rowHeight - hairline, dropdownWidth, hairline)];
+            divider.backgroundColor = [UIColor colorWithWhite:0.6 alpha:0.5];
+            divider.alpha = 0;
+            [rowHost addSubview:divider];
+        }
+    }
+
+    self.logoDropdownOpen = YES;
+    overlay.alpha = 0;
+    overlay.transform = CGAffineTransformMakeScale(0.92, 0.92);
+
+    [UIView animateWithDuration:0.2
+                          delay:0
+         usingSpringWithDamping:0.86
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        overlay.alpha = 1;
+        overlay.transform = CGAffineTransformIdentity;
+        self.logoChevronButton.transform = CGAffineTransformMakeRotation(M_PI);
+        for (UIView *subview in rowHost.subviews) {
+            subview.alpha = 1;
+        }
+    } completion:nil];
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+- (void)zs_closeLogoDropdownAnimated:(BOOL)animated {
+    if (!self.logoDropdownOpen) return;
+
+    UIView *overlay = self.logoDropdownOverlay;
+    UIControl *scrim = self.logoDropdownScrim;
+    self.logoDropdownOverlay = nil;
+    self.logoDropdownScrim = nil;
+    self.logoDropdownOpen = NO;
+
+    void (^finish)(void) = ^{
+        [overlay removeFromSuperview];
+        [scrim removeFromSuperview];
+    };
+
+    if (!animated) {
+        self.logoChevronButton.transform = CGAffineTransformIdentity;
+        finish();
+        return;
+    }
+
+    [UIView animateWithDuration:0.16
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        overlay.alpha = 0;
+        overlay.transform = CGAffineTransformMakeScale(0.92, 0.92);
+        self.logoChevronButton.transform = CGAffineTransformIdentity;
+    } completion:^(BOOL finished) {
+        finish();
+    }];
+}
+
+- (void)zs_logoDropdownOptionTapped:(UIButton *)sender {
+    NSArray<NSString *> *names = self.logoDropdownNames;
+    if (sender.tag < 0 || sender.tag >= (NSInteger)names.count) return;
+
+    NSString *name = names[sender.tag];
+    [self zs_closeLogoDropdownAnimated:YES];
+    if ([name isEqualToString:zs_logo_selected_name()]) return;
+
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+
+    zs_logo_select(name, ^(BOOL success) {
+        if (success) return;
+        UINotificationFeedbackGenerator *failHaptic = [UINotificationFeedbackGenerator new];
+        [failHaptic notificationOccurred:UINotificationFeedbackTypeError];
+    });
+}
+
+- (void)zs_logoDropdownScrimTapped:(UIControl *)sender {
+    [self zs_closeLogoDropdownAnimated:YES];
 }
 
 - (void)docsLanguageButtonTapped:(UIButton *)sender {
