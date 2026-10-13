@@ -6117,7 +6117,6 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, strong) UIButton *syslogButton;
 @property (nonatomic, assign) BOOL syslogDebugModeEnabled;
 
-@property (nonatomic, strong) UIButton *keepAliveButton;
 @property (nonatomic, assign) BOOL keepAliveEnabled;
 @property (nonatomic, strong) CLLocationManager *keepAliveLocationManager;
 
@@ -6136,6 +6135,8 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL syslogRenderDeferred;
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
 @property (nonatomic, strong) UIView *syslogCopyToastView;
+@property (nonatomic, strong) UIVisualEffectView *syslogCommandDropdown;
+@property (nonatomic, strong) UIStackView *syslogCommandStack;
 
 @property (nonatomic, strong) ZSCapsuleSlider *normalFpsSlider;
 @property (nonatomic, strong) UILabel *normalFpsValueLabel;
@@ -8821,6 +8822,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [self.syslogFullScreenOverlay removeFromSuperview];
     self.syslogFullScreenOverlay = nil;
     self.syslogSearchField = nil;
+    self.syslogCommandDropdown = nil;
+    self.syslogCommandStack = nil;
     self.syslogExportButton = nil;
     self.syslogChannelToggleButton = nil;
     self.syslogInfoLabel = nil;
@@ -9832,44 +9835,17 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *experimentalEnabledRow = zs_make_switch_row(@"Enable Experimental Settings", g_experimentalSettingsEnabled);
     [experimentalEnabledRow.toggle addTarget:self action:@selector(experimentalSettingsEnabledChanged:) forControlEvents:UIControlEventValueChanged];
 
-    UIButton *dumpIL2CPPMethodsButton = zs_make_grouped_action_button(@"Dump IL2CPP Methods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    UIButton *sigkillButton = zs_make_grouped_action_button(@"SIGKILL process", [UIColor colorWithRed:0.85 green:0.08 blue:0.08 alpha:1.0]);
-    zs_attach_tap_to_confirm(sigkillButton, self,
-        @"SIGKILL process?", @"This immediately kills the app with SIGKILL to test crash reporting. Anything unsaved will be lost.", @"SIGKILL", YES, ^{
-        [ZCrashLogger killProcessWithSIGKILL];
-    });
-
-    zs_attach_tap_to_confirm(dumpIL2CPPMethodsButton, self,
-        @"Dump IL2CPP Methods?", @"This enumerates every loaded assembly, class, method, field, and property and writes the dump to Documents. It may take a while.", @"Dump", NO, ^{
-        [weakSelf dumpIL2CPPMethodsTapped];
-    });
-
-    UIButton *librarySymlinkButton = zs_make_grouped_action_button(@"Library Symlink", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [librarySymlinkButton addTarget:self action:@selector(librarySymlinkTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *patchLCButton = zs_make_grouped_action_button(@"Patch LC", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [patchLCButton addTarget:self action:@selector(patchLCTapped) forControlEvents:UIControlEventTouchUpInside];
-
     UIButton *syslogButton = zs_make_grouped_action_button(@"Show system logs", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     self.syslogButton = syslogButton;
 
     [syslogButton addTarget:self action:@selector(toggleSyslogTapped) forControlEvents:UIControlEventTouchUpInside];
-
-    UIButton *keepAliveButton = zs_make_grouped_action_button(@"Keep Alive", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    self.keepAliveButton = keepAliveButton;
-    [keepAliveButton addTarget:self action:@selector(toggleKeepAliveTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *developerActionsCard = zs_make_grouped_action_card(@[
         overrideTutorialRow,
         checkCIBuildsRow,
         experimentalEnabledRow,
         fullManifestZeroingRow,
-        dumpIL2CPPMethodsButton,
-        librarySymlinkButton,
-        patchLCButton,
         syslogButton,
-        keepAliveButton,
-        sigkillButton,
     ]);
     developerActionsCard.layer.borderWidth = 1;
     developerActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -12446,11 +12422,9 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
             [self.keepAliveLocationManager startUpdatingLocation];
         }
 
-        [self.keepAliveButton setTitle:@"Keep Alive (Active)" forState:UIControlStateNormal];
         ZLog(@"[UserInterface] Keep Alive enabled - starting low-accuracy location updates");
     } else {
         [self.keepAliveLocationManager stopUpdatingLocation];
-        [self.keepAliveButton setTitle:@"Keep Alive" forState:UIControlStateNormal];
         ZLog(@"[UserInterface] Keep Alive disabled - stopped location updates");
     }
 
@@ -12466,7 +12440,6 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
         [manager startUpdatingLocation];
     } else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
         self.keepAliveEnabled = NO;
-        [self.keepAliveButton setTitle:@"Keep Alive" forState:UIControlStateNormal];
         ZLog(@"[UserInterface] Keep Alive: location permission denied");
     }
 }
@@ -16147,7 +16120,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     searchField.autocapitalizationType = UITextAutocapitalizationTypeNone;
     searchField.autocorrectionType = UITextAutocorrectionTypeNo;
     searchField.clearButtonMode = UITextFieldViewModeWhileEditing;
-    searchField.returnKeyType = UIReturnKeyDone;
+    searchField.returnKeyType = UIReturnKeySearch;
     searchField.delegate = self;
     [searchField addTarget:self action:@selector(zs_syslogSearchFieldChanged:) forControlEvents:UIControlEventEditingChanged];
     self.syslogSearchField = searchField;
@@ -16247,7 +16220,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
-        [searchContainer.widthAnchor constraintEqualToConstant:180],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
         [tableView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
@@ -16255,12 +16227,166 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [tableView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
         [tableView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
     ]];
+
+    NSLayoutConstraint *searchWidth = [searchContainer.widthAnchor constraintEqualToConstant:250];
+    searchWidth.priority = UILayoutPriorityDefaultHigh;
+    searchWidth.active = YES;
+
+    UIVisualEffectView *commandDropdown = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(NO)];
+    commandDropdown.translatesAutoresizingMaskIntoConstraints = NO;
+    commandDropdown.layer.cornerRadius = 12;
+    commandDropdown.layer.cornerCurve = kCACornerCurveContinuous;
+    commandDropdown.clipsToBounds = YES;
+    commandDropdown.hidden = YES;
+    [overlay addSubview:commandDropdown];
+    self.syslogCommandDropdown = commandDropdown;
+
+    UIStackView *commandStack = [[UIStackView alloc] init];
+    commandStack.translatesAutoresizingMaskIntoConstraints = NO;
+    commandStack.axis = UILayoutConstraintAxisVertical;
+    commandStack.spacing = 2;
+    [commandDropdown.contentView addSubview:commandStack];
+    self.syslogCommandStack = commandStack;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [commandStack.topAnchor constraintEqualToAnchor:commandDropdown.contentView.topAnchor constant:6],
+        [commandStack.bottomAnchor constraintEqualToAnchor:commandDropdown.contentView.bottomAnchor constant:-6],
+        [commandStack.leadingAnchor constraintEqualToAnchor:commandDropdown.contentView.leadingAnchor constant:12],
+        [commandStack.trailingAnchor constraintEqualToAnchor:commandDropdown.contentView.trailingAnchor constant:-12],
+
+        [commandDropdown.topAnchor constraintEqualToAnchor:searchContainer.bottomAnchor constant:6],
+        [commandDropdown.trailingAnchor constraintEqualToAnchor:searchContainer.trailingAnchor],
+        [commandDropdown.widthAnchor constraintGreaterThanOrEqualToAnchor:searchContainer.widthAnchor],
+    ]];
+}
+
+static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void) {
+    return @[
+        @{@"name": @"/dump", @"desc": @"Dump IL2CPP methods"},
+        @{@"name": @"/sigkill", @"desc": @"SIGKILL the process"},
+        @{@"name": @"/symlink", @"desc": @"Expose Library in Files"},
+        @{@"name": @"/patchlc", @"desc": @"Patch an IPA for LiveContainer"},
+        @{@"name": @"/keepalive", @"desc": @"Toggle Keep Alive"},
+    ];
+}
+
+- (NSString *)zs_syslogCommandToken {
+    NSString *text = [self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (![text hasPrefix:@"/"]) return nil;
+    NSString *token = [text componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].firstObject;
+    return token.lowercaseString;
+}
+
+- (NSArray<NSDictionary<NSString *, NSString *> *> *)zs_syslogMatchingCommands {
+    NSString *token = [self zs_syslogCommandToken];
+    if (token.length == 0) return @[];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *matches = [NSMutableArray array];
+    for (NSDictionary<NSString *, NSString *> *command in zs_syslog_commands()) {
+        if ([command[@"name"] hasPrefix:token]) [matches addObject:command];
+    }
+    return matches;
+}
+
+- (BOOL)zs_syslogCommandModeActive {
+    return [self zs_syslogMatchingCommands].count > 0;
+}
+
+- (void)zs_updateSyslogCommandDropdown {
+    UIVisualEffectView *dropdown = self.syslogCommandDropdown;
+    UIStackView *stack = self.syslogCommandStack;
+    if (!dropdown || !stack) return;
+
+    NSArray<NSDictionary<NSString *, NSString *> *> *matches = self.syslogSearchField.isFirstResponder ? [self zs_syslogMatchingCommands] : @[];
+    NSString *trimmed = [[self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    if (matches.count == 0 || (matches.count == 1 && [trimmed isEqualToString:matches.firstObject[@"name"]])) {
+        dropdown.hidden = YES;
+        return;
+    }
+
+    for (UIView *row in stack.arrangedSubviews) {
+        [stack removeArrangedSubview:row];
+        [row removeFromSuperview];
+    }
+
+    for (NSDictionary<NSString *, NSString *> *command in matches) {
+        NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:command[@"name"]
+                                                                                   attributes:@{
+            NSFontAttributeName: zs_mono_font(12, UIFontWeightSemibold),
+            NSForegroundColorAttributeName: zs_accent_green_color(),
+        }];
+        [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  " stringByAppendingString:command[@"desc"]]
+                                                                      attributes:@{
+            NSFontAttributeName: zs_mono_font(10, UIFontWeightRegular),
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.55],
+        }]];
+
+        UILabel *row = [[UILabel alloc] init];
+        row.attributedText = title;
+        row.userInteractionEnabled = YES;
+        row.translatesAutoresizingMaskIntoConstraints = NO;
+        [row.heightAnchor constraintEqualToConstant:28].active = YES;
+        objc_setAssociatedObject(row, "zs_commandName", command[@"name"], OBJC_ASSOCIATION_COPY);
+        [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_syslogCommandRowTapped:)]];
+        [stack addArrangedSubview:row];
+    }
+
+    [self.syslogFullScreenOverlay bringSubviewToFront:dropdown];
+    dropdown.hidden = NO;
+}
+
+- (void)zs_syslogCommandRowTapped:(UITapGestureRecognizer *)gesture {
+    NSString *name = objc_getAssociatedObject(gesture.view, "zs_commandName");
+    if (name.length == 0) return;
+
+    self.syslogSearchField.text = name;
+    [self zs_syslogSearchFieldChanged:self.syslogSearchField];
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_executeSyslogCommandIfNeeded {
+    NSString *token = [self zs_syslogCommandToken];
+    NSString *name = nil;
+    NSArray<NSDictionary<NSString *, NSString *> *> *matches = [self zs_syslogMatchingCommands];
+    for (NSDictionary<NSString *, NSString *> *command in matches) {
+        if ([command[@"name"] isEqualToString:token]) {
+            name = command[@"name"];
+            break;
+        }
+    }
+    if (!name && matches.count == 1) name = matches.firstObject[@"name"];
+    if (!name) return;
+
+    self.syslogSearchField.text = @"";
+    [self zs_syslogSearchFieldChanged:self.syslogSearchField];
+    ZLog(@"[UserInterface] command executed: %@", name);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf zs_runSyslogCommand:name];
+    });
+}
+
+- (void)zs_runSyslogCommand:(NSString *)name {
+    if ([name isEqualToString:@"/dump"]) {
+        [self dumpIL2CPPMethodsTapped];
+    } else if ([name isEqualToString:@"/sigkill"]) {
+        [ZCrashLogger killProcessWithSIGKILL];
+    } else if ([name isEqualToString:@"/symlink"]) {
+        [self librarySymlinkTapped];
+    } else if ([name isEqualToString:@"/patchlc"]) {
+        [self patchLCTapped];
+    } else if ([name isEqualToString:@"/keepalive"]) {
+        [self toggleKeepAliveTapped];
+        [self zs_showSyslogToastWithText:self.keepAliveEnabled ? @"Keep Alive enabled" : @"Keep Alive disabled"];
+    }
 }
 
 - (NSArray<NSString *> *)zs_syslogFullScreenFilteredLines {
     NSArray<NSString *> *base = [self zs_syslogDisplayLines];
     NSString *query = [self.syslogSearchField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (query.length == 0) return base;
+    if (query.length == 0 || [self zs_syslogCommandModeActive]) return base;
 
     NSString *lowerQuery = query.lowercaseString;
     NSMutableArray<NSString *> *filtered = [NSMutableArray array];
@@ -16288,7 +16414,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
     self.syslogRenderDeferred = NO;
     BOOL stickToBottom = controller.atBottom;
-    self.syslogEmptyLabel.text = self.syslogSearchField.text.length > 0 ? @"No matching log lines" : @"[syslog] no output yet";
+    self.syslogEmptyLabel.text = (self.syslogSearchField.text.length > 0 && ![self zs_syslogCommandModeActive]) ? @"No matching log lines" : @"[syslog] no output yet";
     self.syslogEmptyLabel.hidden = lines.count > 0;
     [tableView reloadData];
     if (stickToBottom && lines.count > 0) [self zs_scrollSyslogFullScreenToBottom];
@@ -16337,6 +16463,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 }
 
 - (void)zs_showSyslogCopiedToast {
+    [self zs_showSyslogToastWithText:@"Copied log to clipboard"];
+}
+
+- (void)zs_showSyslogToastWithText:(NSString *)text {
     UIView *overlay = self.syslogFullScreenOverlay;
     if (!overlay) return;
 
@@ -16355,7 +16485,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 
         UILabel *label = [[UILabel alloc] init];
         label.translatesAutoresizingMaskIntoConstraints = NO;
-        label.text = @"Copied log to clipboard";
+        label.text = text;
         label.font = zs_mono_font(11, UIFontWeightMedium);
         label.textColor = [UIColor colorWithWhite:1 alpha:0.92];
         label.textAlignment = NSTextAlignmentCenter;
@@ -16377,6 +16507,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         toast = toastGlass;
     }
 
+    UIView *toastFirstSubview = [(UIVisualEffectView *)toast contentView].subviews.firstObject;
+    if ([toastFirstSubview isKindOfClass:[UILabel class]]) ((UILabel *)toastFirstSubview).text = text;
+
     [overlay bringSubviewToFront:toast];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(zs_hideSyslogCopiedToast) object:nil];
     [UIView animateWithDuration:0.2 animations:^{
@@ -16394,6 +16527,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 - (void)zs_syslogSearchFieldChanged:(UITextField *)field {
     self.syslogTableController.atBottom = YES;
     [self zs_renderSyslogFullScreenRows];
+    [self zs_updateSyslogCommandDropdown];
 }
 
 - (void)zs_exportSyslogVisibleLogsTapped {
@@ -20523,7 +20657,15 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
     return YES;
 }
 
+- (void)textFieldDidBeginEditing:(UITextField *)textField {
+    if (textField == self.syslogSearchField) [self zs_updateSyslogCommandDropdown];
+}
+
 - (void)textFieldDidEndEditing:(UITextField *)textField {
+    if (textField == self.syslogSearchField) {
+        [self zs_updateSyslogCommandDropdown];
+        return;
+    }
     if (textField == self.zsFloatingField) {
 
         [self zs_commitFloatingField];
@@ -20541,6 +20683,7 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
     }
     if (textField == self.syslogSearchField || textField == self.assetExplorerSearchField) {
         [textField resignFirstResponder];
+        if (textField == self.syslogSearchField) [self zs_executeSyslogCommandIfNeeded];
         return YES;
     }
     if (textField != self.syslogBlacklistField) return YES;
