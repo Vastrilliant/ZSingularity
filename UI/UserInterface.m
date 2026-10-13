@@ -2424,16 +2424,29 @@ static const NSInteger kZSWheelLoopCopies = 9;
 
 @interface ZSSectionIndexView : UIView
 @property (nonatomic, copy) void (^onSelect)(NSUInteger index);
-- (void)setTitles:(NSArray<NSString *> *)titles;
+- (void)setTitles:(NSArray<NSString *> *)titles fullTitles:(NSArray<NSString *> *)fullTitles;
 @end
 
 static const CGFloat kZSSectionIndexRowHeight = 12;
 static const CGFloat kZSSectionIndexVerticalPadding = 4;
+static const CGFloat kZSSectionIndexBaseFontSize = 8;
+static const CGFloat kZSSectionIndexPeakGrowth = 0.65;
+static const CGFloat kZSSectionIndexFalloff = 0.9;
+static const CGFloat kZSSectionIndexLabelInset = 4;
+static const CGFloat kZSSectionIndexFullTitleScale = 1.35;
 
 @implementation ZSSectionIndexView {
     NSArray<NSString *> *_titles;
+    NSArray<NSString *> *_fullTitles;
     NSMutableArray<UILabel *> *_labels;
+    UIView *_pill;
     NSInteger _activeIndex;
+    NSInteger _focusIndex;
+    CGFloat _touchP;
+    CGFloat _progress;
+    CGFloat _target;
+    CADisplayLink *_link;
+    CFTimeInterval _lastTimestamp;
     UISelectionFeedbackGenerator *_haptic;
 }
 
@@ -2441,29 +2454,38 @@ static const CGFloat kZSSectionIndexVerticalPadding = 4;
     self = [super initWithFrame:frame];
     if (!self) return nil;
     _titles = @[];
+    _fullTitles = @[];
     _labels = [NSMutableArray array];
     _activeIndex = -1;
+    _focusIndex = -1;
     self.backgroundColor = UIColor.clearColor;
     self.multipleTouchEnabled = NO;
-    self.layer.cornerCurve = kCACornerCurveContinuous;
+    _pill = [[UIView alloc] init];
+    _pill.userInteractionEnabled = NO;
+    _pill.alpha = 0;
+    _pill.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.82];
+    _pill.layer.cornerCurve = kCACornerCurveContinuous;
+    [self addSubview:_pill];
     return self;
 }
 
-- (void)setTitles:(NSArray<NSString *> *)titles {
-    if ([_titles isEqualToArray:titles]) return;
+- (void)setTitles:(NSArray<NSString *> *)titles fullTitles:(NSArray<NSString *> *)fullTitles {
+    if ([_titles isEqualToArray:titles] && [_fullTitles isEqualToArray:fullTitles]) return;
     _titles = [titles copy];
+    _fullTitles = [fullTitles copy];
     for (UILabel *label in _labels) [label removeFromSuperview];
     [_labels removeAllObjects];
     for (NSString *title in _titles) {
         UILabel *label = [[UILabel alloc] init];
         label.text = title;
         label.textAlignment = NSTextAlignmentCenter;
-        label.font = zs_mono_font(8, UIFontWeightSemibold);
+        label.font = zs_mono_font(kZSSectionIndexBaseFontSize, UIFontWeightSemibold);
         label.textColor = [UIColor colorWithWhite:1 alpha:0.5];
         [self addSubview:label];
         [_labels addObject:label];
     }
     _activeIndex = -1;
+    _focusIndex = -1;
     [self invalidateIntrinsicContentSize];
     [self setNeedsLayout];
 }
@@ -2475,11 +2497,71 @@ static const CGFloat kZSSectionIndexVerticalPadding = 4;
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    [self zs_layoutMagnified];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) return;
+    [_link invalidate];
+    _link = nil;
+    _progress = 0;
+    _target = 0;
+    _focusIndex = -1;
+}
+
+- (void)zs_layoutMagnified {
+    NSUInteger count = _labels.count;
+    if (count == 0) return;
     CGFloat width = self.bounds.size.width;
-    for (NSUInteger i = 0; i < _labels.count; i++) {
-        _labels[i].frame = CGRectMake(0, kZSSectionIndexVerticalPadding + i * kZSSectionIndexRowHeight, width, kZSSectionIndexRowHeight);
+    CGFloat t = _progress * _progress * (3 - 2 * _progress);
+    CGFloat p = MAX(0, MIN(_touchP, (CGFloat)count));
+
+    CGFloat scales[count];
+    CGFloat heights[count];
+    for (NSUInteger i = 0; i < count; i++) {
+        CGFloat d = ((CGFloat)i + 0.5) - p;
+        CGFloat s = 1 + kZSSectionIndexPeakGrowth * t * exp(-(d * d) / (2 * kZSSectionIndexFalloff * kZSSectionIndexFalloff));
+        scales[i] = s;
+        heights[i] = kZSSectionIndexRowHeight * s;
     }
-    self.layer.cornerRadius = MIN(self.bounds.size.width, self.bounds.size.height) * 0.5;
+
+    NSInteger anchor = MIN((NSInteger)floor(p), (NSInteger)count - 1);
+    CGFloat magnified = 0;
+    for (NSInteger j = 0; j < anchor; j++) magnified += heights[j];
+    magnified += (p - anchor) * heights[anchor];
+    CGFloat offset = p * kZSSectionIndexRowHeight - magnified;
+
+    CGFloat startY = kZSSectionIndexVerticalPadding + offset;
+    CGFloat y = startY;
+    CGFloat minLeft = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < count; i++) {
+        UILabel *label = _labels[i];
+        BOOL showFull = (NSInteger)i == _focusIndex && scales[i] >= kZSSectionIndexFullTitleScale && i < _fullTitles.count;
+        NSString *text = showFull ? _fullTitles[i] : _titles[i];
+        if (![label.text isEqualToString:text]) {
+            if (t > 0) {
+                CATransition *fade = [CATransition animation];
+                fade.type = kCATransitionFade;
+                fade.duration = 0.12;
+                [label.layer addAnimation:fade forKey:@"zs_text"];
+            }
+            label.text = text;
+        }
+        label.font = zs_mono_font(kZSSectionIndexBaseFontSize * scales[i], UIFontWeightSemibold);
+        CGFloat labelWidth = ceil([text sizeWithAttributes:@{NSFontAttributeName: label.font}].width) + 2;
+        CGFloat centered = (width - labelWidth) * 0.5;
+        CGFloat trailing = width - kZSSectionIndexLabelInset - labelWidth;
+        CGFloat x = centered + (trailing - centered) * t;
+        label.frame = CGRectMake(x, y, labelWidth, heights[i]);
+        minLeft = MIN(minLeft, x);
+        y += heights[i];
+    }
+
+    CGFloat pillLeft = minLeft - kZSSectionIndexLabelInset;
+    _pill.frame = CGRectMake(pillLeft, startY - kZSSectionIndexVerticalPadding, width - pillLeft, (y - startY) + kZSSectionIndexVerticalPadding * 2);
+    _pill.alpha = t;
+    _pill.layer.cornerRadius = MIN(_pill.bounds.size.width * 0.5, 7 + 4 * t);
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
@@ -2500,13 +2582,36 @@ static const CGFloat kZSSectionIndexVerticalPadding = 4;
     }
 }
 
-- (void)zs_setTracking:(BOOL)tracking {
-    [UIView animateWithDuration:0.18
-                          delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{
-        self.backgroundColor = tracking ? [UIColor colorWithWhite:1 alpha:0.12] : UIColor.clearColor;
-    } completion:nil];
+- (void)zs_setTarget:(CGFloat)target {
+    _target = target;
+    if (_link || _progress == target) return;
+    _lastTimestamp = 0;
+    _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_tick:)];
+    [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
+- (void)zs_tick:(CADisplayLink *)link {
+    CFTimeInterval timestamp = link.timestamp;
+    CFTimeInterval dt = _lastTimestamp > 0 ? timestamp - _lastTimestamp : 1.0 / 60.0;
+    _lastTimestamp = timestamp;
+    BOOL rising = _target > _progress;
+    CGFloat step = (CGFloat)dt / (rising ? 0.16 : 0.22);
+    _progress = rising ? MIN(_target, _progress + step) : MAX(_target, _progress - step);
+    if (_progress == _target) {
+        [_link invalidate];
+        _link = nil;
+        if (_progress <= 0) _focusIndex = -1;
+    }
+    [self zs_layoutMagnified];
+}
+
+- (void)zs_trackTouch:(UITouch *)touch {
+    CGFloat y = [touch locationInView:self].y - kZSSectionIndexVerticalPadding;
+    _touchP = MAX(0, MIN(y / kZSSectionIndexRowHeight, (CGFloat)_labels.count));
+    NSInteger index = [self indexForTouch:touch];
+    _focusIndex = index;
+    [self zs_selectIndex:index];
+    [self zs_layoutMagnified];
 }
 
 - (void)zs_selectIndex:(NSInteger)index {
@@ -2521,19 +2626,19 @@ static const CGFloat kZSSectionIndexVerticalPadding = 4;
 - (void)zs_endTracking {
     _activeIndex = -1;
     [self zs_applyActiveIndex];
-    [self zs_setTracking:NO];
+    [self zs_setTarget:0];
     _haptic = nil;
 }
 
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     _haptic = [[UISelectionFeedbackGenerator alloc] init];
     [_haptic prepare];
-    [self zs_setTracking:YES];
-    [self zs_selectIndex:[self indexForTouch:touches.anyObject]];
+    [self zs_setTarget:1];
+    [self zs_trackTouch:touches.anyObject];
 }
 
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self zs_selectIndex:[self indexForTouch:touches.anyObject]];
+    [self zs_trackTouch:touches.anyObject];
 }
 
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -11318,7 +11423,7 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
     }
 
     self.sectionIndexSectionNames = names;
-    [self.sectionIndexView setTitles:initials];
+    [self.sectionIndexView setTitles:initials fullTitles:names];
     self.sectionIndexView.hidden = initials.count == 0;
 }
 
