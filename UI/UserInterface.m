@@ -6432,6 +6432,7 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 + (instancetype)shared;
 - (void)installIfNeeded;
 - (void)zs_bootstrapSyslogCaptureIfNeeded;
+- (NSMutableArray<NSString *> *)zs_pinnedKeys;
 - (void)zs_refreshMetalTabs;
 - (void)zs_metalTabActivatedForKey:(NSString *)key;
 @end
@@ -8660,7 +8661,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     UIView *unityView = zs_ui_host_view();
     if (!unityView) return;
 
-    BOOL fromTabs = [[ZSMetalTabs shared] isVisible];
+    BOOL fromTabs = [[ZSMetalTabs shared] isVisible] && [[self zs_pinnedKeys] containsObject:kZSMTHandleKey];
     CGFloat tabInset = fromTabs ? kHandleWidth : 0;
     self.panelOpen = YES;
     [[ZSMetalTabs shared] setVisible:NO snap:NO];
@@ -20901,6 +20902,7 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
 static NSString * const kZSPinKeyMemory = @"memory";
 static NSString * const kZSPinKeySyslog = @"syslog";
 static NSString * const kZSPinKeyMemoryCleanup = @"memoryCleanup";
+static NSString * const kZSPinKeyAssetExplorer = @"assetExplorer";
 static NSString * const kZSPinKeyReapply = @"reapplySettings";
 static NSString * const kZSPinnedActionsSettingsSection = @"pinnedActions";
 static NSString * const kZSPinnedActionsSettingsKey = @"keys";
@@ -20920,8 +20922,10 @@ static const CGFloat kZSPinMenuCornerRadius = 20;
 
 static NSArray<NSDictionary<NSString *, NSString *> *> *zs_pin_action_catalog(void) {
     NSMutableArray<NSDictionary<NSString *, NSString *> *> *catalog = [NSMutableArray arrayWithObjects:
+        @{@"key": kZSMTHandleKey, @"title": @"Pull Tab", @"symbol": @"chevron.left"},
         @{@"key": kZSPinKeyMemory, @"title": @"Memory Analysis", @"symbol": @"memorychip"},
         @{@"key": kZSPinKeyMemoryCleanup, @"title": @"Memory Cleanup", @"symbol": @"sparkles"},
+        @{@"key": kZSPinKeyAssetExplorer, @"title": @"Asset Explorer", @"symbol": @"shippingbox.fill"},
         nil];
     if (zs_developer_settings_enabled()) {
         [catalog addObject:@{@"key": kZSPinKeySyslog, @"title": @"Console Log", @"symbol": @"terminal"}];
@@ -20986,6 +20990,14 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     return self.pinnedActionKeys;
 }
 
+- (NSArray<NSString *> *)zs_pinnedActionKeys {
+    NSMutableArray<NSString *> *keys = [NSMutableArray array];
+    for (NSString *key in [self zs_pinnedKeys]) {
+        if (![key isEqualToString:kZSMTHandleKey]) [keys addObject:key];
+    }
+    return keys;
+}
+
 - (void)zs_removeDeveloperOnlyPins {
     if (zs_developer_settings_enabled()) return;
     [self zs_removePinnedKey:kZSPinKeySyslog delay:0];
@@ -21009,7 +21021,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 }
 
 - (CGFloat)zs_centeredClusterOffset {
-    return (CGFloat)[self zs_pinnedKeys].count * (kZSPinnedTabHeight + kZSPinnedTabGap) * 0.5;
+    return (CGFloat)[self zs_pinnedActionKeys].count * (kZSPinnedTabHeight + kZSPinnedTabGap) * 0.5;
 }
 
 - (CGRect)zs_pinAnchorFrame {
@@ -21079,7 +21091,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 
 - (UIView *)zs_makePinnedTabElementForKey:(NSString *)key {
     NSDictionary<NSString *, NSString *> *action = zs_pin_action_for_key(key);
-    if (!action || !self.glassContainerContent) return nil;
+    if ([key isEqualToString:kZSMTHandleKey] || !action || !self.glassContainerContent) return nil;
 
     UIView *element = nil;
     UIView *content = nil;
@@ -21147,7 +21159,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     self.pinRecenterPending = NO;
     self.pinRecenterToken = self.pinRecenterToken + 1;
     self.pinnedTabElements = [NSMutableDictionary dictionary];
-    for (NSString *key in [self zs_pinnedKeys]) {
+    for (NSString *key in [self zs_pinnedActionKeys]) {
         [self zs_makePinnedTabElementForKey:key];
     }
 }
@@ -21157,7 +21169,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 }
 
 - (void)zs_layoutPinnedTabsWithHandleY:(CGFloat)handleY localX:(CGFloat)x visible:(BOOL)visible updateIcons:(BOOL)updateIcons {
-    NSArray<NSString *> *keys = self.pinnedActionKeys;
+    NSArray<NSString *> *keys = [self zs_pinnedActionKeys];
     for (NSUInteger idx = 0; idx < keys.count; idx++) {
         UIView *element = self.pinnedTabElements[keys[idx]];
         if (!element) continue;
@@ -21172,6 +21184,10 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     if ([keys containsObject:key] || !zs_pin_action_for_key(key)) return;
     [keys addObject:key];
     [self zs_persistPinnedKeys];
+    if ([key isEqualToString:kZSMTHandleKey]) {
+        [self zs_refreshMetalTabs];
+        return;
+    }
     self.pinRecenterPending = YES;
     if (!self.pinMenuOpen) [self zs_schedulePinClusterRecenter];
 
@@ -21179,7 +21195,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     dispatch_block_t emerge = ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || !strongSelf.glassContainerContent || !strongSelf.panelOpen) return;
-        NSUInteger idx = [[strongSelf zs_pinnedKeys] indexOfObject:key];
+        NSUInteger idx = [[strongSelf zs_pinnedActionKeys] indexOfObject:key];
         if (idx == NSNotFound || strongSelf.pinnedTabElements[key]) return;
 
         UIView *element = [strongSelf zs_makePinnedTabElementForKey:key];
@@ -21192,7 +21208,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             typeof(self) innerSelf = weakSelf;
             if (!innerSelf || !innerSelf.panelOpen || innerSelf.pinnedTabElements[key] != element) return;
-            NSUInteger slotIdx = [[innerSelf zs_pinnedKeys] indexOfObject:key];
+            NSUInteger slotIdx = [[innerSelf zs_pinnedActionKeys] indexOfObject:key];
             if (slotIdx == NSNotFound) return;
             CGRect slot = [innerSelf zs_pinnedSlotFrameAtIndex:slotIdx handleY:[innerSelf zs_pinAnchorY] localX:[innerSelf zs_pinAnchorX]];
 
@@ -21253,8 +21269,11 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 - (void)zs_syncMetalTabsAllowingHierarchy:(BOOL)allowHierarchy snap:(BOOL)snap {
     ZSMetalTabs *tabs = [ZSMetalTabs shared];
     UIView *unityView = zs_ui_host_view();
-    NSArray<NSString *> *keys = [[self zs_pinnedKeys] copy];
-    BOOL show = unityView && self.installed && !self.panelOpen && (allowHierarchy || !self.glassContainer) && !self.tutorialPresented && !self.crashReportPresented && keys.count > 0;
+    NSArray<NSString *> *pinnedKeys = [[self zs_pinnedKeys] copy];
+    NSArray<NSString *> *keys = [self zs_pinnedActionKeys];
+    BOOL handlePinned = [pinnedKeys containsObject:kZSMTHandleKey];
+    BOOL hasPinnedItems = handlePinned || keys.count > 0;
+    BOOL show = unityView && self.installed && !self.panelOpen && (allowHierarchy || !self.glassContainer) && !self.tutorialPresented && !self.crashReportPresented && hasPinnedItems;
     if (!show) {
         [tabs setVisible:NO snap:NO];
         return;
@@ -21264,9 +21283,15 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     CGSize size = unityView.bounds.size;
     CGFloat tabX = size.width - kHandleWidth;
     CGFloat handleY = (size.height - kHandleHeight) * 0.5 + (CGFloat)keys.count * (kZSPinnedTabHeight + kZSPinnedTabGap) * 0.5;
-    NSMutableArray<NSValue *> *rects = [NSMutableArray arrayWithObject:[NSValue valueWithCGRect:CGRectMake(tabX, handleY, kHandleWidth, kHandleHeight)]];
-    NSMutableArray<NSString *> *itemKeys = [NSMutableArray arrayWithObject:kZSMTHandleKey];
-    NSMutableArray<NSString *> *symbols = [NSMutableArray arrayWithObject:@""];
+    if (!handlePinned) handleY += (kHandleHeight + kZSPinnedTabGap) * 0.5;
+    NSMutableArray<NSValue *> *rects = [NSMutableArray array];
+    NSMutableArray<NSString *> *itemKeys = [NSMutableArray array];
+    NSMutableArray<NSString *> *symbols = [NSMutableArray array];
+    if (handlePinned) {
+        [rects addObject:[NSValue valueWithCGRect:CGRectMake(tabX, handleY, kHandleWidth, kHandleHeight)]];
+        [itemKeys addObject:kZSMTHandleKey];
+        [symbols addObject:@""];
+    }
     for (NSUInteger idx = 0; idx < keys.count; idx++) {
         NSDictionary<NSString *, NSString *> *action = zs_pin_action_for_key(keys[idx]);
         if (!action) continue;
@@ -21291,6 +21316,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     if (!unityView || self.panelOpen) return;
 
     BOOL isMemory = [key isEqualToString:kZSPinKeyMemory];
+    BOOL isAssetExplorer = [key isEqualToString:kZSPinKeyAssetExplorer];
 
     self.panelOpen = YES;
     [[ZSMetalTabs shared] setVisible:NO snap:NO];
@@ -21301,6 +21327,8 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     self.extendedCoverEntering = YES;
     if (isMemory) {
         [self memoryUsageAnalyzeTapped:nil];
+    } else if (isAssetExplorer) {
+        [self zs_openAssetExplorerFullScreenPanel];
     } else {
         self.syslogTabEnabled = NO;
         [self toggleSyslogTapped];
@@ -21353,7 +21381,11 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
 
 - (void)zs_performPinnedActionForKey:(NSString *)key {
     if (!key) return;
-    BOOL needsPanel = [key isEqualToString:kZSPinKeyMemory] || [key isEqualToString:kZSPinKeySyslog];
+    if ([key isEqualToString:kZSMTHandleKey]) {
+        if (!self.panelOpen) [self openPanel];
+        return;
+    }
+    BOOL needsPanel = [key isEqualToString:kZSPinKeyMemory] || [key isEqualToString:kZSPinKeySyslog] || [key isEqualToString:kZSPinKeyAssetExplorer];
     if (needsPanel && !self.panelOpen) {
         [self zs_openExtendedOnlyForKey:key];
         return;
@@ -21365,6 +21397,8 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         [self toggleSyslogTapped];
     } else if ([key isEqualToString:kZSPinKeyMemoryCleanup]) {
         [self memoryCleanupTapped:nil];
+    } else if ([key isEqualToString:kZSPinKeyAssetExplorer]) {
+        [self zs_openAssetExplorerFullScreenPanel];
     } else if ([key isEqualToString:kZSPinKeyReapply]) {
         [self reapplySettingsTapped];
     }
