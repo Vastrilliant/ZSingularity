@@ -2434,12 +2434,13 @@ static const CGFloat kZSSectionIndexPeakGrowth = 0.65;
 static const CGFloat kZSSectionIndexFalloff = 0.9;
 static const CGFloat kZSSectionIndexLabelInset = 4;
 static const CGFloat kZSSectionIndexFullTitleScale = 1.35;
+static const CGFloat kZSSectionIndexShadowMargin = 22;
 
 @implementation ZSSectionIndexView {
     NSArray<NSString *> *_titles;
     NSArray<NSString *> *_fullTitles;
     NSMutableArray<UILabel *> *_labels;
-    UIView *_pill;
+    CAGradientLayer *_shadow;
     NSInteger _activeIndex;
     NSInteger _focusIndex;
     CGFloat _touchP;
@@ -2460,12 +2461,18 @@ static const CGFloat kZSSectionIndexFullTitleScale = 1.35;
     _focusIndex = -1;
     self.backgroundColor = UIColor.clearColor;
     self.multipleTouchEnabled = NO;
-    _pill = [[UIView alloc] init];
-    _pill.userInteractionEnabled = NO;
-    _pill.alpha = 0;
-    _pill.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.82];
-    _pill.layer.cornerCurve = kCACornerCurveContinuous;
-    [self addSubview:_pill];
+    _shadow = [CAGradientLayer layer];
+    _shadow.type = kCAGradientLayerRadial;
+    _shadow.colors = @[
+        (id)[UIColor colorWithWhite:0 alpha:0.62].CGColor,
+        (id)[UIColor colorWithWhite:0 alpha:0.34].CGColor,
+        (id)[UIColor colorWithWhite:0 alpha:0.0].CGColor,
+    ];
+    _shadow.locations = @[@0.0, @0.5, @1.0];
+    _shadow.startPoint = CGPointMake(0.5, 0.5);
+    _shadow.endPoint = CGPointMake(1.0, 1.0);
+    _shadow.opacity = 0;
+    [self.layer insertSublayer:_shadow atIndex:0];
     return self;
 }
 
@@ -2558,10 +2565,17 @@ static const CGFloat kZSSectionIndexFullTitleScale = 1.35;
         y += heights[i];
     }
 
-    CGFloat pillLeft = minLeft - kZSSectionIndexLabelInset;
-    _pill.frame = CGRectMake(pillLeft, startY - kZSSectionIndexVerticalPadding, width - pillLeft, (y - startY) + kZSSectionIndexVerticalPadding * 2);
-    _pill.alpha = t;
-    _pill.layer.cornerRadius = MIN(_pill.bounds.size.width * 0.5, 7 + 4 * t);
+    CGFloat reachX = (width - minLeft) + kZSSectionIndexShadowMargin;
+    CGFloat reachY = (y - startY) * 0.5 + kZSSectionIndexShadowMargin;
+    CGFloat grow = 0.35 + 0.65 * t;
+    CGFloat radiusX = reachX * grow;
+    CGFloat radiusY = reachY * grow;
+    CGFloat centerY = (startY + y) * 0.5;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _shadow.frame = CGRectMake(width - radiusX, centerY - radiusY, radiusX * 2, radiusY * 2);
+    _shadow.opacity = t;
+    [CATransaction commit];
 }
 
 - (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
