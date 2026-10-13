@@ -5673,24 +5673,54 @@ static BOOL zs_custom_logo_active(void) {
     return zs_logo_selected_font(12) != nil;
 }
 
-static UIColor *zs_title_color(void) {
-    return zs_custom_logo_active() ? UIColor.whiteColor : zs_accent_green_color();
+static NSAttributedString *zs_make_title_string(CGFloat restSize, CGFloat emphasizedSize) {
+    NSString *fullTitle = @"ZSingularity";
+    NSUInteger emphasizedLength = 2;
+    ZSLogoFontStyle *style = zs_custom_logo_active() ? zs_logo_selected_style().font : nil;
+
+    CGFloat restPoints = restSize;
+    CGFloat emphasizedPoints = emphasizedSize;
+    UIColor *color = zs_accent_green_color();
+
+    if (style) {
+        restPoints = restSize * style.sizeScale;
+        emphasizedPoints = style.emphasisScale > 0 ? restPoints * style.emphasisScale : emphasizedSize * style.sizeScale;
+        color = style.color;
+        if (style.textCase == ZSLogoTextCaseUpper) fullTitle = fullTitle.uppercaseString;
+        if (style.textCase == ZSLogoTextCaseLower) fullTitle = fullTitle.lowercaseString;
+    }
+
+    NSDictionary *(^attributesForSize)(CGFloat) = ^NSDictionary *(CGFloat points) {
+        NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+        attributes[NSFontAttributeName] = zs_title_font(points, UIFontWeightBold);
+        attributes[NSForegroundColorAttributeName] = color;
+        if (!style) return attributes;
+
+        if (style.spacing != 0) attributes[NSKernAttributeName] = @(style.spacing);
+        if (style.baselineOffset != 0) attributes[NSBaselineOffsetAttributeName] = @(style.baselineOffset);
+        if (style.shadowBlur > 0) {
+            CGFloat alpha = CGColorGetAlpha(style.shadowColor.CGColor) * style.shadowOpacity;
+            NSShadow *shadow = [[NSShadow alloc] init];
+            shadow.shadowBlurRadius = style.shadowBlur;
+            shadow.shadowOffset = style.shadowOffset;
+            shadow.shadowColor = [style.shadowColor colorWithAlphaComponent:alpha];
+            attributes[NSShadowAttributeName] = shadow;
+        }
+        if (style.strokeWidth > 0) {
+            attributes[NSStrokeWidthAttributeName] = @(-style.strokeWidth / points * 100.0);
+            attributes[NSStrokeColorAttributeName] = style.strokeColor;
+        }
+        return attributes;
+    };
+
+    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
+                                                                              attributes:attributesForSize(restPoints)];
+    [title setAttributes:attributesForSize(emphasizedPoints) range:NSMakeRange(0, emphasizedLength)];
+    return title;
 }
 
 static void zs_style_title_header_label(UILabel *label) {
-    NSString *fullTitle = @"ZSingularity";
-    NSString *emphasized = @"ZS";
-
-    NSMutableAttributedString *titleString =
-        [[NSMutableAttributedString alloc] initWithString:fullTitle
-                                                 attributes:@{
-            NSFontAttributeName: zs_title_font(33.75, UIFontWeightBold),
-            NSForegroundColorAttributeName: zs_title_color(),
-        }];
-    [titleString addAttribute:NSFontAttributeName
-                         value:zs_title_font(45, UIFontWeightBold)
-                         range:NSMakeRange(0, emphasized.length)];
-    label.attributedText = titleString;
+    label.attributedText = zs_make_title_string(33.75, 45);
 
     if (zs_custom_logo_active()) {
         zs_remove_gif_text_tint(label);
@@ -6262,6 +6292,7 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, copy) NSString *libraryImportTargetFolder;
 
 @property (nonatomic, weak) UIDocumentPickerViewController *patchLCPicker;
+@property (nonatomic, weak) UIDocumentPickerViewController *logoImportPicker;
 
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTimer *> *doctorPollTimers;
 
@@ -8247,16 +8278,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     UILabel *header = [[UILabel alloc] init];
     header.translatesAutoresizingMaskIntoConstraints = NO;
     header.textAlignment = NSTextAlignmentLeft;
-    NSString *fullTitle = @"ZSingularity";
-    NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
-                                                                                 attributes:@{
-        NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
-        NSForegroundColorAttributeName: zs_title_color()
-    }];
-    [title addAttribute:NSFontAttributeName
-                 value:zs_title_font(27.5, UIFontWeightBold)
-                 range:NSMakeRange(0, 2)];
-    header.attributedText = title;
+    header.attributedText = zs_make_title_string(20.5, 27.5);
     [panelHost addSubview:header];
 
     UILabel *welcome = [[UILabel alloc] init];
@@ -8490,15 +8512,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     UILabel *header = [[UILabel alloc] init];
     header.translatesAutoresizingMaskIntoConstraints = NO;
     header.textAlignment = NSTextAlignmentLeft;
-    NSMutableAttributedString *headerTitle = [[NSMutableAttributedString alloc] initWithString:@"ZSingularity"
-                                                                                     attributes:@{
-        NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
-        NSForegroundColorAttributeName: zs_title_color()
-    }];
-    [headerTitle addAttribute:NSFontAttributeName
-                        value:zs_title_font(27.5, UIFontWeightBold)
-                        range:NSMakeRange(0, 2)];
-    header.attributedText = headerTitle;
+    header.attributedText = zs_make_title_string(20.5, 27.5);
     [panelHost addSubview:header];
 
     UILabel *titleLabel = [[UILabel alloc] init];
@@ -13057,6 +13071,11 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
 
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count == 0) return;
+    if (controller == self.logoImportPicker) {
+        self.logoImportPicker = nil;
+        [self zs_handleLogoImportPickedURL:urls.firstObject];
+        return;
+    }
     if (controller == self.patchLCPicker) {
         self.patchLCPicker = nil;
         [self zs_handlePatchLCPickedURL:urls.firstObject];
@@ -22609,7 +22628,8 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     CGRect buttonFrame = [self.logoChevronButton convertRect:self.logoChevronButton.bounds toView:self.scrollView];
     CGFloat dropdownWidth = kZSLogoDropdownWidth;
     CGFloat rowHeight = kZSReencodeFieldHeight;
-    CGFloat dropdownHeight = rowHeight * names.count;
+    NSInteger rowCount = (NSInteger)names.count + 1;
+    CGFloat dropdownHeight = rowHeight * rowCount;
 
     CGFloat originX = CGRectGetMinX(buttonFrame);
     originX = MIN(originX, CGRectGetWidth(self.scrollView.bounds) - dropdownWidth - kPanelPadding);
@@ -22651,11 +22671,13 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 
     UIView *rowHost = glassOverlay ? glassOverlay.contentView : overlay;
 
-    for (NSInteger i = 0; i < (NSInteger)names.count; i++) {
-        NSString *name = names[i];
-        BOOL selected = [name isEqualToString:currentName];
+    for (NSInteger i = 0; i < rowCount; i++) {
+        BOOL isAddRow = i == (NSInteger)names.count;
+        NSString *name = isAddRow ? @"+ Add logo" : names[i];
+        BOOL selected = !isAddRow && [name isEqualToString:currentName];
         UIButton *optionButton = zs_make_docs_language_option_button(@{@"name": name}, selected, i, self,
                                                                        @selector(zs_logoDropdownOptionTapped:));
+        if (isAddRow) [optionButton setTitleColor:zs_accent_green_color() forState:UIControlStateNormal];
         optionButton.frame = CGRectMake(0, i * rowHeight, dropdownWidth, rowHeight);
         optionButton.alpha = 0;
         [rowHost addSubview:optionButton];
@@ -22725,11 +22747,16 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 
 - (void)zs_logoDropdownOptionTapped:(UIButton *)sender {
     NSArray<NSString *> *names = self.logoDropdownNames;
-    if (sender.tag < 0 || sender.tag >= (NSInteger)names.count) return;
+    if (sender.tag < 0 || sender.tag > (NSInteger)names.count) return;
+
+    if (sender.tag == (NSInteger)names.count) {
+        [self zs_closeLogoDropdownAnimated:YES];
+        [self zs_presentLogoImportPicker];
+        return;
+    }
 
     NSString *name = names[sender.tag];
     [self zs_closeLogoDropdownAnimated:YES];
-    if ([name isEqualToString:zs_logo_selected_name()]) return;
 
     UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
     [haptic selectionChanged];
@@ -22738,6 +22765,39 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
         if (success) return;
         UINotificationFeedbackGenerator *failHaptic = [UINotificationFeedbackGenerator new];
         [failHaptic notificationOccurred:UINotificationFeedbackTypeError];
+    });
+}
+
+- (void)zs_presentLogoImportPicker {
+    UIDocumentPickerViewController *picker;
+    if (@available(iOS 14.0, *)) {
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:YES];
+    } else {
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive"] inMode:UIDocumentPickerModeImport];
+    }
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) {
+        ZLog(@"[Logo] no root view controller to present the file picker from");
+        return;
+    }
+    self.logoImportPicker = picker;
+    [presenter presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)zs_handleLogoImportPickedURL:(NSURL *)url {
+    __weak typeof(self) weakSelf = self;
+    zs_logo_import_zip(url, ^(NSArray<NSString *> *importedNames, NSString *errorMessage) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (errorMessage) {
+            [strongSelf zs_presentModsAlertWithTitle:@"Couldn't Add Logo" message:errorMessage];
+            return;
+        }
+        zs_logo_select(importedNames.firstObject, nil);
     });
 }
 

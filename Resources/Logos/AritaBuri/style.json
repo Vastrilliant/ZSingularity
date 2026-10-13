@@ -1,0 +1,36 @@
+{
+  "font": {
+    "size": 1,
+    "emphasisScale": 0,
+    "spacing": 1,
+    "baselineOffset": 0,
+    "textCase": "none",
+    "color": "#FFFFFF",
+    "shadow": 4,
+    "shadowOffset": [0, 2],
+    "shadowColor": "#000000",
+    "shadowOpacity": 0.6,
+    "stroke": 0,
+    "strokeColor": "#000000"
+  },
+  "fill": {
+    "enabled": true,
+    "speed": 1,
+    "opacity": 1,
+    "scale": 1,
+    "offset": [0, 0],
+    "rotation": 0,
+    "blendMode": "normal"
+  },
+  "vfx": {
+    "enabled": true,
+    "speed": 1,
+    "opacity": 1,
+    "scale": 1,
+    "offset": [0, 0],
+    "rotation": 0,
+    "blendMode": "normal",
+    "layer": "above",
+    "maskToText": false
+  }
+}
