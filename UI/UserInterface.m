@@ -5669,6 +5669,14 @@ static UIImageView *zs_make_signature_overlay(void) {
     return view;
 }
 
+static BOOL zs_custom_logo_active(void) {
+    return zs_logo_selected_font(12) != nil;
+}
+
+static UIColor *zs_title_color(void) {
+    return zs_custom_logo_active() ? UIColor.whiteColor : zs_accent_green_color();
+}
+
 static void zs_style_title_header_label(UILabel *label) {
     NSString *fullTitle = @"ZSingularity";
     NSString *emphasized = @"ZS";
@@ -5677,12 +5685,18 @@ static void zs_style_title_header_label(UILabel *label) {
         [[NSMutableAttributedString alloc] initWithString:fullTitle
                                                  attributes:@{
             NSFontAttributeName: zs_title_font(33.75, UIFontWeightBold),
-            NSForegroundColorAttributeName: zs_accent_green_color(),
+            NSForegroundColorAttributeName: zs_title_color(),
         }];
     [titleString addAttribute:NSFontAttributeName
                          value:zs_title_font(45, UIFontWeightBold)
                          range:NSMakeRange(0, emphasized.length)];
     label.attributedText = titleString;
+
+    if (zs_custom_logo_active()) {
+        zs_remove_gif_text_tint(label);
+    } else {
+        zs_apply_gif_text_tint(label);
+    }
 }
 
 static UIImage *zs_make_logo_chevron_image(void) {
@@ -5711,7 +5725,6 @@ static UIView *zs_make_title_block(void) {
     headerLabel.textAlignment = NSTextAlignmentNatural;
 
     zs_style_title_header_label(headerLabel);
-    zs_apply_gif_text_tint(headerLabel);
     [container addSubview:headerLabel];
 
     UIButton *logoChevron = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -8238,7 +8251,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:fullTitle
                                                                                  attributes:@{
         NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
-        NSForegroundColorAttributeName: zs_accent_green_color()
+        NSForegroundColorAttributeName: zs_title_color()
     }];
     [title addAttribute:NSFontAttributeName
                  value:zs_title_font(27.5, UIFontWeightBold)
@@ -8480,7 +8493,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     NSMutableAttributedString *headerTitle = [[NSMutableAttributedString alloc] initWithString:@"ZSingularity"
                                                                                      attributes:@{
         NSFontAttributeName: zs_title_font(20.5, UIFontWeightBold),
-        NSForegroundColorAttributeName: zs_accent_green_color()
+        NSForegroundColorAttributeName: zs_title_color()
     }];
     [headerTitle addAttribute:NSFontAttributeName
                         value:zs_title_font(27.5, UIFontWeightBold)
