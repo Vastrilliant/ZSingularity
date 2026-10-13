@@ -5724,7 +5724,9 @@ static void zs_style_title_header_label(UILabel *label) {
 
     if (zs_custom_logo_active()) {
         zs_remove_gif_text_tint(label);
+        zs_logo_effects_attach(label);
     } else {
+        zs_logo_effects_detach(label);
         zs_apply_gif_text_tint(label);
     }
 }
@@ -5754,8 +5756,8 @@ static UIView *zs_make_title_block(void) {
     headerLabel.translatesAutoresizingMaskIntoConstraints = NO;
     headerLabel.textAlignment = NSTextAlignmentNatural;
 
-    zs_style_title_header_label(headerLabel);
     [container addSubview:headerLabel];
+    zs_style_title_header_label(headerLabel);
 
     UIButton *logoChevron = [UIButton buttonWithType:UIButtonTypeSystem];
     logoChevron.translatesAutoresizingMaskIntoConstraints = NO;
@@ -8784,6 +8786,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [[FPS120Controller shared] setPanelOpen:YES];
     zs_set_glass_suspended(NO);
     zs_gif_tint_set_paused(NO);
+    zs_logo_effects_set_paused(NO);
     zs_gif_tint_reconstruct_all();
     [self zs_updateSliderGlassVisibility];
 
@@ -8835,6 +8838,7 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [[FPS120Controller shared] setPanelOpen:NO];
     zs_set_glass_suspended(YES);
     zs_gif_tint_set_paused(YES);
+    zs_logo_effects_set_paused(YES);
     zs_gif_tint_teardown_all();
     [self stopPostFXReapply];
 
@@ -21451,6 +21455,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     [[FPS120Controller shared] setPanelOpen:YES];
     zs_set_glass_suspended(NO);
     zs_gif_tint_set_paused(NO);
+    zs_logo_effects_set_paused(NO);
     zs_gif_tint_reconstruct_all();
 
     [UIView animateWithDuration:0.28
@@ -22771,9 +22776,9 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 - (void)zs_presentLogoImportPicker {
     UIDocumentPickerViewController *picker;
     if (@available(iOS 14.0, *)) {
-        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP] asCopy:YES];
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP, UTTypeFolder]];
     } else {
-        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive"] inMode:UIDocumentPickerModeImport];
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder"] inMode:UIDocumentPickerModeOpen];
     }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;
@@ -22790,7 +22795,7 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 
 - (void)zs_handleLogoImportPickedURL:(NSURL *)url {
     __weak typeof(self) weakSelf = self;
-    zs_logo_import_zip(url, ^(NSArray<NSString *> *importedNames, NSString *errorMessage) {
+    zs_logo_import_item(url, ^(NSArray<NSString *> *importedNames, NSString *errorMessage) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         if (errorMessage) {

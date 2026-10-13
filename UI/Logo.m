@@ -2,6 +2,9 @@
 #import "Engine.h"
 #import "ZTweakLog.h"
 #import <CoreText/CoreText.h>
+#import <ImageIO/ImageIO.h>
+#import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #import <compression.h>
 
 NSString * const kZSLogoDefaultName = @"Default";
@@ -667,6 +670,409 @@ UIFont *zs_logo_selected_font(CGFloat size) {
     return [UIFont fontWithName:pack.postScriptName size:size];
 }
 
+#pragma mark - Effects
+
+static const NSUInteger kZSLogoAnimationMaxFrames = 240;
+static const double kZSLogoAnimationByteBudget = 64.0 * 1024 * 1024;
+static const CGFloat kZSLogoAnimationMaxPixels = 2048;
+static NSString * const kZSLogoFrameAnimationKey = @"zs.logo.frames";
+
+@interface ZSLogoAnimation : NSObject
+@property (nonatomic, strong) NSArray *frames;
+@property (nonatomic, strong) NSArray<NSNumber *> *keyTimes;
+@property (nonatomic, assign) NSTimeInterval duration;
+@property (nonatomic, assign) CGSize size;
+@end
+
+@implementation ZSLogoAnimation
+@end
+
+static NSCache<NSString *, ZSLogoAnimation *> *zs_logo_animation_cache(void) {
+    static NSCache<NSString *, ZSLogoAnimation *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [[NSCache alloc] init];
+        cache.totalCostLimit = (NSUInteger)(kZSLogoAnimationByteBudget * 2);
+    });
+    return cache;
+}
+
+static NSString *zs_logo_animation_key(NSString *path) {
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    return [NSString stringWithFormat:@"%@|%.3f|%llu", path,
+            [attributes.fileModificationDate timeIntervalSince1970], attributes.fileSize];
+}
+
+static NSTimeInterval zs_logo_frame_delay(CGImageSourceRef source, size_t index) {
+    NSDictionary *properties = (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, index, NULL);
+    NSDictionary *gif = properties[(__bridge NSString *)kCGImagePropertyGIFDictionary];
+    NSDictionary *png = properties[(__bridge NSString *)kCGImagePropertyPNGDictionary];
+    NSNumber *delay = gif[(__bridge NSString *)kCGImagePropertyGIFUnclampedDelayTime]
+        ?: gif[(__bridge NSString *)kCGImagePropertyGIFDelayTime]
+        ?: png[(__bridge NSString *)kCGImagePropertyAPNGUnclampedDelayTime]
+        ?: png[(__bridge NSString *)kCGImagePropertyAPNGDelayTime];
+    NSTimeInterval value = delay.doubleValue;
+    return value >= 0.011 ? value : 0.1;
+}
+
+static ZSLogoAnimation *zs_logo_decode_animation(NSString *path) {
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:path], NULL);
+    if (!source) return nil;
+
+    size_t count = MIN(CGImageSourceGetCount(source), (size_t)kZSLogoAnimationMaxFrames);
+    NSDictionary *first = (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    CGFloat width = [first[(__bridge NSString *)kCGImagePropertyPixelWidth] doubleValue];
+    CGFloat height = [first[(__bridge NSString *)kCGImagePropertyPixelHeight] doubleValue];
+    if (count == 0 || width <= 0 || height <= 0) {
+        CFRelease(source);
+        return nil;
+    }
+
+    CGFloat longest = MAX(width, height);
+    CGFloat maxPixel = MIN(longest, kZSLogoAnimationMaxPixels);
+    double ratio = maxPixel / longest;
+    double bytes = (double)count * (width * ratio) * (height * ratio) * 4.0;
+    if (bytes > kZSLogoAnimationByteBudget) {
+        maxPixel = MAX(1, floor(maxPixel * sqrt(kZSLogoAnimationByteBudget / bytes)));
+        ratio = maxPixel / longest;
+        bytes = (double)count * (width * ratio) * (height * ratio) * 4.0;
+    }
+
+    NSDictionary *options = @{
+        (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+        (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES,
+        (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(ceil(maxPixel)),
+    };
+
+    NSMutableArray *frames = [NSMutableArray arrayWithCapacity:count];
+    NSMutableArray<NSNumber *> *starts = [NSMutableArray arrayWithCapacity:count];
+    NSTimeInterval elapsed = 0;
+    for (size_t i = 0; i < count; i++) {
+        @autoreleasepool {
+            CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, i, (__bridge CFDictionaryRef)options);
+            if (!image) continue;
+            [frames addObject:(__bridge id)image];
+            CGImageRelease(image);
+            [starts addObject:@(elapsed)];
+            elapsed += zs_logo_frame_delay(source, i);
+        }
+    }
+    CFRelease(source);
+    if (frames.count == 0) return nil;
+
+    NSMutableArray<NSNumber *> *keyTimes = [NSMutableArray arrayWithCapacity:starts.count];
+    for (NSNumber *start in starts) [keyTimes addObject:@(elapsed > 0 ? start.doubleValue / elapsed : 0)];
+
+    ZSLogoAnimation *animation = [[ZSLogoAnimation alloc] init];
+    animation.frames = frames;
+    animation.keyTimes = keyTimes;
+    animation.duration = elapsed;
+    animation.size = CGSizeMake(width, height);
+    return animation;
+}
+
+static ZSLogoAnimation *zs_logo_cached_animation(NSString *path) {
+    return [zs_logo_animation_cache() objectForKey:zs_logo_animation_key(path)];
+}
+
+static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
+    NSString *key = zs_logo_animation_key(path);
+    ZSLogoAnimation *cached = [zs_logo_animation_cache() objectForKey:key];
+    if (cached) return cached;
+
+    ZSLogoAnimation *decoded = zs_logo_decode_animation(path);
+    if (decoded) {
+        CGSize size = decoded.size;
+        NSUInteger cost = (NSUInteger)(size.width * size.height * 4.0 * decoded.frames.count);
+        [zs_logo_animation_cache() setObject:decoded forKey:key cost:cost];
+    }
+    return decoded;
+}
+
+@interface ZSLogoEffectView : UIView
+@property (nonatomic, weak) UILabel *label;
+@property (nonatomic, strong) ZSLogoLayerStyle *layerStyle;
+@property (nonatomic, assign) BOOL fillsText;
+@property (nonatomic, assign) BOOL animationsPaused;
+- (void)loadAssetAtPath:(NSString *)path;
+@end
+
+@implementation ZSLogoEffectView {
+    CALayer *_clipLayer;
+    CALayer *_contentLayer;
+    CALayer *_maskLayer;
+    ZSLogoAnimation *_animation;
+    NSString *_path;
+    id _activeObserver;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.translatesAutoresizingMaskIntoConstraints = NO;
+        self.userInteractionEnabled = NO;
+        self.isAccessibilityElement = NO;
+        self.backgroundColor = UIColor.clearColor;
+
+        _clipLayer = [CALayer layer];
+        _contentLayer = [CALayer layer];
+        _contentLayer.contentsGravity = kCAGravityResize;
+        [_clipLayer addSublayer:_contentLayer];
+        [self.layer addSublayer:_clipLayer];
+
+        __weak typeof(self) weakSelf = self;
+        _activeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                                            object:nil
+                                                                             queue:[NSOperationQueue mainQueue]
+                                                                        usingBlock:^(NSNotification *note) {
+            [weakSelf zs_applyFrames];
+        }];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (_activeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_activeObserver];
+}
+
+- (void)setLayerStyle:(ZSLogoLayerStyle *)layerStyle {
+    _layerStyle = layerStyle;
+    self.alpha = layerStyle.opacity;
+    self.layer.compositingFilter = layerStyle.compositingFilter;
+    [self setNeedsLayout];
+    [self zs_applyFrames];
+}
+
+- (void)setAnimationsPaused:(BOOL)animationsPaused {
+    if (_animationsPaused == animationsPaused) return;
+    _animationsPaused = animationsPaused;
+    [self zs_applyFrames];
+}
+
+- (void)loadAssetAtPath:(NSString *)path {
+    _path = [path copy];
+    ZSLogoAnimation *cached = zs_logo_cached_animation(path);
+    if (cached) {
+        [self zs_setAnimation:cached];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ZSLogoAnimation *decoded = zs_logo_animation_for_path(path);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
+            [strongSelf zs_setAnimation:decoded];
+        });
+    });
+}
+
+- (void)zs_setAnimation:(ZSLogoAnimation *)animation {
+    _animation = animation;
+    [self setNeedsLayout];
+    [self zs_applyFrames];
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self zs_applyFrames];
+}
+
+- (void)zs_applyFrames {
+    [_contentLayer removeAnimationForKey:kZSLogoFrameAnimationKey];
+
+    ZSLogoAnimation *animation = _animation;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _contentLayer.contents = animation.frames.firstObject;
+    [CATransaction commit];
+
+    if (!animation || animation.frames.count < 2 || animation.duration <= 0) return;
+    if (_layerStyle.speed <= 0 || _animationsPaused || !self.window) return;
+
+    CAKeyframeAnimation *frames = [CAKeyframeAnimation animationWithKeyPath:@"contents"];
+    frames.calculationMode = kCAAnimationDiscrete;
+    frames.values = animation.frames;
+    frames.keyTimes = animation.keyTimes;
+    frames.duration = animation.duration / _layerStyle.speed;
+    frames.repeatCount = HUGE_VALF;
+    frames.removedOnCompletion = NO;
+    [_contentLayer addAnimation:frames forKey:kZSLogoFrameAnimationKey];
+}
+
+- (UIImage *)zs_renderTextMask {
+    UILabel *label = self.label;
+    CGSize size = self.bounds.size;
+    if (!label || label.attributedText.length == 0 || size.width <= 0 || size.height <= 0) return nil;
+
+    NSMutableAttributedString *text = [label.attributedText mutableCopy];
+    NSRange all = NSMakeRange(0, text.length);
+    [text removeAttribute:NSShadowAttributeName range:all];
+    [text removeAttribute:NSStrokeWidthAttributeName range:all];
+    [text removeAttribute:NSStrokeColorAttributeName range:all];
+    [text addAttribute:NSForegroundColorAttributeName value:UIColor.blackColor range:all];
+
+    UILabel *probe = [[UILabel alloc] initWithFrame:(CGRect){CGPointZero, size}];
+    probe.backgroundColor = UIColor.clearColor;
+    probe.numberOfLines = label.numberOfLines;
+    probe.lineBreakMode = label.lineBreakMode;
+    probe.textAlignment = label.textAlignment;
+    probe.attributedText = text;
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.opaque = NO;
+    format.scale = UIScreen.mainScreen.scale;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [probe.layer renderInContext:context.CGContext];
+    }];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    CGRect bounds = self.bounds;
+    ZSLogoLayerStyle *style = self.layerStyle;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    _clipLayer.frame = bounds;
+
+    BOOL masked = self.fillsText || style.maskToText;
+    UIImage *maskImage = masked ? [self zs_renderTextMask] : nil;
+    if (maskImage) {
+        if (!_maskLayer) _maskLayer = [CALayer layer];
+        _maskLayer.frame = _clipLayer.bounds;
+        _maskLayer.contentsScale = maskImage.scale;
+        _maskLayer.contents = (__bridge id)maskImage.CGImage;
+        _clipLayer.mask = _maskLayer;
+    } else {
+        _clipLayer.mask = nil;
+    }
+
+    CGSize imageSize = _animation.size;
+    if (imageSize.width > 0 && imageSize.height > 0 && bounds.size.width > 0 && bounds.size.height > 0) {
+        CGFloat aspect = imageSize.width / imageSize.height;
+        CGFloat width, height;
+        if (self.fillsText) {
+            if (bounds.size.width / bounds.size.height > aspect) {
+                width = bounds.size.width;
+                height = width / aspect;
+            } else {
+                height = bounds.size.height;
+                width = height * aspect;
+            }
+        } else {
+            width = bounds.size.width;
+            height = width / aspect;
+        }
+        width *= style.scale;
+        height *= style.scale;
+
+        _contentLayer.transform = CATransform3DIdentity;
+        _contentLayer.bounds = CGRectMake(0, 0, width, height);
+        _contentLayer.position = CGPointMake(CGRectGetMidX(bounds) + style.offset.width,
+                                             CGRectGetMidY(bounds) + style.offset.height);
+        _contentLayer.transform = CATransform3DMakeRotation(style.rotation * M_PI / 180.0, 0, 0, 1);
+        _contentLayer.hidden = NO;
+    } else {
+        _contentLayer.hidden = YES;
+    }
+
+    [CATransaction commit];
+}
+
+@end
+
+static const void *kZSLogoEffectsKey = &kZSLogoEffectsKey;
+static BOOL gZSLogoEffectsPaused = NO;
+
+static NSHashTable<ZSLogoEffectView *> *zs_logo_effect_views(void) {
+    static NSHashTable<ZSLogoEffectView *> *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ table = [NSHashTable weakObjectsHashTable]; });
+    return table;
+}
+
+void zs_logo_effects_detach(UILabel *label) {
+    if (!label) return;
+    NSArray<UIView *> *views = objc_getAssociatedObject(label, kZSLogoEffectsKey);
+    for (UIView *view in views) [view removeFromSuperview];
+    objc_setAssociatedObject(label, kZSLogoEffectsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static ZSLogoEffectView *zs_logo_make_effect_view(UILabel *label, ZSLogoLayerStyle *style, NSString *path, BOOL fillsText) {
+    ZSLogoEffectView *view = [[ZSLogoEffectView alloc] initWithFrame:CGRectZero];
+    view.label = label;
+    view.fillsText = fillsText;
+    view.animationsPaused = gZSLogoEffectsPaused;
+    view.layerStyle = style;
+    [zs_logo_effect_views() addObject:view];
+    [view loadAssetAtPath:path];
+    return view;
+}
+
+static void zs_logo_pin_effect_view(UIView *view, UIView *label) {
+    [NSLayoutConstraint activateConstraints:@[
+        [view.leadingAnchor constraintEqualToAnchor:label.leadingAnchor],
+        [view.trailingAnchor constraintEqualToAnchor:label.trailingAnchor],
+        [view.topAnchor constraintEqualToAnchor:label.topAnchor],
+        [view.bottomAnchor constraintEqualToAnchor:label.bottomAnchor],
+    ]];
+}
+
+void zs_logo_effects_attach(UILabel *label) {
+    zs_logo_effects_detach(label);
+
+    UIView *parent = label.superview;
+    ZSLogoPack *pack = zs_logo_selected_pack();
+    if (!parent || !pack) return;
+
+    ZSLogoStyle *style = pack.style;
+    NSMutableArray<UIView *> *attached = [NSMutableArray array];
+    ZSLogoEffectView *fill = nil;
+
+    if (pack.fillPath && style.fill.enabled) {
+        fill = zs_logo_make_effect_view(label, style.fill, pack.fillPath, YES);
+        [parent insertSubview:fill aboveSubview:label];
+        zs_logo_pin_effect_view(fill, label);
+        [attached addObject:fill];
+    }
+
+    if (pack.vfxPath && style.vfx.enabled) {
+        ZSLogoEffectView *vfx = zs_logo_make_effect_view(label, style.vfx, pack.vfxPath, NO);
+        if (style.vfx.aboveText) {
+            UIView *anchor = fill ? (UIView *)fill : (UIView *)label;
+            [parent insertSubview:vfx aboveSubview:anchor];
+        } else {
+            [parent insertSubview:vfx belowSubview:label];
+        }
+        zs_logo_pin_effect_view(vfx, label);
+        [attached addObject:vfx];
+    }
+
+    objc_setAssociatedObject(label, kZSLogoEffectsKey, attached, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+void zs_logo_effects_set_paused(BOOL paused) {
+    gZSLogoEffectsPaused = paused;
+    for (ZSLogoEffectView *view in zs_logo_effect_views().allObjects) view.animationsPaused = paused;
+}
+
+#pragma mark - Import
+
+@interface ZSLogoSourceEntry : NSObject
+@property (nonatomic, copy) NSString *path;
+@property (nonatomic, assign) uint64_t size;
+@property (nonatomic, copy) NSData *(^load)(NSString **errorOut);
+@end
+
+@implementation ZSLogoSourceEntry
+@end
+
 #pragma mark - Zip import
 
 @interface ZSLogoZipRecord : NSObject
@@ -886,27 +1292,13 @@ static BOOL zs_logo_import_commit(NSString *name, NSDictionary<NSString *, NSArr
     return YES;
 }
 
-static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **errorOut) {
-    NSData *zip = [NSData dataWithContentsOfURL:zipURL options:NSDataReadingMappedIfSafe error:nil];
-    if (!zip) {
-        *errorOut = @"Couldn't read that file.";
-        return nil;
-    }
-
-    NSString *error = nil;
-    NSArray<ZSLogoZipRecord *> *records = zs_zip_records(zip, &error);
-    if (!records) {
-        *errorOut = error;
-        return nil;
-    }
-
-    NSString *fallbackName = zipURL.lastPathComponent.stringByDeletingPathExtension;
+static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSString **errorOut) {
     NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSArray *> *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groupNames = [NSMutableDictionary dictionary];
 
-    for (ZSLogoZipRecord *record in records) {
-        if (record.path.length == 0 || [record.path hasSuffix:@"/"]) continue;
-        NSArray<NSString *> *components = [record.path componentsSeparatedByString:@"/"];
+    for (ZSLogoSourceEntry *entry in entries) {
+        if (entry.path.length == 0 || [entry.path hasSuffix:@"/"]) continue;
+        NSArray<NSString *> *components = [entry.path componentsSeparatedByString:@"/"];
 
         BOOL skip = NO;
         for (NSString *component in components) {
@@ -930,7 +1322,7 @@ static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **er
             group = [NSMutableDictionary dictionary];
             groups[groupKey] = group;
         }
-        if (!group[role]) group[role] = @[record, extension];
+        if (!group[role]) group[role] = @[entry, extension];
     }
 
     NSSet<NSString *> *remoteNames = [NSSet setWithArray:zs_logo_remote_cached_names()];
@@ -948,21 +1340,21 @@ static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **er
         for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx, kZSLogoRoleStyle]) {
             NSArray *asset = group[role];
             if (!asset) continue;
-            ZSLogoZipRecord *record = asset[0];
+            ZSLogoSourceEntry *entry = asset[0];
 
-            totalSize += record.uncompressedSize;
+            totalSize += entry.size;
             if (totalSize > kZSLogoZipMaxTotalSize) {
-                firstError = firstError ?: @"The zip is too large.";
+                firstError = firstError ?: @"The logo files are too large.";
                 groupOK = NO;
                 break;
             }
 
             NSString *extractError = nil;
-            NSData *data = zs_zip_extract(zip, record, &extractError);
+            NSData *data = entry.load(&extractError);
             BOOL isFont = [role isEqualToString:kZSLogoRoleFont];
             if (data && isFont && !zs_logo_font_data_is_valid(data)) {
                 data = nil;
-                extractError = [NSString stringWithFormat:@"%@ isn't a readable font.", record.path.lastPathComponent];
+                extractError = [NSString stringWithFormat:@"%@ isn't a readable font.", entry.path.lastPathComponent];
             }
             if (!data) {
                 if (isFont) {
@@ -985,18 +1377,105 @@ static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **er
     }
 
     if (imported.count == 0) {
-        *errorOut = firstError ?: @"No logo found. The zip needs a .ttf or .otf font, plus optional fill, vfx and style.json files.";
+        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional fill, vfx and style.json files, in a folder or a zip.";
         return nil;
     }
     return imported;
 }
 
-void zs_logo_import_zip(NSURL *zipURL, ZSLogoImportCompletion completion) {
-    BOOL scoped = [zipURL startAccessingSecurityScopedResource];
+static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **errorOut) {
+    NSData *zip = [NSData dataWithContentsOfURL:zipURL options:NSDataReadingMappedIfSafe error:nil];
+    if (!zip) {
+        *errorOut = @"Couldn't read that file.";
+        return nil;
+    }
+
+    NSString *error = nil;
+    NSArray<ZSLogoZipRecord *> *records = zs_zip_records(zip, &error);
+    if (!records) {
+        *errorOut = error;
+        return nil;
+    }
+
+    NSMutableArray<ZSLogoSourceEntry *> *entries = [NSMutableArray arrayWithCapacity:records.count];
+    for (ZSLogoZipRecord *record in records) {
+        ZSLogoSourceEntry *entry = [[ZSLogoSourceEntry alloc] init];
+        entry.path = record.path;
+        entry.size = record.uncompressedSize;
+        entry.load = ^NSData *(NSString **loadError) {
+            return zs_zip_extract(zip, record, loadError);
+        };
+        [entries addObject:entry];
+    }
+    return zs_logo_import_entries(entries, zipURL.lastPathComponent.stringByDeletingPathExtension, errorOut);
+}
+
+static NSArray<NSString *> *zs_logo_import_folder_sync(NSURL *folderURL, NSString **errorOut) {
+    NSString *root = folderURL.path;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDirectoryEnumerator<NSString *> *enumerator = [fm enumeratorAtPath:root];
+    if (!enumerator) {
+        *errorOut = @"Couldn't read that folder.";
+        return nil;
+    }
+
+    NSMutableArray<ZSLogoSourceEntry *> *entries = [NSMutableArray array];
+    NSUInteger visited = 0;
+    for (NSString *relative in enumerator) {
+        NSString *name = relative.lastPathComponent;
+        NSDictionary *attributes = enumerator.fileAttributes;
+        BOOL isDirectory = [attributes.fileType isEqualToString:NSFileTypeDirectory];
+        if ([name hasPrefix:@"."] || [name isEqualToString:@"__MACOSX"]) {
+            if (isDirectory) [enumerator skipDescendants];
+            continue;
+        }
+        if (++visited > kZSLogoZipMaxEntries) {
+            *errorOut = @"That folder has too many files.";
+            return nil;
+        }
+        if (![attributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+
+        NSString *fullPath = [root stringByAppendingPathComponent:relative];
+        uint64_t size = attributes.fileSize;
+        ZSLogoSourceEntry *entry = [[ZSLogoSourceEntry alloc] init];
+        entry.path = relative;
+        entry.size = size;
+        entry.load = ^NSData *(NSString **loadError) {
+            if (size > kZSLogoZipMaxEntrySize) {
+                *loadError = [NSString stringWithFormat:@"%@ is too large.", fullPath.lastPathComponent];
+                return nil;
+            }
+            NSData *data = [NSData dataWithContentsOfFile:fullPath options:NSDataReadingMappedIfSafe error:nil];
+            if (!data) *loadError = [NSString stringWithFormat:@"Couldn't read %@.", fullPath.lastPathComponent];
+            return data;
+        };
+        [entries addObject:entry];
+    }
+    return zs_logo_import_entries(entries, folderURL.lastPathComponent, errorOut);
+}
+
+static NSArray<NSString *> *zs_logo_import_item_sync(NSURL *url, NSString **errorOut) {
+    __block NSArray<NSString *> *result = nil;
+    __block NSString *failure = nil;
+    NSError *coordinationError = nil;
+    NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+    [coordinator coordinateReadingItemAtURL:url options:0 error:&coordinationError byAccessor:^(NSURL *readURL) {
+        NSNumber *isDirectory = nil;
+        [readURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+        NSString *error = nil;
+        result = isDirectory.boolValue ? zs_logo_import_folder_sync(readURL, &error) : zs_logo_import_zip_sync(readURL, &error);
+        failure = error;
+    }];
+    if (!result) *errorOut = failure ?: (coordinationError ? @"Couldn't read that item." : nil);
+    return result;
+}
+
+void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion) {
+    BOOL scoped = [url startAccessingSecurityScopedResource];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *error = nil;
-        NSArray<NSString *> *names = zs_logo_import_zip_sync(zipURL, &error);
-        if (scoped) [zipURL stopAccessingSecurityScopedResource];
+        NSArray<NSString *> *names = zs_logo_import_item_sync(url, &error);
+        if (scoped) [url stopAccessingSecurityScopedResource];
         dispatch_async(dispatch_get_main_queue(), ^{
             completion(names ?: @[], names ? nil : (error ?: @"Couldn't add that logo."));
         });

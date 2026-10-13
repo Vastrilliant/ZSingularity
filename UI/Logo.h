@@ -63,7 +63,7 @@ NSArray<NSString *> *zs_logo_cached_names(void);
 void zs_logo_refresh_names(ZSLogoNamesCompletion completion);
 
 BOOL zs_logo_is_local(NSString *name);
-void zs_logo_import_zip(NSURL *zipURL, ZSLogoImportCompletion completion);
+void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion);
 
 NSString *zs_logo_selected_name(void);
 void zs_logo_select(NSString *name, ZSLogoSelectCompletion _Nullable completion);
@@ -71,5 +71,9 @@ void zs_logo_select(NSString *name, ZSLogoSelectCompletion _Nullable completion)
 ZSLogoPack * _Nullable zs_logo_selected_pack(void);
 ZSLogoStyle * _Nullable zs_logo_selected_style(void);
 UIFont * _Nullable zs_logo_selected_font(CGFloat size);
+
+void zs_logo_effects_attach(UILabel *label);
+void zs_logo_effects_detach(UILabel *label);
+void zs_logo_effects_set_paused(BOOL paused);
 
 NS_ASSUME_NONNULL_END
