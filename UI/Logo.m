@@ -401,6 +401,8 @@ static const NSUInteger kZSLogoSVGSettleMaxAttempts = 40;
 static const NSTimeInterval kZSLogoSVGSettlePollInterval = 0.03;
 static const NSTimeInterval kZSLogoSVGSettleCommitDelay = 0.08;
 static const NSTimeInterval kZSLogoSVGSettleFadeDuration = 0.15;
+static const CGFloat kZSLogoSVGRasterScale = 0.5;
+static const NSTimeInterval kZSLogoSVGProbeInterval = 6;
 
 static BOOL zs_logo_is_font_file(NSString *filename) {
     NSString *ext = filename.pathExtension.lowercaseString;
@@ -1014,39 +1016,38 @@ static NSString * const kZSLogoSVGPlaybackScript =
     @"(function(speed,paused){\n"
     @"var svg=document.querySelector('svg');\n"
     @"if(!svg)return;\n"
-    @"var smil=!!svg.pauseAnimations;\n"
     @"var z=window.__zs;\n"
     @"if(!z){\n"
-    @"z=window.__zs={speed:1,items:[]};\n"
-    @"Array.prototype.forEach.call(svg.querySelectorAll('animate,animateTransform,animateMotion,animateColor,set'),function(el){\n"
-    @"['dur','begin','end','repeatDur','min','max'].forEach(function(a){var v=el.getAttribute(a);if(v)z.items.push([el,a,v]);});});}\n"
-    @"function ms(t){var m;\n"
-    @"if((m=/^([+-]?\\d*\\.?\\d+)ms$/.exec(t)))return parseFloat(m[1]);\n"
-    @"if((m=/^([+-]?\\d*\\.?\\d+)s$/.exec(t)))return parseFloat(m[1])*1000;\n"
-    @"if((m=/^([+-]?\\d*\\.?\\d+)min$/.exec(t)))return parseFloat(m[1])*60000;\n"
-    @"if((m=/^([+-]?\\d*\\.?\\d+)h$/.exec(t)))return parseFloat(m[1])*3600000;\n"
-    @"if((m=/^([+-]?\\d*\\.?\\d+)$/.exec(t)))return parseFloat(m[1])*1000;\n"
-    @"if((m=/^(?:(\\d+):)?(\\d+):(\\d+(?:\\.\\d+)?)$/.exec(t)))return((+m[1]||0)*3600+(+m[2])*60+parseFloat(m[3]))*1000;\n"
-    @"return null;}\n"
-    @"function scale(v,f){return v.split(';').map(function(t){\n"
-    @"t=t.trim();var n=ms(t);\n"
-    @"if(n!==null)return(n/f)+'ms';\n"
-    @"var m=/^(\\S+?)\\s*([+-])\\s*(\\.?\\d[\\w.:]*)$/.exec(t);\n"
-    @"if(m){var o=ms(m[3]);if(o!==null)return m[1]+m[2]+(o/f)+'ms';}\n"
-    @"return t;}).join(';');}\n"
+    @"z=window.__zs={t:0,last:0,raf:0,speed:1,paused:true,frames:0,worst:0,since:0,report:''};\n"
+    @"if(svg.pauseAnimations)svg.pauseAnimations();\n"
+    @"z.tick=function(now){\n"
+    @"z.raf=0;\n"
+    @"if(z.paused)return;\n"
+    @"if(z.last){var dt=now-z.last;z.t+=dt*z.speed;z.frames++;if(dt>z.worst)z.worst=dt;}\n"
+    @"z.last=now;\n"
+    @"if(svg.setCurrentTime)svg.setCurrentTime(z.t/1000);\n"
+    @"if(!z.since)z.since=now;\n"
+    @"if(now-z.since>=3000){z.report=(z.frames*1000/(now-z.since)).toFixed(1)+'fps worst '+z.worst.toFixed(0)+'ms';z.frames=0;z.worst=0;z.since=now;}\n"
+    @"z.raf=requestAnimationFrame(z.tick);\n"
+    @"};\n"
+    @"}\n"
     @"var anims=document.getAnimations?document.getAnimations():[];\n"
-    @"if(speed<=0){\n"
-    @"anims.forEach(function(a){a.pause();a.currentTime=0;});\n"
-    @"if(smil){svg.pauseAnimations();svg.setCurrentTime(0);}\n"
-    @"return;}\n"
-    @"if(speed!==z.speed){\n"
-    @"var media=smil?svg.getCurrentTime()*z.speed:0;\n"
-    @"z.items.forEach(function(i){i[0].setAttribute(i[1],speed===1?i[2]:scale(i[2],speed));});\n"
     @"z.speed=speed;\n"
-    @"if(smil)svg.setCurrentTime(media/speed);}\n"
-    @"anims.forEach(function(a){a.playbackRate=speed;if(paused){a.pause();}else if(a.playState==='paused'){a.play();}});\n"
-    @"if(smil){if(paused){svg.pauseAnimations();}else{svg.unpauseAnimations();}}\n"
-    @"})(%g,%@);";
+    @"z.paused=paused||speed<=0;\n"
+    @"if(speed<=0){\n"
+    @"z.t=0;\n"
+    @"anims.forEach(function(a){a.pause();a.currentTime=0;});\n"
+    @"if(svg.setCurrentTime)svg.setCurrentTime(0);\n"
+    @"}else{\n"
+    @"anims.forEach(function(a){a.playbackRate=speed;if(z.paused){a.pause();}else if(a.playState==='paused'){a.play();}});\n"
+    @"}\n"
+    @"if(z.paused){\n"
+    @"if(z.raf){cancelAnimationFrame(z.raf);z.raf=0;}\n"
+    @"z.last=0;z.since=0;z.frames=0;z.worst=0;\n"
+    @"return;\n"
+    @"}\n"
+    @"if(!z.raf){z.last=0;z.since=0;z.raf=requestAnimationFrame(z.tick);}\n"
+    @"})(%g,%@);\n";
 
 static NSString * const kZSLogoSVGOptimizeScript =
     @"(function(){\n"
@@ -1189,6 +1190,7 @@ static UIView *zs_logo_park_view(void) {
     BOOL _settling;
     NSUInteger _settleGeneration;
     CGSize _settleSize;
+    NSUInteger _probeGeneration;
 }
 
 - (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg {
@@ -1204,7 +1206,7 @@ static UIView *zs_logo_park_view(void) {
     CGRect frame = CGRectMake(0, 0, MAX(1, round(svg.size.width * ratio)), MAX(1, round(svg.size.height * ratio)));
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
-    configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+    configuration.defaultWebpagePreferences.allowsContentJavaScript = YES;
     configuration.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
     WKWebView *web = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
     web.navigationDelegate = self;
@@ -1235,12 +1237,14 @@ static UIView *zs_logo_park_view(void) {
 }
 
 - (void)placeWithSize:(CGSize)size center:(CGPoint)center rotation:(CGFloat)radians {
-    BOOL resized = !CGSizeEqualToSize(_web.bounds.size, size);
+    CGSize raster = CGSizeMake(MAX(1, round(size.width * kZSLogoSVGRasterScale)), MAX(1, round(size.height * kZSLogoSVGRasterScale)));
+    BOOL resized = !CGSizeEqualToSize(_web.bounds.size, raster);
     _web.transform = CGAffineTransformIdentity;
-    if (resized) _web.bounds = CGRectMake(0, 0, size.width, size.height);
+    if (resized) _web.bounds = CGRectMake(0, 0, raster.width, raster.height);
     _web.center = center;
-    _web.transform = CGAffineTransformMakeRotation(radians);
-    if (resized) [self zs_beginSettlingAtSize:size];
+    CGFloat upscale = size.width / raster.width;
+    _web.transform = CGAffineTransformScale(CGAffineTransformMakeRotation(radians), upscale, upscale);
+    if (resized) [self zs_beginSettlingAtSize:raster];
 }
 
 - (void)zs_beginSettlingAtSize:(CGSize)size {
@@ -1331,6 +1335,20 @@ static UIView *zs_logo_park_view(void) {
     _appliedPaused = _paused;
     NSString *script = [NSString stringWithFormat:kZSLogoSVGPlaybackScript, _speed, _paused ? @"true" : @"false"];
     [_web evaluateJavaScript:script completionHandler:nil];
+    _probeGeneration++;
+    if (!_paused && _speed > 0) [self zs_scheduleProbe:_probeGeneration];
+}
+
+- (void)zs_scheduleProbe:(NSUInteger)generation {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoSVGProbeInterval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ZSLogoSVGRenderer *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_probeGeneration != generation || strongSelf->_paused) return;
+        [strongSelf->_web evaluateJavaScript:@"window.__zs?window.__zs.report:''" completionHandler:^(id result, NSError *error) {
+            if ([result isKindOfClass:[NSString class]] && [(NSString *)result length] > 0) ZLog(@"[Logo] svg playback: %@", result);
+            [weakSelf zs_scheduleProbe:generation];
+        }];
+    });
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
