@@ -31,6 +31,7 @@ static NSString * const kZSRamBypassSection = @"ramBypass";
 static NSString * const kZSRamBypassEnabledKey = @"enabled";
 static NSString * const kZSRamBypassHudKey = @"hud";
 static NSString * const kZSRamRedirectModeKey = @"redirectMode";
+static NSString * const kZSRamRedirectMinimumKey = @"redirectMinimum";
 
 #define ZS_MALLOC_ALLOCATION_MAGIC 0x5A534D414C4C4F43ull
 #define ZS_MALLOC_SLAB_MAGIC 0x5A53534C41424D47ull
@@ -76,8 +77,18 @@ static const uint64_t kZSTrimMinIntervalNs = 10ull * NSEC_PER_SEC;
 
 #define ZS_TRIM_BATCH 32
 static const uint64_t kZSDonatedMinimumBytes = 256ull * 1024ull * 1024ull;
-static const uint64_t kZSDonatedMinAllocation = 256ull * 1024ull;
-static const uint64_t kZSDonatedMinAllocation16KB = 16ull * 1024ull;
+#define ZS_REDIRECT_OPTION_COUNT 8
+#define ZS_REDIRECT_DEFAULT_INDEX 7
+static const uint64_t kZSRedirectMinimums[ZS_REDIRECT_OPTION_COUNT] = {
+    0ull,
+    4ull * 1024ull,
+    8ull * 1024ull,
+    16ull * 1024ull,
+    32ull * 1024ull,
+    64ull * 1024ull,
+    128ull * 1024ull,
+    256ull * 1024ull
+};
 static const uint64_t kZSDonatedLogStride = 256ull * 1024ull * 1024ull;
 
 #define ZS_BIN_COUNT 128
@@ -127,7 +138,7 @@ typedef struct {
 static _Atomic(uint8_t) g_poolReady;
 static _Atomic(uint8_t) g_mallocAllocationEnabled;
 static _Atomic(uint8_t) g_mallocZoneRegistered;
-static _Atomic(uint8_t) g_mallocRedirect16KB;
+static _Atomic(uint64_t) g_redirectMinimum = 256ull * 1024ull;
 static ZSClassBin g_classBins[ZS_MALLOC_SMALL_CLASS_COUNT];
 static ZSStatShard g_statShards[ZS_STAT_SHARDS];
 static malloc_zone_t g_mallocZone;
@@ -205,26 +216,37 @@ void zs_set_ram_hud_enabled(BOOL enabled)
 
 NSInteger zs_ram_redirect_mode(void)
 {
-    id stored = zs_settings_section(kZSRamBypassSection)[kZSRamRedirectModeKey];
-    NSInteger mode = [stored respondsToSelector:@selector(integerValue)] ? [stored integerValue] : 0;
+    NSDictionary *section = zs_settings_section(kZSRamBypassSection);
+    id stored = section[kZSRamRedirectMinimumKey];
 
-    return mode == 1 ? 1 : 0;
+    if ([stored respondsToSelector:@selector(integerValue)])
+    {
+        NSInteger index = [stored integerValue];
+
+        return index >= 0 && index < ZS_REDIRECT_OPTION_COUNT ? index : ZS_REDIRECT_DEFAULT_INDEX;
+    }
+
+    id legacy = section[kZSRamRedirectModeKey];
+
+    return [legacy respondsToSelector:@selector(integerValue)] && [legacy integerValue] == 1 ? 3 : ZS_REDIRECT_DEFAULT_INDEX;
 }
 
 void zs_set_ram_redirect_mode(NSInteger mode)
 {
-    mode = mode == 1 ? 1 : 0;
-    atomic_store_explicit(&g_mallocRedirect16KB, mode == 1, memory_order_release);
+    if (mode < 0 || mode >= ZS_REDIRECT_OPTION_COUNT)
+    {
+        mode = ZS_REDIRECT_DEFAULT_INDEX;
+    }
+
+    atomic_store_explicit(&g_redirectMinimum, kZSRedirectMinimums[mode], memory_order_release);
     NSMutableDictionary *section = [zs_settings_section(kZSRamBypassSection) mutableCopy] ?: [NSMutableDictionary new];
-    section[kZSRamRedirectModeKey] = @(mode);
+    section[kZSRamRedirectMinimumKey] = @(mode);
     zs_write_settings_section(kZSRamBypassSection, section);
 }
 
 static uint64_t zs_donated_min_allocation(void)
 {
-    return atomic_load_explicit(&g_mallocRedirect16KB, memory_order_acquire)
-        ? kZSDonatedMinAllocation16KB
-        : kZSDonatedMinAllocation;
+    return atomic_load_explicit(&g_redirectMinimum, memory_order_acquire);
 }
 
 void zs_set_donated_heap_enabled(BOOL enabled)
@@ -2818,7 +2840,7 @@ static void zs_ram_bypass_start(void)
 __attribute__((constructor))
 static void ZSRamBypassConstructor(void)
 {
-    atomic_store_explicit(&g_mallocRedirect16KB, zs_ram_redirect_mode() == 1, memory_order_release);
+    atomic_store_explicit(&g_redirectMinimum, kZSRedirectMinimums[zs_ram_redirect_mode()], memory_order_release);
 
     if (zs_ram_bypass_enabled())
     {

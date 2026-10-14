@@ -10388,7 +10388,7 @@ static const CGFloat kContentFadeHeight = 22;
 
     __weak typeof(self) weakRedirectSelf = self;
     UIControl *ramRedirectModeRow = zs_make_disclosure_row(@"Redirect minimum", @"", nil, NULL);
-    zs_disclosure_row_install_menu(ramRedirectModeRow, @[@"256 KB", @"16 KB"], zs_ram_redirect_mode(), ^(NSInteger index) {
+    zs_disclosure_row_install_menu(ramRedirectModeRow, @[@"None", @"4 KB", @"8 KB", @"16 KB", @"32 KB", @"64 KB", @"128 KB", @"256 KB"], zs_ram_redirect_mode(), ^(NSInteger index) {
         zs_set_ram_redirect_mode(index);
         [weakRedirectSelf zs_scheduleSave];
     });
