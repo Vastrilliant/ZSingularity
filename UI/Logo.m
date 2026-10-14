@@ -1041,7 +1041,7 @@ static NSString * const kZSLogoSVGPlaybackScript =
     @"if(smil)svg.setCurrentTime(media/speed);}\n"
     @"anims.forEach(function(a){a.playbackRate=speed;if(paused){a.pause();}else if(a.playState==='paused'){a.play();}});\n"
     @"if(smil){if(paused){svg.pauseAnimations();}else{svg.unpauseAnimations();}}\n"
-    @"})(%g,%@);"
+    @"})(%g,%@);";
 
 static UIWindow *zs_logo_host_window(void) {
     UIWindow *fallback = nil;
