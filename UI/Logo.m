@@ -1048,6 +1048,95 @@ static NSString * const kZSLogoSVGPlaybackScript =
     @"if(smil){if(paused){svg.pauseAnimations();}else{svg.unpauseAnimations();}}\n"
     @"})(%g,%@);";
 
+static NSString * const kZSLogoSVGOptimizeScript =
+    @"(function(){\n"
+    @"try{\n"
+    @"var svg=document.querySelector('svg');\n"
+    @"if(!svg||svg.__zsOpt)return 'skip';\n"
+    @"svg.__zsOpt=1;\n"
+    @"var NS='http://www.w3.org/2000/svg';\n"
+    @"var vb=svg.viewBox&&svg.viewBox.baseVal;\n"
+    @"if(!vb||!(vb.width>0)||!(vb.height>0))return 'noviewbox';\n"
+    @"var iw=window.innerWidth,ih=window.innerHeight,slackX=0,slackY=0;\n"
+    @"if(iw>0&&ih>0){var ar=iw/ih,vr=vb.width/vb.height;if(ar>vr)slackX=vb.height*ar-vb.width;else slackY=vb.width/ar-vb.height;}\n"
+    @"function kids(n){return Array.prototype.filter.call(n.childNodes,function(c){return c.nodeType===1;});}\n"
+    @"function num(v,d){var n=parseFloat(v);return isFinite(n)?n:d;}\n"
+    @"function refId(v){var m=/^url\\(\\s*['\"]?#([^'\")\\s]+)['\"]?\\s*\\)$/.exec((v||'').trim());return m?m[1]:null;}\n"
+    @"function filterOf(el){var id=refId(el.getAttribute('filter'));var f=id?document.getElementById(id):null;return f&&f.localName==='filter'?f:null;}\n"
+    @"function isMotion(n){return n.localName==='animateTransform'||n.localName==='animateMotion';}\n"
+    @"function padFor(f){\n"
+    @"if(f.hasAttribute('href')||f.hasAttribute('xlink:href')||f.hasAttribute('filterRes'))return -1;\n"
+    @"if(f.getAttribute('primitiveUnits')==='objectBoundingBox')return -1;\n"
+    @"var pad=0,ps=kids(f);\n"
+    @"for(var i=0;i<ps.length;i++){\n"
+    @"var n=ps[i].localName;\n"
+    @"if(n==='feGaussianBlur'){\n"
+    @"var s=(ps[i].getAttribute('stdDeviation')||'0').split(/[\\s,]+/).map(function(v){return Math.abs(num(v,0));});\n"
+    @"pad=Math.max(pad,4*Math.max.apply(null,s));\n"
+    @"}else if(n!=='feColorMatrix'&&n!=='feComponentTransfer')return -1;\n"
+    @"}\n"
+    @"return Math.ceil(pad)+2;\n"
+    @"}\n"
+    @"function staticChain(el){\n"
+    @"for(var a=el.parentNode;a&&a!==svg;a=a.parentNode){\n"
+    @"if(a.nodeType!==1||a.localName!=='g'||a.hasAttribute('transform'))return false;\n"
+    @"if(kids(a).some(isMotion))return false;\n"
+    @"}\n"
+    @"return a===svg;\n"
+    @"}\n"
+    @"function oldArea(f,bb){\n"
+    @"if((f.getAttribute('filterUnits')||'objectBoundingBox')==='userSpaceOnUse')return null;\n"
+    @"function frac(a,d){var v=f.getAttribute(a);if(v===null)return d;v=v.trim();return /%$/.test(v)?parseFloat(v)/100:parseFloat(v);}\n"
+    @"var w=frac('width',1.2),h=frac('height',1.2);\n"
+    @"if(!isFinite(w)||!isFinite(h)||!(bb.width>0)||!(bb.height>0))return null;\n"
+    @"return bb.width*w*bb.height*h;\n"
+    @"}\n"
+    @"var stat={hoist:0,clamp:0};\n"
+    @"var groups={};\n"
+    @"Array.prototype.forEach.call(svg.querySelectorAll('[filter]'),function(el){\n"
+    @"var f=filterOf(el);\n"
+    @"if(!f)return;\n"
+    @"var id=f.getAttribute('id');\n"
+    @"var g=groups[id]||(groups[id]={f:f,els:[],ok:padFor(f)>=0});\n"
+    @"g.els.push(el);\n"
+    @"if(!g.ok)return;\n"
+    @"var own=kids(el).filter(isMotion);\n"
+    @"if(el.hasAttribute('transform')||(own.length&&el.localName!=='g')||!staticChain(el))g.ok=false;\n"
+    @"});\n"
+    @"Object.keys(groups).forEach(function(id){\n"
+    @"var g=groups[id];\n"
+    @"if(!g.ok)return;\n"
+    @"var pad=padFor(g.f);\n"
+    @"var padX=slackX+pad,padY=slackY+pad;\n"
+    @"var w=vb.width+2*padX,h=vb.height+2*padY;\n"
+    @"var smallest=Infinity;\n"
+    @"for(var i=0;i<g.els.length;i++){\n"
+    @"var bb;\n"
+    @"try{bb=g.els[i].getBBox();}catch(e){return;}\n"
+    @"var old=oldArea(g.f,bb);\n"
+    @"if(old===null)return;\n"
+    @"smallest=Math.min(smallest,old);\n"
+    @"}\n"
+    @"if(!(w*h<smallest*0.9))return;\n"
+    @"g.els.forEach(function(el){\n"
+    @"if(kids(el).some(isMotion)){\n"
+    @"var inner=document.createElementNS(NS,'g');\n"
+    @"while(el.firstChild)inner.appendChild(el.firstChild);\n"
+    @"el.appendChild(inner);\n"
+    @"stat.hoist++;\n"
+    @"}\n"
+    @"});\n"
+    @"g.f.setAttribute('filterUnits','userSpaceOnUse');\n"
+    @"g.f.setAttribute('x',String(vb.x-padX));\n"
+    @"g.f.setAttribute('y',String(vb.y-padY));\n"
+    @"g.f.setAttribute('width',String(w));\n"
+    @"g.f.setAttribute('height',String(h));\n"
+    @"stat.clamp++;\n"
+    @"});\n"
+    @"return 'hoist:'+stat.hoist+' clamp:'+stat.clamp;\n"
+    @"}catch(e){return 'error:'+(e&&e.message);}\n"
+    @"})();\n";
+
 static UIWindow *zs_logo_host_window(void) {
     UIWindow *fallback = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -1245,10 +1334,16 @@ static UIView *zs_logo_park_view(void) {
 }
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    _ready = YES;
-    _applied = NO;
-    [self zs_apply];
-    if (_settling) [self zs_pollSettleAttempt:0];
+    __weak typeof(self) weakSelf = self;
+    [webView evaluateJavaScript:kZSLogoSVGOptimizeScript completionHandler:^(id result, NSError *error) {
+        ZSLogoSVGRenderer *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        ZLog(@"[Logo] svg optimize: %@", error ? error.localizedDescription : result);
+        strongSelf->_ready = YES;
+        strongSelf->_applied = NO;
+        [strongSelf zs_apply];
+        if (strongSelf->_settling) [strongSelf zs_pollSettleAttempt:0];
+    }];
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
