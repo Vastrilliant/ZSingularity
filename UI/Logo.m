@@ -888,6 +888,7 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
 @property (nonatomic, assign) BOOL fillsText;
 @property (nonatomic, assign) BOOL animationsPaused;
 - (void)loadAssetAtPath:(NSString *)path;
+- (void)releaseAssets;
 @end
 
 @interface ZSLogoSVG : NSObject
@@ -913,6 +914,25 @@ static CGFloat zs_logo_svg_length(NSString *value) {
     if (![value isKindOfClass:[NSString class]] || value.length == 0 || [value containsString:@"%"]) return 0;
     double number = value.doubleValue;
     return (isfinite(number) && number > 0) ? (CGFloat)number : 0;
+}
+
+static NSString *zs_logo_svg_strip_noise(NSString *markup) {
+    static NSArray<NSRegularExpression *> *expressions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSRegularExpressionOptions options = NSRegularExpressionDotMatchesLineSeparators;
+        expressions = @[
+            [NSRegularExpression regularExpressionWithPattern:@"<!--.*?-->" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<metadata\\b.*?</metadata>" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<sodipodi:namedview\\b[^>]*?/>" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<sodipodi:namedview\\b.*?</sodipodi:namedview>" options:options error:nil],
+        ];
+    });
+    NSMutableString *result = [markup mutableCopy];
+    for (NSRegularExpression *expression in expressions) {
+        [expression replaceMatchesInString:result options:0 range:NSMakeRange(0, result.length) withTemplate:@""];
+    }
+    return result;
 }
 
 static NSCache<NSString *, ZSLogoSVG *> *zs_logo_svg_cache(void) {
@@ -970,6 +990,7 @@ static ZSLogoSVG *zs_logo_svg_for_path(NSString *path) {
         markup = [markup stringByReplacingCharactersInRange:NSMakeRange(0, 4)
                                                  withString:[NSString stringWithFormat:@"<svg viewBox=\"0 0 %g %g\"", width, height]];
     }
+    markup = zs_logo_svg_strip_noise(markup);
 
     ZSLogoSVG *svg = [[ZSLogoSVG alloc] init];
     svg.size = size;
@@ -978,125 +999,49 @@ static ZSLogoSVG *zs_logo_svg_for_path(NSString *path) {
         @"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1\">"
         @"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:\">"
         @"<style>html,body{margin:0;padding:0;width:100%%;height:100%%;background:transparent;overflow:hidden}"
-        @"svg{display:block;width:100%%;height:100%%}</style></head><body>%@</body></html>", markup];
+        @"svg{display:block;width:100%%;height:100%%;contain:layout paint style;will-change:transform;transform:translateZ(0)}"
+        @"</style></head><body>%@</body></html>", markup];
     [zs_logo_svg_cache() setObject:svg forKey:key];
     return svg;
 }
 
 static NSString * const kZSLogoSVGPlaybackScript =
-    @"(function(speed,paused){"
-    @"var svg=document.querySelector('svg');"
-    @"var z=window.__zs||(window.__zs={raf:0,t0:0,base:0});"
-    @"if(z.raf){cancelAnimationFrame(z.raf);z.raf=0;}"
-    @"var anims=document.getAnimations?document.getAnimations():[];"
-    @"if(speed<=0){"
-    @"anims.forEach(function(a){a.pause();a.currentTime=0;});"
-    @"if(svg&&svg.pauseAnimations){svg.pauseAnimations();svg.setCurrentTime(0);}"
-    @"return;}"
-    @"anims.forEach(function(a){a.playbackRate=speed;if(paused){a.pause();}else{a.play();}});"
-    @"if(!svg||!svg.pauseAnimations)return;"
-    @"if(paused){svg.pauseAnimations();return;}"
-    @"if(speed===1){svg.unpauseAnimations();return;}"
-    @"svg.pauseAnimations();"
-    @"z.base=svg.getCurrentTime();z.t0=0;"
-    @"var tick=function(ts){if(!z.t0)z.t0=ts;svg.setCurrentTime(z.base+(ts-z.t0)/1000*speed);z.raf=requestAnimationFrame(tick);};"
-    @"z.raf=requestAnimationFrame(tick);"
-    @"})(%g,%@);";
-
-static const NSTimeInterval kZSLogoBakeMaxDurationMs = 15000;
-static const double kZSLogoBakeFramesPerSecond = 24;
-static const double kZSLogoBakeByteBudget = 48.0 * 1024 * 1024;
-static const NSTimeInterval kZSLogoBakeWatchdog = 25;
-
-static NSString * const kZSLogoBakeProbeScript =
-    @"(function(){"
-    @"var cycles=[],max=0,i;"
-    @"function gcd(a,b){while(b){var t=b;b=a%b;a=t;}return a;}"
-    @"function clock(v){if(!v)return 0;v=String(v).trim();var m;"
-    @"if((m=/^([\\d.]+)ms$/.exec(v)))return parseFloat(m[1]);"
-    @"if((m=/^([\\d.]+)s$/.exec(v)))return parseFloat(m[1])*1000;"
-    @"if((m=/^([\\d.]+)min$/.exec(v)))return parseFloat(m[1])*60000;"
-    @"if((m=/^([\\d.]+)h$/.exec(v)))return parseFloat(m[1])*3600000;"
-    @"if((m=/^(?:(\\d+):)?(\\d+):([\\d.]+)$/.exec(v)))return ((+m[1]||0)*3600+(+m[2])*60+parseFloat(m[3]))*1000;"
-    @"var n=parseFloat(v);return isFinite(n)?n*1000:0;}"
-    @"(document.getAnimations?document.getAnimations():[]).forEach(function(a){"
-    @"var t=a.effect&&a.effect.getComputedTiming?a.effect.getComputedTiming():null;if(!t)return;"
-    @"var d=t.duration;if(typeof d!=='number'||!isFinite(d)||d<1)return;"
-    @"if(t.iterations===Infinity){cycles.push(d);}else if(isFinite(t.endTime)){max=Math.max(max,t.endTime);}});"
-    @"Array.prototype.forEach.call(document.querySelectorAll('animate,animateTransform,animateMotion,animateColor'),function(el){"
-    @"var d=clock(el.getAttribute('dur'));if(d<1)return;"
-    @"var rc=el.getAttribute('repeatCount'),rd=el.getAttribute('repeatDur'),b=clock(el.getAttribute('begin'));"
-    @"if(rc==='indefinite'||rd==='indefinite'){cycles.push(d);}"
-    @"else{var n=rc?parseFloat(rc):1;if(!isFinite(n)||n<1)n=1;max=Math.max(max,b+d*n);}});"
-    @"var total=0;"
-    @"if(cycles.length){var l=Math.round(cycles[0]),mx=l;"
-    @"for(i=1;i<cycles.length;i++){var c=Math.round(cycles[i]);if(c<1)continue;mx=Math.max(mx,c);l=l/gcd(l,c)*c;if(l>12000){l=0;break;}}"
-    @"total=l>0?l:mx;}"
-    @"return Math.max(total,max);})();";
-
-static NSString *zs_logo_svg_disk_directory(NSString *key) {
-    uint32_t hash = 5381;
-    const char *bytes = [[key stringByAppendingString:@"|v2"] UTF8String];
-    for (const char *p = bytes; *p; p++) hash = hash * 33 + (uint8_t)*p;
-    return [zs_logo_cache_directory() stringByAppendingPathComponent:[NSString stringWithFormat:@"svg-%08x", hash]];
-}
-
-static void zs_logo_svg_disk_store(NSString *key, ZSLogoAnimation *animation) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *directory = zs_logo_svg_disk_directory(key);
-    [fm removeItemAtPath:directory error:nil];
-    if (![fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil]) return;
-
-    NSUInteger index = 0;
-    for (id frame in animation.frames) {
-        UIImage *image = [UIImage imageWithCGImage:(__bridge CGImageRef)frame];
-        NSData *png = UIImagePNGRepresentation(image);
-        if (!png || ![png writeToFile:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.png", (unsigned long)index]] atomically:YES]) {
-            [fm removeItemAtPath:directory error:nil];
-            return;
-        }
-        index++;
-    }
-    NSDictionary *meta = @{
-        @"count": @(animation.frames.count),
-        @"duration": @(animation.duration),
-        @"width": @(animation.size.width),
-        @"height": @(animation.size.height),
-    };
-    [meta writeToFile:[directory stringByAppendingPathComponent:@"meta.plist"] atomically:YES];
-}
-
-static ZSLogoAnimation *zs_logo_svg_disk_load(NSString *key) {
-    NSString *directory = zs_logo_svg_disk_directory(key);
-    NSDictionary *meta = [NSDictionary dictionaryWithContentsOfFile:[directory stringByAppendingPathComponent:@"meta.plist"]];
-    NSUInteger count = [meta[@"count"] unsignedIntegerValue];
-    if (count == 0 || count > kZSLogoAnimationMaxFrames) return nil;
-
-    NSDictionary *options = @{(__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES};
-    NSMutableArray *frames = [NSMutableArray arrayWithCapacity:count];
-    for (NSUInteger i = 0; i < count; i++) {
-        @autoreleasepool {
-            NSURL *url = [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu.png", (unsigned long)i]]];
-            CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
-            CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source, 0, (__bridge CFDictionaryRef)options) : NULL;
-            if (source) CFRelease(source);
-            if (!image) return nil;
-            [frames addObject:(__bridge id)image];
-            CGImageRelease(image);
-        }
-    }
-
-    NSTimeInterval duration = [meta[@"duration"] doubleValue];
-    NSMutableArray<NSNumber *> *keyTimes = [NSMutableArray arrayWithCapacity:count];
-    for (NSUInteger i = 0; i < count; i++) [keyTimes addObject:@((double)i / (double)count)];
-
-    ZSLogoAnimation *animation = [[ZSLogoAnimation alloc] init];
-    animation.frames = frames;
-    animation.keyTimes = keyTimes;
-    animation.duration = duration;
-    animation.size = CGSizeMake([meta[@"width"] doubleValue], [meta[@"height"] doubleValue]);
-    return animation;
-}
+    @"(function(speed,paused){\n"
+    @"var svg=document.querySelector('svg');\n"
+    @"if(!svg)return;\n"
+    @"var smil=!!svg.pauseAnimations;\n"
+    @"var z=window.__zs;\n"
+    @"if(!z){\n"
+    @"z=window.__zs={speed:1,items:[]};\n"
+    @"Array.prototype.forEach.call(svg.querySelectorAll('animate,animateTransform,animateMotion,animateColor,set'),function(el){\n"
+    @"['dur','begin','end','repeatDur','min','max'].forEach(function(a){var v=el.getAttribute(a);if(v)z.items.push([el,a,v]);});});}\n"
+    @"function ms(t){var m;\n"
+    @"if((m=/^([+-]?\\d*\\.?\\d+)ms$/.exec(t)))return parseFloat(m[1]);\n"
+    @"if((m=/^([+-]?\\d*\\.?\\d+)s$/.exec(t)))return parseFloat(m[1])*1000;\n"
+    @"if((m=/^([+-]?\\d*\\.?\\d+)min$/.exec(t)))return parseFloat(m[1])*60000;\n"
+    @"if((m=/^([+-]?\\d*\\.?\\d+)h$/.exec(t)))return parseFloat(m[1])*3600000;\n"
+    @"if((m=/^([+-]?\\d*\\.?\\d+)$/.exec(t)))return parseFloat(m[1])*1000;\n"
+    @"if((m=/^(?:(\\d+):)?(\\d+):(\\d+(?:\\.\\d+)?)$/.exec(t)))return((+m[1]||0)*3600+(+m[2])*60+parseFloat(m[3]))*1000;\n"
+    @"return null;}\n"
+    @"function scale(v,f){return v.split(';').map(function(t){\n"
+    @"t=t.trim();var n=ms(t);\n"
+    @"if(n!==null)return(n/f)+'ms';\n"
+    @"var m=/^(\\S+?)\\s*([+-])\\s*(\\.?\\d[\\w.:]*)$/.exec(t);\n"
+    @"if(m){var o=ms(m[3]);if(o!==null)return m[1]+m[2]+(o/f)+'ms';}\n"
+    @"return t;}).join(';');}\n"
+    @"var anims=document.getAnimations?document.getAnimations():[];\n"
+    @"if(speed<=0){\n"
+    @"anims.forEach(function(a){a.pause();a.currentTime=0;});\n"
+    @"if(smil){svg.pauseAnimations();svg.setCurrentTime(0);}\n"
+    @"return;}\n"
+    @"if(speed!==z.speed){\n"
+    @"var media=smil?svg.getCurrentTime()*z.speed:0;\n"
+    @"z.items.forEach(function(i){i[0].setAttribute(i[1],speed===1?i[2]:scale(i[2],speed));});\n"
+    @"z.speed=speed;\n"
+    @"if(smil)svg.setCurrentTime(media/speed);}\n"
+    @"anims.forEach(function(a){a.playbackRate=speed;if(paused){a.pause();}else if(a.playState==='paused'){a.play();}});\n"
+    @"if(smil){if(paused){svg.pauseAnimations();}else{svg.unpauseAnimations();}}\n"
+    @"})(%g,%@);"
 
 static UIWindow *zs_logo_host_window(void) {
     UIWindow *fallback = nil;
@@ -1110,301 +1055,222 @@ static UIWindow *zs_logo_host_window(void) {
     return fallback;
 }
 
-static CGSize zs_logo_bake_pixels(CGSize intrinsic, CGFloat longest) {
-    CGFloat major = MAX(intrinsic.width, intrinsic.height);
-    CGFloat ratio = major > 0 ? longest / major : 1;
-    return CGSizeMake(MAX(1, round(intrinsic.width * ratio)), MAX(1, round(intrinsic.height * ratio)));
+static UIView *zs_logo_park_view(void) {
+    static UIView *view;
+    UIWindow *window = zs_logo_host_window();
+    if (!view) {
+        if (!window) return nil;
+        view = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+        view.userInteractionEnabled = NO;
+        view.clipsToBounds = YES;
+        view.alpha = 0.02;
+        view.backgroundColor = UIColor.clearColor;
+    }
+    if (window && view.superview != window) [window insertSubview:view atIndex:0];
+    return view;
 }
 
-static CGFloat zs_logo_bake_longest(void) {
-    CGFloat width = UIScreen.mainScreen.bounds.size.width * UIScreen.mainScreen.scale * 0.5;
-    return MIN(1024, MAX(512, round(width)));
+@interface ZSLogoSVGRenderer : NSObject <WKNavigationDelegate>
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, strong) ZSLogoSVG *svg;
+@property (nonatomic, strong, readonly) WKWebView *web;
+@property (nonatomic, weak, nullable) ZSLogoEffectView *owner;
+- (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg;
+- (void)mountInto:(UIView *)host;
+- (void)park;
+- (void)teardown;
+- (void)invalidate;
+- (void)setSpeed:(double)speed paused:(BOOL)paused;
+@end
+
+@implementation ZSLogoSVGRenderer {
+    WKWebView *_web;
+    BOOL _ready;
+    BOOL _applied;
+    double _speed;
+    BOOL _paused;
+    double _appliedSpeed;
+    BOOL _appliedPaused;
 }
 
-static BOOL zs_logo_image_corner_is_opaque(CGImageRef image) {
-    uint8_t pixel[4] = {0, 0, 0, 0};
-    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixel, 1, 1, 8, 4, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(space);
-    if (!context) return YES;
-    CGFloat height = (CGFloat)CGImageGetHeight(image);
-    CGContextDrawImage(context, CGRectMake(0, 1 - height, (CGFloat)CGImageGetWidth(image), height), image);
-    CGContextRelease(context);
-    return pixel[3] == 255;
+- (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg {
+    self = [super init];
+    if (!self) return nil;
+    _key = [key copy];
+    _svg = svg;
+    _speed = 1;
+    _paused = YES;
+
+    CGFloat major = MAX(svg.size.width, svg.size.height);
+    CGFloat ratio = major > 0 ? 512.0 / major : 1;
+    CGRect frame = CGRectMake(0, 0, MAX(1, round(svg.size.width * ratio)), MAX(1, round(svg.size.height * ratio)));
+
+    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+    WKWebView *web = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
+    web.navigationDelegate = self;
+    web.opaque = NO;
+    web.backgroundColor = UIColor.clearColor;
+    web.underPageBackgroundColor = UIColor.clearColor;
+    web.userInteractionEnabled = NO;
+    web.allowsLinkPreview = NO;
+    web.scrollView.backgroundColor = UIColor.clearColor;
+    web.scrollView.scrollEnabled = NO;
+    web.scrollView.bounces = NO;
+    web.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    _web = web;
+
+    [self park];
+    [web loadHTMLString:svg.html baseURL:nil];
+    return self;
 }
 
-static BOOL zs_logo_image_has_content(CGImageRef image) {
-    const size_t side = 24;
-    uint8_t pixels[24 * 24 * 4];
-    memset(pixels, 0, sizeof(pixels));
-    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixels, side, side, 8, side * 4, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(space);
-    if (!context) return YES;
-    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
-    CGContextDrawImage(context, CGRectMake(0, 0, side, side), image);
-    CGContextRelease(context);
-    for (size_t i = 3; i < sizeof(pixels); i += 4) {
-        if (pixels[i] > 0) return YES;
+- (WKWebView *)web {
+    return _web;
+}
+
+- (void)mountInto:(UIView *)host {
+    if (_web.superview != host) [host addSubview:_web];
+}
+
+- (void)park {
+    self.owner = nil;
+    [self setSpeed:_speed paused:YES];
+
+    UIView *host = zs_logo_park_view();
+    if (!host) {
+        [_web removeFromSuperview];
+        return;
+    }
+    if (_web.superview != host) [host addSubview:_web];
+    _web.hidden = NO;
+    _web.transform = CGAffineTransformIdentity;
+    _web.frame = CGRectMake(0, 0, _web.bounds.size.width, _web.bounds.size.height);
+}
+
+- (void)teardown {
+    _web.navigationDelegate = nil;
+    [_web stopLoading];
+    [_web removeFromSuperview];
+}
+
+- (void)invalidate {
+    _applied = NO;
+    [self zs_apply];
+}
+
+- (void)setSpeed:(double)speed paused:(BOOL)paused {
+    _speed = speed;
+    _paused = paused;
+    [self zs_apply];
+}
+
+- (void)zs_apply {
+    if (!_ready) return;
+    if (_applied && _appliedSpeed == _speed && _appliedPaused == _paused) return;
+    _applied = YES;
+    _appliedSpeed = _speed;
+    _appliedPaused = _paused;
+    NSString *script = [NSString stringWithFormat:kZSLogoSVGPlaybackScript, _speed, _paused ? @"true" : @"false"];
+    [_web evaluateJavaScript:script completionHandler:nil];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    _ready = YES;
+    _applied = NO;
+    [self zs_apply];
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    _ready = NO;
+    _applied = NO;
+    [webView loadHTMLString:_svg.html baseURL:nil];
+}
+
+@end
+
+static NSMutableArray<ZSLogoSVGRenderer *> *zs_logo_svg_renderers(void) {
+    static NSMutableArray<ZSLogoSVGRenderer *> *renderers;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ renderers = [NSMutableArray array]; });
+    return renderers;
+}
+
+static NSString *zs_logo_svg_renderer_key(NSString *path, BOOL fill) {
+    return [zs_logo_animation_key(path) stringByAppendingString:fill ? @"|fill" : @"|vfx"];
+}
+
+static ZSLogoSVGRenderer *zs_logo_svg_free_renderer(NSString *key) {
+    for (ZSLogoSVGRenderer *renderer in zs_logo_svg_renderers()) {
+        if (!renderer.owner && [renderer.key isEqualToString:key]) return renderer;
+    }
+    return nil;
+}
+
+static BOOL zs_logo_svg_renderer_exists(NSString *key) {
+    for (ZSLogoSVGRenderer *renderer in zs_logo_svg_renderers()) {
+        if ([renderer.key isEqualToString:key]) return YES;
     }
     return NO;
 }
 
-typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
-
-@interface ZSLogoSVGBaker : NSObject <WKNavigationDelegate>
-+ (instancetype)shared;
-- (void)bake:(ZSLogoSVG *)svg key:(NSString *)key completion:(ZSLogoBakeCompletion)completion;
-@end
-
-@implementation ZSLogoSVGBaker {
-    NSMutableArray<NSMutableDictionary *> *_jobs;
-    WKWebView *_web;
-    void (^_loadHandler)(void);
-    BOOL _busy;
+static ZSLogoSVGRenderer *zs_logo_svg_make_renderer(NSString *key, ZSLogoSVG *svg) {
+    ZSLogoSVGRenderer *renderer = [[ZSLogoSVGRenderer alloc] initWithKey:key svg:svg];
+    [zs_logo_svg_renderers() addObject:renderer];
+    return renderer;
 }
 
-+ (instancetype)shared {
-    static ZSLogoSVGBaker *baker;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ baker = [[ZSLogoSVGBaker alloc] init]; });
-    return baker;
-}
-
-- (instancetype)init {
-    self = [super init];
-    if (self) _jobs = [NSMutableArray array];
-    return self;
-}
-
-- (void)bake:(ZSLogoSVG *)svg key:(NSString *)key completion:(ZSLogoBakeCompletion)completion {
-    for (NSMutableDictionary *job in _jobs) {
-        if ([job[@"key"] isEqualToString:key]) {
-            [job[@"completions"] addObject:[completion copy]];
-            return;
-        }
-    }
-    NSMutableDictionary *job = [@{
-        @"svg": svg,
-        @"key": key,
-        @"completions": [NSMutableArray arrayWithObject:[completion copy]],
-    } mutableCopy];
-    [_jobs addObject:job];
-    [self zs_next];
-}
-
-- (void)zs_next {
-    if (_busy || _jobs.count == 0) return;
-    _busy = YES;
-    [self zs_run:_jobs.firstObject];
-}
-
-- (void)zs_finish:(NSMutableDictionary *)job animation:(ZSLogoAnimation *)animation {
-    if (_jobs.firstObject != job) return;
-    [_jobs removeObjectAtIndex:0];
-    _busy = NO;
-    _loadHandler = nil;
-    if (_jobs.count == 0) {
-        [_web removeFromSuperview];
-        _web = nil;
-    }
-    for (ZSLogoBakeCompletion completion in job[@"completions"]) completion(animation);
-    [self zs_next];
-}
-
-- (void)zs_run:(NSMutableDictionary *)job {
-    UIWindow *window = zs_logo_host_window();
-    if (!window) {
-        [self zs_finish:job animation:nil];
-        return;
-    }
-
-    ZSLogoSVG *svg = job[@"svg"];
-    if (!_web) {
-        WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
-        WKWebView *web = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
-        web.navigationDelegate = self;
-        web.opaque = NO;
-        web.backgroundColor = UIColor.clearColor;
-        web.underPageBackgroundColor = UIColor.clearColor;
-        web.userInteractionEnabled = NO;
-        web.alpha = 0.02;
-        web.scrollView.backgroundColor = UIColor.clearColor;
-        web.scrollView.scrollEnabled = NO;
-        web.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-        _web = web;
-    }
-    if (_web.superview != window) [window addSubview:_web];
-    [window bringSubviewToFront:_web];
-
-    CGFloat scale = UIScreen.mainScreen.scale;
-    CGSize pixels = zs_logo_bake_pixels(svg.size, 512);
-    _web.frame = CGRectMake(0, 0, pixels.width / scale, pixels.height / scale);
-
-    __weak typeof(self) weakSelf = self;
-    _loadHandler = ^{
-        [weakSelf zs_probe:job];
-    };
-    [_web loadHTMLString:svg.html baseURL:nil];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoBakeWatchdog * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [weakSelf zs_finish:job animation:nil];
-    });
-}
-
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    void (^handler)(void) = _loadHandler;
-    _loadHandler = nil;
-    if (handler) handler();
-}
-
-- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    NSMutableDictionary *job = _jobs.firstObject;
-    if (job) [self zs_finish:job animation:nil];
-}
-
-- (void)zs_probe:(NSMutableDictionary *)job {
-    if (_jobs.firstObject != job) return;
-    __weak typeof(self) weakSelf = self;
-    [_web evaluateJavaScript:kZSLogoBakeProbeScript completionHandler:^(id result, NSError *error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf->_jobs.firstObject != job) return;
-        double duration = [result isKindOfClass:[NSNumber class]] ? [result doubleValue] : 0;
-        duration = MIN(MAX(duration, 0), kZSLogoBakeMaxDurationMs);
-        [strongSelf zs_prepare:job duration:duration];
-    }];
-}
-
-- (void)zs_prepare:(NSMutableDictionary *)job duration:(double)duration {
-    ZSLogoSVG *svg = job[@"svg"];
-    NSUInteger count = duration > 0
-        ? MIN((NSUInteger)kZSLogoAnimationMaxFrames, MAX((NSUInteger)2, (NSUInteger)ceil(duration / 1000.0 * kZSLogoBakeFramesPerSecond)))
-        : 1;
-
-    CGFloat scale = UIScreen.mainScreen.scale;
-    CGFloat longest = zs_logo_bake_longest();
-    CGSize pixels = zs_logo_bake_pixels(svg.size, longest);
-    while ((double)count * pixels.width * pixels.height * 4.0 > kZSLogoBakeByteBudget && longest > 96) {
-        longest *= 0.85;
-        pixels = zs_logo_bake_pixels(svg.size, longest);
-    }
-    _web.frame = CGRectMake(0, 0, pixels.width / scale, pixels.height / scale);
-
-    ZLog(@"[Logo] baking svg: %lu frame(s), %.0fms, %.0fx%.0f px", (unsigned long)count, duration, pixels.width, pixels.height);
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf->_jobs.firstObject != job) return;
-        [strongSelf zs_capture:job index:0 count:count duration:duration frames:[NSMutableArray arrayWithCapacity:count]];
-    });
-}
-
-- (void)zs_capture:(NSMutableDictionary *)job index:(NSUInteger)index count:(NSUInteger)count duration:(double)duration frames:(NSMutableArray *)frames {
-    if (_jobs.firstObject != job) return;
-    double time = count > 1 ? duration * (double)index / (double)count : 0;
-    NSString *script = [NSString stringWithFormat:
-        @"(function(t){(document.getAnimations?document.getAnimations():[]).forEach(function(a){a.pause();a.currentTime=t;});"
-        @"var s=document.querySelector('svg');if(s&&s.pauseAnimations){s.pauseAnimations();s.setCurrentTime(t/1000);}})(%g);", time];
-
-    __weak typeof(self) weakSelf = self;
-    [_web evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf || strongSelf->_jobs.firstObject != job) return;
-
-        WKSnapshotConfiguration *configuration = [[WKSnapshotConfiguration alloc] init];
-        configuration.rect = strongSelf->_web.bounds;
-        [strongSelf->_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *snapshotError) {
-            typeof(self) innerSelf = weakSelf;
-            if (!innerSelf || innerSelf->_jobs.firstObject != job) return;
-            if (!image.CGImage) {
-                ZLog(@"[Logo] svg snapshot failed: %@", snapshotError.localizedDescription);
-                [innerSelf zs_finish:job animation:nil];
-                return;
-            }
-            if (index == 0 && zs_logo_image_corner_is_opaque(image.CGImage)) {
-                ZLog(@"[Logo] svg snapshot has an opaque background - using live rendering");
-                [innerSelf zs_finish:job animation:nil];
-                return;
-            }
-            if (zs_logo_image_has_content(image.CGImage)) job[@"content"] = @YES;
-            [frames addObject:(__bridge id)image.CGImage];
-            if (index + 1 < count) {
-                [innerSelf zs_capture:job index:index + 1 count:count duration:duration frames:frames];
-                return;
-            }
-
-            if (![job[@"content"] boolValue]) {
-                ZLog(@"[Logo] svg snapshots were blank - using live rendering");
-                [innerSelf zs_finish:job animation:nil];
-                return;
-            }
-
-            NSMutableArray<NSNumber *> *keyTimes = [NSMutableArray arrayWithCapacity:count];
-            for (NSUInteger i = 0; i < count; i++) [keyTimes addObject:@((double)i / (double)count)];
-
-            ZSLogoSVG *svg = job[@"svg"];
-            ZSLogoAnimation *animation = [[ZSLogoAnimation alloc] init];
-            animation.frames = frames;
-            animation.keyTimes = keyTimes;
-            animation.duration = count > 1 ? duration / 1000.0 : 0;
-            animation.size = svg.size;
-
-            NSString *key = job[@"key"];
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                zs_logo_svg_disk_store(key, animation);
-            });
-            [innerSelf zs_finish:job animation:animation];
-        }];
-    }];
-}
-
-@end
-
-static NSString *zs_logo_svg_bake_key(NSString *path) {
-    return [zs_logo_animation_key(path) stringByAppendingString:@"|svgbake"];
-}
-
-static void zs_logo_svg_cache_animation(NSString *key, ZSLogoAnimation *animation) {
-    CGImageRef first = animation.frames.count > 0 ? (__bridge CGImageRef)animation.frames.firstObject : NULL;
-    double pixels = first ? (double)CGImageGetWidth(first) * (double)CGImageGetHeight(first) : 0;
-    [zs_logo_animation_cache() setObject:animation forKey:key cost:(NSUInteger)(pixels * 4.0 * animation.frames.count)];
-}
-
-static void zs_logo_svg_prewarm(NSString *path) {
-    NSString *key = zs_logo_svg_bake_key(path);
-    if ([zs_logo_animation_cache() objectForKey:key]) return;
+static void zs_logo_svg_preload(NSString *path, BOOL fill) {
+    NSString *key = zs_logo_svg_renderer_key(path, fill);
+    if (zs_logo_svg_renderer_exists(key)) return;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ZSLogoAnimation *stored = zs_logo_svg_disk_load(key);
-        if (stored) {
-            zs_logo_svg_cache_animation(key, stored);
-            return;
-        }
         ZSLogoSVG *svg = zs_logo_svg_for_path(path);
         if (!svg) return;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [[ZSLogoSVGBaker shared] bake:svg key:key completion:^(ZSLogoAnimation *animation) {
-                if (animation) zs_logo_svg_cache_animation(key, animation);
-            }];
+            if (zs_logo_svg_renderer_exists(key)) return;
+            zs_logo_svg_make_renderer(key, svg);
         });
     });
 }
 
-@interface ZSLogoEffectView () <WKNavigationDelegate>
-@end
+static void zs_logo_svg_evict_unwanted(NSSet<NSString *> *wanted) {
+    NSMutableArray<ZSLogoSVGRenderer *> *pool = zs_logo_svg_renderers();
+    for (ZSLogoSVGRenderer *renderer in [pool copy]) {
+        if (renderer.owner || [wanted containsObject:renderer.key]) continue;
+        [renderer teardown];
+        [pool removeObject:renderer];
+    }
+}
+
+static void zs_logo_svg_remove_legacy_cache(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = zs_logo_cache_directory();
+    NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
+    for (NSString *name in [fm contentsOfDirectoryAtPath:root error:nil]) {
+        if (name.length != 12 || ![name hasPrefix:@"svg-"]) continue;
+        if ([[name substringFromIndex:4] rangeOfCharacterFromSet:hex.invertedSet].location != NSNotFound) continue;
+        NSString *directory = [root stringByAppendingPathComponent:name];
+        if (![fm fileExistsAtPath:[directory stringByAppendingPathComponent:@"meta.plist"]]) continue;
+        [fm removeItemAtPath:directory error:nil];
+    }
+}
 
 @implementation ZSLogoEffectView {
     UIView *_clipView;
     CALayer *_clipLayer;
-    WKWebView *_webView;
-    ZSLogoSVG *_svg;
-    BOOL _svgReady;
+    ZSLogoSVGRenderer *_renderer;
     CALayer *_contentLayer;
     CALayer *_maskLayer;
     ZSLogoAnimation *_animation;
     NSString *_path;
     id _activeObserver;
+    UIImage *_maskImage;
+    NSAttributedString *_maskText;
+    CGSize _maskSize;
+    BOOL _svgPlaced;
+    CGSize _placedSize;
+    CGPoint _placedPosition;
+    CGFloat _placedRotation;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1429,7 +1295,7 @@ static void zs_logo_svg_prewarm(NSString *path) {
                                                                             object:nil
                                                                              queue:[NSOperationQueue mainQueue]
                                                                         usingBlock:^(NSNotification *note) {
-            [weakSelf zs_applyFrames];
+            [weakSelf zs_resumeAfterActivation];
         }];
     }
     return self;
@@ -1437,6 +1303,12 @@ static void zs_logo_svg_prewarm(NSString *path) {
 
 - (void)dealloc {
     if (_activeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_activeObserver];
+    [_renderer park];
+}
+
+- (void)zs_resumeAfterActivation {
+    [_renderer invalidate];
+    [self zs_applyFrames];
 }
 
 - (void)setLayerStyle:(ZSLogoLayerStyle *)layerStyle {
@@ -1459,6 +1331,7 @@ static void zs_logo_svg_prewarm(NSString *path) {
         [self zs_loadSVGAtPath:path];
         return;
     }
+    [self zs_releaseRenderer];
     ZSLogoAnimation *cached = zs_logo_cached_animation(path);
     if (cached) {
         [self zs_setAnimation:cached];
@@ -1477,91 +1350,51 @@ static void zs_logo_svg_prewarm(NSString *path) {
 }
 
 - (void)zs_loadSVGAtPath:(NSString *)path {
-    NSString *key = zs_logo_svg_bake_key(path);
-    ZSLogoAnimation *cached = [zs_logo_animation_cache() objectForKey:key];
-    if (cached) {
-        [self zs_setSVG:nil];
-        [self zs_setAnimation:cached];
+    NSString *key = zs_logo_svg_renderer_key(path, self.fillsText);
+    ZSLogoSVGRenderer *ready = zs_logo_svg_free_renderer(key);
+    if (ready) {
+        [self zs_attachRenderer:ready];
         return;
     }
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ZSLogoAnimation *stored = zs_logo_svg_disk_load(key);
-        ZSLogoSVG *svg = stored ? nil : zs_logo_svg_for_path(path);
+        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
-
-            if (stored) {
-                zs_logo_svg_cache_animation(key, stored);
-                [strongSelf zs_setSVG:nil];
-                [strongSelf zs_setAnimation:stored];
-                return;
-            }
             if (!svg) {
-                [strongSelf zs_setSVG:nil];
+                [strongSelf zs_releaseRenderer];
+                [strongSelf setNeedsLayout];
                 return;
             }
-
-            [strongSelf zs_setSVG:svg];
-            [[ZSLogoSVGBaker shared] bake:svg key:key completion:^(ZSLogoAnimation *animation) {
-                typeof(self) bakedSelf = weakSelf;
-                if (!bakedSelf || ![bakedSelf->_path isEqualToString:path] || !animation) return;
-                zs_logo_svg_cache_animation(key, animation);
-                [bakedSelf zs_setSVG:nil];
-                [bakedSelf zs_setAnimation:animation];
-            }];
+            [strongSelf zs_attachRenderer:zs_logo_svg_free_renderer(key) ?: zs_logo_svg_make_renderer(key, svg)];
         });
     });
 }
 
-- (void)zs_setSVG:(ZSLogoSVG *)svg {
-    _svg = svg;
-    _svgReady = NO;
-    if (!svg) {
-        [_webView removeFromSuperview];
-        _webView = nil;
-        [self setNeedsLayout];
-        return;
+- (void)zs_attachRenderer:(ZSLogoSVGRenderer *)renderer {
+    if (_renderer != renderer) {
+        [self zs_releaseRenderer];
+        _renderer = renderer;
+        renderer.owner = self;
     }
-    if (!_webView) {
-        WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
-        WKWebView *webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
-        webView.navigationDelegate = self;
-        webView.opaque = NO;
-        webView.backgroundColor = UIColor.clearColor;
-        webView.underPageBackgroundColor = UIColor.clearColor;
-        webView.userInteractionEnabled = NO;
-        webView.hidden = YES;
-        webView.scrollView.backgroundColor = UIColor.clearColor;
-        webView.scrollView.scrollEnabled = NO;
-        webView.scrollView.bounces = NO;
-        webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-        [_clipView addSubview:webView];
-        _webView = webView;
-    }
-    [_webView loadHTMLString:svg.html baseURL:nil];
+    _animation = nil;
+    _svgPlaced = NO;
+    [renderer mountInto:_clipView];
     [self setNeedsLayout];
+    [self zs_applyFrames];
 }
 
-- (void)zs_applySVGPlayback {
-    if (!_webView || !_svgReady) return;
-    double speed = _layerStyle ? _layerStyle.speed : 1;
-    BOOL paused = _animationsPaused || !self.window;
-    NSString *script = [NSString stringWithFormat:kZSLogoSVGPlaybackScript, speed, paused ? @"true" : @"false"];
-    [_webView evaluateJavaScript:script completionHandler:nil];
+- (void)zs_releaseRenderer {
+    ZSLogoSVGRenderer *renderer = _renderer;
+    _renderer = nil;
+    _svgPlaced = NO;
+    if (renderer.owner == self) [renderer park];
 }
 
-- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
-    _svgReady = YES;
-    [self zs_applySVGPlayback];
-}
-
-- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
-    _svgReady = NO;
-    if (_svg) [webView loadHTMLString:_svg.html baseURL:nil];
+- (void)releaseAssets {
+    [self zs_releaseRenderer];
 }
 
 - (void)zs_setAnimation:(ZSLogoAnimation *)animation {
@@ -1578,12 +1411,12 @@ static void zs_logo_svg_prewarm(NSString *path) {
 - (void)zs_applyFrames {
     [_contentLayer removeAnimationForKey:kZSLogoFrameAnimationKey];
 
-    if (_svg) {
+    if (_renderer) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         _contentLayer.contents = nil;
         [CATransaction commit];
-        [self zs_applySVGPlayback];
+        [_renderer setSpeed:_layerStyle ? _layerStyle.speed : 1 paused:_animationsPaused || !self.window];
         return;
     }
 
@@ -1634,6 +1467,18 @@ static void zs_logo_svg_prewarm(NSString *path) {
     }];
 }
 
+- (UIImage *)zs_cachedTextMask {
+    NSAttributedString *text = self.label.attributedText;
+    CGSize size = self.bounds.size;
+    if (_maskImage && CGSizeEqualToSize(_maskSize, size) && text && [_maskText isEqualToAttributedString:text]) {
+        return _maskImage;
+    }
+    _maskImage = [self zs_renderTextMask];
+    _maskSize = size;
+    _maskText = [text copy];
+    return _maskImage;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
 
@@ -1646,18 +1491,26 @@ static void zs_logo_svg_prewarm(NSString *path) {
     _clipView.frame = bounds;
 
     BOOL masked = self.fillsText || style.maskToText;
-    UIImage *maskImage = masked ? [self zs_renderTextMask] : nil;
+    UIImage *maskImage = nil;
+    if (masked) {
+        maskImage = [self zs_cachedTextMask];
+    } else {
+        _maskImage = nil;
+        _maskText = nil;
+    }
     if (maskImage) {
         if (!_maskLayer) _maskLayer = [CALayer layer];
         _maskLayer.frame = _clipLayer.bounds;
-        _maskLayer.contentsScale = maskImage.scale;
-        _maskLayer.contents = (__bridge id)maskImage.CGImage;
-        _clipLayer.mask = _maskLayer;
-    } else {
+        if (_maskLayer.contents != (__bridge id)maskImage.CGImage) {
+            _maskLayer.contentsScale = maskImage.scale;
+            _maskLayer.contents = (__bridge id)maskImage.CGImage;
+        }
+        if (_clipLayer.mask != _maskLayer) _clipLayer.mask = _maskLayer;
+    } else if (_clipLayer.mask) {
         _clipLayer.mask = nil;
     }
 
-    CGSize imageSize = _svg ? _svg.size : _animation.size;
+    CGSize imageSize = _renderer ? _renderer.svg.size : _animation.size;
     if (imageSize.width > 0 && imageSize.height > 0 && bounds.size.width > 0 && bounds.size.height > 0) {
         CGFloat aspect = imageSize.width / imageSize.height;
         CGFloat width, height;
@@ -1680,15 +1533,23 @@ static void zs_logo_svg_prewarm(NSString *path) {
                                        CGRectGetMidY(bounds) + style.offset.height);
         CGFloat radians = style.rotation * M_PI / 180.0;
 
-        if (_svg) {
+        if (_renderer) {
             _contentLayer.hidden = YES;
-            _webView.hidden = NO;
-            _webView.transform = CGAffineTransformIdentity;
-            _webView.bounds = CGRectMake(0, 0, width, height);
-            _webView.center = position;
-            _webView.transform = CGAffineTransformMakeRotation(radians);
+            WKWebView *web = _renderer.web;
+            web.hidden = NO;
+            CGSize size = CGSizeMake(width, height);
+            if (!_svgPlaced || !CGSizeEqualToSize(_placedSize, size) ||
+                !CGPointEqualToPoint(_placedPosition, position) || _placedRotation != radians) {
+                web.transform = CGAffineTransformIdentity;
+                if (!CGSizeEqualToSize(web.bounds.size, size)) web.bounds = CGRectMake(0, 0, width, height);
+                web.center = position;
+                web.transform = CGAffineTransformMakeRotation(radians);
+                _svgPlaced = YES;
+                _placedSize = size;
+                _placedPosition = position;
+                _placedRotation = radians;
+            }
         } else {
-            _webView.hidden = YES;
             _contentLayer.transform = CATransform3DIdentity;
             _contentLayer.bounds = CGRectMake(0, 0, width, height);
             _contentLayer.position = position;
@@ -1697,7 +1558,8 @@ static void zs_logo_svg_prewarm(NSString *path) {
         }
     } else {
         _contentLayer.hidden = YES;
-        _webView.hidden = YES;
+        _renderer.web.hidden = YES;
+        _svgPlaced = NO;
     }
 
     [CATransaction commit];
@@ -1718,7 +1580,10 @@ static NSHashTable<ZSLogoEffectView *> *zs_logo_effect_views(void) {
 void zs_logo_effects_detach(UILabel *label) {
     if (!label) return;
     NSArray<UIView *> *views = objc_getAssociatedObject(label, kZSLogoEffectsKey);
-    for (UIView *view in views) [view removeFromSuperview];
+    for (UIView *view in views) {
+        if ([view isKindOfClass:[ZSLogoEffectView class]]) [(ZSLogoEffectView *)view releaseAssets];
+        [view removeFromSuperview];
+    }
     objc_setAssociatedObject(label, kZSLogoEffectsKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
@@ -1777,9 +1642,18 @@ void zs_logo_effects_attach(UILabel *label) {
 
 void zs_logo_prewarm(void) {
     ZSLogoPack *pack = zs_logo_selected_pack();
-    if (!pack) return;
-    if (pack.fillPath && pack.style.fill.enabled && zs_logo_is_svg_file(pack.fillPath)) zs_logo_svg_prewarm(pack.fillPath);
-    if (pack.vfxPath && pack.style.vfx.enabled && zs_logo_is_svg_file(pack.vfxPath)) zs_logo_svg_prewarm(pack.vfxPath);
+    NSMutableSet<NSString *> *wanted = [NSMutableSet set];
+    if (pack) {
+        if (pack.fillPath && pack.style.fill.enabled && zs_logo_is_svg_file(pack.fillPath)) {
+            [wanted addObject:zs_logo_svg_renderer_key(pack.fillPath, YES)];
+            zs_logo_svg_preload(pack.fillPath, YES);
+        }
+        if (pack.vfxPath && pack.style.vfx.enabled && zs_logo_is_svg_file(pack.vfxPath)) {
+            [wanted addObject:zs_logo_svg_renderer_key(pack.vfxPath, NO)];
+            zs_logo_svg_preload(pack.vfxPath, NO);
+        }
+    }
+    zs_logo_svg_evict_unwanted(wanted);
 }
 
 __attribute__((constructor)) static void zs_logo_prewarm_init(void) {
@@ -1790,6 +1664,10 @@ __attribute__((constructor)) static void zs_logo_prewarm_init(void) {
                                                       usingBlock:^(NSNotification *note) {
             zs_logo_prewarm();
         }];
+        zs_logo_prewarm();
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            zs_logo_svg_remove_legacy_cache();
+        });
         for (NSNumber *delay in @[@3, @10]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 zs_logo_prewarm();

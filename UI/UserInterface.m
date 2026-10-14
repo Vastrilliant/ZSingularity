@@ -16898,6 +16898,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         @{@"name": @"/symlink", @"desc": @"Expose Library in Files"},
         @{@"name": @"/patchlc", @"desc": @"Patch an IPA for LiveContainer"},
         @{@"name": @"/keepalive", @"desc": @"Toggle Keep Alive"},
+        @{@"name": @"/memlog", @"desc": @"Start the RamBypass allocation profiler"},
     ];
 }
 
@@ -17011,6 +17012,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     } else if ([name isEqualToString:@"/keepalive"]) {
         [self toggleKeepAliveTapped];
         [self zs_showSyslogToastWithText:self.keepAliveEnabled ? @"Keep Alive enabled" : @"Keep Alive disabled"];
+    } else if ([name isEqualToString:@"/memlog"]) {
+        zs_ram_bypass_memlog();
+        [self zs_showSyslogToastWithText:@"Memlog running"];
     }
 }
 
