@@ -138,22 +138,9 @@ import { inject } from "./js/inject.js";
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  channel: "release", versions: [], version: null, manifests: {}, nightly: null, loaded: false, loadError: null,
+  channel: "release", versions: [], version: null, manifests: {}, nightly: null,
   file: null, t0: 0, busy: false, outUrl: null, outBlob: null, outName: "",
 };
-
-const FALLBACK_REPO = "vastrilliant/ZSingularity";
-const DYLIB_ASSET = "ZSingularity.dylib";
-const APPEX_ASSET = "ZSRamDonor.appex.zip";
-
-function repoSlug() {
-  const host = location.hostname.match(/^([^.]+)\.github\.io$/i);
-  const first = location.pathname.split("/").filter(Boolean)[0];
-  return host && first ? host[1] + "/" + first : FALLBACK_REPO;
-}
-
-const REPO = repoSlug();
-const API = "https://api.github.com/repos/" + REPO;
 
 function fmtSize(n) {
   if (n >= 1073741824) return (n / 1073741824).toFixed(2) + " GB";
@@ -174,6 +161,10 @@ function log(msg, cls) {
   $("log").scrollTop = $("log").scrollHeight;
 }
 
+function basePath() {
+  return state.channel === "nightly" ? "payload/nightly/" : "payload/release/" + state.version + "/";
+}
+
 function current() {
   return state.channel === "nightly" ? state.nightly : state.manifests[state.version];
 }
@@ -182,8 +173,7 @@ function refresh() {
   const m = current();
   const name = state.channel === "nightly" ? "Nightly" : "Release";
   if (m) $("ver").textContent = name + " \u00b7 " + m.version + (m.build ? " \u00b7 build " + m.build : "");
-  else if (state.loadError) $("ver").textContent = state.loadError;
-  else if (state.loaded) $("ver").textContent = "No builds are published yet.";
+  else if (!state.versions.length && !state.nightly) $("ver").textContent = "No builds are published on this site yet.";
   else $("ver").textContent = "Loading\u2026";
   $("versionPop").classList.toggle("hidden", !(state.channel === "release" && state.versions.length));
   $("channelBtn").disabled = state.busy;
@@ -191,73 +181,27 @@ function refresh() {
   $("go").disabled = !(m && state.file) || state.busy;
 }
 
-async function githubFetch(url, init) {
-  const r = await fetch(url, init);
-  if ((r.status === 403 || r.status === 429) && r.headers.get("x-ratelimit-remaining") === "0") {
-    const reset = Number(r.headers.get("x-ratelimit-reset")) * 1000;
-    const mins = reset ? Math.max(1, Math.ceil((reset - Date.now()) / 60000)) : 0;
-    throw new Error("GitHub's rate limit was reached, try again " + (mins ? "in about " + mins + " min." : "later."));
-  }
-  return r;
+async function fetchJson(path) {
+  const r = await fetch(path, { cache: "no-store" });
+  if (!r.ok) throw new Error(path + " " + r.status);
+  return r.json();
 }
 
-function assetInfo(a) {
-  const m = /^sha256:([0-9a-f]{64})$/i.exec(a.digest || "");
-  return { file: a.name, url: a.url, size: a.size, sha256: m ? m[1].toLowerCase() : "" };
-}
-
-function manifestFor(rel, channel, version, commit) {
-  const dylib = (rel.assets || []).find((a) => a.name === DYLIB_ASSET && a.size > 0);
-  if (!dylib) return null;
-  const appex = rel.assets.find((a) => a.name === APPEX_ASSET && a.size > 0);
-  const build = (/build (\d+)/.exec(rel.body || "") || [])[1] || null;
-  return { channel, version, build, commit: commit || null, dylib: assetInfo(dylib), appex: appex ? assetInfo(appex) : null };
-}
-
-async function sourceVersion(ref) {
-  for (const r of [ref, "main"]) {
-    if (!r) continue;
-    try {
-      const res = await fetch("https://raw.githubusercontent.com/" + REPO + "/" + r + "/Core/Version.h", { cache: "no-cache" });
-      if (!res.ok) continue;
-      const text = await res.text();
-      const part = (n) => (new RegExp("#define ZS_VERSION_" + n + " (\\d+)").exec(text) || [])[1];
-      if (part("MAJOR") !== undefined && part("MINOR") !== undefined && part("PATCH") !== undefined) return part("MAJOR") + "." + part("MINOR") + "." + part("PATCH");
-    } catch (e) {}
-  }
-  return "nightly";
+async function ensureManifest(version) {
+  if (!state.manifests[version]) state.manifests[version] = await fetchJson("payload/release/" + version + "/manifest.json");
 }
 
 async function loadAll() {
+  try { state.nightly = await fetchJson("payload/nightly/manifest.json"); } catch (e) {}
   try {
-    const r = await githubFetch(API + "/releases?per_page=100", { headers: { Accept: "application/vnd.github+json" }, cache: "no-cache" });
-    if (!r.ok) throw new Error("GitHub returned " + r.status + " while listing releases.");
-    const releases = await r.json();
-    let nightlyRel = null;
-    const manifests = {};
-    for (const rel of releases) {
-      if (rel.draft) continue;
-      if (rel.tag_name === "nightly") {
-        nightlyRel = nightlyRel || rel;
-        continue;
-      }
-      if (rel.prerelease) continue;
-      const version = rel.tag_name.replace(/^v/, "");
-      const m = manifestFor(rel, "release", version, "");
-      if (m && !manifests[version]) manifests[version] = m;
+    const idx = await fetchJson("payload/release/index.json");
+    state.versions = idx.versions || [];
+    if (state.versions.length) {
+      state.version = state.versions[0];
+      await ensureManifest(state.version);
     }
-    state.manifests = manifests;
-    state.versions = Object.keys(manifests).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
-    state.version = state.versions[0] || null;
-    if (nightlyRel) {
-      const commit = nightlyRel.target_commitish || "";
-      state.nightly = manifestFor(nightlyRel, "nightly", await sourceVersion(commit), commit);
-    }
-    if (!state.versions.length && state.nightly) state.channel = "nightly";
-  } catch (e) {
-    state.loadError = e && e.message ? e.message : "Could not reach GitHub.";
-  }
-  state.loaded = true;
+  } catch (e) { state.versions = []; }
+  if (!state.versions.length && state.nightly) state.channel = "nightly";
   refresh();
 }
 
@@ -302,8 +246,10 @@ $("channelBtn").addEventListener("click", () => {
 });
 
 $("versionBtn").addEventListener("click", () => {
-  showMenu($("versionBtn"), state.versions.map((v) => ({ value: v, label: v })), state.version, (v) => {
+  showMenu($("versionBtn"), state.versions.map((v) => ({ value: v, label: v })), state.version, async (v) => {
     state.version = v;
+    refresh();
+    try { await ensureManifest(v); } catch (e) { $("ver").textContent = "Could not load " + v; return; }
     refresh();
   });
 });
@@ -330,23 +276,21 @@ async function sha256Hex(buf) {
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-async function fetchVerified(asset) {
+async function fetchVerified(path, expected) {
   const t = performance.now();
-  log("GET " + asset.url);
-  const r = await githubFetch(asset.url, { headers: { Accept: "application/octet-stream" } });
+  log("GET " + path);
+  const r = await fetch(path, { cache: "no-store" });
   log("  HTTP " + r.status + " " + r.statusText + " \u00b7 type " + (r.headers.get("content-type") || "?") + " \u00b7 length " + (r.headers.get("content-length") || "?"));
-  if (r.redirected) log("  served from " + new URL(r.url).host);
-  if (!r.ok) throw new Error("Could not download " + asset.file + " (" + r.status + ")");
+  if (!r.ok) throw new Error("Could not download " + path + " (" + r.status + ")");
   const buf = await r.arrayBuffer();
   log("  received " + fmtSize(buf.byteLength) + " (" + buf.byteLength + " bytes) in " + (performance.now() - t).toFixed(0) + " ms");
-  if (asset.size && buf.byteLength !== asset.size) throw new Error("Size mismatch for " + asset.file + ": expected " + asset.size + " bytes, got " + buf.byteLength + ".");
-  if (asset.sha256) {
+  if (expected) {
     const t2 = performance.now();
     const got = await sha256Hex(buf);
-    log("  sha256 expected " + asset.sha256);
+    log("  sha256 expected " + expected);
     log("  sha256 computed " + got + " (" + (performance.now() - t2).toFixed(0) + " ms)");
-    if (got !== asset.sha256) throw new Error("Checksum mismatch for " + asset.file + ". The release may have been replaced while downloading, try again.");
-  } else log("  no checksum published for this asset, skipping verification", "w");
+    if (got !== expected) throw new Error("Checksum mismatch for " + path + ". The site may be mid-update, try again in a minute.");
+  } else log("  no checksum in manifest, skipping verification", "w");
   return buf;
 }
 
@@ -372,6 +316,7 @@ $("go").addEventListener("click", async () => {
   reset();
   state.busy = true;
   refresh();
+  const base = basePath();
   let lock = null;
   try { lock = await navigator.wakeLock?.request("screen"); } catch (e) {}
   const t0 = performance.now();
@@ -381,13 +326,13 @@ $("go").addEventListener("click", async () => {
     log("Environment: " + navigator.userAgent);
     log("Wake lock: " + (lock ? "held" : "unavailable") + " \u00b7 crypto.subtle: " + (crypto && crypto.subtle ? "yes" : "NO") + " \u00b7 deviceMemory: " + (navigator.deviceMemory || "?") + " GB \u00b7 cores: " + (navigator.hardwareConcurrency || "?"));
     log("Input: " + state.file.name + " \u00b7 " + fmtSize(state.file.size) + " (" + state.file.size + " bytes) \u00b7 type " + (state.file.type || "unknown"));
-    log("Channel: " + state.channel + " \u00b7 repo " + REPO);
+    log("Channel: " + state.channel + " \u00b7 base " + base);
     log("Manifest: " + JSON.stringify(m));
     log("Fetching " + m.dylib.file + " (" + m.version + (m.build ? ", build " + m.build : "") + ")");
-    const dylib = new Uint8Array(await fetchVerified(m.dylib));
+    const dylib = new Uint8Array(await fetchVerified(base + m.dylib.file, m.dylib.sha256));
     let appex = null;
     if (m.appex) {
-      appex = new Blob([await fetchVerified(m.appex)]);
+      appex = new Blob([await fetchVerified(base + m.appex.file, m.appex.sha256)]);
       log("Fetched " + m.appex.file + " (" + fmtSize(appex.size) + ")");
     } else log("No extension in this build, skipping embed");
     log("Checksums OK", "k");
