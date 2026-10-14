@@ -44,6 +44,14 @@ typedef NS_ENUM(NSInteger, ZSAssetExplorerErrorCode) {
 @property (nonatomic, copy) NSString *formatName;
 @end
 
+@interface ZSAssetLocation : NSObject
+@property (nonatomic, copy) NSString *cabIdentifier;
+@property (nonatomic, copy) NSString *bundleName;
+@property (nonatomic, copy) NSString *filePath;
+@property (nonatomic, assign) int32_t classID;
+@property (nonatomic, assign) int64_t pathID;
+@end
+
 typedef UIImage * _Nullable (^ZSAssetExplorerPageProvider)(NSInteger page, NSError * _Nullable * _Nullable error);
 typedef UIImage * _Nullable (^ZSAssetExplorerLiveFrameProvider)(NSTimeInterval elapsed);
 typedef NSString * _Nullable (^ZSAssetExplorerLiveDebugProvider)(NSTimeInterval elapsed);
@@ -70,6 +78,10 @@ typedef NSString * _Nullable (^ZSAssetExplorerLiveDebugProvider)(NSTimeInterval 
                      batchSize:(NSUInteger)batchSize
                 shouldContinue:(nullable BOOL (^)(void))shouldContinue
                        handler:(void (^)(NSArray<ZSAssetExplorerBundle *> *updated))handler;
++ (BOOL)isNameIndexBuilding;
++ (NSUInteger)indexedBundleCount;
++ (void)buildNameIndexWithProgress:(nullable void (^)(NSUInteger done, NSUInteger total))progress completion:(nullable void (^)(BOOL success))completion;
++ (NSArray<ZSAssetLocation *> *)locationsForAssetName:(NSString *)name classIDs:(NSArray<NSNumber *> *)classIDs;
 + (BOOL)loadBundleIntoMemoryAtPath:(NSString *)path error:(NSError **)error;
 + (void)unloadBundleAtPath:(NSString *)path;
 + (void)unloadAllBundles;

@@ -6351,6 +6351,9 @@ static ZSAssetExplorerVisual *ZSAEBuildParticleVisual(ZSAEContext *context, ZSAE
 @implementation ZSAssetExplorerTexture
 @end
 
+@implementation ZSAssetLocation
+@end
+
 static id ZSAEJSONSafeValue(id value, NSUInteger depth, NSUInteger *budget) {
     if (!value || *budget == 0) return [NSNull null];
     (*budget)--;
@@ -6807,6 +6810,132 @@ static NSString *ZSAEObjectKey(ZSAEObject *object) {
     return [NSString stringWithFormat:@"%@|%lld", object.session.bundlePath ?: @"", (long long)object.pathID];
 }
 
+
+
+typedef struct {
+    uint64_t hash;
+    int64_t pathID;
+    int32_t classID;
+    int32_t reserved;
+} ZSAEIndexRecord;
+
+static uint64_t ZSAEHashName(NSString *name) {
+    const char *utf8 = [name lowercaseString].UTF8String;
+    uint64_t hash = 1469598103934665603ULL;
+    if (!utf8) return hash;
+    for (const unsigned char *c = (const unsigned char *)utf8; *c; c++) {
+        hash ^= *c;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static NSObject *ZSAEIndexLock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [NSObject new]; });
+    return lock;
+}
+
+static NSString *ZSAEIndexPath(void) {
+    NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    return caches ? [caches stringByAppendingPathComponent:@"ZSAssetNameIndex.plist"] : nil;
+}
+
+static NSMutableDictionary<NSString *, NSDictionary *> *ZSAEIndexStore(void) {
+    static NSMutableDictionary<NSString *, NSDictionary *> *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *path = ZSAEIndexPath();
+        NSData *data = path ? [NSData dataWithContentsOfFile:path] : nil;
+        id plist = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListMutableContainers format:NULL error:NULL] : nil;
+        store = [plist isKindOfClass:[NSMutableDictionary class]] ? plist : [NSMutableDictionary dictionary];
+    });
+    return store;
+}
+
+static BOOL gZSAEIndexBuilding = NO;
+
+static void ZSAESaveIndex(void) {
+    NSString *path = ZSAEIndexPath();
+    if (!path) return;
+    NSDictionary *snapshot = nil;
+    @synchronized (ZSAEIndexLock()) {
+        snapshot = [ZSAEIndexStore() copy];
+    }
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:snapshot format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+    if (data) [data writeToFile:path atomically:YES];
+}
+
+static BOOL ZSAEIsIndexedClass(int32_t classID) {
+    return classID == 28 || classID == 213 || classID == 687078895;
+}
+
+static NSData *ZSAEScanIndexRecords(NSString *path) {
+    ZSAEBundle *bundle = nil;
+    if (!ZSAEOpenBundle(path, &bundle, NULL)) return nil;
+
+    ZSAEBundleNode *cabNode = ZSAEFindSerializedNode(bundle);
+    if (!cabNode || cabNode.size < 64) return nil;
+
+    NSData *head = ZSAEReadBundleRange(bundle, cabNode.offset, 48, NULL);
+    if (head.length < 48) return nil;
+    uint64_t dataOffset = ZSAEReadU64BEBytes((const uint8_t *)head.bytes + 32);
+    if (dataOffset < 48 || dataOffset > cabNode.size || dataOffset > (16ULL << 20)) return nil;
+
+    NSData *metadata = ZSAEReadBundleRange(bundle, cabNode.offset, dataOffset, NULL);
+    if (!metadata) return nil;
+
+    NSArray<ZSAssetExplorerAsset *> *assets = nil;
+    if (!ZSAEParseSerializedFile(metadata, &assets, INT64_MIN, NULL, NULL, NULL, NULL, NULL)) return nil;
+
+    NSMutableArray<ZSAssetExplorerAsset *> *wanted = [NSMutableArray array];
+    for (ZSAssetExplorerAsset *asset in assets) {
+        if (!ZSAEIsIndexedClass(asset.classID) || asset.objectSize < 5) continue;
+        uint64_t objectStart = cabNode.offset + dataOffset + asset.byteStart;
+        uint64_t readLength = MIN((uint64_t)asset.objectSize, (uint64_t)260);
+        if (objectStart + readLength > cabNode.offset + cabNode.size) continue;
+        [wanted addObject:asset];
+    }
+    [wanted sortUsingComparator:^NSComparisonResult(ZSAssetExplorerAsset *a, ZSAssetExplorerAsset *b) {
+        if (a.byteStart < b.byteStart) return NSOrderedAscending;
+        if (a.byteStart > b.byteStart) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    NSMutableData *records = [NSMutableData dataWithCapacity:wanted.count * sizeof(ZSAEIndexRecord)];
+    NSUInteger i = 0;
+    while (i < wanted.count) {
+        uint64_t groupStart = cabNode.offset + dataOffset + wanted[i].byteStart;
+        uint64_t groupEnd = groupStart + MIN((uint64_t)wanted[i].objectSize, (uint64_t)260);
+        NSUInteger j = i + 1;
+        while (j < wanted.count) {
+            uint64_t start = cabNode.offset + dataOffset + wanted[j].byteStart;
+            uint64_t end = start + MIN((uint64_t)wanted[j].objectSize, (uint64_t)260);
+            if (start > groupEnd + 65536 || end - groupStart > (4ULL << 20)) break;
+            groupEnd = MAX(groupEnd, end);
+            j++;
+        }
+
+        NSData *blob = ZSAEReadBundleRange(bundle, groupStart, groupEnd - groupStart, NULL);
+        if (blob) {
+            const uint8_t *bytes = blob.bytes;
+            for (NSUInteger k = i; k < j; k++) {
+                uint64_t offset = cabNode.offset + dataOffset + wanted[k].byteStart - groupStart;
+                uint64_t available = MIN((uint64_t)wanted[k].objectSize, (uint64_t)260);
+                if (offset + available > blob.length || available < 5) continue;
+                int32_t nameLength = ZSAEReadI32LEBytes(bytes + offset);
+                if (nameLength <= 0 || (uint64_t)nameLength > available - 4) continue;
+                NSString *name = [[NSString alloc] initWithBytes:bytes + offset + 4 length:(NSUInteger)nameLength encoding:NSUTF8StringEncoding];
+                if (name.length == 0) continue;
+                ZSAEIndexRecord record = { ZSAEHashName(name), wanted[k].pathID, wanted[k].classID, 0 };
+                [records appendBytes:&record length:sizeof(record)];
+            }
+        }
+        i = j;
+    }
+    return records;
+}
 
 @implementation ZSAssetExplorer
 
@@ -7320,7 +7449,127 @@ static NSString *ZSAEObjectKey(ZSAEObject *object) {
     }];
 }
 
++ (BOOL)isNameIndexBuilding {
+    @synchronized (ZSAEIndexLock()) {
+        return gZSAEIndexBuilding;
+    }
+}
+
++ (NSUInteger)indexedBundleCount {
+    @synchronized (ZSAEIndexLock()) {
+        return ZSAEIndexStore().count;
+    }
+}
+
++ (void)buildNameIndexWithProgress:(void (^)(NSUInteger, NSUInteger))progress completion:(void (^)(BOOL))completion {
+    @synchronized (ZSAEIndexLock()) {
+        if (gZSAEIndexBuilding) return;
+        gZSAEIndexBuilding = YES;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *error = nil;
+        NSArray<ZSAssetExplorerBundle *> *bundles = [ZSAssetExplorer cachedBundles:&error];
+        NSUInteger total = bundles.count;
+        NSMutableSet<NSString *> *liveCABs = [NSMutableSet setWithCapacity:total];
+        NSUInteger done = 0;
+
+        for (ZSAssetExplorerBundle *bundle in bundles) {
+            @autoreleasepool {
+                [liveCABs addObject:bundle.cabIdentifier];
+                NSString *signature = ZSAEFileSignature(bundle.filePath);
+                NSDictionary *existing = nil;
+                @synchronized (ZSAEIndexLock()) {
+                    existing = ZSAEIndexStore()[bundle.cabIdentifier];
+                }
+                BOOL fresh = signature && [existing[@"sig"] isEqualToString:signature];
+                if (!fresh && signature) {
+                    NSData *records = ZSAEScanIndexRecords(bundle.filePath);
+                    if (records) {
+                        NSString *name = ZSAEReadAssetBundleName(bundle.filePath);
+                        @synchronized (ZSAENameCacheLock()) {
+                            ZSAENameCache()[bundle.cabIdentifier] = @{@"name": name ?: @"", @"sig": signature};
+                        }
+                        NSDictionary *entry = @{
+                            @"sig": signature,
+                            @"path": bundle.filePath ?: @"",
+                            @"b": name.length > 0 ? name : bundle.displayName,
+                            @"r": records,
+                        };
+                        @synchronized (ZSAEIndexLock()) {
+                            ZSAEIndexStore()[bundle.cabIdentifier] = entry;
+                        }
+                    }
+                }
+                done++;
+                if (progress && (done % 20 == 0 || done == total)) {
+                    NSUInteger snapshotDone = done;
+                    dispatch_async(dispatch_get_main_queue(), ^{ progress(snapshotDone, total); });
+                }
+                if (done % 150 == 0) {
+                    ZSAESaveIndex();
+                    ZSAESaveNameCache();
+                }
+            }
+        }
+
+        BOOL success = total > 0;
+        if (success) {
+            @synchronized (ZSAEIndexLock()) {
+                NSMutableDictionary *store = ZSAEIndexStore();
+                for (NSString *cab in store.allKeys) {
+                    if (![liveCABs containsObject:cab]) [store removeObjectForKey:cab];
+                }
+            }
+            ZSAESaveIndex();
+            ZSAESaveNameCache();
+        }
+
+        @synchronized (ZSAEIndexLock()) {
+            gZSAEIndexBuilding = NO;
+        }
+        if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(success); });
+    });
+}
+
++ (NSArray<ZSAssetLocation *> *)locationsForAssetName:(NSString *)name classIDs:(NSArray<NSNumber *> *)classIDs {
+    if (name.length == 0) return @[];
+    uint64_t hash = ZSAEHashName(name);
+    NSDictionary<NSString *, NSDictionary *> *snapshot = nil;
+    @synchronized (ZSAEIndexLock()) {
+        snapshot = [ZSAEIndexStore() copy];
+    }
+
+    NSMutableArray<ZSAssetLocation *> *results = [NSMutableArray array];
+    for (NSString *cab in snapshot) {
+        NSData *records = snapshot[cab][@"r"];
+        if (![records isKindOfClass:[NSData class]]) continue;
+        const ZSAEIndexRecord *items = records.bytes;
+        NSUInteger count = records.length / sizeof(ZSAEIndexRecord);
+        for (NSUInteger i = 0; i < count; i++) {
+            if (items[i].hash != hash) continue;
+            if (classIDs.count > 0 && ![classIDs containsObject:@(items[i].classID)]) continue;
+            ZSAssetLocation *location = [ZSAssetLocation new];
+            location.cabIdentifier = cab;
+            NSString *bundleName = snapshot[cab][@"b"];
+            location.bundleName = [bundleName isKindOfClass:[NSString class]] ? bundleName : cab;
+            NSString *filePath = snapshot[cab][@"path"];
+            location.filePath = [filePath isKindOfClass:[NSString class]] ? filePath : @"";
+            location.classID = items[i].classID;
+            location.pathID = items[i].pathID;
+            [results addObject:location];
+        }
+    }
+    [results sortUsingComparator:^NSComparisonResult(ZSAssetLocation *a, ZSAssetLocation *b) {
+        NSComparisonResult order = [a.bundleName caseInsensitiveCompare:b.bundleName];
+        if (order != NSOrderedSame) return order;
+        return [a.cabIdentifier caseInsensitiveCompare:b.cabIdentifier];
+    }];
+    return results;
+}
+
 @end
+
 
 
 #pragma mark FMOD bank core

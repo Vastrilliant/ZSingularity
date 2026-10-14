@@ -6560,6 +6560,9 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL memoryFullScreenOpen;
 @property (nonatomic, assign) BOOL assetExplorerFullScreenOpen;
 @property (nonatomic, strong) UIView *assetExplorerFullScreenOverlay;
+@property (nonatomic, strong) UIView *selectModeOverlay;
+@property (nonatomic, strong) UILabel *selectModeBannerLabel;
+@property (nonatomic, strong) UIView *selectModeResultCard;
 @property (nonatomic, strong) UITableView *assetExplorerTableView;
 @property (nonatomic, strong) UICollectionView *assetExplorerThumbCollectionView;
 @property (nonatomic, strong) ZSAssetThumbGridSource *assetExplorerThumbSource;
@@ -8248,6 +8251,96 @@ static void zs_mt_hud_request_refresh(void) {
     return [super hitTest:point withEvent:event];
 }
 @end
+
+@interface ZSSelectModeOverlayView : UIView
+@end
+
+@implementation ZSSelectModeOverlayView
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
+@end
+
+static const void *kZSSelectModeCopyKey = &kZSSelectModeCopyKey;
+static NSString * const kZSSelectModeReadyText = @"Tap a sprite or image to find its bundle";
+
+static NSString *zs_select_mode_short_cab(NSString *cab) {
+    NSString *identifier = [cab hasPrefix:@"CAB-"] ? [cab substringFromIndex:4] : cab;
+    NSString *head = identifier.length > 12 ? [[identifier substringToIndex:12] stringByAppendingString:@"…"] : identifier;
+    return [@"CAB-" stringByAppendingString:head];
+}
+
+static void zs_select_mode_append_locations(NSMutableAttributedString *text, NSString *label, NSArray<ZSAssetLocation *> *locations, NSMutableArray<NSString *> *copyLines) {
+    UIFont *font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    UIFont *mono = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    for (NSUInteger i = 0; i < locations.count; i++) {
+        ZSAssetLocation *location = locations[i];
+        [copyLines addObject:[NSString stringWithFormat:@"%@ | %@", location.bundleName, location.cabIdentifier]];
+        if (i >= 3) continue;
+        NSString *lead = [NSString stringWithFormat:@"\n%@ → %@  ", label, location.bundleName];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:lead attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.whiteColor}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:zs_select_mode_short_cab(location.cabIdentifier) attributes:@{NSFontAttributeName: mono, NSForegroundColorAttributeName: zs_accent_green_color()}]];
+    }
+    if (locations.count > 3) {
+        NSString *more = [NSString stringWithFormat:@"\n+%lu more bundles (copy to see all)", (unsigned long)(locations.count - 3)];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:more attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.55]}]];
+    }
+}
+
+static UIView *zs_select_mode_make_row(NSDictionary *row, id target, SEL action) {
+    NSDictionary *hit = row[@"hit"];
+    NSArray<ZSAssetLocation *> *spriteLocations = row[@"sprite"];
+    NSArray<ZSAssetLocation *> *textureLocations = row[@"texture"];
+    NSString *spriteName = hit[@"spriteName"];
+    NSString *textureName = hit[@"textureName"];
+
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] init];
+    NSString *title = spriteName.length > 0 ? spriteName : (textureName.length > 0 ? textureName : @"(unnamed)");
+    [text appendAttributedString:[[NSAttributedString alloc] initWithString:title attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightBold], NSForegroundColorAttributeName: UIColor.whiteColor}]];
+
+    NSMutableArray<NSString *> *details = [NSMutableArray array];
+    if (hit[@"source"]) [details addObject:hit[@"source"]];
+    if ([hit[@"owner"] length] > 0) [details addObject:hit[@"owner"]];
+    if (hit[@"width"] && hit[@"height"]) [details addObject:[NSString stringWithFormat:@"%@×%@", hit[@"width"], hit[@"height"]]];
+    if ([hit[@"packed"] boolValue]) [details addObject:@"atlas-packed"];
+    if (details.count > 0) {
+        NSString *line = [@"\n" stringByAppendingString:[details componentsJoinedByString:@" · "]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:line attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightRegular], NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.55]}]];
+    }
+
+    NSMutableArray<NSString *> *copyLines = [NSMutableArray array];
+    if (spriteLocations.count > 0) zs_select_mode_append_locations(text, @"Sprite", spriteLocations, copyLines);
+    if (textureLocations.count > 0) zs_select_mode_append_locations(text, @"Texture", textureLocations, copyLines);
+    if (spriteLocations.count == 0 && textureLocations.count == 0) {
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"\nNot found in indexed bundles" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightMedium], NSForegroundColorAttributeName: [UIColor colorWithRed:1.0 green:0.62 blue:0.25 alpha:1.0]}]];
+    }
+
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    container.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
+    container.layer.cornerRadius = 12;
+    container.layer.cornerCurve = kCACornerCurveContinuous;
+
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.numberOfLines = 0;
+    label.attributedText = text;
+    [container addSubview:label];
+    [NSLayoutConstraint activateConstraints:@[
+        [label.topAnchor constraintEqualToAnchor:container.topAnchor constant:10],
+        [label.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-10],
+        [label.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:12],
+        [label.trailingAnchor constraintEqualToAnchor:container.trailingAnchor constant:-12],
+    ]];
+
+    if (copyLines.count > 0) {
+        objc_setAssociatedObject(container, kZSSelectModeCopyKey, [copyLines componentsJoinedByString:@"\n"], OBJC_ASSOCIATION_COPY_NONATOMIC);
+        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:target action:action];
+        [container addGestureRecognizer:tap];
+    }
+    return container;
+}
 
 static const void *kZSHostOwnedViewKey = &kZSHostOwnedViewKey;
 
@@ -10348,12 +10441,16 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *assetExplorerButton = zs_make_grouped_action_button(@"Asset Explorer", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [assetExplorerButton addTarget:self action:@selector(assetExplorerTapped) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *selectModeButton = zs_make_grouped_action_button(@"Toggle Select Mode", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [selectModeButton addTarget:self action:@selector(zs_selectModeTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIView *miscCard = zs_make_grouped_action_card(@[
         customGreetingRow,
         uidRedactorRow,
         disableLiquidGlassRow,
         disableEnkephalinRow,
         assetExplorerButton,
+        selectModeButton,
     ]);
     miscCard.layer.borderWidth = 1;
     miscCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
@@ -17115,6 +17212,221 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
     [self zs_openAssetExplorerFullScreenPanel];
+}
+
+- (void)zs_selectModeTapped {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    if (self.selectModeOverlay) {
+        [self zs_exitSelectMode];
+        return;
+    }
+    [self closePanelAnimated:YES];
+    [self zs_enterSelectMode];
+}
+
+- (void)zs_exitSelectModeTapped {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    [self zs_exitSelectMode];
+}
+
+- (void)zs_exitSelectMode {
+    [self zs_dismissSelectModeResults];
+    [self.selectModeOverlay removeFromSuperview];
+    self.selectModeOverlay = nil;
+    self.selectModeBannerLabel = nil;
+}
+
+- (void)zs_enterSelectMode {
+    UIView *host = zs_ui_host_view();
+    if (!host || self.selectModeOverlay) return;
+
+    ZSSelectModeOverlayView *overlay = [[ZSSelectModeOverlayView alloc] initWithFrame:host.bounds];
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.userInteractionEnabled = YES;
+    zs_mark_host_owned(overlay);
+    [host addSubview:overlay];
+    self.selectModeOverlay = overlay;
+
+    UIView *catcher = [[UIView alloc] initWithFrame:overlay.bounds];
+    catcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    catcher.backgroundColor = UIColor.clearColor;
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_selectModeTapRecognized:)];
+    [catcher addGestureRecognizer:tap];
+    [overlay addSubview:catcher];
+
+    UIVisualEffectView *banner = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    banner.translatesAutoresizingMaskIntoConstraints = NO;
+    banner.layer.cornerRadius = 18;
+    banner.layer.cornerCurve = kCACornerCurveContinuous;
+    banner.clipsToBounds = YES;
+    [overlay addSubview:banner];
+
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    label.textColor = UIColor.whiteColor;
+    label.numberOfLines = 2;
+    label.text = @"Indexing bundles...";
+    [banner.contentView addSubview:label];
+    self.selectModeBannerLabel = label;
+
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [closeButton setImage:[UIImage systemImageNamed:@"xmark" withConfiguration:symbolConfig] forState:UIControlStateNormal];
+    closeButton.tintColor = [UIColor colorWithWhite:1 alpha:0.85];
+    [closeButton addTarget:self action:@selector(zs_exitSelectModeTapped) forControlEvents:UIControlEventTouchUpInside];
+    [banner.contentView addSubview:closeButton];
+
+    NSLayoutConstraint *bannerWidth = [banner.widthAnchor constraintEqualToConstant:520];
+    bannerWidth.priority = UILayoutPriorityDefaultHigh;
+    [NSLayoutConstraint activateConstraints:@[
+        [banner.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:8],
+        [banner.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [banner.leadingAnchor constraintGreaterThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:12],
+        [banner.trailingAnchor constraintLessThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-12],
+        bannerWidth,
+        [label.topAnchor constraintEqualToAnchor:banner.contentView.topAnchor constant:11],
+        [label.bottomAnchor constraintEqualToAnchor:banner.contentView.bottomAnchor constant:-11],
+        [label.leadingAnchor constraintEqualToAnchor:banner.contentView.leadingAnchor constant:16],
+        [label.trailingAnchor constraintEqualToAnchor:closeButton.leadingAnchor constant:-8],
+        [closeButton.trailingAnchor constraintEqualToAnchor:banner.contentView.trailingAnchor constant:-8],
+        [closeButton.centerYAnchor constraintEqualToAnchor:banner.contentView.centerYAnchor],
+        [closeButton.widthAnchor constraintEqualToConstant:32],
+        [closeButton.heightAnchor constraintEqualToConstant:32],
+    ]];
+
+    [self zs_startSelectModeIndexing];
+}
+
+- (void)zs_startSelectModeIndexing {
+    __weak typeof(self) weakSelf = self;
+    self.selectModeBannerLabel.text = @"Indexing bundles...";
+    [ZSAssetExplorer buildNameIndexWithProgress:^(NSUInteger done, NSUInteger total) {
+        UserInterface *strongSelf = weakSelf;
+        if (!strongSelf.selectModeOverlay || strongSelf.selectModeResultCard) return;
+        strongSelf.selectModeBannerLabel.text = [NSString stringWithFormat:@"Indexing bundles %lu/%lu", (unsigned long)done, (unsigned long)total];
+    } completion:^(BOOL success) {
+        UserInterface *strongSelf = weakSelf;
+        if (!strongSelf.selectModeOverlay || strongSelf.selectModeResultCard) return;
+        BOOL usable = success || [ZSAssetExplorer indexedBundleCount] > 0;
+        strongSelf.selectModeBannerLabel.text = usable ? kZSSelectModeReadyText : @"No bundles found to index";
+    }];
+    if ([ZSAssetExplorer isNameIndexBuilding] && [ZSAssetExplorer indexedBundleCount] > 0) {
+        self.selectModeBannerLabel.text = kZSSelectModeReadyText;
+    }
+}
+
+- (void)zs_selectModeTapRecognized:(UITapGestureRecognizer *)tap {
+    UIView *catcher = tap.view;
+    UIView *host = catcher.superview.superview;
+    if (!catcher || !host) return;
+
+    CGPoint point = [tap locationInView:catcher];
+    CGFloat scale = host.contentScaleFactor;
+    float x = (float)(point.x * scale);
+    float y = (float)((catcher.bounds.size.height - point.y) * scale);
+
+    [self zs_dismissSelectModeResults];
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+
+    NSArray<NSDictionary *> *hits = zs_pick_assets_at_screen_point(x, y);
+    if (hits.count == 0) {
+        self.selectModeBannerLabel.text = @"No sprite or image found there. Try another spot.";
+        return;
+    }
+
+    self.selectModeBannerLabel.text = @"Looking up bundles...";
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSMutableArray<NSDictionary *> *rows = [NSMutableArray arrayWithCapacity:hits.count];
+        for (NSDictionary *hit in hits) {
+            NSString *spriteName = hit[@"spriteName"];
+            NSString *textureName = hit[@"textureName"];
+            BOOL packed = [hit[@"packed"] boolValue];
+            NSArray<ZSAssetLocation *> *spriteLocations = spriteName.length > 0 ? [ZSAssetExplorer locationsForAssetName:spriteName classIDs:@[@213]] : @[];
+            BOOL skipTexture = packed && spriteName.length > 0;
+            NSArray<ZSAssetLocation *> *textureLocations = (textureName.length > 0 && !skipTexture) ? [ZSAssetExplorer locationsForAssetName:textureName classIDs:@[@28]] : @[];
+            [rows addObject:@{@"hit": hit, @"sprite": spriteLocations, @"texture": textureLocations}];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf zs_showSelectModeResults:rows];
+        });
+    });
+}
+
+- (void)zs_dismissSelectModeResults {
+    [self.selectModeResultCard removeFromSuperview];
+    self.selectModeResultCard = nil;
+}
+
+- (void)zs_showSelectModeResults:(NSArray<NSDictionary *> *)rows {
+    UIView *overlay = self.selectModeOverlay;
+    if (!overlay) return;
+    [self zs_dismissSelectModeResults];
+
+    BOOL indexing = [ZSAssetExplorer isNameIndexBuilding];
+    self.selectModeBannerLabel.text = indexing ? @"Results may be incomplete while indexing. Tap a row to copy." : @"Tap a row to copy its bundle info";
+
+    UIVisualEffectView *card = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemChromeMaterialDark]];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.layer.cornerRadius = 20;
+    card.layer.cornerCurve = kCACornerCurveContinuous;
+    card.clipsToBounds = YES;
+    [overlay addSubview:card];
+    self.selectModeResultCard = card;
+
+    UIScrollView *scroll = [[UIScrollView alloc] init];
+    scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    scroll.alwaysBounceVertical = NO;
+    [card.contentView addSubview:scroll];
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.spacing = 8;
+    [scroll addSubview:stack];
+
+    for (NSDictionary *row in rows) {
+        [stack addArrangedSubview:zs_select_mode_make_row(row, self, @selector(zs_selectModeRowTapped:))];
+    }
+
+    NSLayoutConstraint *fitHeight = [scroll.heightAnchor constraintEqualToAnchor:stack.heightAnchor constant:24];
+    fitHeight.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint *cardWidth = [card.widthAnchor constraintEqualToConstant:560];
+    cardWidth.priority = UILayoutPriorityDefaultHigh;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [card.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor constant:-10],
+        [card.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [card.leadingAnchor constraintGreaterThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:12],
+        [card.trailingAnchor constraintLessThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-12],
+        cardWidth,
+        [scroll.topAnchor constraintEqualToAnchor:card.contentView.topAnchor],
+        [scroll.bottomAnchor constraintEqualToAnchor:card.contentView.bottomAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:card.contentView.leadingAnchor],
+        [scroll.trailingAnchor constraintEqualToAnchor:card.contentView.trailingAnchor],
+        fitHeight,
+        [scroll.heightAnchor constraintLessThanOrEqualToAnchor:overlay.heightAnchor multiplier:0.55],
+        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:12],
+        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-12],
+        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:12],
+        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-12],
+        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-24],
+    ]];
+}
+
+- (void)zs_selectModeRowTapped:(UITapGestureRecognizer *)tap {
+    NSString *text = objc_getAssociatedObject(tap.view, kZSSelectModeCopyKey);
+    if (text.length == 0) return;
+    [UIPasteboard generalPasteboard].string = text;
+    UINotificationFeedbackGenerator *haptic = [[UINotificationFeedbackGenerator alloc] init];
+    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+    self.selectModeBannerLabel.text = @"Copied bundle info to clipboard";
 }
 
 - (void)zs_buildAssetExplorerFullScreenPanelIfNeeded {

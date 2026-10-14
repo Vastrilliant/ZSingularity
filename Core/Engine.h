@@ -467,6 +467,7 @@ const void *mt_method(void *klass, const char *name, int argCount);
 void *zs_type_object(void *klass);
 void *zs_resources_find_all_for_class(void *typeClass, NSUInteger *countOut);
 void *zs_array_object_at(void *array, NSUInteger index);
+NSArray<NSDictionary *> *zs_pick_assets_at_screen_point(float x, float y);
 BOOL ZSUID_UnityObjectIsAlive(void *obj);
 
 #pragma mark - Legacy aliases used by existing UI / ZSScripts
