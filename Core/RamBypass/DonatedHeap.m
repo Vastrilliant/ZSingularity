@@ -31,8 +31,6 @@ static NSString * const kZSRamBypassSection = @"ramBypass";
 static NSString * const kZSRamBypassEnabledKey = @"enabled";
 static NSString * const kZSRamBypassHudKey = @"hud";
 static NSString * const kZSRamRedirectModeKey = @"redirectMode";
-static NSString * const kZSRamDecommitKey = @"decommit";
-static _Atomic(uint8_t) g_decommitEnabled = 1;
 
 #define ZS_MALLOC_ALLOCATION_MAGIC 0x5A534D414C4C4F43ull
 #define ZS_MALLOC_SLAB_MAGIC 0x5A53534C41424D47ull
@@ -73,8 +71,6 @@ typedef struct __attribute__((aligned(16))) ZSMallocSlab {
 #endif
 
 static const uint64_t kZSDonatedTargetBytes = 3ull * 1024ull * 1024ull * 1024ull;
-static const uint64_t kZSDonatedPhysicalDivisor = 2ull;
-static const uint64_t kZSDonatedTargetGranularity = 64ull * 1024ull * 1024ull;
 static const uint64_t kZSDonatedDecommitMinBytes = 1ull * 1024ull * 1024ull;
 static const uint64_t kZSTrimMinIntervalNs = 10ull * NSEC_PER_SEC;
 
@@ -204,21 +200,6 @@ void zs_set_ram_hud_enabled(BOOL enabled)
 {
     NSMutableDictionary *section = [zs_settings_section(kZSRamBypassSection) mutableCopy] ?: [NSMutableDictionary new];
     section[kZSRamBypassHudKey] = @(enabled);
-    zs_write_settings_section(kZSRamBypassSection, section);
-}
-
-BOOL zs_ram_decommit_enabled(void)
-{
-    id stored = zs_settings_section(kZSRamBypassSection)[kZSRamDecommitKey];
-
-    return [stored respondsToSelector:@selector(boolValue)] ? [stored boolValue] : YES;
-}
-
-void zs_set_ram_decommit_enabled(BOOL enabled)
-{
-    atomic_store_explicit(&g_decommitEnabled, enabled ? 1 : 0, memory_order_release);
-    NSMutableDictionary *section = [zs_settings_section(kZSRamBypassSection) mutableCopy] ?: [NSMutableDictionary new];
-    section[kZSRamDecommitKey] = @(enabled);
     zs_write_settings_section(kZSRamBypassSection, section);
 }
 
@@ -469,6 +450,23 @@ static uint32_t zs_run_find(uint32_t pages)
 
             cursor = g_pool.runs[cursor].next;
         }
+
+        const int higherBin = zs_next_bin(bin + 1);
+
+        if (higherBin >= 0)
+        {
+            return g_pool.bins[higherBin];
+        }
+
+        for (; cursor != ZS_RUN_NONE; cursor = g_pool.runs[cursor].next)
+        {
+            if (g_pool.runs[cursor].len >= pages)
+            {
+                return cursor;
+            }
+        }
+
+        return ZS_RUN_NONE;
     }
 
     const int higher = zs_next_bin(bin + 1);
@@ -722,7 +720,7 @@ static void zs_pool_give_internal(void *address, uint64_t length, BOOL decommit)
     const uint64_t first = offset / pageSize;
     const uint64_t count = bytes / pageSize;
 
-    if (decommit && bytes >= kZSDonatedDecommitMinBytes && atomic_load_explicit(&g_decommitEnabled, memory_order_acquire))
+    if (decommit && bytes >= kZSDonatedDecommitMinBytes)
     {
         os_unfair_lock_lock(&g_pool.lock);
         const BOOL valid = first + count <= g_pool.cleanPage && zs_bytes_all_zero(g_pool.freeMap + first, count);
@@ -879,7 +877,7 @@ static uint64_t zs_pool_trim(uint64_t goal)
 
 static uint64_t zs_pool_trim_guarded(uint64_t goal, BOOL throttled)
 {
-    if (!atomic_load_explicit(&g_poolReady, memory_order_acquire) || !atomic_load_explicit(&g_decommitEnabled, memory_order_acquire))
+    if (!atomic_load_explicit(&g_poolReady, memory_order_acquire))
     {
         return 0;
     }
@@ -2771,11 +2769,7 @@ static BOOL zs_install_rebinds(void)
 
 static uint64_t zs_donated_target_bytes(void)
 {
-    uint64_t target = NSProcessInfo.processInfo.physicalMemory / kZSDonatedPhysicalDivisor;
-
-    target -= target % kZSDonatedTargetGranularity;
-
-    return MAX(kZSDonatedMinimumBytes, MIN(kZSDonatedTargetBytes, target));
+    return kZSDonatedTargetBytes;
 }
 
 static void zs_ram_bypass_start(void)
@@ -2825,7 +2819,6 @@ __attribute__((constructor))
 static void ZSRamBypassConstructor(void)
 {
     atomic_store_explicit(&g_mallocRedirect16KB, zs_ram_redirect_mode() == 1, memory_order_release);
-    atomic_store_explicit(&g_decommitEnabled, zs_ram_decommit_enabled() ? 1 : 0, memory_order_release);
 
     if (zs_ram_bypass_enabled())
     {

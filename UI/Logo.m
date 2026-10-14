@@ -396,6 +396,11 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
+static const CGFloat kZSLogoSVGSettleAlpha = 0.02;
+static const NSUInteger kZSLogoSVGSettleMaxAttempts = 40;
+static const NSTimeInterval kZSLogoSVGSettlePollInterval = 0.03;
+static const NSTimeInterval kZSLogoSVGSettleCommitDelay = 0.08;
+static const NSTimeInterval kZSLogoSVGSettleFadeDuration = 0.15;
 
 static BOOL zs_logo_is_font_file(NSString *filename) {
     NSString *ext = filename.pathExtension.lowercaseString;
@@ -1077,6 +1082,7 @@ static UIView *zs_logo_park_view(void) {
 @property (nonatomic, weak, nullable) ZSLogoEffectView *owner;
 - (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg;
 - (void)mountInto:(UIView *)host;
+- (void)placeWithSize:(CGSize)size center:(CGPoint)center rotation:(CGFloat)radians;
 - (void)park;
 - (void)teardown;
 - (void)invalidate;
@@ -1091,6 +1097,9 @@ static UIView *zs_logo_park_view(void) {
     BOOL _paused;
     double _appliedSpeed;
     BOOL _appliedPaused;
+    BOOL _settling;
+    NSUInteger _settleGeneration;
+    CGSize _settleSize;
 }
 
 - (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg {
@@ -1107,6 +1116,7 @@ static UIView *zs_logo_park_view(void) {
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+    configuration.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
     WKWebView *web = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
     web.navigationDelegate = self;
     web.opaque = NO;
@@ -1130,11 +1140,70 @@ static UIView *zs_logo_park_view(void) {
 }
 
 - (void)mountInto:(UIView *)host {
-    if (_web.superview != host) [host addSubview:_web];
+    if (_web.superview == host) return;
+    _web.hidden = YES;
+    [host addSubview:_web];
+}
+
+- (void)placeWithSize:(CGSize)size center:(CGPoint)center rotation:(CGFloat)radians {
+    BOOL resized = !CGSizeEqualToSize(_web.bounds.size, size);
+    _web.transform = CGAffineTransformIdentity;
+    if (resized) _web.bounds = CGRectMake(0, 0, size.width, size.height);
+    _web.center = center;
+    _web.transform = CGAffineTransformMakeRotation(radians);
+    if (resized) [self zs_beginSettlingAtSize:size];
+}
+
+- (void)zs_beginSettlingAtSize:(CGSize)size {
+    _settleGeneration++;
+    _settling = YES;
+    _settleSize = size;
+    _web.alpha = kZSLogoSVGSettleAlpha;
+    [self zs_pollSettleAttempt:0];
+}
+
+- (void)zs_pollSettleAttempt:(NSUInteger)attempt {
+    if (!_settling || !_ready) return;
+    NSUInteger generation = _settleGeneration;
+    CGSize expected = _settleSize;
+    __weak typeof(self) weakSelf = self;
+    [_web evaluateJavaScript:@"window.innerWidth+','+window.innerHeight" completionHandler:^(id result, NSError *error) {
+        ZSLogoSVGRenderer *strongSelf = weakSelf;
+        if (!strongSelf || !strongSelf->_settling || strongSelf->_settleGeneration != generation) return;
+        BOOL matched = NO;
+        if ([result isKindOfClass:[NSString class]]) {
+            NSArray<NSString *> *parts = [(NSString *)result componentsSeparatedByString:@","];
+            if (parts.count == 2) {
+                matched = fabs(parts[0].doubleValue - expected.width) < 1.5 && fabs(parts[1].doubleValue - expected.height) < 1.5;
+            }
+        }
+        if (matched || error || attempt >= kZSLogoSVGSettleMaxAttempts) {
+            [strongSelf zs_finishSettlingGeneration:generation];
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoSVGSettlePollInterval * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakSelf zs_pollSettleAttempt:attempt + 1];
+        });
+    }];
+}
+
+- (void)zs_finishSettlingGeneration:(NSUInteger)generation {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoSVGSettleCommitDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        ZSLogoSVGRenderer *strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_settleGeneration != generation || !strongSelf->_settling) return;
+        strongSelf->_settling = NO;
+        [UIView animateWithDuration:kZSLogoSVGSettleFadeDuration animations:^{
+            strongSelf->_web.alpha = 1;
+        }];
+    });
 }
 
 - (void)park {
     self.owner = nil;
+    _settling = NO;
+    _settleGeneration++;
+    _web.alpha = 1;
     [self setSpeed:_speed paused:YES];
 
     UIView *host = zs_logo_park_view();
@@ -1179,6 +1248,7 @@ static UIView *zs_logo_park_view(void) {
     _ready = YES;
     _applied = NO;
     [self zs_apply];
+    if (_settling) [self zs_pollSettleAttempt:0];
 }
 
 - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
@@ -1535,20 +1605,16 @@ static void zs_logo_svg_remove_legacy_cache(void) {
 
         if (_renderer) {
             _contentLayer.hidden = YES;
-            WKWebView *web = _renderer.web;
-            web.hidden = NO;
             CGSize size = CGSizeMake(width, height);
             if (!_svgPlaced || !CGSizeEqualToSize(_placedSize, size) ||
                 !CGPointEqualToPoint(_placedPosition, position) || _placedRotation != radians) {
-                web.transform = CGAffineTransformIdentity;
-                if (!CGSizeEqualToSize(web.bounds.size, size)) web.bounds = CGRectMake(0, 0, width, height);
-                web.center = position;
-                web.transform = CGAffineTransformMakeRotation(radians);
+                [_renderer placeWithSize:size center:position rotation:radians];
                 _svgPlaced = YES;
                 _placedSize = size;
                 _placedPosition = position;
                 _placedRotation = radians;
             }
+            _renderer.web.hidden = NO;
         } else {
             _contentLayer.transform = CATransform3DIdentity;
             _contentLayer.bounds = CGRectMake(0, 0, width, height);
