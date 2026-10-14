@@ -5046,7 +5046,7 @@ static double zs_pick_hierarchy_depth(void *component) {
     return (double)depth;
 }
 
-static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen, void *component, void *sprite, void *texture, NSString *source, double rank, double area) {
+static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen, void *component, void *sprite, void *texture, NSString *source, double rank, double area, const float *screenRect) {
     void *identity = sprite ?: texture;
     if (!identity) return;
     NSNumber *key = @((uintptr_t)identity);
@@ -5076,6 +5076,8 @@ static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutab
 
     hit[@"rank"] = @(rank);
     hit[@"area"] = @(area);
+    hit[@"id"] = key;
+    if (screenRect) hit[@"rect"] = @[@(screenRect[0]), @(screenRect[1]), @(screenRect[2]), @(screenRect[3])];
     [hits addObject:hit];
 }
 
@@ -5143,7 +5145,46 @@ static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, float x, 
         double area = fabs((double)rect[2] * (double)rect[3]);
 
         double rank = 1.0e9 + (double)sortingOrder * 1000.0 + zs_pick_hierarchy_depth(graphic);
-        zs_pick_add_hit(hits, seen, graphic, sprite, texture, isImage ? @"UI Image" : @"UI RawImage", rank, area);
+
+        float screenRect[4] = {0, 0, 0, 0};
+        BOOL hasScreenRect = YES;
+        float rMinX = INFINITY, rMinY = INFINITY, rMaxX = -INFINITY, rMaxY = -INFINITY;
+        for (int corner = 0; corner < 4; corner++) {
+            float local[3] = {
+                rect[0] + ((corner & 1) ? rect[2] : 0.0f),
+                rect[1] + ((corner & 2) ? rect[3] : 0.0f),
+                0.0f,
+            };
+            void *localArgs[1] = { local };
+            float world[3] = {0, 0, 0};
+            if (!zs_pick_unbox_floats(zs_pick_invoke(rectTransform, "TransformPoint", 1, localArgs), world, 3)) {
+                hasScreenRect = NO;
+                break;
+            }
+            float cornerX = world[0];
+            float cornerY = world[1];
+            if (camera) {
+                void *worldArgs[1] = { world };
+                float projected[3] = {0, 0, 0};
+                if (!zs_pick_unbox_floats(zs_pick_invoke(camera, "WorldToScreenPoint", 1, worldArgs), projected, 3)) {
+                    hasScreenRect = NO;
+                    break;
+                }
+                cornerX = projected[0];
+                cornerY = projected[1];
+            }
+            rMinX = MIN(rMinX, cornerX);
+            rMaxX = MAX(rMaxX, cornerX);
+            rMinY = MIN(rMinY, cornerY);
+            rMaxY = MAX(rMaxY, cornerY);
+        }
+        if (hasScreenRect) {
+            screenRect[0] = rMinX;
+            screenRect[1] = rMinY;
+            screenRect[2] = rMaxX;
+            screenRect[3] = rMaxY;
+        }
+        zs_pick_add_hit(hits, seen, graphic, sprite, texture, isImage ? @"UI Image" : @"UI RawImage", rank, area, hasScreenRect ? screenRect : NULL);
     }
 }
 
@@ -5176,6 +5217,7 @@ static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NS
 
         BOOL matched = NO;
         double area = 0;
+        float matchedRect[4] = {0, 0, 0, 0};
         for (NSValue *cameraValue in cameras) {
             void *camera = cameraValue.pointerValue;
             int32_t mask = 0;
@@ -5204,6 +5246,10 @@ static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NS
             if (x >= minX && x <= maxX && y >= minY && y <= maxY) {
                 matched = YES;
                 area = (double)(maxX - minX) * (double)(maxY - minY);
+                matchedRect[0] = minX;
+                matchedRect[1] = minY;
+                matchedRect[2] = maxX;
+                matchedRect[3] = maxY;
                 break;
             }
         }
@@ -5216,7 +5262,7 @@ static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NS
         zs_pick_unbox_int(zs_pick_invoke_static(sortingLayerClass, "GetLayerValueFromID", 1, layerArgs), &layerValue);
 
         double rank = (double)layerValue * 10000.0 + (double)sortingOrder;
-        zs_pick_add_hit(hits, seen, renderer, sprite, NULL, @"SpriteRenderer", rank, area);
+        zs_pick_add_hit(hits, seen, renderer, sprite, NULL, @"SpriteRenderer", rank, area, matchedRect);
     }
 }
 
