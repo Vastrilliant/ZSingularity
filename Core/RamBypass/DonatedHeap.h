@@ -29,11 +29,14 @@ BOOL zs_ram_bypass_enabled(void);
 BOOL zs_ram_bypass_available(void);
 BOOL zs_ram_hud_enabled(void);
 void zs_set_ram_hud_enabled(BOOL enabled);
+BOOL zs_ram_decommit_enabled(void);
+void zs_set_ram_decommit_enabled(BOOL enabled);
 NSInteger zs_ram_redirect_mode(void);
 void zs_set_ram_redirect_mode(NSInteger mode);
 void zs_ram_hud_get_snapshot(RamHudSnapshot *outSnapshot);
 void zs_set_donated_heap_enabled(BOOL enabled);
 void zs_ram_bypass_get_stats(RamBypassStats *outStats);
+void zs_ram_bypass_trim(void);
 void zs_ram_bypass_memlog(void);
 
 #endif

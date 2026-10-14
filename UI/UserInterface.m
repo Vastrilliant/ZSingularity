@@ -10386,6 +10386,9 @@ static const CGFloat kContentFadeHeight = 22;
     ZSRow *ramHudRow = zs_make_switch_row(@"Memory Usage HUD", zs_ram_hud_enabled());
     [ramHudRow.toggle addTarget:self action:@selector(ramHudChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *ramDecommitRow = zs_make_switch_row(@"Decommit Free Memory", zs_ram_decommit_enabled());
+    [ramDecommitRow.toggle addTarget:self action:@selector(ramDecommitChanged:) forControlEvents:UIControlEventValueChanged];
+
     __weak typeof(self) weakRedirectSelf = self;
     UIControl *ramRedirectModeRow = zs_make_disclosure_row(@"Redirect minimum", @"", nil, NULL);
     zs_disclosure_row_install_menu(ramRedirectModeRow, @[@"256 KB", @"16 KB"], zs_ram_redirect_mode(), ^(NSInteger index) {
@@ -10407,6 +10410,7 @@ static const CGFloat kContentFadeHeight = 22;
         ramBypassRow,
         ramHudRow,
         ramRedirectModeRow,
+        ramDecommitRow,
         memoryCleanupButton,
         self.memoryUsageAnalyzeButton,
         lowResTranscodeButton,
@@ -23379,6 +23383,10 @@ static void zs_update_value_label(ZSCapsuleSlider *slider) {
 - (void)ramHudChanged:(UISwitch *)toggle {
     zs_set_ram_hud_enabled(toggle.on);
     [[ZSMetalTabs shared] setRamHudVisible:toggle.on];
+}
+
+- (void)ramDecommitChanged:(UISwitch *)toggle {
+    zs_set_ram_decommit_enabled(toggle.on);
 }
 
 - (void)nightlyReleasesEnabledChanged:(UISwitch *)toggle {
