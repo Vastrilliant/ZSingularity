@@ -1036,7 +1036,7 @@ static NSString * const kZSLogoBakeProbeScript =
 
 static NSString *zs_logo_svg_disk_directory(NSString *key) {
     uint32_t hash = 5381;
-    const char *bytes = [[key stringByAppendingString:@"|v1"] UTF8String];
+    const char *bytes = [[key stringByAppendingString:@"|v2"] UTF8String];
     for (const char *p = bytes; *p; p++) hash = hash * 33 + (uint8_t)*p;
     return [zs_logo_cache_directory() stringByAppendingPathComponent:[NSString stringWithFormat:@"svg-%08x", hash]];
 }
@@ -1128,6 +1128,23 @@ static BOOL zs_logo_image_corner_is_opaque(CGImageRef image) {
     return pixel[3] == 255;
 }
 
+static BOOL zs_logo_image_has_content(CGImageRef image) {
+    const size_t side = 24;
+    uint8_t pixels[24 * 24 * 4];
+    memset(pixels, 0, sizeof(pixels));
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels, side, side, 8, side * 4, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return YES;
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, side, side), image);
+    CGContextRelease(context);
+    for (size_t i = 3; i < sizeof(pixels); i += 4) {
+        if (pixels[i] > 0) return YES;
+    }
+    return NO;
+}
+
 typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
 
 @interface ZSLogoSVGBaker : NSObject <WKNavigationDelegate>
@@ -1207,13 +1224,14 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
         web.backgroundColor = UIColor.clearColor;
         web.underPageBackgroundColor = UIColor.clearColor;
         web.userInteractionEnabled = NO;
-        web.alpha = 0.01;
+        web.alpha = 0.02;
         web.scrollView.backgroundColor = UIColor.clearColor;
         web.scrollView.scrollEnabled = NO;
         web.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
         _web = web;
     }
-    if (_web.superview != window) [window insertSubview:_web atIndex:0];
+    if (_web.superview != window) [window addSubview:_web];
+    [window bringSubviewToFront:_web];
 
     CGFloat scale = UIScreen.mainScreen.scale;
     CGSize pixels = zs_logo_bake_pixels(svg.size, 512);
@@ -1268,7 +1286,14 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
     }
     _web.frame = CGRectMake(0, 0, pixels.width / scale, pixels.height / scale);
 
-    [self zs_capture:job index:0 count:count duration:duration frames:[NSMutableArray arrayWithCapacity:count]];
+    ZLog(@"[Logo] baking svg: %lu frame(s), %.0fms, %.0fx%.0f px", (unsigned long)count, duration, pixels.width, pixels.height);
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_jobs.firstObject != job) return;
+        [strongSelf zs_capture:job index:0 count:count duration:duration frames:[NSMutableArray arrayWithCapacity:count]];
+    });
 }
 
 - (void)zs_capture:(NSMutableDictionary *)job index:(NSUInteger)index count:(NSUInteger)count duration:(double)duration frames:(NSMutableArray *)frames {
@@ -1288,13 +1313,26 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
         [strongSelf->_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *snapshotError) {
             typeof(self) innerSelf = weakSelf;
             if (!innerSelf || innerSelf->_jobs.firstObject != job) return;
-            if (!image.CGImage || (index == 0 && zs_logo_image_corner_is_opaque(image.CGImage))) {
+            if (!image.CGImage) {
+                ZLog(@"[Logo] svg snapshot failed: %@", snapshotError.localizedDescription);
                 [innerSelf zs_finish:job animation:nil];
                 return;
             }
+            if (index == 0 && zs_logo_image_corner_is_opaque(image.CGImage)) {
+                ZLog(@"[Logo] svg snapshot has an opaque background - using live rendering");
+                [innerSelf zs_finish:job animation:nil];
+                return;
+            }
+            if (zs_logo_image_has_content(image.CGImage)) job[@"content"] = @YES;
             [frames addObject:(__bridge id)image.CGImage];
             if (index + 1 < count) {
                 [innerSelf zs_capture:job index:index + 1 count:count duration:duration frames:frames];
+                return;
+            }
+
+            if (![job[@"content"] boolValue]) {
+                ZLog(@"[Logo] svg snapshots were blank - using live rendering");
+                [innerSelf zs_finish:job animation:nil];
                 return;
             }
 
