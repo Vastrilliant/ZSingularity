@@ -2838,6 +2838,612 @@ static NSString *ZSAEClassLabel(int32_t classID) {
     }
 }
 
+typedef struct {
+    uint32_t i0, i1, i2;
+    uint32_t sub;
+    float depth;
+} ZSAEMeshTri;
+
+static int ZSAEMeshTriCompare(const void *a, const void *b) {
+    float da = ((const ZSAEMeshTri *)a)->depth;
+    float db = ((const ZSAEMeshTri *)b)->depth;
+    return da < db ? 1 : (da > db ? -1 : 0);
+}
+
+@interface ZSAEMeshData : NSObject {
+@public
+    float lo[3];
+    float hi[3];
+}
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) NSUInteger vertexCount;
+@property (nonatomic, strong) NSData *positions;
+@property (nonatomic, strong) NSData *uvs;
+@property (nonatomic, strong) NSArray<NSData *> *triangles;
+@end
+
+@implementation ZSAEMeshData
+@end
+
+static float ZSAEHalfToFloat(uint16_t half) {
+    uint32_t sign = (half >> 15) & 1u;
+    uint32_t exponent = (half >> 10) & 0x1Fu;
+    uint32_t mantissa = half & 0x3FFu;
+    float value;
+    if (exponent == 0) value = ldexpf((float)mantissa, -24);
+    else if (exponent == 31) value = mantissa ? NAN : INFINITY;
+    else value = ldexpf((float)(mantissa | 0x400u), (int)exponent - 25);
+    return sign ? -value : value;
+}
+
+static NSUInteger ZSAEMeshFormatSize(int64_t format) {
+    switch (format) {
+        case 0: case 10: case 11: return 4;
+        case 1: case 4: case 5: case 8: case 9: return 2;
+        default: return 1;
+    }
+}
+
+static float ZSAEMeshReadComponent(const uint8_t *p, int64_t format) {
+    switch (format) {
+        case 0: { float v; memcpy(&v, p, 4); return v; }
+        case 1: { uint16_t v; memcpy(&v, p, 2); return ZSAEHalfToFloat(v); }
+        case 2: return (float)p[0] / 255.0f;
+        case 3: return MAX((float)(int8_t)p[0] / 127.0f, -1.0f);
+        case 4: { uint16_t v; memcpy(&v, p, 2); return (float)v / 65535.0f; }
+        case 5: { int16_t v; memcpy(&v, p, 2); return MAX((float)v / 32767.0f, -1.0f); }
+        case 6: return (float)p[0];
+        case 7: return (float)(int8_t)p[0];
+        case 8: { uint16_t v; memcpy(&v, p, 2); return (float)v; }
+        case 9: { int16_t v; memcpy(&v, p, 2); return (float)v; }
+        case 10: { uint32_t v; memcpy(&v, p, 4); return (float)v; }
+        case 11: { int32_t v; memcpy(&v, p, 4); return (float)v; }
+        default: return 0;
+    }
+}
+
+static NSData *ZSAEMeshReadChannel(NSData *blob, NSDictionary *channel, NSUInteger vertexCount, NSUInteger streamOffset, NSUInteger stride, NSUInteger components) {
+    int64_t format = ZSAEInt(channel[@"format"]);
+    NSUInteger dimension = (NSUInteger)(ZSAEInt(channel[@"dimension"]) & 0xF);
+    NSUInteger offset = (NSUInteger)ZSAEInt(channel[@"offset"]);
+    NSUInteger componentSize = ZSAEMeshFormatSize(format);
+    if (dimension == 0 || vertexCount == 0) return nil;
+    NSUInteger last = streamOffset + (vertexCount - 1) * stride + offset + dimension * componentSize;
+    if (last > blob.length) return nil;
+
+    NSMutableData *output = [NSMutableData dataWithLength:vertexCount * components * sizeof(float)];
+    float *out = output.mutableBytes;
+    const uint8_t *base = blob.bytes;
+    NSUInteger usable = MIN(dimension, components);
+    for (NSUInteger i = 0; i < vertexCount; i++) {
+        const uint8_t *vertex = base + streamOffset + i * stride + offset;
+        for (NSUInteger c = 0; c < usable; c++) out[i * components + c] = ZSAEMeshReadComponent(vertex + c * componentSize, format);
+    }
+    return output;
+}
+
+static BOOL ZSAEMeshReadIndex(NSData *data, NSUInteger byteOffset, NSUInteger size, uint32_t *out) {
+    if (byteOffset + size > data.length) return NO;
+    const uint8_t *p = (const uint8_t *)data.bytes + byteOffset;
+    if (size == 2) {
+        uint16_t v;
+        memcpy(&v, p, 2);
+        *out = v;
+    } else {
+        uint32_t v;
+        memcpy(&v, p, 4);
+        *out = v;
+    }
+    return YES;
+}
+
+static ZSAEMeshData *ZSAEParseMesh(ZSAEObject *meshObject, NSString **reason) {
+    NSDictionary *fields = meshObject.fields;
+    NSDictionary *vertexData = ZSAEDict(fields[@"m_VertexData"]);
+    NSUInteger vertexCount = (NSUInteger)MAX(ZSAEInt(vertexData[@"m_VertexCount"]), 0);
+    NSData *blob = nil;
+    for (id value in vertexData.allValues) {
+        if ([value isKindOfClass:[NSData class]] && [(NSData *)value length] > 0) {
+            blob = value;
+            break;
+        }
+    }
+    NSArray *channels = ZSAEArray(vertexData[@"m_Channels"]);
+    if (vertexCount == 0 || !blob || channels.count == 0) {
+        if (reason) *reason = @"mesh uses compressed or unsupported vertex data";
+        return nil;
+    }
+
+    NSUInteger strides[8] = {0};
+    for (id entry in channels) {
+        NSDictionary *channel = ZSAEDict(entry);
+        int64_t stream = ZSAEInt(channel[@"stream"]);
+        NSUInteger dimension = (NSUInteger)(ZSAEInt(channel[@"dimension"]) & 0xF);
+        if (!channel || stream < 0 || stream >= 8 || dimension == 0) continue;
+        NSUInteger end = (NSUInteger)ZSAEInt(channel[@"offset"]) + ZSAEMeshFormatSize(ZSAEInt(channel[@"format"])) * dimension;
+        strides[stream] = MAX(strides[stream], end);
+    }
+    NSUInteger streamOffsets[8] = {0};
+    NSUInteger running = 0;
+    for (int s = 0; s < 8; s++) {
+        streamOffsets[s] = running;
+        if (strides[s] > 0) {
+            running += strides[s] * vertexCount;
+            running = (running + 15u) & ~(NSUInteger)15u;
+        }
+    }
+
+    NSDictionary *positionChannel = channels.count > 0 ? ZSAEDict(channels[0]) : nil;
+    int64_t positionStream = ZSAEInt(positionChannel[@"stream"]);
+    if (!positionChannel || positionStream < 0 || positionStream >= 8) {
+        if (reason) *reason = @"mesh has no position channel";
+        return nil;
+    }
+    NSData *positions = ZSAEMeshReadChannel(blob, positionChannel, vertexCount, streamOffsets[positionStream], strides[positionStream], 3);
+    if (!positions) {
+        if (reason) *reason = @"mesh vertex data is truncated";
+        return nil;
+    }
+
+    NSData *uvs = nil;
+    if (channels.count > 4) {
+        NSDictionary *uvChannel = ZSAEDict(channels[4]);
+        int64_t uvStream = ZSAEInt(uvChannel[@"stream"]);
+        if (uvChannel && (ZSAEInt(uvChannel[@"dimension"]) & 0xF) >= 2 && uvStream >= 0 && uvStream < 8) {
+            uvs = ZSAEMeshReadChannel(blob, uvChannel, vertexCount, streamOffsets[uvStream], strides[uvStream], 2);
+        }
+    }
+
+    ZSAEMeshData *mesh = [ZSAEMeshData new];
+    mesh.name = ZSAEString(fields[@"m_Name"]);
+    mesh.vertexCount = vertexCount;
+    mesh.positions = positions;
+    mesh.uvs = uvs;
+
+    const float *pos = positions.bytes;
+    for (int a = 0; a < 3; a++) {
+        mesh->lo[a] = INFINITY;
+        mesh->hi[a] = -INFINITY;
+    }
+    for (NSUInteger i = 0; i < vertexCount; i++) {
+        for (int a = 0; a < 3; a++) {
+            float v = pos[i * 3 + a];
+            if (!isfinite(v)) continue;
+            mesh->lo[a] = MIN(mesh->lo[a], v);
+            mesh->hi[a] = MAX(mesh->hi[a], v);
+        }
+    }
+    for (int a = 0; a < 3; a++) {
+        if (!isfinite(mesh->lo[a]) || !isfinite(mesh->hi[a])) {
+            if (reason) *reason = @"mesh has invalid vertex positions";
+            return nil;
+        }
+    }
+
+    NSData *indexData = [fields[@"m_IndexBuffer"] isKindOfClass:[NSData class]] ? fields[@"m_IndexBuffer"] : nil;
+    NSUInteger indexSize = 2;
+    if (fields[@"m_IndexFormat"]) indexSize = ZSAEInt(fields[@"m_IndexFormat"]) == 1 ? 4 : 2;
+    else if (fields[@"m_Use16BitIndices"]) indexSize = ZSAEInt(fields[@"m_Use16BitIndices"]) != 0 ? 2 : 4;
+    NSArray *subMeshes = ZSAEArray(fields[@"m_SubMeshes"]);
+    if (indexData.length == 0 || subMeshes.count == 0) {
+        if (reason) *reason = @"mesh has no index data";
+        return nil;
+    }
+
+    const NSUInteger kMaxTriangles = 40000;
+    NSUInteger total = 0;
+    NSMutableArray<NSData *> *triangles = [NSMutableArray arrayWithCapacity:subMeshes.count];
+    for (id entry in subMeshes) {
+        NSDictionary *sub = ZSAEDict(entry);
+        NSMutableData *tris = [NSMutableData data];
+        if (sub) {
+            NSUInteger first = (NSUInteger)MAX(ZSAEInt(sub[@"firstByte"]), 0);
+            NSUInteger count = (NSUInteger)MAX(ZSAEInt(sub[@"indexCount"]), 0);
+            int64_t topology = ZSAEInt(sub[@"topology"]);
+            int64_t baseVertex = ZSAEInt(sub[@"baseVertex"]);
+            NSUInteger step = topology == 2 ? 4 : 3;
+            for (NSUInteger k = 0; k + (topology == 1 ? 3 : step) <= count && total < kMaxTriangles; k += (topology == 1 ? 1 : step)) {
+                uint32_t raw[4] = {0, 0, 0, 0};
+                NSUInteger need = topology == 2 ? 4 : 3;
+                BOOL ok = YES;
+                for (NSUInteger n = 0; n < need; n++) {
+                    if (!ZSAEMeshReadIndex(indexData, first + (k + n) * indexSize, indexSize, &raw[n])) { ok = NO; break; }
+                    int64_t shifted = (int64_t)raw[n] + baseVertex;
+                    if (shifted < 0 || (NSUInteger)shifted >= vertexCount) { ok = NO; break; }
+                    raw[n] = (uint32_t)shifted;
+                }
+                if (!ok) continue;
+                uint32_t tri[6];
+                NSUInteger triCount = 0;
+                if (topology == 0) {
+                    tri[0] = raw[0]; tri[1] = raw[1]; tri[2] = raw[2];
+                    triCount = 1;
+                } else if (topology == 1) {
+                    if (raw[0] == raw[1] || raw[1] == raw[2] || raw[0] == raw[2]) continue;
+                    if (k & 1) { tri[0] = raw[1]; tri[1] = raw[0]; tri[2] = raw[2]; }
+                    else { tri[0] = raw[0]; tri[1] = raw[1]; tri[2] = raw[2]; }
+                    triCount = 1;
+                } else if (topology == 2) {
+                    tri[0] = raw[0]; tri[1] = raw[1]; tri[2] = raw[2];
+                    tri[3] = raw[0]; tri[4] = raw[2]; tri[5] = raw[3];
+                    triCount = 2;
+                }
+                [tris appendBytes:tri length:triCount * 3 * sizeof(uint32_t)];
+                total += triCount;
+            }
+        }
+        [triangles addObject:tris];
+    }
+    if (total == 0) {
+        if (reason) *reason = @"mesh has no renderable triangles";
+        return nil;
+    }
+    mesh.triangles = triangles;
+    return mesh;
+}
+
+static UIImage *ZSAEMeshDownscale(UIImage *image, CGFloat maxDimension) {
+    CGFloat longest = MAX(image.size.width, image.size.height);
+    if (longest <= maxDimension || longest <= 0) return image;
+    CGFloat factor = maxDimension / longest;
+    CGSize target = CGSizeMake(MAX(1, floor(image.size.width * factor)), MAX(1, floor(image.size.height * factor)));
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
+}
+
+static NSDictionary *ZSAEMeshMaterialEntry(ZSAEContext *context, ZSAEObject *owner, id pointer, NSMutableDictionary *cache) {
+    ZSAEObject *material = ZSAEResolvePPtr(context, owner, pointer, NULL);
+    if (!material || material.classID != 21) return nil;
+    NSDictionary *saved = ZSAEDict(material.fields[@"m_SavedProperties"]);
+    NSArray<NSDictionary *> *pairs = ZSAENamedPairs(saved[@"m_TexEnvs"]);
+
+    BOOL (^hasTexture)(NSDictionary *) = ^BOOL(NSDictionary *pair) {
+        return ZSAEInt(ZSAEDict(ZSAEDict(pair[@"value"])[@"m_Texture"])[@"m_PathID"]) != 0;
+    };
+    NSDictionary *chosen = nil;
+    NSArray<NSString *> *preferred = @[@"_MainTex", @"_BaseMap", @"_BaseColorMap", @"_Tex", @"_Diffuse", @"_Albedo", @"_Texture"];
+    for (NSString *wanted in preferred) {
+        for (NSDictionary *pair in pairs) {
+            if ([pair[@"name"] isEqualToString:wanted] && hasTexture(pair)) { chosen = pair; break; }
+        }
+        if (chosen) break;
+    }
+    if (!chosen) {
+        for (NSDictionary *pair in pairs) {
+            if (hasTexture(pair)) { chosen = pair; break; }
+        }
+    }
+    if (!chosen) return nil;
+
+    NSDictionary *value = ZSAEDict(chosen[@"value"]);
+    ZSAEObject *textureObject = ZSAEResolvePPtr(context, material, value[@"m_Texture"], NULL);
+    if (!textureObject || textureObject.classID != 28) return nil;
+
+    NSString *key = [NSString stringWithFormat:@"%p:%lld", textureObject.session, (long long)textureObject.pathID];
+    UIImage *image = cache[key];
+    NSString *textureName = ZSAEString(textureObject.fields[@"m_Name"]) ?: @"";
+    if (!image) {
+        ZSAETextureRecord *record = nil;
+        NSMutableData *rgba = nil;
+        if (!ZSAEDecodeTextureObject(textureObject, &record, &rgba, NULL)) return nil;
+        UIImage *full = ZSAEImageFromRGBA(rgba, record.width, record.height);
+        if (!full) return nil;
+        image = ZSAEMeshDownscale(full, 1024);
+        cache[key] = image;
+    }
+
+    NSDictionary *scale = ZSAEDict(value[@"m_Scale"]);
+    NSDictionary *offset = ZSAEDict(value[@"m_Offset"]);
+    double sx = scale ? ZSAEDouble(scale[@"x"]) : 1;
+    double sy = scale ? ZSAEDouble(scale[@"y"]) : 1;
+    if (sx == 0) sx = 1;
+    if (sy == 0) sy = 1;
+    return @{@"image": image, @"name": textureName, @"tf": @[@(sx), @(sy), @(ZSAEDouble(offset[@"x"])), @(ZSAEDouble(offset[@"y"]))]};
+}
+
+static CGAffineTransform ZSAEMeshAffine(CGPoint t0, CGPoint t1, CGPoint t2, CGPoint p0, CGPoint p1, CGPoint p2, BOOL *ok) {
+    double dx1 = t1.x - t0.x, dy1 = t1.y - t0.y;
+    double dx2 = t2.x - t0.x, dy2 = t2.y - t0.y;
+    double det = dx1 * dy2 - dx2 * dy1;
+    if (fabs(det) < 1e-9) {
+        *ok = NO;
+        return CGAffineTransformIdentity;
+    }
+    double sx1 = p1.x - p0.x, sy1 = p1.y - p0.y;
+    double sx2 = p2.x - p0.x, sy2 = p2.y - p0.y;
+    double a = (sx1 * dy2 - sx2 * dy1) / det;
+    double c = (sx2 * dx1 - sx1 * dx2) / det;
+    double b = (sy1 * dy2 - sy2 * dy1) / det;
+    double d = (sy2 * dx1 - sy1 * dx2) / det;
+    double tx = p0.x - a * t0.x - c * t0.y;
+    double ty = p0.y - b * t0.x - d * t0.y;
+    *ok = YES;
+    return CGAffineTransformMake(a, b, c, d, tx, ty);
+}
+
+static UIImage *ZSAERenderMeshUVMap(ZSAEMeshData *mesh, NSArray *entries, NSError **error) {
+    UIImage *base = nil;
+    for (id entry in entries) {
+        if ([entry isKindOfClass:[NSDictionary class]]) {
+            base = entry[@"image"];
+            if (base) break;
+        }
+    }
+    if (!mesh.uvs) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"This mesh has no UV coordinates.");
+        return nil;
+    }
+    CGSize size = base ? base.size : CGSizeMake(1024, 1024);
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    const float *uv = mesh.uvs.bytes;
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextRef ctx = context.CGContext;
+        [[UIColor colorWithWhite:0.1 alpha:1] setFill];
+        CGContextFillRect(ctx, CGRectMake(0, 0, size.width, size.height));
+        if (base) [base drawInRect:CGRectMake(0, 0, size.width, size.height)];
+        CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithRed:1 green:0.2 blue:0.2 alpha:0.85].CGColor);
+        CGContextSetLineWidth(ctx, 1);
+        for (NSData *tris in mesh.triangles) {
+            const uint32_t *idx = tris.bytes;
+            NSUInteger count = tris.length / (3 * sizeof(uint32_t));
+            for (NSUInteger t = 0; t < count; t++) {
+                CGPoint pts[3];
+                for (int n = 0; n < 3; n++) {
+                    uint32_t i = idx[t * 3 + n];
+                    pts[n] = CGPointMake(uv[i * 2] * size.width, (1.0f - uv[i * 2 + 1]) * size.height);
+                }
+                CGContextMoveToPoint(ctx, pts[0].x, pts[0].y);
+                CGContextAddLineToPoint(ctx, pts[1].x, pts[1].y);
+                CGContextAddLineToPoint(ctx, pts[2].x, pts[2].y);
+                CGContextClosePath(ctx);
+                CGContextStrokePath(ctx);
+            }
+        }
+    }];
+}
+
+static UIImage *ZSAERenderMesh(ZSAEMeshData *mesh, NSArray *entries, NSInteger page, NSError **error) {
+    if (page == 4) return ZSAERenderMeshUVMap(mesh, entries, error);
+
+    int axisU = 0, axisV = 1, axisD = 2;
+    if (page == 1) { axisU = 2; axisV = 1; axisD = 0; }
+    else if (page == 2) { axisU = 0; axisV = 2; axisD = 1; }
+    BOOL wire = page == 3;
+
+    float loU = mesh->lo[axisU], loV = mesh->lo[axisV];
+    float extentU = mesh->hi[axisU] - loU;
+    float extentV = mesh->hi[axisV] - loV;
+    float longest = MAX(extentU, extentV);
+    if (!(longest > 1e-6f)) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorAssetNotFound, @"This mesh has no extent in this view.");
+        return nil;
+    }
+    CGFloat margin = 32;
+    CGFloat scale = 960.0 / longest;
+    CGSize size = CGSizeMake(MAX(ceil(extentU * scale), 4) + margin * 2, MAX(ceil(extentV * scale), 4) + margin * 2);
+
+    const float *pos = mesh.positions.bytes;
+    const float *uv = mesh.uvs.bytes;
+
+    NSUInteger triCount = 0;
+    for (NSData *tris in mesh.triangles) triCount += tris.length / (3 * sizeof(uint32_t));
+    ZSAEMeshTri *list = malloc(MAX(triCount, 1) * sizeof(ZSAEMeshTri));
+    if (!list) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorTextureDecodeFailed, @"Couldn't allocate memory for the mesh preview.");
+        return nil;
+    }
+    NSUInteger n = 0;
+    for (NSUInteger s = 0; s < mesh.triangles.count; s++) {
+        const uint32_t *idx = mesh.triangles[s].bytes;
+        NSUInteger count = mesh.triangles[s].length / (3 * sizeof(uint32_t));
+        for (NSUInteger t = 0; t < count; t++) {
+            ZSAEMeshTri tri;
+            tri.i0 = idx[t * 3];
+            tri.i1 = idx[t * 3 + 1];
+            tri.i2 = idx[t * 3 + 2];
+            tri.sub = (uint32_t)s;
+            tri.depth = (pos[tri.i0 * 3 + axisD] + pos[tri.i1 * 3 + axisD] + pos[tri.i2 * 3 + axisD]) / 3.0f;
+            list[n++] = tri;
+        }
+    }
+    qsort(list, n, sizeof(ZSAEMeshTri), ZSAEMeshTriCompare);
+
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = YES;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:format];
+    CGFloat height = size.height;
+    UIImage *result = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGContextRef ctx = context.CGContext;
+        [[UIColor colorWithWhite:0.1 alpha:1] setFill];
+        CGContextFillRect(ctx, CGRectMake(0, 0, size.width, size.height));
+        CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+
+        CGPoint (^project)(uint32_t) = ^CGPoint(uint32_t i) {
+            return CGPointMake(margin + (pos[i * 3 + axisU] - loU) * scale, height - margin - (pos[i * 3 + axisV] - loV) * scale);
+        };
+
+        for (NSUInteger k = 0; k < n; k++) {
+            ZSAEMeshTri tri = list[k];
+            CGPoint p[3] = { project(tri.i0), project(tri.i1), project(tri.i2) };
+            uint32_t ids[3] = { tri.i0, tri.i1, tri.i2 };
+
+            if (wire) {
+                CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:0.9 alpha:0.7].CGColor);
+                CGContextSetLineWidth(ctx, 1);
+                CGContextMoveToPoint(ctx, p[0].x, p[0].y);
+                CGContextAddLineToPoint(ctx, p[1].x, p[1].y);
+                CGContextAddLineToPoint(ctx, p[2].x, p[2].y);
+                CGContextClosePath(ctx);
+                CGContextStrokePath(ctx);
+                continue;
+            }
+
+            CGPoint centroid = CGPointMake((p[0].x + p[1].x + p[2].x) / 3.0, (p[0].y + p[1].y + p[2].y) / 3.0);
+            CGPoint grown[3];
+            for (int v = 0; v < 3; v++) {
+                CGFloat dx = p[v].x - centroid.x, dy = p[v].y - centroid.y;
+                CGFloat length = hypot(dx, dy);
+                grown[v] = length > 1e-6 ? CGPointMake(p[v].x + dx / length * 0.6, p[v].y + dy / length * 0.6) : p[v];
+            }
+
+            NSDictionary *entry = nil;
+            if (entries.count > 0) {
+                id candidate = entries[MIN((NSUInteger)tri.sub, entries.count - 1)];
+                if ([candidate isKindOfClass:[NSDictionary class]]) entry = candidate;
+            }
+            UIImage *image = entry[@"image"];
+
+            CGContextSaveGState(ctx);
+            CGContextMoveToPoint(ctx, grown[0].x, grown[0].y);
+            CGContextAddLineToPoint(ctx, grown[1].x, grown[1].y);
+            CGContextAddLineToPoint(ctx, grown[2].x, grown[2].y);
+            CGContextClosePath(ctx);
+
+            BOOL drawn = NO;
+            if (image && uv) {
+                NSArray<NSNumber *> *tf = entry[@"tf"];
+                double sx = tf[0].doubleValue, sy = tf[1].doubleValue, ox = tf[2].doubleValue, oy = tf[3].doubleValue;
+                CGPoint t[3];
+                for (int v = 0; v < 3; v++) {
+                    double u = uv[ids[v] * 2] * sx + ox;
+                    double w = uv[ids[v] * 2 + 1] * sy + oy;
+                    t[v] = CGPointMake(u * image.size.width, (1.0 - w) * image.size.height);
+                }
+                BOOL ok = NO;
+                CGAffineTransform transform = ZSAEMeshAffine(t[0], t[1], t[2], p[0], p[1], p[2], &ok);
+                if (ok) {
+                    CGContextClip(ctx);
+                    CGContextConcatCTM(ctx, transform);
+                    [image drawInRect:CGRectMake(0, 0, image.size.width, image.size.height)];
+                    drawn = YES;
+                }
+            }
+            if (!drawn) {
+                float ax = pos[ids[1] * 3] - pos[ids[0] * 3], ay = pos[ids[1] * 3 + 1] - pos[ids[0] * 3 + 1], az = pos[ids[1] * 3 + 2] - pos[ids[0] * 3 + 2];
+                float bx = pos[ids[2] * 3] - pos[ids[0] * 3], by = pos[ids[2] * 3 + 1] - pos[ids[0] * 3 + 1], bz = pos[ids[2] * 3 + 2] - pos[ids[0] * 3 + 2];
+                float normal[3] = { ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx };
+                float magnitude = sqrtf(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+                float facing = magnitude > 1e-9f ? fabsf(normal[axisD]) / magnitude : 0.5f;
+                CGFloat shade = 0.3 + 0.6 * facing;
+                CGContextSetFillColorWithColor(ctx, [UIColor colorWithRed:shade * 0.8 green:shade * 0.88 blue:shade alpha:1].CGColor);
+                CGContextFillPath(ctx);
+            }
+            CGContextRestoreGState(ctx);
+        }
+    }];
+    free(list);
+    return result;
+}
+
+static ZSAEObject *ZSAEMeshComponent(ZSAEContext *context, ZSAEObject *gameObject, int32_t classA, int32_t classB) {
+    for (id entry in ZSAEArray(gameObject.fields[@"m_Component"])) {
+        NSDictionary *wrapper = ZSAEDict(entry);
+        NSDictionary *pointer = ZSAEDict(wrapper[@"component"]) ?: (ZSAEDict(wrapper[@"second"]) ?: wrapper);
+        if (!pointer || ZSAEInt(pointer[@"m_PathID"]) == 0) continue;
+        ZSAEObject *candidate = ZSAEResolvePPtr(context, gameObject, pointer, NULL);
+        if (candidate && (candidate.classID == classA || candidate.classID == classB)) return candidate;
+    }
+    return nil;
+}
+
+static NSString *ZSAEMeshOBJText(ZSAEMeshData *mesh) {
+    NSMutableString *text = [NSMutableString stringWithCapacity:mesh.vertexCount * 48];
+    [text appendFormat:@"o %@\n", mesh.name.length > 0 ? mesh.name : @"Mesh"];
+    const float *pos = mesh.positions.bytes;
+    const float *uv = mesh.uvs.bytes;
+    for (NSUInteger i = 0; i < mesh.vertexCount; i++) [text appendFormat:@"v %g %g %g\n", pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]];
+    if (uv) for (NSUInteger i = 0; i < mesh.vertexCount; i++) [text appendFormat:@"vt %g %g\n", uv[i * 2], uv[i * 2 + 1]];
+    for (NSUInteger s = 0; s < mesh.triangles.count; s++) {
+        [text appendFormat:@"g submesh_%lu\n", (unsigned long)s];
+        const uint32_t *idx = mesh.triangles[s].bytes;
+        NSUInteger count = mesh.triangles[s].length / (3 * sizeof(uint32_t));
+        for (NSUInteger t = 0; t < count; t++) {
+            unsigned a = idx[t * 3] + 1, b = idx[t * 3 + 1] + 1, c = idx[t * 3 + 2] + 1;
+            if (uv) [text appendFormat:@"f %u/%u %u/%u %u/%u\n", a, a, b, b, c, c];
+            else [text appendFormat:@"f %u %u %u\n", a, b, c];
+        }
+    }
+    return text;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildMeshVisual(ZSAEContext *context, ZSAEObject *object, NSError **error) {
+    NSString *kind = object.classID == 23 ? @"MeshRenderer" : (object.classID == 137 ? @"SkinnedMeshRenderer" : (object.classID == 33 ? @"MeshFilter" : @"Mesh"));
+    ZSAEObject *renderer = nil;
+    ZSAEObject *meshObject = nil;
+
+    if (object.classID == 43) {
+        meshObject = object;
+    } else if (object.classID == 137) {
+        renderer = object;
+        meshObject = ZSAEResolvePPtr(context, object, object.fields[@"m_Mesh"], NULL);
+    } else if (object.classID == 33) {
+        meshObject = ZSAEResolvePPtr(context, object, object.fields[@"m_Mesh"], NULL);
+        ZSAEObject *gameObject = ZSAEResolvePPtr(context, object, object.fields[@"m_GameObject"], NULL);
+        if (gameObject) renderer = ZSAEMeshComponent(context, gameObject, 23, 137);
+    } else {
+        renderer = object;
+        ZSAEObject *gameObject = ZSAEResolvePPtr(context, object, object.fields[@"m_GameObject"], NULL);
+        ZSAEObject *filter = gameObject ? ZSAEMeshComponent(context, gameObject, 33, 33) : nil;
+        if (filter) meshObject = ZSAEResolvePPtr(context, filter, filter.fields[@"m_Mesh"], NULL);
+    }
+
+    NSString *reason = nil;
+    ZSAEMeshData *mesh = nil;
+    if (!meshObject || meshObject.classID != 43) reason = @"no mesh is assigned or it isn't available in the cache";
+    else mesh = ZSAEParseMesh(meshObject, &reason);
+    if (!mesh) {
+        ZSAssetExplorerVisual *fallback = ZSAEBuildInspectorVisual(object, error);
+        if (fallback) fallback.summary = [NSString stringWithFormat:@"%@  •  %@  •  can't be previewed: %@", fallback.name.length > 0 ? fallback.name : kind, kind, reason ?: @"unsupported mesh"];
+        return fallback;
+    }
+
+    NSMutableDictionary *cache = [NSMutableDictionary dictionary];
+    NSMutableArray *entries = [NSMutableArray array];
+    NSMutableOrderedSet<NSString *> *textureNames = [NSMutableOrderedSet orderedSet];
+    if (renderer) {
+        for (id pointer in ZSAEArray(renderer.fields[@"m_Materials"])) {
+            NSDictionary *entry = ZSAEMeshMaterialEntry(context, renderer, pointer, cache);
+            [entries addObject:entry ?: (id)[NSNull null]];
+            NSString *textureName = entry[@"name"];
+            if (textureName.length > 0) [textureNames addObject:textureName];
+        }
+    }
+
+    NSString *gameObjectName = nil;
+    if (renderer) {
+        ZSAEObject *gameObject = ZSAEResolvePPtr(context, renderer, renderer.fields[@"m_GameObject"], NULL);
+        gameObjectName = ZSAEString(gameObject.fields[@"m_Name"]);
+    }
+    NSString *label = gameObjectName.length > 0 ? gameObjectName : (mesh.name.length > 0 ? mesh.name : kind);
+    NSUInteger triangleCount = 0;
+    for (NSData *tris in mesh.triangles) triangleCount += tris.length / (3 * sizeof(uint32_t));
+
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = label;
+    visual.summary = [NSString stringWithFormat:@"%@  •  %@  •  %lu vertices  •  %lu triangles  •  %lu submesh%@  •  %@", label, kind,
+                      (unsigned long)mesh.vertexCount, (unsigned long)triangleCount,
+                      (unsigned long)mesh.triangles.count, mesh.triangles.count == 1 ? @"" : @"es",
+                      textureNames.count > 0 ? [textureNames.array componentsJoinedByString:@", "] : @"no texture"];
+    visual.pageLabels = @[@"Front", @"Side", @"Top", @"Wireframe", @"UV Map"];
+    NSArray *frozen = [entries copy];
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        return ZSAERenderMesh(mesh, frozen, page, providerError);
+    };
+    NSString *obj = ZSAEMeshOBJText(mesh);
+    visual.exportData = [obj dataUsingEncoding:NSUTF8StringEncoding];
+    visual.fileExtension = @"obj";
+    return visual;
+}
+
 @interface ZSAEGraphState : NSObject
 @property (nonatomic, strong) ZSAEContext *context;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *items;
@@ -7244,6 +7850,11 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
             return ZSAEBuildFontVisual(object, error);
         case 329:
             return ZSAEBuildVideoClipVisual(object, error);
+        case 23:
+        case 33:
+        case 43:
+        case 137:
+            return ZSAEBuildMeshVisual(context, object, error);
         default:
             return ZSAEBuildInspectorVisual(object, error);
     }
