@@ -1116,6 +1116,11 @@ static CGSize zs_logo_bake_pixels(CGSize intrinsic, CGFloat longest) {
     return CGSizeMake(MAX(1, round(intrinsic.width * ratio)), MAX(1, round(intrinsic.height * ratio)));
 }
 
+static CGFloat zs_logo_bake_longest(void) {
+    CGFloat width = UIScreen.mainScreen.bounds.size.width * UIScreen.mainScreen.scale * 0.5;
+    return MIN(1024, MAX(512, round(width)));
+}
+
 static BOOL zs_logo_image_corner_is_opaque(CGImageRef image) {
     uint8_t pixel[4] = {0, 0, 0, 0};
     CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
@@ -1278,7 +1283,7 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
         : 1;
 
     CGFloat scale = UIScreen.mainScreen.scale;
-    CGFloat longest = MIN(1024, 512 * scale);
+    CGFloat longest = zs_logo_bake_longest();
     CGSize pixels = zs_logo_bake_pixels(svg.size, longest);
     while ((double)count * pixels.width * pixels.height * 4.0 > kZSLogoBakeByteBudget && longest > 96) {
         longest *= 0.85;
@@ -1356,6 +1361,35 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
 }
 
 @end
+
+static NSString *zs_logo_svg_bake_key(NSString *path) {
+    return [zs_logo_animation_key(path) stringByAppendingString:@"|svgbake"];
+}
+
+static void zs_logo_svg_cache_animation(NSString *key, ZSLogoAnimation *animation) {
+    CGImageRef first = animation.frames.count > 0 ? (__bridge CGImageRef)animation.frames.firstObject : NULL;
+    double pixels = first ? (double)CGImageGetWidth(first) * (double)CGImageGetHeight(first) : 0;
+    [zs_logo_animation_cache() setObject:animation forKey:key cost:(NSUInteger)(pixels * 4.0 * animation.frames.count)];
+}
+
+static void zs_logo_svg_prewarm(NSString *path) {
+    NSString *key = zs_logo_svg_bake_key(path);
+    if ([zs_logo_animation_cache() objectForKey:key]) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ZSLogoAnimation *stored = zs_logo_svg_disk_load(key);
+        if (stored) {
+            zs_logo_svg_cache_animation(key, stored);
+            return;
+        }
+        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
+        if (!svg) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [[ZSLogoSVGBaker shared] bake:svg key:key completion:^(ZSLogoAnimation *animation) {
+                if (animation) zs_logo_svg_cache_animation(key, animation);
+            }];
+        });
+    });
+}
 
 @interface ZSLogoEffectView () <WKNavigationDelegate>
 @end
@@ -1443,7 +1477,7 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
 }
 
 - (void)zs_loadSVGAtPath:(NSString *)path {
-    NSString *key = [zs_logo_animation_key(path) stringByAppendingString:@"|svgbake"];
+    NSString *key = zs_logo_svg_bake_key(path);
     ZSLogoAnimation *cached = [zs_logo_animation_cache() objectForKey:key];
     if (cached) {
         [self zs_setSVG:nil];
@@ -1460,8 +1494,7 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
             if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
 
             if (stored) {
-                NSUInteger cost = (NSUInteger)(stored.size.width * stored.size.height * 4.0 * stored.frames.count);
-                [zs_logo_animation_cache() setObject:stored forKey:key cost:cost];
+                zs_logo_svg_cache_animation(key, stored);
                 [strongSelf zs_setSVG:nil];
                 [strongSelf zs_setAnimation:stored];
                 return;
@@ -1471,18 +1504,13 @@ typedef void (^ZSLogoBakeCompletion)(ZSLogoAnimation * _Nullable animation);
                 return;
             }
 
+            [strongSelf zs_setSVG:svg];
             [[ZSLogoSVGBaker shared] bake:svg key:key completion:^(ZSLogoAnimation *animation) {
                 typeof(self) bakedSelf = weakSelf;
-                if (!bakedSelf || ![bakedSelf->_path isEqualToString:path]) return;
-                if (animation) {
-                    CGSize size = animation.frames.count > 0 ? CGSizeMake(CGImageGetWidth((__bridge CGImageRef)animation.frames.firstObject), CGImageGetHeight((__bridge CGImageRef)animation.frames.firstObject)) : CGSizeZero;
-                    NSUInteger cost = (NSUInteger)(size.width * size.height * 4.0 * animation.frames.count);
-                    [zs_logo_animation_cache() setObject:animation forKey:key cost:cost];
-                    [bakedSelf zs_setSVG:nil];
-                    [bakedSelf zs_setAnimation:animation];
-                } else {
-                    [bakedSelf zs_setSVG:svg];
-                }
+                if (!bakedSelf || ![bakedSelf->_path isEqualToString:path] || !animation) return;
+                zs_logo_svg_cache_animation(key, animation);
+                [bakedSelf zs_setSVG:nil];
+                [bakedSelf zs_setAnimation:animation];
             }];
         });
     });
@@ -1745,6 +1773,29 @@ void zs_logo_effects_attach(UILabel *label) {
     }
 
     objc_setAssociatedObject(label, kZSLogoEffectsKey, attached, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+void zs_logo_prewarm(void) {
+    ZSLogoPack *pack = zs_logo_selected_pack();
+    if (!pack) return;
+    if (pack.fillPath && pack.style.fill.enabled && zs_logo_is_svg_file(pack.fillPath)) zs_logo_svg_prewarm(pack.fillPath);
+    if (pack.vfxPath && pack.style.vfx.enabled && zs_logo_is_svg_file(pack.vfxPath)) zs_logo_svg_prewarm(pack.vfxPath);
+}
+
+__attribute__((constructor)) static void zs_logo_prewarm_init(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] addObserverForName:ZSLogoDidChangeNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            zs_logo_prewarm();
+        }];
+        for (NSNumber *delay in @[@3, @10]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                zs_logo_prewarm();
+            });
+        }
+    });
 }
 
 void zs_logo_effects_set_paused(BOOL paused) {
