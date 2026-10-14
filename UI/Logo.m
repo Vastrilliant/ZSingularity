@@ -4,6 +4,7 @@
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #import <compression.h>
 
@@ -393,28 +394,86 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
     [task resume];
 }
 
-static NSString *zs_logo_role_for_filename(NSString *filename, NSString **extensionOut) {
-    NSString *stem = filename.stringByDeletingPathExtension.lowercaseString;
+static NSString * const kZSLogoStyleFilename = @"style.json";
+static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
+
+static BOOL zs_logo_is_font_file(NSString *filename) {
     NSString *ext = filename.pathExtension.lowercaseString;
-    if ([ext isEqualToString:@"ttf"] || [ext isEqualToString:@"otf"]) {
-        *extensionOut = ext;
-        return kZSLogoRoleFont;
+    return [ext isEqualToString:@"ttf"] || [ext isEqualToString:@"otf"];
+}
+
+static BOOL zs_logo_is_svg_file(NSString *filename) {
+    return [filename.pathExtension.lowercaseString isEqualToString:@"svg"];
+}
+
+static BOOL zs_logo_is_image_file(NSString *filename) {
+    static NSSet<NSString *> *extensions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        extensions = [NSSet setWithArray:@[@"png", @"apng", @"gif", @"webp", @"jpg", @"jpeg", @"svg"]];
+    });
+    return [extensions containsObject:filename.pathExtension.lowercaseString];
+}
+
+static BOOL zs_logo_is_style_file(NSString *filename) {
+    return [filename.lowercaseString isEqualToString:kZSLogoStyleFilename];
+}
+
+static BOOL zs_logo_is_relevant_file(NSString *filename) {
+    return zs_logo_is_font_file(filename) || zs_logo_is_image_file(filename) || zs_logo_is_style_file(filename);
+}
+
+static BOOL zs_logo_role_accepts_file(NSString *role, NSString *filename) {
+    if ([role isEqualToString:kZSLogoRoleFont]) return zs_logo_is_font_file(filename);
+    return zs_logo_is_image_file(filename);
+}
+
+static NSDictionary *zs_logo_parse_style_json(NSData *data) {
+    if (data.length == 0) return nil;
+    id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    return [json isKindOfClass:[NSDictionary class]] ? json : nil;
+}
+
+static NSString *zs_logo_style_file(NSDictionary *json, NSString *role) {
+    id section = json[role];
+    if (![section isKindOfClass:[NSDictionary class]]) return nil;
+    id value = section[@"file"];
+    if (![value isKindOfClass:[NSString class]]) return nil;
+    NSString *file = [[(NSString *)value lastPathComponent] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (file.length == 0 || [file hasPrefix:@"."]) return nil;
+    return file;
+}
+
+static NSDictionary<NSString *, NSString *> *zs_logo_resolve_roles(NSDictionary *json, NSArray<NSString *> *available, NSString **missingOut) {
+    NSMutableDictionary<NSString *, NSString *> *lowered = [NSMutableDictionary dictionary];
+    for (NSString *file in [available sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+        if (!lowered[file.lowercaseString]) lowered[file.lowercaseString] = file;
     }
-    if ([ext isEqualToString:@"json"] && [stem isEqualToString:@"style"]) {
-        *extensionOut = ext;
-        return kZSLogoRoleStyle;
-    }
-    if ([ext isEqualToString:@"png"] || [ext isEqualToString:@"gif"]) {
-        if ([stem isEqualToString:@"fill"]) {
-            *extensionOut = ext;
-            return kZSLogoRoleFill;
+
+    NSString *(^match)(NSString *, NSString *) = ^NSString *(NSString *role, NSString *wanted) {
+        NSString *found = [available containsObject:wanted] ? wanted : lowered[wanted.lowercaseString];
+        return found && zs_logo_role_accepts_file(role, found) ? found : nil;
+    };
+
+    NSMutableDictionary<NSString *, NSString *> *resolved = [NSMutableDictionary dictionary];
+    for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx]) {
+        NSString *wanted = json ? zs_logo_style_file(json, role) : nil;
+        if (wanted) {
+            NSString *found = match(role, wanted);
+            if (found) resolved[role] = found;
+            else if (missingOut && !*missingOut) *missingOut = wanted;
+            continue;
         }
-        if ([stem isEqualToString:@"vfx"]) {
-            *extensionOut = ext;
-            return kZSLogoRoleVfx;
+        if ([role isEqualToString:kZSLogoRoleFont]) {
+            for (NSString *candidate in [lowered.allValues sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+                if (zs_logo_is_font_file(candidate)) {
+                    resolved[role] = candidate;
+                    break;
+                }
+            }
         }
     }
-    return nil;
+    return resolved;
 }
 
 #pragma mark - Logo list
@@ -469,9 +528,44 @@ void zs_logo_refresh_names(ZSLogoNamesCompletion completion) {
 
 #pragma mark - Sync
 
+static NSDictionary *zs_logo_remote_info(NSDictionary *entry) {
+    if (![entry isKindOfClass:[NSDictionary class]] || ![entry[@"type"] isEqual:@"file"]) return nil;
+    NSString *filename = entry[@"name"];
+    NSString *downloadURL = entry[@"download_url"];
+    if (![filename isKindOfClass:[NSString class]] || ![downloadURL isKindOfClass:[NSString class]]) return nil;
+    if ([filename hasPrefix:@"."] || !zs_logo_is_relevant_file(filename)) return nil;
+    return @{
+        @"file": filename,
+        @"sha": [entry[@"sha"] isKindOfClass:[NSString class]] ? entry[@"sha"] : @"",
+        @"url": downloadURL,
+    };
+}
+
+static BOOL zs_logo_meta_has_file(NSDictionary *meta, NSString *file, NSString *sha) {
+    if (sha.length == 0) return NO;
+    for (id value in meta.allValues) {
+        if (![value isKindOfClass:[NSDictionary class]]) continue;
+        if ([value[@"file"] isEqual:file] && [value[@"sha"] isEqual:sha]) return YES;
+    }
+    return NO;
+}
+
+static void zs_logo_fetch_remote_file(NSString *directory, NSDictionary *info, NSDictionary *oldMeta, void (^completion)(BOOL success)) {
+    NSString *destination = [directory stringByAppendingPathComponent:info[@"file"]];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:destination] && zs_logo_meta_has_file(oldMeta, info[@"file"], info[@"sha"])) {
+        completion(YES);
+        return;
+    }
+    NSURL *url = [NSURL URLWithString:info[@"url"]];
+    if (!url) {
+        completion(NO);
+        return;
+    }
+    zs_logo_download_file(url, destination, completion);
+}
+
 static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
-    NSString *subpath = name;
-    zs_logo_fetch_listing(zs_logo_contents_url(subpath), ^(NSArray<NSDictionary *> *entries) {
+    zs_logo_fetch_listing(zs_logo_contents_url(name), ^(NSArray<NSDictionary *> *entries) {
         if (!entries) {
             completion(NO);
             return;
@@ -479,82 +573,80 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
 
         NSMutableDictionary<NSString *, NSDictionary *> *remote = [NSMutableDictionary dictionary];
         for (NSDictionary *entry in entries) {
-            if (![entry isKindOfClass:[NSDictionary class]] || ![entry[@"type"] isEqual:@"file"]) continue;
-            NSString *filename = entry[@"name"];
-            NSString *downloadURL = entry[@"download_url"];
-            if (![filename isKindOfClass:[NSString class]] || ![downloadURL isKindOfClass:[NSString class]]) continue;
-            NSString *ext = nil;
-            NSString *role = zs_logo_role_for_filename(filename, &ext);
-            if (!role || remote[role]) continue;
-            remote[role] = @{
-                @"file": [NSString stringWithFormat:@"%@.%@", role, ext],
-                @"sha": [entry[@"sha"] isKindOfClass:[NSString class]] ? entry[@"sha"] : @"",
-                @"url": downloadURL,
-            };
-        }
-
-        if (!remote[kZSLogoRoleFont]) {
-            ZLog(@"[Logo] '%@' has no ttf/otf font in the repo", name);
-            completion(NO);
-            return;
+            NSDictionary *info = zs_logo_remote_info(entry);
+            if (info && !remote[info[@"file"]]) remote[info[@"file"]] = info;
         }
 
         NSString *directory = zs_logo_directory(name);
         NSFileManager *fm = [NSFileManager defaultManager];
         [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
-
         NSDictionary *oldMeta = zs_logo_read_meta(name);
-        NSMutableDictionary *newMeta = [NSMutableDictionary dictionary];
-        dispatch_group_t group = dispatch_group_create();
-        dispatch_queue_t stateQueue = dispatch_queue_create("zs.logo.sync", DISPATCH_QUEUE_SERIAL);
-        __block BOOL fontOK = NO;
 
-        for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx, kZSLogoRoleStyle]) {
-            NSDictionary *info = remote[role];
-            NSString *oldFile = oldMeta[role][@"file"];
-            if (!info) {
-                if ([oldFile isKindOfClass:[NSString class]]) {
-                    [fm removeItemAtPath:[directory stringByAppendingPathComponent:oldFile.lastPathComponent] error:nil];
+        void (^proceed)(NSString *, NSData *) = ^(NSString *styleName, NSData *styleData) {
+            NSDictionary *json = zs_logo_parse_style_json(styleData);
+            NSString *missing = nil;
+            NSDictionary<NSString *, NSString *> *resolved = zs_logo_resolve_roles(json, remote.allKeys, &missing);
+            if (!resolved[kZSLogoRoleFont]) {
+                ZLog(@"[Logo] '%@' has no usable font%@", name, missing ? [NSString stringWithFormat:@" (style.json points to %@)", missing] : @"");
+                completion(NO);
+                return;
+            }
+
+            NSMutableDictionary<NSString *, NSString *> *roleFiles = [resolved mutableCopy];
+            if (styleName && styleData) roleFiles[kZSLogoRoleStyle] = styleName;
+
+            NSMutableSet<NSString *> *okFiles = [NSMutableSet set];
+            if (styleName && styleData) [okFiles addObject:styleName];
+
+            dispatch_group_t group = dispatch_group_create();
+            dispatch_queue_t stateQueue = dispatch_queue_create("zs.logo.sync", DISPATCH_QUEUE_SERIAL);
+
+            for (NSString *file in [NSSet setWithArray:roleFiles.allValues]) {
+                if ([okFiles containsObject:file]) continue;
+                dispatch_group_enter(group);
+                zs_logo_fetch_remote_file(directory, remote[file], oldMeta, ^(BOOL success) {
+                    if (success) dispatch_sync(stateQueue, ^{ [okFiles addObject:file]; });
+                    dispatch_group_leave(group);
+                });
+            }
+
+            dispatch_group_notify(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                NSMutableDictionary *newMeta = [NSMutableDictionary dictionary];
+                for (NSString *role in roleFiles) {
+                    NSString *file = roleFiles[role];
+                    if (![okFiles containsObject:file]) continue;
+                    newMeta[role] = @{@"file": file, @"sha": remote[file][@"sha"] ?: @""};
                 }
-                continue;
-            }
 
-            NSString *destination = [directory stringByAppendingPathComponent:info[@"file"]];
-            BOOL upToDate = [oldMeta[role][@"sha"] isEqual:info[@"sha"]] && [oldMeta[role][@"file"] isEqual:info[@"file"]]
-                && [fm fileExistsAtPath:destination];
-            if (upToDate) {
-                dispatch_sync(stateQueue, ^{
-                    newMeta[role] = @{@"file": info[@"file"], @"sha": info[@"sha"]};
-                    if ([role isEqualToString:kZSLogoRoleFont]) fontOK = YES;
-                });
-                continue;
-            }
-
-            if ([oldFile isKindOfClass:[NSString class]] && ![oldFile isEqualToString:info[@"file"]]) {
-                [fm removeItemAtPath:[directory stringByAppendingPathComponent:oldFile.lastPathComponent] error:nil];
-            }
-
-            NSURL *url = [NSURL URLWithString:info[@"url"]];
-            if (!url) continue;
-            dispatch_group_enter(group);
-            zs_logo_download_file(url, destination, ^(BOOL success) {
-                dispatch_sync(stateQueue, ^{
-                    if (success) {
-                        newMeta[role] = @{@"file": info[@"file"], @"sha": info[@"sha"]};
-                        if ([role isEqualToString:kZSLogoRoleFont]) fontOK = YES;
+                BOOL success = newMeta[kZSLogoRoleFont] != nil;
+                if (success) {
+                    NSMutableSet<NSString *> *keep = [NSMutableSet setWithObject:@"meta.json"];
+                    for (NSDictionary *item in newMeta.allValues) [keep addObject:item[@"file"]];
+                    for (NSString *existing in [fm contentsOfDirectoryAtPath:directory error:nil]) {
+                        if (![keep containsObject:existing]) [fm removeItemAtPath:[directory stringByAppendingPathComponent:existing] error:nil];
                     }
-                });
-                dispatch_group_leave(group);
+                    zs_logo_write_meta(name, newMeta);
+                    zs_logo_invalidate_pack(name);
+                }
+                completion(success);
             });
+        };
+
+        NSString *styleName = nil;
+        for (NSString *file in remote.allKeys) {
+            if (zs_logo_is_style_file(file)) {
+                styleName = file;
+                break;
+            }
+        }
+        if (!styleName) {
+            proceed(nil, nil);
+            return;
         }
 
-        dispatch_group_notify(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            BOOL success = fontOK;
-            if (success) {
-                zs_logo_write_meta(name, newMeta);
-                zs_logo_invalidate_pack(name);
-            }
-            completion(success);
+        zs_logo_fetch_remote_file(directory, remote[styleName], oldMeta, ^(BOOL success) {
+            NSData *data = success ? [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:styleName]] : nil;
+            proceed(data ? styleName : nil, data);
         });
     });
 }
@@ -798,8 +890,128 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
 - (void)loadAssetAtPath:(NSString *)path;
 @end
 
+@interface ZSLogoSVG : NSObject
+@property (nonatomic, copy) NSString *html;
+@property (nonatomic, assign) CGSize size;
+@end
+
+@implementation ZSLogoSVG
+@end
+
+@interface ZSLogoSVGRootReader : NSObject <NSXMLParserDelegate>
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, NSString *> *attributes;
+@end
+
+@implementation ZSLogoSVGRootReader
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *, NSString *> *)attributeDict {
+    if ([elementName isEqualToString:@"svg"]) self.attributes = attributeDict ?: @{};
+    [parser abortParsing];
+}
+@end
+
+static CGFloat zs_logo_svg_length(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0 || [value containsString:@"%"]) return 0;
+    double number = value.doubleValue;
+    return (isfinite(number) && number > 0) ? (CGFloat)number : 0;
+}
+
+static NSCache<NSString *, ZSLogoSVG *> *zs_logo_svg_cache(void) {
+    static NSCache<NSString *, ZSLogoSVG *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 8; });
+    return cache;
+}
+
+static ZSLogoSVG *zs_logo_svg_for_path(NSString *path) {
+    NSString *key = zs_logo_animation_key(path);
+    ZSLogoSVG *cached = [zs_logo_svg_cache() objectForKey:key];
+    if (cached) return cached;
+
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    if (data.length == 0 || data.length > kZSLogoSVGMaxBytes) return nil;
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSRange start = text ? [text rangeOfString:@"<svg"] : NSMakeRange(NSNotFound, 0);
+    if (start.location == NSNotFound) return nil;
+
+    ZSLogoSVGRootReader *reader = [[ZSLogoSVGRootReader alloc] init];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
+    parser.delegate = reader;
+    parser.shouldResolveExternalEntities = NO;
+    [parser parse];
+    NSDictionary<NSString *, NSString *> *attributes = reader.attributes;
+    if (!attributes) return nil;
+
+    CGSize boxSize = CGSizeZero;
+    BOOL hasViewBox = NO;
+    NSString *viewBox = attributes[@"viewBox"];
+    if (viewBox.length > 0) {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSString *part in [viewBox componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@", \t\r\n"]]) {
+            if (part.length > 0) [parts addObject:part];
+        }
+        if (parts.count == 4) {
+            CGFloat w = (CGFloat)[parts[2] doubleValue];
+            CGFloat h = (CGFloat)[parts[3] doubleValue];
+            if (w > 0 && h > 0) {
+                boxSize = CGSizeMake(w, h);
+                hasViewBox = YES;
+            }
+        }
+    }
+
+    CGFloat width = zs_logo_svg_length(attributes[@"width"]);
+    CGFloat height = zs_logo_svg_length(attributes[@"height"]);
+    BOOL hasDimensions = width > 0 && height > 0;
+    CGSize size = hasDimensions ? CGSizeMake(width, height) : boxSize;
+    if (size.width <= 0 || size.height <= 0) size = CGSizeMake(1, 1);
+
+    NSString *markup = [text substringFromIndex:start.location];
+    if (!hasViewBox && hasDimensions) {
+        markup = [markup stringByReplacingCharactersInRange:NSMakeRange(0, 4)
+                                                 withString:[NSString stringWithFormat:@"<svg viewBox=\"0 0 %g %g\"", width, height]];
+    }
+
+    ZSLogoSVG *svg = [[ZSLogoSVG alloc] init];
+    svg.size = size;
+    svg.html = [NSString stringWithFormat:
+        @"<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        @"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1\">"
+        @"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:\">"
+        @"<style>html,body{margin:0;padding:0;width:100%%;height:100%%;background:transparent;overflow:hidden}"
+        @"svg{display:block;width:100%%;height:100%%}</style></head><body>%@</body></html>", markup];
+    [zs_logo_svg_cache() setObject:svg forKey:key];
+    return svg;
+}
+
+static NSString * const kZSLogoSVGPlaybackScript =
+    @"(function(speed,paused){"
+    @"var svg=document.querySelector('svg');"
+    @"var z=window.__zs||(window.__zs={raf:0,t0:0,base:0});"
+    @"if(z.raf){cancelAnimationFrame(z.raf);z.raf=0;}"
+    @"var anims=document.getAnimations?document.getAnimations():[];"
+    @"if(speed<=0){"
+    @"anims.forEach(function(a){a.pause();a.currentTime=0;});"
+    @"if(svg&&svg.pauseAnimations){svg.pauseAnimations();svg.setCurrentTime(0);}"
+    @"return;}"
+    @"anims.forEach(function(a){a.playbackRate=speed;if(paused){a.pause();}else{a.play();}});"
+    @"if(!svg||!svg.pauseAnimations)return;"
+    @"if(paused){svg.pauseAnimations();return;}"
+    @"if(speed===1){svg.unpauseAnimations();return;}"
+    @"svg.pauseAnimations();"
+    @"z.base=svg.getCurrentTime();z.t0=0;"
+    @"var tick=function(ts){if(!z.t0)z.t0=ts;svg.setCurrentTime(z.base+(ts-z.t0)/1000*speed);z.raf=requestAnimationFrame(tick);};"
+    @"z.raf=requestAnimationFrame(tick);"
+    @"})(%g,%@);";
+
+@interface ZSLogoEffectView () <WKNavigationDelegate>
+@end
+
 @implementation ZSLogoEffectView {
+    UIView *_clipView;
     CALayer *_clipLayer;
+    WKWebView *_webView;
+    ZSLogoSVG *_svg;
+    BOOL _svgReady;
     CALayer *_contentLayer;
     CALayer *_maskLayer;
     ZSLogoAnimation *_animation;
@@ -815,11 +1027,14 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
         self.isAccessibilityElement = NO;
         self.backgroundColor = UIColor.clearColor;
 
-        _clipLayer = [CALayer layer];
+        _clipView = [[UIView alloc] initWithFrame:CGRectZero];
+        _clipView.userInteractionEnabled = NO;
+        _clipView.backgroundColor = UIColor.clearColor;
+        _clipLayer = _clipView.layer;
         _contentLayer = [CALayer layer];
         _contentLayer.contentsGravity = kCAGravityResize;
         [_clipLayer addSublayer:_contentLayer];
-        [self.layer addSublayer:_clipLayer];
+        [self addSubview:_clipView];
 
         __weak typeof(self) weakSelf = self;
         _activeObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
@@ -852,6 +1067,10 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
 
 - (void)loadAssetAtPath:(NSString *)path {
     _path = [path copy];
+    if (zs_logo_is_svg_file(path)) {
+        [self zs_loadSVGAtPath:path];
+        return;
+    }
     ZSLogoAnimation *cached = zs_logo_cached_animation(path);
     if (cached) {
         [self zs_setAnimation:cached];
@@ -869,6 +1088,66 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
     });
 }
 
+- (void)zs_loadSVGAtPath:(NSString *)path {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
+            [strongSelf zs_setSVG:svg];
+        });
+    });
+}
+
+- (void)zs_setSVG:(ZSLogoSVG *)svg {
+    _svg = svg;
+    _svgReady = NO;
+    if (!svg) {
+        [_webView removeFromSuperview];
+        _webView = nil;
+        [self setNeedsLayout];
+        return;
+    }
+    if (!_webView) {
+        WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+        WKWebView *webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:configuration];
+        webView.navigationDelegate = self;
+        webView.opaque = NO;
+        webView.backgroundColor = UIColor.clearColor;
+        webView.underPageBackgroundColor = UIColor.clearColor;
+        webView.userInteractionEnabled = NO;
+        webView.hidden = YES;
+        webView.scrollView.backgroundColor = UIColor.clearColor;
+        webView.scrollView.scrollEnabled = NO;
+        webView.scrollView.bounces = NO;
+        webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+        [_clipView addSubview:webView];
+        _webView = webView;
+    }
+    [_webView loadHTMLString:svg.html baseURL:nil];
+    [self setNeedsLayout];
+}
+
+- (void)zs_applySVGPlayback {
+    if (!_webView || !_svgReady) return;
+    double speed = _layerStyle ? _layerStyle.speed : 1;
+    BOOL paused = _animationsPaused || !self.window;
+    NSString *script = [NSString stringWithFormat:kZSLogoSVGPlaybackScript, speed, paused ? @"true" : @"false"];
+    [_webView evaluateJavaScript:script completionHandler:nil];
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    _svgReady = YES;
+    [self zs_applySVGPlayback];
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    _svgReady = NO;
+    if (_svg) [webView loadHTMLString:_svg.html baseURL:nil];
+}
+
 - (void)zs_setAnimation:(ZSLogoAnimation *)animation {
     _animation = animation;
     [self setNeedsLayout];
@@ -882,6 +1161,15 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
 
 - (void)zs_applyFrames {
     [_contentLayer removeAnimationForKey:kZSLogoFrameAnimationKey];
+
+    if (_svg) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _contentLayer.contents = nil;
+        [CATransaction commit];
+        [self zs_applySVGPlayback];
+        return;
+    }
 
     ZSLogoAnimation *animation = _animation;
     [CATransaction begin];
@@ -939,7 +1227,7 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
 
-    _clipLayer.frame = bounds;
+    _clipView.frame = bounds;
 
     BOOL masked = self.fillsText || style.maskToText;
     UIImage *maskImage = masked ? [self zs_renderTextMask] : nil;
@@ -953,7 +1241,7 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
         _clipLayer.mask = nil;
     }
 
-    CGSize imageSize = _animation.size;
+    CGSize imageSize = _svg ? _svg.size : _animation.size;
     if (imageSize.width > 0 && imageSize.height > 0 && bounds.size.width > 0 && bounds.size.height > 0) {
         CGFloat aspect = imageSize.width / imageSize.height;
         CGFloat width, height;
@@ -972,14 +1260,28 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
         width *= style.scale;
         height *= style.scale;
 
-        _contentLayer.transform = CATransform3DIdentity;
-        _contentLayer.bounds = CGRectMake(0, 0, width, height);
-        _contentLayer.position = CGPointMake(CGRectGetMidX(bounds) + style.offset.width,
-                                             CGRectGetMidY(bounds) + style.offset.height);
-        _contentLayer.transform = CATransform3DMakeRotation(style.rotation * M_PI / 180.0, 0, 0, 1);
-        _contentLayer.hidden = NO;
+        CGPoint position = CGPointMake(CGRectGetMidX(bounds) + style.offset.width,
+                                       CGRectGetMidY(bounds) + style.offset.height);
+        CGFloat radians = style.rotation * M_PI / 180.0;
+
+        if (_svg) {
+            _contentLayer.hidden = YES;
+            _webView.hidden = NO;
+            _webView.transform = CGAffineTransformIdentity;
+            _webView.bounds = CGRectMake(0, 0, width, height);
+            _webView.center = position;
+            _webView.transform = CGAffineTransformMakeRotation(radians);
+        } else {
+            _webView.hidden = YES;
+            _contentLayer.transform = CATransform3DIdentity;
+            _contentLayer.bounds = CGRectMake(0, 0, width, height);
+            _contentLayer.position = position;
+            _contentLayer.transform = CATransform3DMakeRotation(radians, 0, 0, 1);
+            _contentLayer.hidden = NO;
+        }
     } else {
         _contentLayer.hidden = YES;
+        _webView.hidden = YES;
     }
 
     [CATransaction commit];
@@ -1293,7 +1595,7 @@ static BOOL zs_logo_import_commit(NSString *name, NSDictionary<NSString *, NSArr
 }
 
 static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSString **errorOut) {
-    NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSArray *> *> *groups = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, ZSLogoSourceEntry *> *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groupNames = [NSMutableDictionary dictionary];
 
     for (ZSLogoSourceEntry *entry in entries) {
@@ -1309,9 +1611,8 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
         }
         if (skip) continue;
 
-        NSString *extension = nil;
-        NSString *role = zs_logo_role_for_filename(components.lastObject, &extension);
-        if (!role) continue;
+        NSString *filename = components.lastObject;
+        if (!zs_logo_is_relevant_file(filename)) continue;
 
         NSArray<NSString *> *folders = [components subarrayWithRange:NSMakeRange(0, components.count - 1)];
         NSString *groupKey = [folders componentsJoinedByString:@"/"];
@@ -1322,7 +1623,7 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
             group = [NSMutableDictionary dictionary];
             groups[groupKey] = group;
         }
-        if (!group[role]) group[role] = @[entry, extension];
+        if (!group[filename]) group[filename] = entry;
     }
 
     NSSet<NSString *> *remoteNames = [NSSet setWithArray:zs_logo_remote_cached_names()];
@@ -1332,29 +1633,59 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
     uint64_t totalSize = 0;
 
     for (NSString *groupKey in [groups.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
-        NSDictionary<NSString *, NSArray *> *group = groups[groupKey];
-        if (!group[kZSLogoRoleFont]) continue;
+        NSDictionary<NSString *, ZSLogoSourceEntry *> *group = groups[groupKey];
 
-        NSMutableDictionary<NSString *, NSArray *> *files = [NSMutableDictionary dictionary];
-        BOOL groupOK = YES;
-        for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx, kZSLogoRoleStyle]) {
-            NSArray *asset = group[role];
-            if (!asset) continue;
-            ZSLogoSourceEntry *entry = asset[0];
-
-            totalSize += entry.size;
-            if (totalSize > kZSLogoZipMaxTotalSize) {
-                firstError = firstError ?: @"The logo files are too large.";
-                groupOK = NO;
+        NSString *styleName = nil;
+        for (NSString *file in group.allKeys) {
+            if (zs_logo_is_style_file(file)) {
+                styleName = file;
                 break;
             }
+        }
 
-            NSString *extractError = nil;
-            NSData *data = entry.load(&extractError);
+        NSMutableDictionary<NSString *, NSData *> *loaded = [NSMutableDictionary dictionary];
+        BOOL groupOK = YES;
+
+        NSData *styleData = nil;
+        if (styleName) {
+            ZSLogoSourceEntry *styleEntry = group[styleName];
+            totalSize += styleEntry.size;
+            NSString *styleError = nil;
+            styleData = styleEntry.size <= kZSLogoZipMaxEntrySize ? styleEntry.load(&styleError) : nil;
+        }
+        NSDictionary *json = zs_logo_parse_style_json(styleData);
+
+        NSString *missing = nil;
+        NSDictionary<NSString *, NSString *> *resolved = zs_logo_resolve_roles(json, group.allKeys, &missing);
+        if (!resolved[kZSLogoRoleFont]) {
+            if (missing) {
+                firstError = firstError ?: [NSString stringWithFormat:@"style.json points to %@, which isn't in the folder.", missing];
+            }
+            continue;
+        }
+
+        NSMutableDictionary<NSString *, NSArray *> *files = [NSMutableDictionary dictionary];
+        for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx]) {
+            NSString *file = resolved[role];
+            if (!file) continue;
+            ZSLogoSourceEntry *entry = group[file];
             BOOL isFont = [role isEqualToString:kZSLogoRoleFont];
-            if (data && isFont && !zs_logo_font_data_is_valid(data)) {
-                data = nil;
-                extractError = [NSString stringWithFormat:@"%@ isn't a readable font.", entry.path.lastPathComponent];
+
+            NSData *data = loaded[file];
+            NSString *extractError = nil;
+            if (!data) {
+                totalSize += entry.size;
+                if (totalSize > kZSLogoZipMaxTotalSize) {
+                    firstError = firstError ?: @"The logo files are too large.";
+                    groupOK = NO;
+                    break;
+                }
+                data = entry.load(&extractError);
+                if (data && isFont && !zs_logo_font_data_is_valid(data)) {
+                    data = nil;
+                    extractError = [NSString stringWithFormat:@"%@ isn't a readable font.", file];
+                }
+                if (data) loaded[file] = data;
             }
             if (!data) {
                 if (isFont) {
@@ -1364,9 +1695,10 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
                 }
                 continue;
             }
-            files[role] = @[[NSString stringWithFormat:@"%@.%@", role, asset[1]], data];
+            files[role] = @[file, data];
         }
         if (!groupOK) continue;
+        if (styleData) files[kZSLogoRoleStyle] = @[kZSLogoStyleFilename, styleData];
 
         NSString *name = zs_logo_import_resolve_name(groupNames[groupKey], usedNames, remoteNames);
         if (zs_logo_import_commit(name, files)) {
@@ -1377,7 +1709,7 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
     }
 
     if (imported.count == 0) {
-        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional fill, vfx and style.json files, in a folder or a zip.";
+        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional images or SVGs and a style.json that points to them, in a folder or a zip.";
         return nil;
     }
     return imported;

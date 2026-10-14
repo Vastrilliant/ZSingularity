@@ -214,6 +214,7 @@ jobs:
             -framework UniformTypeIdentifiers \
             -framework Security \
             -framework CoreLocation \
+            -framework WebKit \
             -lcompression \
             -lc++ \
             -stdlib=libc++ \

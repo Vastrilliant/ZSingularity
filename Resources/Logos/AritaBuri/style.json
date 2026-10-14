@@ -1,5 +1,6 @@
 {
   "font": {
+    "file": "AritaBuriB.ttf",
     "size": 1,
     "emphasisScale": 0,
     "spacing": 1,
@@ -14,6 +15,7 @@
     "strokeColor": "#000000"
   },
   "fill": {
+    "file": "fill.png",
     "enabled": true,
     "speed": 1,
     "opacity": 1,
@@ -23,6 +25,7 @@
     "blendMode": "normal"
   },
   "vfx": {
+    "file": "vfx.png",
     "enabled": true,
     "speed": 1,
     "opacity": 1,
