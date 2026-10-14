@@ -6611,6 +6611,9 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL assetExplorerBundleSortByDate;
 @property (nonatomic, assign) BOOL assetExplorerBundleDateAscending;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *assetExplorerBundleDates;
+@property (nonatomic, assign) BOOL assetExplorerBundleSortByCreation;
+@property (nonatomic, assign) BOOL assetExplorerBundleCreationAscending;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *assetExplorerBundleCreations;
 @property (nonatomic, strong) NSArray<ZSAssetExplorerAsset *> *assetExplorerTextureAssets;
 @property (nonatomic, assign) NSInteger assetExplorerTextureIndex;
 @property (nonatomic, strong) UIStackView *assetExplorerTexturePagerStack;
@@ -9319,6 +9322,9 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.assetExplorerBundleSortByDate = NO;
     self.assetExplorerBundleDateAscending = NO;
     self.assetExplorerBundleDates = nil;
+    self.assetExplorerBundleSortByCreation = NO;
+    self.assetExplorerBundleCreationAscending = NO;
+    self.assetExplorerBundleCreations = nil;
     self.assetExplorerTextureAssets = nil;
     self.assetExplorerTexturePagerStack = nil;
     self.assetExplorerTexturePrevButton = nil;
@@ -18767,6 +18773,20 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     [self zs_assetExplorerRefreshListResettingScroll:YES];
 }
 
+static long long zs_asset_explorer_bundle_creation_timestamp(NSString *bundlePath) {
+    NSString *folderPath = [bundlePath stringByDeletingLastPathComponent];
+    NSString *candidates[2] = { bundlePath, folderPath };
+    for (int i = 0; i < 2; i++) {
+        struct stat fileStat;
+        if (candidates[i].length == 0 || stat(candidates[i].fileSystemRepresentation, &fileStat) != 0) continue;
+        long long birth = (long long)fileStat.st_birthtimespec.tv_sec;
+        if (birth > 0) return birth;
+    }
+    struct stat dataStat;
+    if (stat(bundlePath.fileSystemRepresentation, &dataStat) == 0) return (long long)dataStat.st_mtime;
+    return 0;
+}
+
 static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     NSString *infoPath = [[bundlePath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"__info"];
     NSData *data = [NSData dataWithContentsOfFile:infoPath options:NSDataReadingMappedIfSafe error:nil];
@@ -18855,6 +18875,16 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 dates[bundle.filePath] = @(zs_asset_explorer_bundle_timestamp(bundle.filePath));
             }
         }
+        BOOL byCreation = self.assetExplorerBundleSortByCreation;
+        BOOL creationAscending = self.assetExplorerBundleCreationAscending;
+        if (!self.assetExplorerBundleCreations) self.assetExplorerBundleCreations = [NSMutableDictionary dictionary];
+        NSMutableDictionary<NSString *, NSNumber *> *creations = self.assetExplorerBundleCreations;
+        if (byCreation) {
+            for (ZSAssetExplorerBundle *bundle in self.assetExplorerBundles) {
+                if (bundle.filePath.length == 0 || creations[bundle.filePath]) continue;
+                creations[bundle.filePath] = @(zs_asset_explorer_bundle_creation_timestamp(bundle.filePath));
+            }
+        }
         NSMutableDictionary<NSString *, NSNumber *> *sizes = [NSMutableDictionary dictionaryWithCapacity:self.assetExplorerBundles.count];
         for (ZSAssetExplorerBundle *bundle in self.assetExplorerBundles) {
             if (bundle.filePath.length == 0) continue;
@@ -18864,6 +18894,14 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         }
         self.assetExplorerBundleSizes = sizes;
         NSArray<ZSAssetExplorerBundle *> *sortedBundles = [matches sortedArrayUsingComparator:^NSComparisonResult(ZSAssetExplorerBundle *a, ZSAssetExplorerBundle *b) {
+            if (byCreation) {
+                long long creationA = creations[a.filePath].longLongValue;
+                long long creationB = creations[b.filePath].longLongValue;
+                if (creationA != creationB) {
+                    BOOL aNewer = creationA > creationB;
+                    return (aNewer == !creationAscending) ? NSOrderedAscending : NSOrderedDescending;
+                }
+            }
             if (byDate) {
                 long long dateA = dates[a.filePath].longLongValue;
                 long long dateB = dates[b.filePath].longLongValue;
@@ -18882,7 +18920,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             }
             NSComparisonResult result = [a.displayName compare:b.displayName options:NSCaseInsensitiveSearch | NSNumericSearch];
             if (result == NSOrderedSame) result = [a.cabIdentifier caseInsensitiveCompare:b.cabIdentifier];
-            if (descending && !bySize && !byDate) {
+            if (descending && !bySize && !byDate && !byCreation) {
                 if (result == NSOrderedAscending) return NSOrderedDescending;
                 if (result == NSOrderedDescending) return NSOrderedAscending;
             }
@@ -18957,6 +18995,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     BOOL sortActive = NO;
     BOOL sizeActive = inBundle ? self.assetExplorerSortBySize : self.assetExplorerBundleSortBySize;
     BOOL dateActive = !inBundle && self.assetExplorerBundleSortByDate;
+    BOOL creationActive = !inBundle && self.assetExplorerBundleSortByCreation;
     BOOL sizeAscending = inBundle ? self.assetExplorerSizeAscending : self.assetExplorerBundleSizeAscending;
     NSString *sizeTitle = sizeActive ? (sizeAscending ? @"Size · Smallest first" : @"Size · Largest first") : @"Size";
     UIImage *sizeImage = sizeActive ? [UIImage systemImageNamed:(sizeAscending ? @"arrow.up" : @"arrow.down")] : nil;
@@ -18973,6 +19012,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         } else {
             strongSelf.assetExplorerBundleSortByDate = NO;
             strongSelf.assetExplorerBundleDateAscending = NO;
+            strongSelf.assetExplorerBundleSortByCreation = NO;
+            strongSelf.assetExplorerBundleCreationAscending = NO;
             if (strongSelf.assetExplorerBundleSortBySize) {
                 strongSelf.assetExplorerBundleSizeAscending = !strongSelf.assetExplorerBundleSizeAscending;
             } else {
@@ -19019,17 +19060,19 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         }
     } else {
         BOOL descending = self.assetExplorerBundleSortDescending;
-        BOOL nameSorted = !self.assetExplorerBundleSortBySize && !self.assetExplorerBundleSortByDate;
-        sortActive = descending || self.assetExplorerBundleSortBySize || self.assetExplorerBundleSortByDate;
+        BOOL nameSorted = !self.assetExplorerBundleSortBySize && !self.assetExplorerBundleSortByDate && !self.assetExplorerBundleSortByCreation;
+        sortActive = descending || self.assetExplorerBundleSortBySize || self.assetExplorerBundleSortByDate || self.assetExplorerBundleSortByCreation;
         NSString *nameTitle = nameSorted ? (descending ? @"Name · Z–A" : @"Name · A–Z") : @"Name";
         UIAction *nameAction = [UIAction actionWithTitle:nameTitle image:nil identifier:nil handler:^(__kindof UIAction *selected) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf) return;
-            if (strongSelf.assetExplorerBundleSortBySize || strongSelf.assetExplorerBundleSortByDate) {
+            if (strongSelf.assetExplorerBundleSortBySize || strongSelf.assetExplorerBundleSortByDate || strongSelf.assetExplorerBundleSortByCreation) {
                 strongSelf.assetExplorerBundleSortBySize = NO;
                 strongSelf.assetExplorerBundleSizeAscending = NO;
                 strongSelf.assetExplorerBundleSortByDate = NO;
                 strongSelf.assetExplorerBundleDateAscending = NO;
+                strongSelf.assetExplorerBundleSortByCreation = NO;
+                strongSelf.assetExplorerBundleCreationAscending = NO;
                 strongSelf.assetExplorerBundleSortDescending = NO;
             } else {
                 strongSelf.assetExplorerBundleSortDescending = !strongSelf.assetExplorerBundleSortDescending;
@@ -19038,7 +19081,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             [strongSelf zs_assetExplorerRebuildMenus];
         }];
         nameAction.state = nameSorted ? UIMenuElementStateOn : UIMenuElementStateOff;
-        NSString *dateTitle = dateActive ? (self.assetExplorerBundleDateAscending ? @"Date · Oldest first" : @"Date · Newest first") : @"Date";
+        NSString *dateTitle = dateActive ? (self.assetExplorerBundleDateAscending ? @"Last Used · Oldest first" : @"Last Used · Newest first") : @"Last Used";
         UIImage *dateImage = dateActive ? [UIImage systemImageNamed:(self.assetExplorerBundleDateAscending ? @"arrow.up" : @"arrow.down")] : nil;
         UIAction *dateAction = [UIAction actionWithTitle:dateTitle image:dateImage identifier:nil handler:^(__kindof UIAction *selected) {
             typeof(self) strongSelf = weakSelf;
@@ -19046,6 +19089,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             strongSelf.assetExplorerBundleSortBySize = NO;
             strongSelf.assetExplorerBundleSizeAscending = NO;
             strongSelf.assetExplorerBundleSortDescending = NO;
+            strongSelf.assetExplorerBundleSortByCreation = NO;
+            strongSelf.assetExplorerBundleCreationAscending = NO;
             if (strongSelf.assetExplorerBundleSortByDate) {
                 strongSelf.assetExplorerBundleDateAscending = !strongSelf.assetExplorerBundleDateAscending;
             } else {
@@ -19056,7 +19101,27 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             [strongSelf zs_assetExplorerRebuildMenus];
         }];
         dateAction.state = dateActive ? UIMenuElementStateOn : UIMenuElementStateOff;
-        [sortItems addObjectsFromArray:@[nameAction, sizeAction, dateAction]];
+        NSString *creationTitle = creationActive ? (self.assetExplorerBundleCreationAscending ? @"Creation Date · Oldest first" : @"Creation Date · Newest first") : @"Creation Date";
+        UIImage *creationImage = creationActive ? [UIImage systemImageNamed:(self.assetExplorerBundleCreationAscending ? @"arrow.up" : @"arrow.down")] : nil;
+        UIAction *creationAction = [UIAction actionWithTitle:creationTitle image:creationImage identifier:nil handler:^(__kindof UIAction *selected) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.assetExplorerBundleSortBySize = NO;
+            strongSelf.assetExplorerBundleSizeAscending = NO;
+            strongSelf.assetExplorerBundleSortDescending = NO;
+            strongSelf.assetExplorerBundleSortByDate = NO;
+            strongSelf.assetExplorerBundleDateAscending = NO;
+            if (strongSelf.assetExplorerBundleSortByCreation) {
+                strongSelf.assetExplorerBundleCreationAscending = !strongSelf.assetExplorerBundleCreationAscending;
+            } else {
+                strongSelf.assetExplorerBundleSortByCreation = YES;
+                strongSelf.assetExplorerBundleCreationAscending = NO;
+            }
+            [strongSelf zs_assetExplorerRefreshListResettingScroll:YES];
+            [strongSelf zs_assetExplorerRebuildMenus];
+        }];
+        creationAction.state = creationActive ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [sortItems addObjectsFromArray:@[nameAction, sizeAction, dateAction, creationAction]];
     }
 
     NSInteger desiredSortStyle = sortActive ? 1 : 0;
@@ -19200,7 +19265,11 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         NSNumber *bundleSize = bundle.filePath ? self.assetExplorerBundleSizes[bundle.filePath] : nil;
         NSString *cabText = bundle.cabIdentifier ?: @"";
         NSString *detail = bundleSize ? [NSString stringWithFormat:@"%@  •  %@", cabText, [NSByteCountFormatter stringFromByteCount:bundleSize.longLongValue countStyle:NSByteCountFormatterCountStyleFile]] : cabText;
-        NSNumber *bundleDate = self.assetExplorerBundleSortByDate && bundle.filePath ? self.assetExplorerBundleDates[bundle.filePath] : nil;
+        NSNumber *bundleDate = nil;
+        if (bundle.filePath) {
+            if (self.assetExplorerBundleSortByDate) bundleDate = self.assetExplorerBundleDates[bundle.filePath];
+            else if (self.assetExplorerBundleSortByCreation) bundleDate = self.assetExplorerBundleCreations[bundle.filePath];
+        }
         if (bundleDate && bundleDate.longLongValue > 0) {
             static NSDateFormatter *dateFormatter;
             static dispatch_once_t dateFormatterOnce;
