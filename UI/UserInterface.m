@@ -6011,6 +6011,188 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 
 @end
 
+@interface ZSAssetThumbCell : UICollectionViewCell
+@property (nonatomic, strong) UIView *well;
+@property (nonatomic, strong) UIImageView *imageView;
+@property (nonatomic, strong) UILabel *captionLabel;
+@property (nonatomic, strong) UIActivityIndicatorView *spinner;
+@property (nonatomic, copy) NSString *representedKey;
+@end
+
+@implementation ZSAssetThumbCell
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.contentView.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+        self.contentView.layer.cornerRadius = 10;
+        self.contentView.layer.cornerCurve = kCACornerCurveContinuous;
+        self.contentView.layer.masksToBounds = YES;
+
+        _well = [[UIView alloc] init];
+        _well.backgroundColor = [UIColor colorWithPatternImage:zs_asset_checkerboard_tile()];
+        _well.layer.cornerRadius = 8;
+        _well.layer.cornerCurve = kCACornerCurveContinuous;
+        _well.layer.masksToBounds = YES;
+        [self.contentView addSubview:_well];
+
+        _imageView = [[UIImageView alloc] init];
+        _imageView.contentMode = UIViewContentModeScaleAspectFit;
+        _imageView.tintColor = [UIColor colorWithWhite:1 alpha:0.35];
+        [_well addSubview:_imageView];
+
+        _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        _spinner.color = [UIColor colorWithWhite:1 alpha:0.7];
+        _spinner.hidesWhenStopped = YES;
+        [_well addSubview:_spinner];
+
+        _captionLabel = [[UILabel alloc] init];
+        _captionLabel.font = zs_mono_font(9, UIFontWeightRegular);
+        _captionLabel.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+        _captionLabel.textAlignment = NSTextAlignmentCenter;
+        _captionLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        [self.contentView addSubview:_captionLabel];
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect bounds = self.contentView.bounds;
+    CGFloat captionHeight = 20;
+    self.well.frame = CGRectMake(4, 4, bounds.size.width - 8, MAX(0, bounds.size.height - captionHeight - 4));
+    self.imageView.frame = CGRectInset(self.well.bounds, 4, 4);
+    self.spinner.center = CGPointMake(CGRectGetMidX(self.well.bounds), CGRectGetMidY(self.well.bounds));
+    self.captionLabel.frame = CGRectMake(4, bounds.size.height - captionHeight, bounds.size.width - 8, captionHeight);
+}
+
+- (void)prepareForReuse {
+    [super prepareForReuse];
+    self.representedKey = nil;
+    self.imageView.image = nil;
+    self.captionLabel.text = nil;
+    [self.spinner stopAnimating];
+}
+
+@end
+
+@interface ZSAssetThumbGridSource : NSObject <UICollectionViewDataSource, UICollectionViewDelegateFlowLayout>
+@property (nonatomic, copy) NSArray<ZSAssetExplorerAsset *> *assets;
+@property (nonatomic, copy) NSString *bundlePath;
+@property (nonatomic, copy) void (^onSelect)(ZSAssetExplorerAsset *asset);
+@property (nonatomic, weak) UICollectionView *collectionView;
+- (void)reset;
+@end
+
+@implementation ZSAssetThumbGridSource {
+    NSCache<NSString *, id> *_cache;
+    NSOperationQueue *_queue;
+    NSMutableSet<NSString *> *_pending;
+    NSUInteger _generation;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _cache = [[NSCache alloc] init];
+        _cache.countLimit = 600;
+        _queue = [[NSOperationQueue alloc] init];
+        _queue.maxConcurrentOperationCount = 3;
+        _queue.qualityOfService = NSQualityOfServiceUserInitiated;
+        _pending = [NSMutableSet set];
+        _assets = @[];
+    }
+    return self;
+}
+
+- (void)reset {
+    _generation += 1;
+    [_queue cancelAllOperations];
+    [_pending removeAllObjects];
+    [_cache removeAllObjects];
+    _assets = @[];
+    _bundlePath = nil;
+}
+
+- (NSString *)keyForAsset:(ZSAssetExplorerAsset *)asset {
+    return [NSString stringWithFormat:@"%@|%lld", self.bundlePath ?: @"", (long long)asset.pathID];
+}
+
+- (void)applyThumbnail:(id)thumbnail toCell:(ZSAssetThumbCell *)cell {
+    [cell.spinner stopAnimating];
+    if ([thumbnail isKindOfClass:[UIImage class]]) {
+        cell.imageView.image = thumbnail;
+    } else {
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:22 weight:UIImageSymbolWeightRegular];
+        cell.imageView.image = [UIImage systemImageNamed:@"exclamationmark.triangle" withConfiguration:config];
+    }
+}
+
+- (void)loadThumbnailForAsset:(ZSAssetExplorerAsset *)asset key:(NSString *)key {
+    if ([_pending containsObject:key]) return;
+    [_pending addObject:key];
+    NSUInteger generation = _generation;
+    NSString *path = [self.bundlePath copy];
+    int64_t pathID = asset.pathID;
+    int32_t classID = asset.classID;
+    __weak typeof(self) weakSelf = self;
+    [_queue addOperationWithBlock:^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_generation != generation) return;
+        UIImage *image = [ZSAssetExplorer thumbnailForPathID:pathID classID:classID inBundleAtPath:path maxDimension:256 error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) innerSelf = weakSelf;
+            if (!innerSelf || innerSelf->_generation != generation) return;
+            [innerSelf->_pending removeObject:key];
+            id stored = image ?: (id)[NSNull null];
+            [innerSelf->_cache setObject:stored forKey:key];
+            for (ZSAssetThumbCell *cell in innerSelf.collectionView.visibleCells) {
+                if ([cell isKindOfClass:[ZSAssetThumbCell class]] && [cell.representedKey isEqualToString:key]) [innerSelf applyThumbnail:stored toCell:cell];
+            }
+        });
+    }];
+}
+
+- (NSInteger)collectionView:(UICollectionView *)collectionView numberOfItemsInSection:(NSInteger)section {
+    return (NSInteger)self.assets.count;
+}
+
+- (UICollectionViewCell *)collectionView:(UICollectionView *)collectionView cellForItemAtIndexPath:(NSIndexPath *)indexPath {
+    self.collectionView = collectionView;
+    ZSAssetThumbCell *cell = [collectionView dequeueReusableCellWithReuseIdentifier:@"ZSAssetThumbCell" forIndexPath:indexPath];
+    ZSAssetExplorerAsset *asset = indexPath.item < (NSInteger)self.assets.count ? self.assets[(NSUInteger)indexPath.item] : nil;
+    if (!asset) return cell;
+    NSString *key = [self keyForAsset:asset];
+    cell.representedKey = key;
+    cell.captionLabel.text = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
+    id cached = [_cache objectForKey:key];
+    if (cached) {
+        [self applyThumbnail:cached toCell:cell];
+    } else {
+        cell.imageView.image = nil;
+        [cell.spinner startAnimating];
+        [self loadThumbnailForAsset:asset key:key];
+    }
+    return cell;
+}
+
+- (void)collectionView:(UICollectionView *)collectionView didSelectItemAtIndexPath:(NSIndexPath *)indexPath {
+    [collectionView deselectItemAtIndexPath:indexPath animated:YES];
+    if (indexPath.item < 0 || indexPath.item >= (NSInteger)self.assets.count) return;
+    if (self.onSelect) self.onSelect(self.assets[(NSUInteger)indexPath.item]);
+}
+
+- (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)collectionViewLayout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
+    UICollectionViewFlowLayout *layout = (UICollectionViewFlowLayout *)collectionViewLayout;
+    CGFloat spacing = layout.minimumInteritemSpacing;
+    CGFloat width = collectionView.bounds.size.width - layout.sectionInset.left - layout.sectionInset.right;
+    NSInteger columns = MAX(3, (NSInteger)floor((width + spacing) / (100 + spacing)));
+    CGFloat side = floor((width - spacing * (columns - 1)) / columns);
+    return CGSizeMake(MAX(side, 1), MAX(side, 1) + 20);
+}
+
+@end
+
 @interface ZSSyslogCell : UITableViewCell
 @property (nonatomic, strong) UILabel *indexLabel;
 @property (nonatomic, strong) UILabel *messageLabel;
@@ -6379,6 +6561,10 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL assetExplorerFullScreenOpen;
 @property (nonatomic, strong) UIView *assetExplorerFullScreenOverlay;
 @property (nonatomic, strong) UITableView *assetExplorerTableView;
+@property (nonatomic, strong) UICollectionView *assetExplorerThumbCollectionView;
+@property (nonatomic, strong) ZSAssetThumbGridSource *assetExplorerThumbSource;
+@property (nonatomic, strong) UIButton *assetExplorerViewModeButton;
+@property (nonatomic, assign) BOOL assetExplorerThumbnailMode;
 @property (nonatomic, strong) UILabel *assetExplorerTitleLabel;
 @property (nonatomic, strong) UILabel *assetExplorerStatusLabel;
 @property (nonatomic, strong) UIButton *assetExplorerBackButton;
@@ -9081,6 +9267,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     [self.assetExplorerFullScreenOverlay removeFromSuperview];
     self.assetExplorerFullScreenOverlay = nil;
     self.assetExplorerTableView = nil;
+    [self.assetExplorerThumbSource reset];
+    self.assetExplorerThumbSource = nil;
+    self.assetExplorerThumbCollectionView = nil;
+    self.assetExplorerViewModeButton = nil;
+    self.assetExplorerThumbnailMode = NO;
     self.assetExplorerFMODTableView = nil;
     self.assetExplorerHubView = nil;
     self.assetExplorerHubVisible = NO;
@@ -16991,6 +17182,31 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     [overlay addSubview:tableView];
     self.assetExplorerTableView = tableView;
 
+    __weak typeof(self) thumbWeakSelf = self;
+    ZSAssetThumbGridSource *thumbSource = [[ZSAssetThumbGridSource alloc] init];
+    thumbSource.onSelect = ^(ZSAssetExplorerAsset *asset) {
+        [thumbWeakSelf zs_assetExplorerOpenTextureForAsset:asset];
+    };
+    UICollectionViewFlowLayout *thumbLayout = [[UICollectionViewFlowLayout alloc] init];
+    thumbLayout.minimumInteritemSpacing = 8;
+    thumbLayout.minimumLineSpacing = 8;
+    thumbLayout.sectionInset = UIEdgeInsetsMake(8, 12, 16, 12);
+    UICollectionView *thumbCollection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:thumbLayout];
+    thumbCollection.translatesAutoresizingMaskIntoConstraints = NO;
+    thumbCollection.backgroundColor = UIColor.clearColor;
+    thumbCollection.showsVerticalScrollIndicator = NO;
+    thumbCollection.alwaysBounceVertical = YES;
+    thumbCollection.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    thumbCollection.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    thumbCollection.hidden = YES;
+    [thumbCollection registerClass:[ZSAssetThumbCell class] forCellWithReuseIdentifier:@"ZSAssetThumbCell"];
+    thumbCollection.dataSource = thumbSource;
+    thumbCollection.delegate = thumbSource;
+    thumbSource.collectionView = thumbCollection;
+    [overlay addSubview:thumbCollection];
+    self.assetExplorerThumbSource = thumbSource;
+    self.assetExplorerThumbCollectionView = thumbCollection;
+
     UIButton *textureBackButton = [UIButton buttonWithType:UIButtonTypeSystem];
     textureBackButton.translatesAutoresizingMaskIntoConstraints = NO;
     zs_style_pill_icon_button_as_native_glass(textureBackButton, backImage, [UIColor colorWithWhite:1 alpha:0.85]);
@@ -17160,7 +17376,15 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     shareButton.alpha = 0.35;
     self.assetExplorerShareButton = shareButton;
 
-    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[shareButton, filterButton, sortButton]];
+    UIButton *viewModeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    viewModeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(viewModeButton, [UIImage systemImageNamed:@"square.grid.2x2" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.9]);
+    [viewModeButton addTarget:self action:@selector(zs_assetExplorerViewModeTapped) forControlEvents:UIControlEventTouchUpInside];
+    viewModeButton.hidden = YES;
+    viewModeButton.tag = 0;
+    self.assetExplorerViewModeButton = viewModeButton;
+
+    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[viewModeButton, shareButton, filterButton, sortButton]];
     controlsStack.translatesAutoresizingMaskIntoConstraints = NO;
     controlsStack.axis = UILayoutConstraintAxisHorizontal;
     controlsStack.alignment = UIStackViewAlignmentCenter;
@@ -17344,9 +17568,79 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         [tableView.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
         [tableView.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
         [tableView.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
+
+        [thumbCollection.topAnchor constraintEqualToAnchor:tableView.topAnchor],
+        [thumbCollection.leadingAnchor constraintEqualToAnchor:tableView.leadingAnchor],
+        [thumbCollection.trailingAnchor constraintEqualToAnchor:tableView.trailingAnchor],
+        [thumbCollection.bottomAnchor constraintEqualToAnchor:tableView.bottomAnchor],
     ]];
 
     [self zs_assetExplorerBuildHubAndFMODViews];
+}
+
+- (void)setAssetExplorerSelectedBundle:(ZSAssetExplorerBundle *)bundle {
+    NSString *previousPath = _assetExplorerSelectedBundle.filePath;
+    _assetExplorerSelectedBundle = bundle;
+    if (previousPath.length > 0 && ![previousPath isEqualToString:bundle.filePath]) {
+        [ZSAssetExplorer unloadBundleAtPath:previousPath];
+        [self.assetExplorerThumbSource reset];
+    }
+}
+
+- (BOOL)zs_assetExplorerFilterIsImageKind {
+    NSString *kind = self.assetExplorerFilterKind;
+    if (!self.assetExplorerSelectedBundle || kind.length == 0) return NO;
+    BOOL found = NO;
+    for (ZSAssetExplorerAsset *asset in self.assetExplorerAssets) {
+        NSString *assetKind = asset.typeName.length > 0 ? asset.typeName : @"Unknown";
+        if (![assetKind isEqualToString:kind]) continue;
+        if (![ZSAssetExplorer classID:asset.classID sharesPreviewGroupWithClassID:28]) return NO;
+        found = YES;
+    }
+    return found;
+}
+
+- (void)zs_assetExplorerUpdateThumbnailGrid {
+    UICollectionView *grid = self.assetExplorerThumbCollectionView;
+    if (!grid) return;
+    BOOL available = !self.assetExplorerFMODMode && !self.assetExplorerHubVisible && [self zs_assetExplorerFilterIsImageKind];
+    BOOL enabled = available && self.assetExplorerThumbnailMode;
+    BOOL show = enabled && !self.assetExplorerTextureOpen && !self.assetExplorerTableView.hidden;
+
+    self.assetExplorerViewModeButton.hidden = !available;
+    NSInteger desiredStyle = enabled ? 1 : 0;
+    if (self.assetExplorerViewModeButton.tag != desiredStyle) {
+        UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+        UIColor *tint = enabled ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.9];
+        zs_style_pill_icon_button_as_native_glass(self.assetExplorerViewModeButton, [UIImage systemImageNamed:(enabled ? @"list.bullet" : @"square.grid.2x2") withConfiguration:symbolConfig], tint);
+        self.assetExplorerViewModeButton.tag = desiredStyle;
+    }
+
+    if (show) {
+        ZSAssetThumbGridSource *source = self.assetExplorerThumbSource;
+        NSArray<ZSAssetExplorerAsset *> *displayed = self.assetExplorerDisplayedAssets ?: @[];
+        NSString *bundlePath = self.assetExplorerSelectedBundle.filePath;
+        BOOL pathChanged = ![source.bundlePath ?: @"" isEqualToString:bundlePath ?: @""];
+        if (pathChanged) {
+            [source reset];
+            source.bundlePath = bundlePath;
+        }
+        if (pathChanged || source.assets != displayed) {
+            source.assets = displayed;
+            [grid reloadData];
+        }
+    }
+    grid.hidden = !show;
+    self.assetExplorerTableView.alpha = show ? 0 : 1;
+    self.assetExplorerTableView.userInteractionEnabled = !show;
+}
+
+- (void)zs_assetExplorerViewModeTapped {
+    self.assetExplorerThumbnailMode = !self.assetExplorerThumbnailMode;
+    [self zs_assetExplorerUpdateThumbnailGrid];
+    if (!self.assetExplorerThumbCollectionView.hidden) [self.assetExplorerThumbCollectionView setContentOffset:CGPointZero animated:NO];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
 }
 
 - (void)zs_assetExplorerLoadBundles {
@@ -17454,6 +17748,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     self.assetExplorerBackButton.hidden = YES;
     self.assetExplorerFullScreenOverlay.hidden = YES;
     self.assetExplorerFMODGeneration += 1;
+    [ZSAssetExplorer unloadAllBundles];
+    [self.assetExplorerThumbSource reset];
     self.assetExplorerHubVisible = NO;
     self.assetExplorerFMODMode = NO;
     self.assetExplorerFMODBankFile = nil;
@@ -18184,10 +18480,14 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     NSString *bundlePath = [bundle.filePath copy];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
+        [ZSAssetExplorer loadBundleIntoMemoryAtPath:bundlePath error:nil];
         NSArray<ZSAssetExplorerAsset *> *assets = [ZSAssetExplorer assetsForBundleAtPath:bundlePath error:&error];
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) strongSelf = weakSelf;
-            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerGeneration != generation) return;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerGeneration != generation) {
+                if (!strongSelf || ![strongSelf.assetExplorerSelectedBundle.filePath isEqualToString:bundlePath]) [ZSAssetExplorer unloadBundleAtPath:bundlePath];
+                return;
+            }
             strongSelf.assetExplorerAssets = assets ?: @[];
             strongSelf.assetExplorerStatusMessage = error ? error.localizedDescription : nil;
             [strongSelf zs_assetExplorerRefreshListResettingScroll:NO];
@@ -18455,6 +18755,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     self.assetExplorerSortKind = nil;
     self.assetExplorerSortBySize = NO;
     self.assetExplorerSizeAscending = NO;
+    self.assetExplorerThumbnailMode = NO;
     [self zs_assetExplorerSyncControls];
 }
 
@@ -18615,9 +18916,12 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerStatusLabel.text = message;
     [self.assetExplorerTableView reloadData];
     if (resetScroll) [self.assetExplorerTableView setContentOffset:CGPointZero animated:NO];
+    [self zs_assetExplorerUpdateThumbnailGrid];
+    if (resetScroll && !self.assetExplorerThumbCollectionView.hidden) [self.assetExplorerThumbCollectionView setContentOffset:CGPointZero animated:NO];
 }
 
 - (void)zs_assetExplorerSyncControls {
+    [self zs_assetExplorerUpdateThumbnailGrid];
     if (self.assetExplorerHubVisible || self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODSyncControls];
         return;

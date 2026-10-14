@@ -70,6 +70,10 @@ typedef NSString * _Nullable (^ZSAssetExplorerLiveDebugProvider)(NSTimeInterval 
                      batchSize:(NSUInteger)batchSize
                 shouldContinue:(nullable BOOL (^)(void))shouldContinue
                        handler:(void (^)(NSArray<ZSAssetExplorerBundle *> *updated))handler;
++ (BOOL)loadBundleIntoMemoryAtPath:(NSString *)path error:(NSError **)error;
++ (void)unloadBundleAtPath:(NSString *)path;
++ (void)unloadAllBundles;
++ (nullable UIImage *)thumbnailForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path maxDimension:(CGFloat)maxDimension error:(NSError **)error;
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error;
 + (nullable ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error;
 + (BOOL)hasVisualPreviewForClassID:(int32_t)classID;

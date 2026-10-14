@@ -5,6 +5,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <compression.h>
 #import <unistd.h>
+#import <os/proc.h>
 #import <sys/stat.h>
 
 #include <stdint.h>
@@ -69,6 +70,8 @@ typedef struct {
 @property (nonatomic, assign) uint32_t blockCount;
 @property (nonatomic, assign) uint64_t uncompressedSize;
 @property (nonatomic, strong) NSArray<ZSAEBundleNode *> *nodes;
+@property (nonatomic, strong) NSData *residentData;
+@property (nonatomic, strong) id residentSession;
 @end
 
 @implementation ZSAEBundle
@@ -546,7 +549,37 @@ static BOOL ZSAEReadFileNodeData(NSData *fileData, uint64_t nodeOffset, uint64_t
     return YES;
 }
 
+static NSMutableDictionary<NSString *, ZSAEBundle *> *ZSAEResidentBundles(void) {
+    static NSMutableDictionary<NSString *, ZSAEBundle *> *bundles;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        bundles = [NSMutableDictionary dictionary];
+    });
+    return bundles;
+}
+
+static ZSAEBundle *ZSAEResidentBundleForPath(NSString *path) {
+    if (path.length == 0) return nil;
+    NSMutableDictionary<NSString *, ZSAEBundle *> *bundles = ZSAEResidentBundles();
+    @synchronized (bundles) {
+        return bundles[path];
+    }
+}
+
+static NSData *ZSAEResidentNodeData(ZSAEBundle *bundle, ZSAEBundleNode *node) {
+    NSData *resident = bundle.residentData;
+    if (!resident || !node || node.size == 0) return nil;
+    if (node.offset > resident.length || node.size > resident.length - node.offset) return nil;
+    return [NSData dataWithBytesNoCopy:(void *)((const uint8_t *)resident.bytes + node.offset) length:(NSUInteger)node.size freeWhenDone:NO];
+}
+
 static BOOL ZSAEOpenBundle(NSString *path, ZSAEBundle **outBundle, NSError **error) {
+    ZSAEBundle *residentBundle = ZSAEResidentBundleForPath(path);
+    if (residentBundle) {
+        if (outBundle) *outBundle = residentBundle;
+        return YES;
+    }
+
     NSError *readError = nil;
     NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&readError];
     if (!fileData) {
@@ -772,6 +805,11 @@ static NSData *ZSAEReadBundleRange(ZSAEBundle *bundle, uint64_t start, uint64_t 
     if (length == 0 || length > (1ULL << 31) || end < start || end > bundle.uncompressedSize) {
         if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The texture's stream range lies outside the bundle.");
         return nil;
+    }
+
+    NSData *resident = bundle.residentData;
+    if (resident && end <= resident.length) {
+        return [resident subdataWithRange:NSMakeRange((NSUInteger)start, (NSUInteger)length)];
     }
 
     NSMutableData *result = [NSMutableData dataWithLength:(NSUInteger)length];
@@ -1635,6 +1673,8 @@ static ZSAESession *ZSAEOpenSession(NSString *bundlePath, NSError **error) {
     ZSAEBundle *bundle = nil;
     if (!ZSAEOpenBundle(bundlePath, &bundle, error)) return nil;
 
+    if (bundle.residentSession) return bundle.residentSession;
+
     ZSAEBundleNode *cabNode = ZSAEFindSerializedNode(bundle);
     if (!cabNode) {
         if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"No serialized CAB node was found in the bundle.");
@@ -1662,6 +1702,75 @@ static ZSAESession *ZSAEOpenSession(NSString *bundlePath, NSError **error) {
     session.serializedPath = serializedPath;
     session.bundlePath = bundlePath;
     return session;
+}
+
+static BOOL ZSAELoadResidentBundle(NSString *path, NSError **error) {
+    if (ZSAEResidentBundleForPath(path)) return YES;
+
+    ZSAEBundle *bundle = nil;
+    if (!ZSAEOpenBundle(path, &bundle, error)) return NO;
+
+    ZSAEBundleNode *cabNode = ZSAEFindSerializedNode(bundle);
+    if (!cabNode) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"No serialized CAB node was found in the bundle.");
+        return NO;
+    }
+
+    if (bundle.uncompressedSize == 0 || bundle.uncompressedSize > (uint64_t)NSUIntegerMax) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The bundle has no loadable data.");
+        return NO;
+    }
+
+    size_t available = os_proc_available_memory();
+    if (available > 0 && bundle.uncompressedSize > (uint64_t)available / 10 * 6) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Not enough free memory to keep this bundle resident.");
+        return NO;
+    }
+
+    NSMutableData *all = [NSMutableData dataWithLength:(NSUInteger)bundle.uncompressedSize];
+    if (!all) {
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't allocate memory for the bundle.");
+        return NO;
+    }
+
+    const ZSAEBlock *blocks = bundle.blockData.bytes;
+    uint8_t *destination = all.mutableBytes;
+    for (uint32_t i = 0; i < bundle.blockCount; i++) {
+        const ZSAEBlock *block = &blocks[i];
+        if (block->uncompressedSize == 0) continue;
+        if (!ZSAEDecodeBlock(bundle.fileData, block, destination + block->uncompressedOffset, error)) return NO;
+    }
+
+    bundle.residentData = all;
+    NSData *serializedData = ZSAEResidentNodeData(bundle, cabNode);
+    if (!serializedData) {
+        bundle.residentData = nil;
+        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The serialized CAB node lies outside the bundle.");
+        return NO;
+    }
+
+    ZSAESession *session = [ZSAESession new];
+    session.bundle = bundle;
+    session.serializedData = serializedData;
+    session.bundlePath = path;
+    bundle.residentSession = session;
+
+    NSMutableDictionary<NSString *, ZSAEBundle *> *bundles = ZSAEResidentBundles();
+    @synchronized (bundles) {
+        bundles[path] = bundle;
+    }
+    return YES;
+}
+
+static void ZSAEUnloadResidentBundle(NSString *path) {
+    if (path.length == 0) return;
+    NSMutableDictionary<NSString *, ZSAEBundle *> *bundles = ZSAEResidentBundles();
+    ZSAEBundle *bundle = nil;
+    @synchronized (bundles) {
+        bundle = bundles[path];
+        [bundles removeObjectForKey:path];
+    }
+    bundle.residentSession = nil;
 }
 
 static ZSAEObject *ZSAEReadObject(ZSAESession *session, int64_t pathID, NSError **error) {
@@ -6839,23 +6948,26 @@ static NSString *ZSAEObjectKey(ZSAEObject *object) {
     }
 
     NSString *serializedPath = nil;
-    if (!ZSAEReadFileNodeData(bundle.fileData, cabNode.offset, cabNode.size,
-                              bundle.blockData.bytes, bundle.blockCount,
-                              &serializedPath, error) || serializedPath.length == 0) {
-        return nil;
-    }
-
-    NSError *mapError = nil;
-    NSData *serializedData = [NSData dataWithContentsOfFile:serializedPath options:NSDataReadingMappedIfSafe error:&mapError];
+    NSData *serializedData = ZSAEResidentNodeData(bundle, cabNode);
     if (!serializedData) {
-        [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
-        if (error) *error = mapError ?: ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't map the serialized file.");
-        return nil;
+        if (!ZSAEReadFileNodeData(bundle.fileData, cabNode.offset, cabNode.size,
+                                  bundle.blockData.bytes, bundle.blockCount,
+                                  &serializedPath, error) || serializedPath.length == 0) {
+            return nil;
+        }
+
+        NSError *mapError = nil;
+        serializedData = [NSData dataWithContentsOfFile:serializedPath options:NSDataReadingMappedIfSafe error:&mapError];
+        if (!serializedData) {
+            [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
+            if (error) *error = mapError ?: ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't map the serialized file.");
+            return nil;
+        }
     }
 
     ZSAETextureRecord *record = nil;
     BOOL parsed = ZSAEParseSerializedFile(serializedData, nil, pathID, &record, NULL, NULL, NULL, error);
-    [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
+    if (serializedPath.length > 0) [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
     if (!parsed || !record) return nil;
 
     NSData *pixels = record.inlineData;
@@ -6905,6 +7017,41 @@ static NSString *ZSAEObjectKey(ZSAEObject *object) {
     texture.format = record.format;
     texture.formatName = ZSAETextureFormatName(record.format);
     return texture;
+}
+
++ (BOOL)loadBundleIntoMemoryAtPath:(NSString *)path error:(NSError **)error {
+    return ZSAELoadResidentBundle(path, error);
+}
+
++ (void)unloadBundleAtPath:(NSString *)path {
+    ZSAEUnloadResidentBundle(path);
+}
+
++ (void)unloadAllBundles {
+    NSMutableDictionary<NSString *, ZSAEBundle *> *bundles = ZSAEResidentBundles();
+    NSArray<NSString *> *paths = nil;
+    @synchronized (bundles) {
+        paths = bundles.allKeys;
+    }
+    for (NSString *path in paths) ZSAEUnloadResidentBundle(path);
+}
+
++ (UIImage *)thumbnailForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path maxDimension:(CGFloat)maxDimension error:(NSError **)error {
+    ZSAssetExplorerVisual *visual = [self visualForPathID:pathID classID:classID inBundleAtPath:path error:error];
+    if (!visual || visual.text.length > 0) return nil;
+    UIImage *image = [visual imageAtPage:0 error:error];
+    if (!image) return nil;
+    CGFloat longest = MAX(image.size.width, image.size.height);
+    if (maxDimension <= 0 || longest <= maxDimension || longest <= 0) return image;
+    CGFloat factor = maxDimension / longest;
+    CGSize target = CGSizeMake(MAX(1, floor(image.size.width * factor)), MAX(1, floor(image.size.height * factor)));
+    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+    format.scale = 1;
+    format.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:target format:format];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [image drawInRect:CGRectMake(0, 0, target.width, target.height)];
+    }];
 }
 
 + (BOOL)hasVisualPreviewForClassID:(int32_t)classID {
@@ -7128,24 +7275,37 @@ static NSString *ZSAEObjectKey(ZSAEObject *object) {
 + (NSArray<ZSAssetExplorerAsset *> *)assetsForBundleAtPath:(NSString *)path error:(NSError **)error {
     NSString *serializedPath = nil;
     NSString *cab = nil;
-    if (!ZSAEParseUnityFSForSerializedPath(path, &serializedPath, &cab, error)) return @[];
-    if (cab.length == 0 || serializedPath.length == 0) {
-        [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
-        if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The bundle has no valid serialized CAB identifier.");
-        return @[];
-    }
+    NSData *serializedData = nil;
+    ZSAEBundle *residentBundle = ZSAEResidentBundleForPath(path);
+    ZSAEBundleNode *residentNode = residentBundle ? ZSAEFindSerializedNode(residentBundle) : nil;
+    if (residentNode) serializedData = ZSAEResidentNodeData(residentBundle, residentNode);
 
-    NSError *mapError = nil;
-    NSData *serializedData = [NSData dataWithContentsOfFile:serializedPath options:NSDataReadingMappedIfSafe error:&mapError];
-    if (!serializedData) {
-        [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
-        if (error) *error = mapError ?: ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't map the serialized file.");
-        return @[];
+    if (serializedData) {
+        cab = residentNode.path;
+        if (cab.length == 0) {
+            if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The bundle has no valid serialized CAB identifier.");
+            return @[];
+        }
+    } else {
+        if (!ZSAEParseUnityFSForSerializedPath(path, &serializedPath, &cab, error)) return @[];
+        if (cab.length == 0 || serializedPath.length == 0) {
+            if (serializedPath.length > 0) [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
+            if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The bundle has no valid serialized CAB identifier.");
+            return @[];
+        }
+
+        NSError *mapError = nil;
+        serializedData = [NSData dataWithContentsOfFile:serializedPath options:NSDataReadingMappedIfSafe error:&mapError];
+        if (!serializedData) {
+            [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
+            if (error) *error = mapError ?: ZSAEError(ZSAssetExplorerErrorBundleUnreadable, @"Couldn't map the serialized file.");
+            return @[];
+        }
     }
 
     NSArray<ZSAssetExplorerAsset *> *assets = nil;
     BOOL ok = ZSAEParseSerializedFile(serializedData, &assets, INT64_MIN, NULL, NULL, NULL, NULL, error);
-    [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
+    if (serializedPath.length > 0) [[NSFileManager defaultManager] removeItemAtPath:serializedPath error:nil];
     if (!ok) return @[];
     return [(assets ?: @[]) sortedArrayUsingComparator:^NSComparisonResult(ZSAssetExplorerAsset *a, ZSAssetExplorerAsset *b) {
         NSString *nameA = a.assetName.length > 0 ? a.assetName : (a.typeName ?: @"");
