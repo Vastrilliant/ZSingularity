@@ -333,7 +333,7 @@ async function sha256Hex(buf) {
 async function fetchVerified(asset) {
   const t = performance.now();
   log("GET " + asset.url);
-  const r = await githubFetch(asset.url, { headers: { Accept: "application/octet-stream" }, cache: "no-store" });
+  const r = await githubFetch(asset.url, { headers: { Accept: "application/octet-stream" } });
   log("  HTTP " + r.status + " " + r.statusText + " \u00b7 type " + (r.headers.get("content-type") || "?") + " \u00b7 length " + (r.headers.get("content-length") || "?"));
   if (r.redirected) log("  served from " + new URL(r.url).host);
   if (!r.ok) throw new Error("Could not download " + asset.file + " (" + r.status + ")");
