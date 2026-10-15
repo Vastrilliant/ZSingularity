@@ -411,11 +411,10 @@ static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
 static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
 static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
-static const uint32_t kZSLogoTranscodeVersion = 5;
-static const double kZSLogoVideoBitsPerPixel = 2.0;
-static const double kZSLogoVideoQuality = 0.8;
-static const double kZSLogoVideoMinBitRate = 8000000.0;
-static const double kZSLogoVideoMaxBitRate = 200000000.0;
+static const uint32_t kZSLogoTranscodeVersion = 6;
+static const double kZSLogoVideoBitsPerPixel = 0.15;
+static const double kZSLogoVideoMinBitRate = 1000000.0;
+static const double kZSLogoVideoMaxBitRate = 60000000.0;
 static const NSInteger kZSLogoVideoKeyframeInterval = 96;
 static const NSTimeInterval kZSLogoVideoAppendTimeout = 60.0;
 
@@ -1157,16 +1156,14 @@ static void zs_logo_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, 
         AVVideoMaxKeyFrameIntervalKey: @(kZSLogoVideoKeyframeInterval),
         AVVideoAllowFrameReorderingKey: @YES,
     };
-    NSMutableDictionary *qualityAlpha = [common mutableCopy];
-    qualityAlpha[AVVideoQualityKey] = @(kZSLogoVideoQuality);
-    qualityAlpha[(__bridge NSString *)kVTCompressionPropertyKey_TargetQualityForAlpha] = @1.0;
-    NSMutableDictionary *quality = [common mutableCopy];
-    quality[AVVideoQualityKey] = @(kZSLogoVideoQuality);
+    NSMutableDictionary *rateAlpha = [common mutableCopy];
+    rateAlpha[AVVideoAverageBitRateKey] = @(bitRate);
+    rateAlpha[(__bridge NSString *)kVTCompressionPropertyKey_TargetQualityForAlpha] = @1.0;
     NSMutableDictionary *rate = [common mutableCopy];
     rate[AVVideoAverageBitRateKey] = @(bitRate);
 
     NSDictionary *settings = nil;
-    for (NSDictionary *properties in @[qualityAlpha, quality, rate]) {
+    for (NSDictionary *properties in @[rateAlpha, rate]) {
         NSDictionary *candidate = @{
             AVVideoCodecKey: AVVideoCodecTypeHEVCWithAlpha,
             AVVideoWidthKey: @(_width),
@@ -1180,7 +1177,7 @@ static void zs_logo_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, 
         };
         if ([_writer canApplyOutputSettings:candidate forMediaType:AVMediaTypeVideo]) {
             settings = candidate;
-            ZLog(@"[Logo] encoding HEVC with %@ at %zux%zu", properties == qualityAlpha ? @"quality + alpha quality" : (properties == quality ? @"quality" : @"bitrate"), _width, _height);
+            ZLog(@"[Logo] encoding HEVC at %zux%zu, %.1f Mbps average%@", _width, _height, bitRate / 1000000.0, properties == rateAlpha ? @", full alpha quality" : @"");
             break;
         }
     }
