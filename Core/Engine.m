@@ -4506,26 +4506,29 @@ static NSArray<NSString *> *ZSCombatTip_Pool(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         pool = @[
-            @"Placeholder combat tip 01",
-            @"Placeholder combat tip 02",
-            @"Placeholder combat tip 03",
-            @"Placeholder combat tip 04",
-            @"Placeholder combat tip 05",
-            @"Placeholder combat tip 06",
-            @"Placeholder combat tip 07",
-            @"Placeholder combat tip 08",
-            @"Placeholder combat tip 09",
-            @"Placeholder combat tip 10",
-            @"Placeholder combat tip 11",
-            @"Placeholder combat tip 12",
-            @"Placeholder combat tip 13",
-            @"Placeholder combat tip 14",
-            @"Placeholder combat tip 15",
-            @"Placeholder combat tip 16",
-            @"Placeholder combat tip 17",
-            @"Placeholder combat tip 18",
-            @"Placeholder combat tip 19",
-            @"Placeholder combat tip 20",
+            @"Going into the <Dungeon> using a burn team? You like using a bottom tier status? Huh? You like that stupid lil burn boy?",
+            @"This combat tip is sponsored by N. Corp",
+            @"I have nothing but my sorrow, and I want nothing more. It has been, it still is, faithful to me.
+Why should I begrudge it, since during the hours, when my soul crushed the depths of my heart, it was seated there beside me?
+O sorrow, I have ended, you see, by respecting you, because I am certain you will never leave me. Ah, I realize it: your beauty lies in the force of your being.
+Because I know that on the day of my final agony, you will be there, lying in my sheets, O sorrow, so that you might once again attempt to enter my heart.",
+            @"is that the red mist",
+            @"<Tick, tock, tick, tock, tick, tock>",
+            @"Did esgoo upload another vid yet?",
+            @"Downloading 22 bytes of data. You will be returned to the title screen if your device has insufficient storage space. A direct internet connection (Wi-Fi) is recommended.",
+            @"Hwell, butter my butt and call me a biscuit!",
+            @"BATH FOR THE REVERED XIANREN!!!",
+            @"Have you ever wondered if little Paus from the April Fools event, is on the Gesellschaft? It's funny to think there's just a little kid running around in their gc",
+            @"Dantehh.. Do your dailies...",
+            @"Severe lack of Egoshard crates detected: initializing [broke ass bitch] protocol",
+            @"1300 lunacy",
+            @"IRIWARA!!!",
+            @"Rien and Matthias fighting for the title of the world's strongest deadbeat",
+            @"Can you stop pressing the [winrate] button for once?",
+            @"What does Hongyuan need? More deathrites. (fuck you Maost)",
+            @"Is that gasharpoon from forsaken",
+            @"Obtained item: [beat it before the nerf] award",
+            @"Insert mandatory unfunny [how wild...] jokr",
         ];
     });
     return pool;
@@ -4552,12 +4555,9 @@ static const void *gZSCombatTipGetText;
 static const void *gZSCombatTipSetText;
 static void *gZSCombatTipLastWrittenString;
 
-static int gZSCombatTipResolveFailStreak;
-static const int kZSCombatTipResolveRetryThrottleTicks = 10;
 
-static const int kZSCombatTipSearchWindowTicks = 180;
-static int gZSCombatTipSearchWindowRemaining;
-static uint64_t gZSCombatTipLastSignature = UINT64_MAX;
+static BOOL gZSCombatTipAttemptPending = YES;
+static int32_t gZSCombatTipLastSceneState = -1;
 
 static void ZSCombatTip_Drop(void) {
     gZSCombatTipManagerInstance = NULL;
@@ -4565,50 +4565,11 @@ static void ZSCombatTip_Drop(void) {
     gZSCombatTipGetText = NULL;
     gZSCombatTipSetText = NULL;
     gZSCombatTipLastWrittenString = NULL;
-    gZSCombatTipResolveFailStreak = 0;
 }
 
 static void ZSCombatTip_HotFieldInvalidate(void) {
     ZSCombatTip_Drop();
-    gZSCombatTipSearchWindowRemaining = kZSCombatTipSearchWindowTicks;
-}
-
-static void *gZSCombatTipSceneManagerClass;
-static const void *gZSCombatTipSceneCountMethod;
-static const void *gZSCombatTipActiveSceneMethod;
-
-static uint64_t ZSCombatTip_SceneSignature(void) {
-    if (!gZSCombatTipSceneManagerClass) {
-        gZSCombatTipSceneManagerClass = [IL2CppBridge classNamed:"SceneManager"
-                                                      inNamespace:"UnityEngine.SceneManagement"
-                                                 assemblyContains:"CoreModule"];
-        if (!gZSCombatTipSceneManagerClass) return 0;
-    }
-    if (!gZSCombatTipSceneCountMethod) {
-        gZSCombatTipSceneCountMethod = [IL2CppBridge methodOnClass:gZSCombatTipSceneManagerClass name:"get_sceneCount" argCount:0];
-    }
-    if (!gZSCombatTipActiveSceneMethod) {
-        gZSCombatTipActiveSceneMethod = [IL2CppBridge methodOnClass:gZSCombatTipSceneManagerClass name:"GetActiveScene" argCount:0];
-    }
-
-    int32_t count = 0;
-    if (gZSCombatTipSceneCountMethod) {
-        void *exc = NULL;
-        void *boxed = [IL2CppBridge invokeMethod:gZSCombatTipSceneCountMethod onInstance:NULL args:NULL outException:&exc];
-        if (!exc && boxed) memcpy(&count, (uint8_t *)boxed + 0x10, sizeof(int32_t));
-    }
-
-    int32_t handle = 0;
-    if (gZSCombatTipActiveSceneMethod) {
-        void *exc = NULL;
-        void *boxed = [IL2CppBridge invokeMethod:gZSCombatTipActiveSceneMethod onInstance:NULL args:NULL outException:&exc];
-        if (!exc && boxed) memcpy(&handle, (uint8_t *)boxed + 0x10, sizeof(int32_t));
-    }
-
-    int32_t sceneState = -1;
-    ZSGlobalScene_Current(&sceneState);
-
-    return ((uint64_t)(uint32_t)count << 48) ^ ((uint64_t)(uint32_t)handle << 16) ^ (uint64_t)(uint16_t)sceneState;
+    gZSCombatTipAttemptPending = YES;
 }
 
 static BOOL ZSCombatTip_HotFieldResolve(void) {
@@ -4651,41 +4612,33 @@ static void ZSCombatTip_ApplyText(NSString *text) {
     void *args[1] = { converted };
     void *exc = NULL;
     [IL2CppBridge invokeMethod:gZSCombatTipSetText onInstance:gZSCombatTipTMPInstance args:args outException:&exc];
-    if (exc) { ZSCombatTip_HotFieldInvalidate(); return; }
+    if (exc) { ZSCombatTip_Drop(); return; }
     gZSCombatTipLastWrittenString = converted;
 }
 
 static void ZSCombatTip_Tick(void) {
+    int32_t sceneState = -1;
+    if (ZSGlobalScene_Current(&sceneState) && sceneState != gZSCombatTipLastSceneState) {
+        gZSCombatTipLastSceneState = sceneState;
+        ZSCombatTip_Drop();
+        gZSCombatTipAttemptPending = YES;
+    }
+
     if (gZSCombatTipManagerInstance && !ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) {
         ZSCombatTip_Drop();
     }
 
     if (!gZSCombatTipTMPInstance) {
-        uint64_t signature = ZSCombatTip_SceneSignature();
-        if (signature != gZSCombatTipLastSignature) {
-            gZSCombatTipLastSignature = signature;
-            gZSCombatTipSearchWindowRemaining = kZSCombatTipSearchWindowTicks;
-            gZSCombatTipResolveFailStreak = 0;
-        }
-
-        if (gZSCombatTipSearchWindowRemaining <= 0) return;
-        gZSCombatTipSearchWindowRemaining--;
-
-        if (gZSCombatTipResolveFailStreak > 0) {
-            gZSCombatTipResolveFailStreak = (gZSCombatTipResolveFailStreak + 1) % kZSCombatTipResolveRetryThrottleTicks;
-            return;
-        }
-        if (!ZSCombatTip_HotFieldResolve()) {
-            gZSCombatTipResolveFailStreak = 1;
-            return;
-        }
+        if (!gZSCombatTipAttemptPending) return;
+        gZSCombatTipAttemptPending = NO;
+        if (!ZSCombatTip_HotFieldResolve()) return;
     }
 
     if (gZSCombatTipChosen.length == 0) return;
 
     void *getExc = NULL;
     void *current = [IL2CppBridge invokeMethod:gZSCombatTipGetText onInstance:gZSCombatTipTMPInstance args:NULL outException:&getExc];
-    if (getExc) { ZSCombatTip_HotFieldInvalidate(); return; }
+    if (getExc) { ZSCombatTip_Drop(); return; }
 
     if (current == gZSCombatTipLastWrittenString) return;
 
