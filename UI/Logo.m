@@ -400,7 +400,7 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
-static const NSInteger kZSLogoTranscodeFPS = 60;
+static const NSInteger kZSLogoTranscodeFPS = 24;
 static const CGFloat kZSLogoTranscodeMaxEdge = 1536;
 static const CGFloat kZSLogoTranscodeMinEdge = 64;
 static const double kZSLogoTranscodeByteBudget = 384.0 * 1024 * 1024;
@@ -1730,6 +1730,14 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     dispatch_queue_t _queue;
     uint8_t *_black;
     uint8_t *_white;
+    CFAbsoluteTime _jobStart;
+    CFAbsoluteTime _captureStart;
+    CFAbsoluteTime _lastLog;
+    double _snapshotSeconds;
+    double _scriptSeconds;
+    double _encodeSeconds;
+    NSUInteger _snapshotCount;
+    NSUInteger _encodedFrames;
 }
 
 - (instancetype)initWithPath:(NSString *)path svg:(ZSLogoSVG *)svg {
@@ -1757,6 +1765,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     }
 
     _scale = MAX(1, (NSInteger)llround(UIScreen.mainScreen.scale));
+    _jobStart = CFAbsoluteTimeGetCurrent();
+    ZLog(@"[Logo] %@: starting transcode (%lu bytes of SVG, intrinsic %.0fx%.0f, scale %ldx)", _path.lastPathComponent, (unsigned long)_svg.html.length, _svg.size.width, _svg.size.height, (long)_scale);
 
     _host = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
     _host.userInteractionEnabled = NO;
@@ -1806,6 +1816,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     if (![self zs_stepIsCurrent:_loadStep]) return;
     [self zs_endStep];
+    ZLog(@"[Logo] %@: page loaded after %.2fs, probing animation timing", _path.lastPathComponent, CFAbsoluteTimeGetCurrent() - _jobStart);
     [self zs_probe];
 }
 
@@ -1837,6 +1848,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
             return;
         }
 
+        ZLog(@"[Logo] %@: probe animated=%d periods=%@ end=%.0fms lead=%.0fms", self->_path.lastPathComponent, [probe[@"anim"] boolValue], [probe[@"periods"] componentsJoinedByString:@","] ?: @"", [probe[@"end"] doubleValue], [probe[@"lead"] doubleValue]);
         double duration = 0;
         double lead = 0;
         zs_logo_transcode_plan(probe, &duration, &lead);
@@ -1844,7 +1856,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
         self->_frameCount = duration > 0 ? (NSUInteger)MAX(1, llround(duration * (double)kZSLogoTranscodeFPS / 1000.0)) : 1;
         zs_logo_transcode_geometry(self->_svg.size, self->_frameCount, self->_scale, &self->_pixelWidth, &self->_pixelHeight);
         self->_pointSize = CGSizeMake((CGFloat)self->_pixelWidth / (CGFloat)self->_scale, (CGFloat)self->_pixelHeight / (CGFloat)self->_scale);
-        ZLog(@"[Logo] transcoding %@: %lu frame(s) at %zux%zu, loop %.2fs", self->_path.lastPathComponent, (unsigned long)self->_frameCount, self->_pixelWidth, self->_pixelHeight, duration / 1000.0);
+        ZLog(@"[Logo] %@: plan %lu frame(s) at %zux%zu px, %ld fps, loop %.2fs, lead %.0fms", self->_path.lastPathComponent, (unsigned long)self->_frameCount, self->_pixelWidth, self->_pixelHeight, (long)kZSLogoTranscodeFPS, duration / 1000.0, lead);
 
         self->_web.frame = CGRectMake(0, 0, self->_pointSize.width, self->_pointSize.height);
         self->_viewportAttempt = 0;
@@ -1869,6 +1881,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
             }
         }
         if (matched || ++self->_viewportAttempt >= kZSLogoTranscodeViewportAttempts) {
+            ZLog(@"[Logo] %@: viewport %@ after %lu check(s), %.2fs since start", self->_path.lastPathComponent, matched ? @"ready" : @"never matched, continuing anyway", (unsigned long)self->_viewportAttempt + (matched ? 1 : 0), CFAbsoluteTimeGetCurrent() - self->_jobStart);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 [self zs_beginCapture];
             });
@@ -1893,11 +1906,15 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
         return;
     }
     _queue = dispatch_queue_create("zs.logo.transcode", DISPATCH_QUEUE_SERIAL);
+    _captureStart = CFAbsoluteTimeGetCurrent();
+    _lastLog = _captureStart;
+    ZLog(@"[Logo] %@: capture started, %.2fs of setup, %.1f MB of buffers", _path.lastPathComponent, _captureStart - _jobStart, (double)(bytes * 2) / (1024.0 * 1024.0));
     [self zs_captureNextFrame];
 }
 
 - (void)zs_runScript:(NSString *)script then:(void (^)(void))next {
     NSUInteger step = [self zs_beginStep];
+    CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     [_web evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
         if (![self zs_stepIsCurrent:step]) return;
         [self zs_endStep];
@@ -1905,6 +1922,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
             [self zs_failWithReason:error.localizedDescription ?: @"script failed"];
             return;
         }
+        self->_scriptSeconds += CFAbsoluteTimeGetCurrent() - began;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoTranscodeSettleDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (self->_finished || self->_closing) return;
             next();
@@ -1918,9 +1936,12 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     configuration.rect = CGRectMake(0, 0, _pointSize.width, _pointSize.height);
     configuration.snapshotWidth = @(_pointSize.width);
     configuration.afterScreenUpdates = YES;
+    CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     [_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *error) {
         if (![self zs_stepIsCurrent:step]) return;
         [self zs_endStep];
+        self->_snapshotSeconds += CFAbsoluteTimeGetCurrent() - began;
+        self->_snapshotCount++;
         if (!image.CGImage) {
             [self zs_failWithReason:error.localizedDescription ?: @"snapshot failed"];
             return;
@@ -1968,6 +1989,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     uint8_t *whiteBuffer = _white;
 
     dispatch_async(_queue, ^{
+        CFAbsoluteTime encodeBegan = CFAbsoluteTimeGetCurrent();
         BOOL ok = zs_logo_draw_snapshot(blackImage, blackBuffer, width, height) && zs_logo_draw_snapshot(whiteImage, whiteBuffer, width, height);
         CGImageRelease(blackImage);
         CGImageRelease(whiteImage);
@@ -1975,8 +1997,14 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
             zs_apng_matte_frame(blackBuffer, whiteBuffer, blackBuffer, width * height);
             ok = zs_apng_encoder_add(encoder, blackBuffer, width * 4, 1, (uint16_t)kZSLogoTranscodeFPS);
         }
+        double spent = CFAbsoluteTimeGetCurrent() - encodeBegan;
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_inFlight--;
+            self->_encodeSeconds += spent;
+            if (ok) {
+                self->_encodedFrames++;
+                [self zs_logProgress];
+            }
             if (!ok) {
                 [self zs_failWithReason:@"couldn't encode a frame"];
                 return;
@@ -1991,6 +2019,22 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     });
 }
 
+- (void)zs_logProgress {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL last = _encodedFrames == _frameCount;
+    if (!last && _encodedFrames != 1 && now - _lastLog < 2.0) return;
+    _lastLog = now;
+    double elapsed = now - _captureStart;
+    double perFrame = elapsed / (double)_encodedFrames;
+    double remaining = perFrame * (double)(_frameCount - _encodedFrames);
+    double snaps = MAX(_snapshotCount, 1);
+    double frames = MAX(_encodedFrames, 1);
+    ZLog(@"[Logo] %@: encoded %lu/%lu (%.0f%%) in %.1fs, %.0f ms/frame (script %.0f, snapshot %.0f x2, encode %.0f), ~%.1fs left",
+         _path.lastPathComponent, (unsigned long)_encodedFrames, (unsigned long)_frameCount,
+         100.0 * (double)_encodedFrames / (double)_frameCount, elapsed, perFrame * 1000.0,
+         _scriptSeconds / frames * 1000.0, _snapshotSeconds / snaps * 1000.0, _encodeSeconds / frames * 1000.0, remaining);
+}
+
 - (void)zs_finishIfDrained {
     if (_finished || _closing || _nextFrame < _frameCount || _inFlight > 0) return;
     _closing = YES;
@@ -1999,6 +2043,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSIn
     dispatch_async(_queue, ^{
         BOOL ok = zs_apng_encoder_finish(encoder, true);
         dispatch_async(dispatch_get_main_queue(), ^{
+            unsigned long long size = [[NSFileManager defaultManager] attributesOfItemAtPath:self->_apngPath error:nil].fileSize;
+            ZLog(@"[Logo] %@: APNG %@, %.1f MB, %.1fs total (%.1fs capturing)", self->_path.lastPathComponent, ok ? @"written" : @"FAILED to finalize", (double)size / (1024.0 * 1024.0), CFAbsoluteTimeGetCurrent() - self->_jobStart, CFAbsoluteTimeGetCurrent() - self->_captureStart);
             [self zs_completeWithSuccess:ok];
         });
     });
@@ -2099,9 +2145,12 @@ static void zs_logo_transcode_pump(void) {
                 }
                 [zs_logo_transcode_failures() removeObjectForKey:path];
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    CFAbsoluteTime cacheBegan = CFAbsoluteTimeGetCurrent();
                     zs_logo_transcode_prune(path, apngPath);
                     BOOL cached = zs_logo_mapped_animation_for_apng(apngPath) != nil;
-                    if (!cached) ZLog(@"[Logo] couldn't build the frame cache for %@", path.lastPathComponent);
+                    unsigned long long cacheSize = [[NSFileManager defaultManager] attributesOfItemAtPath:zs_logo_frames_path(apngPath) error:nil].fileSize;
+                    if (cached) ZLog(@"[Logo] %@: frame cache ready, %.1f MB, built in %.1fs", path.lastPathComponent, (double)cacheSize / (1024.0 * 1024.0), CFAbsoluteTimeGetCurrent() - cacheBegan);
+                    else ZLog(@"[Logo] couldn't build the frame cache for %@", path.lastPathComponent);
                     dispatch_async(dispatch_get_main_queue(), ^{
                         zs_logo_transcode_finish_active(cached ? apngPath : nil);
                     });
@@ -2120,6 +2169,7 @@ static void zs_logo_transcode_svg_notify(NSString *svgPath) {
         if (failedAt && -failedAt.timeIntervalSinceNow < kZSLogoTranscodeRetryInterval) return;
         if ([gZSLogoTranscodeActive isEqualToString:svgPath] || [zs_logo_transcode_queue() containsObject:svgPath]) return;
         [zs_logo_transcode_queue() addObject:svgPath];
+        ZLog(@"[Logo] %@: queued for transcoding (%lu waiting, %@)", svgPath.lastPathComponent, (unsigned long)zs_logo_transcode_queue().count, gZSLogoTranscodeActive ? @"another job is running" : @"starting now");
         zs_logo_transcode_pump();
     });
 }
