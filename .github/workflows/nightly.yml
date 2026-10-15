@@ -179,6 +179,7 @@ jobs:
             -install_name "@rpath/ZSingularity.dylib" \
             -Wl,-ld_classic \
             -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
+            -Wl,-sectcreate,__DATA,__zstips,Resources/tips.json \
             -Wl,-sectcreate,__DATA,__zsastcmetal,Astc.metallib \
             -I. \
             -ICore -ICore/RamBypass -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \

@@ -18,6 +18,7 @@
 #import <dlfcn.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <os/proc.h>
+#import <mach-o/getsect.h>
 #include <sys/sysctl.h>
 #import <Security/Security.h>
 #import "UnityBundleTools.h"
@@ -4505,28 +4506,23 @@ static NSArray<NSString *> *ZSCombatTip_Pool(void) {
     static NSArray<NSString *> *pool;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        pool = @[
-            @"Going into the <Dungeon> using a burn team? You like using a bottom tier status? Huh? You like that stupid lil burn boy?",
-            @"This combat tip is sponsored by N. Corp",
-            @"I have nothing but my sorrow, and I want nothing more. It has been, it still is, faithful to me.\nWhy should I begrudge it, since during the hours, when my soul crushed the depths of my heart, it was seated there beside me?\nO sorrow, I have ended, you see, by respecting you, because I am certain you will never leave me. Ah, I realize it: your beauty lies in the force of your being.\nBecause I know that on the day of my final agony, you will be there, lying in my sheets, O sorrow, so that you might once again attempt to enter my heart.",
-            @"is that the red mist",
-            @"<Tick, tock, tick, tock, tick, tock>",
-            @"Did esgoo upload another vid yet?",
-            @"Downloading 22 bytes of data.\nYou will be returned to the title screen if your device has insufficient storage space.\nA direct internet connection (Wi-Fi) is recommended.",
-            @"Hwell, butter my butt and call me a biscuit!",
-            @"BATH FOR THE REVERED XIANREN!!!",
-            @"Have you ever wondered if little Paus from the April Fools event, is on the Gesellschaft? It's funny to think there's just a little kid running around in their gc",
-            @"Dantehh.. Do your dailies...",
-            @"Severe lack of Egoshard crates detected: initializing [broke ass bitch] protocol",
-            @"1300 lunacy",
-            @"IRIWARA!!!",
-            @"Rien and Matthias fighting for the title of the world's strongest deadbeat",
-            @"Can you stop pressing the [winrate] button for once?",
-            @"What does Hongyuan need? More deathrites. (fuck you Maost)",
-            @"Is that gasharpoon from forsaken",
-            @"Obtained item: [beat it before the nerf] award",
-            @"Insert mandatory unfunny [how wild...] jokr",
-        ];
+        NSMutableArray<NSString *> *loaded = [NSMutableArray new];
+        Dl_info info;
+        if (dladdr((const void *)&ZSCombatTip_Pool, &info) != 0 && info.dli_fbase) {
+            unsigned long size = 0;
+            uint8_t *bytes = getsectiondata((const struct mach_header_64 *)info.dli_fbase, "__DATA", "__zstips", &size);
+            if (bytes && size > 0) {
+                NSData *data = [NSData dataWithBytesNoCopy:bytes length:size freeWhenDone:NO];
+                id parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if ([parsed isKindOfClass:[NSArray class]]) {
+                    for (id item in (NSArray *)parsed) {
+                        if ([item isKindOfClass:[NSString class]] && [(NSString *)item length] > 0) [loaded addObject:item];
+                    }
+                }
+            }
+        }
+        if (loaded.count == 0) ZLog(@"[CombatTips] no tips found in __DATA,__zstips - feature inactive");
+        pool = [loaded copy];
     });
     return pool;
 }
@@ -4553,8 +4549,16 @@ static const void *gZSCombatTipSetText;
 static void *gZSCombatTipLastWrittenString;
 
 
-static BOOL gZSCombatTipAttemptPending = YES;
+static const int kZSCombatTipMaxAttempts = 3;
+static const int kZSCombatTipAttemptSpacingTicks = 30;
+static int gZSCombatTipAttemptsRemaining = 3;
+static int gZSCombatTipTicksUntilAttempt;
 static int32_t gZSCombatTipLastSceneState = -1;
+
+static void ZSCombatTip_ArmAttempts(void) {
+    gZSCombatTipAttemptsRemaining = kZSCombatTipMaxAttempts;
+    gZSCombatTipTicksUntilAttempt = 0;
+}
 
 static void ZSCombatTip_Drop(void) {
     gZSCombatTipManagerInstance = NULL;
@@ -4566,7 +4570,7 @@ static void ZSCombatTip_Drop(void) {
 
 static void ZSCombatTip_HotFieldInvalidate(void) {
     ZSCombatTip_Drop();
-    gZSCombatTipAttemptPending = YES;
+    ZSCombatTip_ArmAttempts();
 }
 
 static BOOL ZSCombatTip_HotFieldResolve(void) {
@@ -4614,11 +4618,13 @@ static void ZSCombatTip_ApplyText(NSString *text) {
 }
 
 static void ZSCombatTip_Tick(void) {
+    if (ZSCombatTip_Pool().count == 0) return;
+
     int32_t sceneState = -1;
     if (ZSGlobalScene_Current(&sceneState) && sceneState != gZSCombatTipLastSceneState) {
         gZSCombatTipLastSceneState = sceneState;
         ZSCombatTip_Drop();
-        gZSCombatTipAttemptPending = YES;
+        ZSCombatTip_ArmAttempts();
     }
 
     if (gZSCombatTipManagerInstance && !ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) {
@@ -4626,9 +4632,15 @@ static void ZSCombatTip_Tick(void) {
     }
 
     if (!gZSCombatTipTMPInstance) {
-        if (!gZSCombatTipAttemptPending) return;
-        gZSCombatTipAttemptPending = NO;
+        if (gZSCombatTipAttemptsRemaining <= 0) return;
+        if (gZSCombatTipTicksUntilAttempt > 0) {
+            gZSCombatTipTicksUntilAttempt--;
+            return;
+        }
+        gZSCombatTipAttemptsRemaining--;
+        gZSCombatTipTicksUntilAttempt = kZSCombatTipAttemptSpacingTicks;
         if (!ZSCombatTip_HotFieldResolve()) return;
+        gZSCombatTipAttemptsRemaining = 0;
     }
 
     if (gZSCombatTipChosen.length == 0) return;
