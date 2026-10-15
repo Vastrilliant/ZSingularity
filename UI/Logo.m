@@ -1207,6 +1207,7 @@ static void zs_logo_matte_rows(const uint8_t *onBlack, const uint8_t *onWhite, u
     }
     BOOL complete = commit && _frames == _expectedFrames && writer.status == AVAssetWriterStatusWriting;
     if (!complete) {
+        if (commit) ZLog(@"[Logo] movie writer can't finish: %lu/%lu frames appended, status %ld, error %@", (unsigned long)_frames, (unsigned long)_expectedFrames, (long)writer.status, writer.error);
         if (writer.status == AVAssetWriterStatusWriting) [writer cancelWriting];
         [[NSFileManager defaultManager] removeItemAtPath:_tempPath error:nil];
         completion(NO);
@@ -1222,7 +1223,7 @@ static void zs_logo_matte_rows(const uint8_t *onBlack, const uint8_t *onWhite, u
             remove(finalPath.fileSystemRepresentation);
             ok = rename(tempPath.fileSystemRepresentation, finalPath.fileSystemRepresentation) == 0;
         } else {
-            ZLog(@"[Logo] movie writer failed to finish: %@", writer.error.localizedDescription);
+            ZLog(@"[Logo] movie writer failed to finish (status %ld): %@", (long)writer.status, writer.error);
         }
         if (!ok) remove(tempPath.fileSystemRepresentation);
         completion(ok);
