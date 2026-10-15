@@ -215,6 +215,10 @@ jobs:
             -framework Security \
             -framework CoreLocation \
             -framework WebKit \
+            -framework AVFoundation \
+            -framework CoreMedia \
+            -framework CoreVideo \
+            -framework VideoToolbox \
             -lcompression \
             -lc++ \
             -stdlib=libc++ \
