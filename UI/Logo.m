@@ -16,6 +16,7 @@
 
 NSString * const kZSLogoDefaultName = @"Default";
 NSNotificationName const ZSLogoDidChangeNotification = @"ZSLogoDidChangeNotification";
+NSNotificationName const ZSLogoInstallStateDidChangeNotification = @"ZSLogoInstallStateDidChangeNotification";
 
 static NSString * const kZSLogoRepoOwner = @"vastrilliant";
 static NSString * const kZSLogoRepoName = @"ZSingularity";
@@ -589,7 +590,62 @@ static BOOL zs_logo_meta_has_file(NSDictionary *meta, NSString *file, NSString *
     return NO;
 }
 
-static void zs_logo_fetch_remote_file(NSString *directory, NSDictionary *info, NSDictionary *oldMeta, void (^completion)(BOOL success)) {
+static NSInteger gZSLogoInstallCount;
+
+static NSObject *zs_logo_install_lock(void) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSObject alloc] init]; });
+    return lock;
+}
+
+BOOL zs_logo_is_installing(void) {
+    @synchronized (zs_logo_install_lock()) {
+        return gZSLogoInstallCount > 0;
+    }
+}
+
+static void zs_logo_install_adjust(NSInteger delta) {
+    BOOL changed;
+    @synchronized (zs_logo_install_lock()) {
+        BOOL before = gZSLogoInstallCount > 0;
+        gZSLogoInstallCount = MAX((NSInteger)0, gZSLogoInstallCount + delta);
+        changed = before != (gZSLogoInstallCount > 0);
+    }
+    if (!changed) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:ZSLogoInstallStateDidChangeNotification object:nil];
+    });
+}
+
+@interface ZSLogoInstallScope : NSObject
+- (void)begin;
+- (void)end;
+@end
+
+@implementation ZSLogoInstallScope {
+    BOOL _active;
+}
+
+- (void)begin {
+    @synchronized (self) {
+        if (_active) return;
+        _active = YES;
+    }
+    zs_logo_install_adjust(1);
+}
+
+- (void)end {
+    @synchronized (self) {
+        if (!_active) return;
+        _active = NO;
+    }
+    zs_logo_install_adjust(-1);
+}
+
+@end
+
+static void zs_logo_fetch_remote_file(NSString *directory, NSDictionary *info, NSDictionary *oldMeta, ZSLogoInstallScope *scope, void (^completion)(BOOL success)) {
     NSString *destination = [directory stringByAppendingPathComponent:info[@"file"]];
     if ([[NSFileManager defaultManager] fileExistsAtPath:destination] && zs_logo_meta_has_file(oldMeta, info[@"file"], info[@"sha"])) {
         completion(YES);
@@ -600,10 +656,11 @@ static void zs_logo_fetch_remote_file(NSString *directory, NSDictionary *info, N
         completion(NO);
         return;
     }
+    [scope begin];
     zs_logo_download_file(url, destination, completion);
 }
 
-static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
+static void zs_logo_sync_inner(NSString *name, ZSLogoInstallScope *scope, void (^completion)(BOOL success)) {
     zs_logo_fetch_listing(zs_logo_contents_url(name), ^(NSArray<NSDictionary *> *entries) {
         if (!entries) {
             completion(NO);
@@ -646,7 +703,7 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
             for (NSString *file in [NSSet setWithArray:roleFiles.allValues]) {
                 if ([okFiles containsObject:file]) continue;
                 dispatch_group_enter(group);
-                zs_logo_fetch_remote_file(directory, remote[file], oldMeta, ^(BOOL success) {
+                zs_logo_fetch_remote_file(directory, remote[file], oldMeta, scope, ^(BOOL success) {
                     if (success) dispatch_sync(stateQueue, ^{ [okFiles addObject:file]; });
                     dispatch_group_leave(group);
                 });
@@ -686,10 +743,18 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
             return;
         }
 
-        zs_logo_fetch_remote_file(directory, remote[styleName], oldMeta, ^(BOOL success) {
+        zs_logo_fetch_remote_file(directory, remote[styleName], oldMeta, scope, ^(BOOL success) {
             NSData *data = success ? [NSData dataWithContentsOfFile:[directory stringByAppendingPathComponent:styleName]] : nil;
             proceed(data ? styleName : nil, data);
         });
+    });
+}
+
+static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
+    ZSLogoInstallScope *scope = [[ZSLogoInstallScope alloc] init];
+    zs_logo_sync_inner(name, scope, ^(BOOL success) {
+        completion(success);
+        [scope end];
     });
 }
 
@@ -738,6 +803,19 @@ void zs_logo_select(NSString *name, ZSLogoSelectCompletion completion) {
     zs_logo_sync(name, ^(BOOL success) {
         finish(success || zs_logo_pack_named(name) != nil);
     });
+}
+
+BOOL zs_logo_delete(NSString *name) {
+    if (!zs_logo_is_local(name)) return NO;
+    NSError *error = nil;
+    if (![[NSFileManager defaultManager] removeItemAtPath:zs_logo_local_directory(name) error:&error]) {
+        ZLog(@"[Logo] couldn't delete '%@': %@", name, error.localizedDescription);
+        return NO;
+    }
+    zs_logo_invalidate_pack(name);
+    if ([zs_logo_selected_name() isEqualToString:name]) zs_logo_store_selected_name(kZSLogoDefaultName);
+    [[NSNotificationCenter defaultCenter] postNotificationName:ZSLogoDidChangeNotification object:nil];
+    return YES;
 }
 
 #pragma mark - Font

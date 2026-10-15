@@ -4,6 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 extern NSString * const kZSLogoDefaultName;
 extern NSNotificationName const ZSLogoDidChangeNotification;
+extern NSNotificationName const ZSLogoInstallStateDidChangeNotification;
 
 typedef NS_ENUM(NSInteger, ZSLogoTextCase) {
     ZSLogoTextCaseNone,
@@ -64,6 +65,8 @@ NSArray<NSString *> *zs_logo_cached_names(void);
 void zs_logo_refresh_names(ZSLogoNamesCompletion completion);
 
 BOOL zs_logo_is_local(NSString *name);
+BOOL zs_logo_is_installing(void);
+BOOL zs_logo_delete(NSString *name);
 void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion);
 void zs_logo_create_pack(NSURL *url, ZSLogoCreateCompletion completion);
 

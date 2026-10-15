@@ -5748,6 +5748,74 @@ static UIImage *zs_make_logo_chevron_image(void) {
 }
 @end
 
+static const void *kZSLogoInstallOverlayKey = &kZSLogoInstallOverlayKey;
+static const void *kZSLogoInstallObserverKey = &kZSLogoInstallObserverKey;
+
+static UIView *zs_make_logo_install_overlay(UIView *container, UILabel *headerLabel) {
+    UIView *overlay = [[UIView alloc] init];
+    overlay.translatesAutoresizingMaskIntoConstraints = NO;
+    overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.62];
+    overlay.layer.cornerRadius = 10;
+    overlay.layer.cornerCurve = kCACornerCurveContinuous;
+    overlay.userInteractionEnabled = NO;
+    overlay.alpha = 0;
+    overlay.hidden = YES;
+
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.color = zs_accent_green_color();
+    spinner.hidesWhenStopped = NO;
+
+    UILabel *label = [[UILabel alloc] init];
+    label.text = @"Installing\u2026";
+    label.textColor = zs_accent_green_color();
+    label.font = zs_mono_font(13, UIFontWeightSemibold);
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[spinner, label]];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.axis = UILayoutConstraintAxisHorizontal;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 8;
+    [overlay addSubview:stack];
+
+    [container addSubview:overlay];
+    objc_setAssociatedObject(overlay, @"zs_install_spinner", spinner, OBJC_ASSOCIATION_RETAIN);
+
+    [NSLayoutConstraint activateConstraints:@[
+        [overlay.leadingAnchor constraintEqualToAnchor:headerLabel.leadingAnchor constant:-10],
+        [overlay.trailingAnchor constraintEqualToAnchor:headerLabel.trailingAnchor constant:10],
+        [overlay.topAnchor constraintEqualToAnchor:headerLabel.topAnchor constant:-4],
+        [overlay.bottomAnchor constraintEqualToAnchor:headerLabel.bottomAnchor constant:4],
+        [stack.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [stack.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+    ]];
+    return overlay;
+}
+
+static void zs_apply_logo_install_state(UIView *container, BOOL animated) {
+    UIView *overlay = objc_getAssociatedObject(container, kZSLogoInstallOverlayKey);
+    if (!overlay) return;
+    UIActivityIndicatorView *spinner = objc_getAssociatedObject(overlay, @"zs_install_spinner");
+    BOOL installing = zs_logo_is_installing();
+
+    if (installing) {
+        [container bringSubviewToFront:overlay];
+        overlay.hidden = NO;
+        [spinner startAnimating];
+        [UIView animateWithDuration:animated ? 0.22 : 0 animations:^{
+            overlay.alpha = 1;
+        }];
+        return;
+    }
+
+    [UIView animateWithDuration:animated ? 0.22 : 0 animations:^{
+        overlay.alpha = 0;
+    } completion:^(BOOL finished) {
+        if (zs_logo_is_installing()) return;
+        overlay.hidden = YES;
+        [spinner stopAnimating];
+    }];
+}
+
 static UIView *zs_make_title_block(void) {
     UIView *container = [[UIView alloc] init];
     container.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5775,6 +5843,19 @@ static UIView *zs_make_title_block(void) {
         if (label) zs_style_title_header_label(label);
     }];
     objc_setAssociatedObject(container, @"zs_logo_observer", observerToken, OBJC_ASSOCIATION_RETAIN);
+
+    UIView *installOverlay = zs_make_logo_install_overlay(container, headerLabel);
+    objc_setAssociatedObject(container, kZSLogoInstallOverlayKey, installOverlay, OBJC_ASSOCIATION_RETAIN);
+    ZSLogoObserverToken *installToken = [[ZSLogoObserverToken alloc] init];
+    __weak UIView *weakContainer = container;
+    installToken.observer = [[NSNotificationCenter defaultCenter] addObserverForName:ZSLogoInstallStateDidChangeNotification
+                                                                               object:nil
+                                                                                queue:[NSOperationQueue mainQueue]
+                                                                           usingBlock:^(NSNotification *note) {
+        UIView *strongContainer = weakContainer;
+        if (strongContainer) zs_apply_logo_install_state(strongContainer, YES);
+    }];
+    objc_setAssociatedObject(container, kZSLogoInstallObserverKey, installToken, OBJC_ASSOCIATION_RETAIN);
 
     UIView *updateDot = [[UIView alloc] init];
     updateDot.translatesAutoresizingMaskIntoConstraints = NO;
@@ -5836,6 +5917,7 @@ static UIView *zs_make_title_block(void) {
         [buildInfoLabel.bottomAnchor constraintEqualToAnchor:container.bottomAnchor],
     ]];
 
+    zs_apply_logo_install_state(container, NO);
     return container;
 }
 
@@ -23773,7 +23855,15 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     NSString *currentName = zs_logo_selected_name();
 
     CGRect buttonFrame = [self.logoChevronButton convertRect:self.logoChevronButton.bounds toView:self.scrollView];
-    CGFloat dropdownWidth = kZSLogoDropdownWidth;
+    BOOL hasLocal = NO;
+    for (NSString *candidate in names) {
+        if (zs_logo_is_local(candidate)) {
+            hasLocal = YES;
+            break;
+        }
+    }
+    CGFloat deleteWidth = 34;
+    CGFloat dropdownWidth = kZSLogoDropdownWidth + (hasLocal ? deleteWidth : 0);
     CGFloat rowHeight = kZSReencodeFieldHeight;
     NSInteger rowCount = (NSInteger)names.count + 1;
     CGFloat dropdownHeight = rowHeight * rowCount;
@@ -23828,6 +23918,20 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
         optionButton.frame = CGRectMake(0, i * rowHeight, dropdownWidth, rowHeight);
         optionButton.alpha = 0;
         [rowHost addSubview:optionButton];
+
+        if (!isAddRow && zs_logo_is_local(name)) {
+            optionButton.titleEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12 + deleteWidth);
+            UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
+            deleteButton.tag = i;
+            deleteButton.frame = CGRectMake(dropdownWidth - deleteWidth, i * rowHeight, deleteWidth, rowHeight);
+            UIImageSymbolConfiguration *trashConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightMedium];
+            [deleteButton setImage:[UIImage systemImageNamed:@"trash" withConfiguration:trashConfig] forState:UIControlStateNormal];
+            deleteButton.tintColor = [UIColor colorWithRed:1.0 green:0.42 blue:0.40 alpha:0.9];
+            deleteButton.accessibilityLabel = [NSString stringWithFormat:@"Delete %@", name];
+            deleteButton.alpha = 0;
+            [deleteButton addTarget:self action:@selector(zs_logoDropdownDeleteTapped:) forControlEvents:UIControlEventTouchUpInside];
+            [rowHost addSubview:deleteButton];
+        }
 
         if (i > 0) {
             CGFloat hairline = 1.0 / MAX(UIScreen.mainScreen.scale, (CGFloat)1.0);
@@ -23913,6 +24017,31 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
         UINotificationFeedbackGenerator *failHaptic = [UINotificationFeedbackGenerator new];
         [failHaptic notificationOccurred:UINotificationFeedbackTypeError];
     });
+}
+
+- (void)zs_logoDropdownDeleteTapped:(UIButton *)sender {
+    NSArray<NSString *> *names = self.logoDropdownNames;
+    if (sender.tag < 0 || sender.tag >= (NSInteger)names.count) return;
+    NSString *name = names[sender.tag];
+    if (!zs_logo_is_local(name)) return;
+    [self zs_closeLogoDropdownAnimated:YES];
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) return;
+
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Delete Logo?"
+                                                                       message:[NSString stringWithFormat:@"\u201C%@\u201D will be removed from this device.", name]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    __weak typeof(self) weakSelf = self;
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Delete" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        BOOL deleted = zs_logo_delete(name);
+        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+        [haptic notificationOccurred:deleted ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
+        if (!deleted) [weakSelf zs_presentModsAlertWithTitle:@"Couldn't Delete Logo" message:[NSString stringWithFormat:@"\u201C%@\u201D couldn't be removed.", name]];
+    }]];
+    [presenter presentViewController:confirm animated:YES completion:nil];
 }
 
 - (void)zs_presentLogoImportPicker {
