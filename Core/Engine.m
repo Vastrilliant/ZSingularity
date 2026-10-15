@@ -28,6 +28,7 @@
 
 static void ZSCustomGreeting_HotFieldInvalidate(void);
 static void ZSUID_HotFieldInvalidate(void);
+static void ZSCombatTip_HotFieldInvalidate(void);
 BOOL ZSGlobalScene_Current(int32_t *outState);
 static const int32_t kZSFontSceneStateMain = 2;
 static void *ZSUID_FindActiveInstance(void *klass);
@@ -1391,6 +1392,7 @@ static void zs_apply_persisted_particle_settings(void) {
 static void zs_reapply_all_settings_internal(BOOL includeExperimental) {
     ZSCustomGreeting_HotFieldInvalidate();
     ZSUID_HotFieldInvalidate();
+    ZSCombatTip_HotFieldInvalidate();
 
     [[FPS120Controller shared] applyMenuFPS:g_menuFPS];
     [[FPS120Controller shared] applyCombatFPS:g_combatFPS];
@@ -4494,6 +4496,200 @@ __attribute__((constructor))
 static void ZSCustomGreetingPatcherConstructor(void) {
     pthread_t t;
     pthread_create(&t, NULL, ZSCustomGreetingPatcher_WaitForUnityThenInstall, NULL);
+    pthread_detach(t);
+}
+
+#pragma mark - Custom Combat Tips
+
+static NSArray<NSString *> *ZSCombatTip_Pool(void) {
+    static NSArray<NSString *> *pool;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pool = @[
+            @"Placeholder combat tip 01",
+            @"Placeholder combat tip 02",
+            @"Placeholder combat tip 03",
+            @"Placeholder combat tip 04",
+            @"Placeholder combat tip 05",
+            @"Placeholder combat tip 06",
+            @"Placeholder combat tip 07",
+            @"Placeholder combat tip 08",
+            @"Placeholder combat tip 09",
+            @"Placeholder combat tip 10",
+            @"Placeholder combat tip 11",
+            @"Placeholder combat tip 12",
+            @"Placeholder combat tip 13",
+            @"Placeholder combat tip 14",
+            @"Placeholder combat tip 15",
+            @"Placeholder combat tip 16",
+            @"Placeholder combat tip 17",
+            @"Placeholder combat tip 18",
+            @"Placeholder combat tip 19",
+            @"Placeholder combat tip 20",
+        ];
+    });
+    return pool;
+}
+
+static NSString *gZSCombatTipChosen;
+
+static NSString *ZSCombatTip_PickRandom(void) {
+    NSArray<NSString *> *pool = ZSCombatTip_Pool();
+    if (pool.count == 0) return nil;
+    NSString *pick = pool[arc4random_uniform((uint32_t)pool.count)];
+    if (pool.count > 1) {
+        while ([pick isEqualToString:gZSCombatTipChosen]) {
+            pick = pool[arc4random_uniform((uint32_t)pool.count)];
+        }
+    }
+    return pick;
+}
+
+static void *gZSCombatTipManagerClass;
+static void *gZSCombatTipManagerInstance;
+static void *gZSCombatTipTMPInstance;
+static const void *gZSCombatTipGetText;
+static const void *gZSCombatTipSetText;
+static void *gZSCombatTipLastWrittenString;
+
+static int gZSCombatTipResolveFailStreak;
+static const int kZSCombatTipResolveRetryThrottleTicks = 30;
+
+static void ZSCombatTip_HotFieldInvalidate(void) {
+    gZSCombatTipManagerInstance = NULL;
+    gZSCombatTipTMPInstance = NULL;
+    gZSCombatTipGetText = NULL;
+    gZSCombatTipSetText = NULL;
+    gZSCombatTipLastWrittenString = NULL;
+    gZSCombatTipResolveFailStreak = 0;
+}
+
+static BOOL ZSCombatTip_HotFieldResolve(void) {
+    if (!gZSCombatTipManagerClass) {
+        gZSCombatTipManagerClass = [IL2CppBridge classNamed:"LoadingSceneManager"
+                                                 inNamespace:""
+                                            assemblyContains:"Assembly-CSharp"];
+        if (!gZSCombatTipManagerClass) return NO;
+    }
+
+    void *manager = ZSCustomGreeting_FindActiveInstance(gZSCombatTipManagerClass);
+    if (!manager) return NO;
+
+    void *field = [IL2CppBridge fieldNamed:"_hintTxt" onClass:gZSCombatTipManagerClass];
+    if (!field) return NO;
+
+    void *tmp = NULL;
+    if (![IL2CppBridge copyInstanceFieldValue:field onInstance:manager toBuffer:&tmp] || !tmp) return NO;
+
+    void *tmpClass = [IL2CppBridge classOfInstance:tmp];
+    if (!tmpClass) return NO;
+
+    const void *getText = [IL2CppBridge methodOnClass:tmpClass name:"get_text" argCount:0];
+    const void *setText = [IL2CppBridge methodOnClass:tmpClass name:"set_text" argCount:1];
+    if (!getText || !setText) return NO;
+
+    gZSCombatTipManagerInstance = manager;
+    gZSCombatTipTMPInstance = tmp;
+    gZSCombatTipGetText = getText;
+    gZSCombatTipSetText = setText;
+    gZSCombatTipLastWrittenString = NULL;
+    gZSCombatTipChosen = ZSCombatTip_PickRandom();
+    return YES;
+}
+
+static void ZSCombatTip_ApplyText(NSString *text) {
+    void *converted = [IL2CppBridge il2CppStringFromNSString:text];
+    if (!converted) return;
+
+    void *args[1] = { converted };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:gZSCombatTipSetText onInstance:gZSCombatTipTMPInstance args:args outException:&exc];
+    if (exc) { ZSCombatTip_HotFieldInvalidate(); return; }
+    gZSCombatTipLastWrittenString = converted;
+}
+
+static void ZSCombatTip_Tick(void) {
+    if (gZSCombatTipManagerInstance && !ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) {
+        ZSCombatTip_HotFieldInvalidate();
+    }
+
+    if (!gZSCombatTipTMPInstance) {
+        if (gZSCombatTipResolveFailStreak > 0) {
+            gZSCombatTipResolveFailStreak = (gZSCombatTipResolveFailStreak + 1) % kZSCombatTipResolveRetryThrottleTicks;
+            return;
+        }
+        if (!ZSCombatTip_HotFieldResolve()) {
+            gZSCombatTipResolveFailStreak = 1;
+            return;
+        }
+    }
+
+    if (gZSCombatTipChosen.length == 0) return;
+
+    void *getExc = NULL;
+    void *current = [IL2CppBridge invokeMethod:gZSCombatTipGetText onInstance:gZSCombatTipTMPInstance args:NULL outException:&getExc];
+    if (getExc) { ZSCombatTip_HotFieldInvalidate(); return; }
+
+    if (current == gZSCombatTipLastWrittenString) return;
+
+    ZSCombatTip_ApplyText(gZSCombatTipChosen);
+}
+
+@interface ZSCombatTipPatcher : NSObject
+@property (nonatomic, strong) CADisplayLink *displayLink;
+@end
+
+@implementation ZSCombatTipPatcher
+
++ (instancetype)shared {
+    static ZSCombatTipPatcher *instance;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [ZSCombatTipPatcher new];
+    });
+    return instance;
+}
+
++ (void)install {
+    static BOOL installed;
+    @synchronized (self) {
+        if (installed) return;
+        installed = YES;
+
+        ZSCombatTipPatcher *shared = [self shared];
+        shared.displayLink = [CADisplayLink displayLinkWithTarget:shared selector:@selector(tick)];
+        [shared.displayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)tick {
+    ZSCombatTip_Tick();
+}
+
+@end
+
+static void *ZSCombatTipPatcher_WaitForUnityThenInstall(void *arg) {
+    (void)arg;
+
+    __block BOOL unityReady = NO;
+    while (!unityReady) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id appController = [[UIApplication sharedApplication] delegate];
+            if (appController && find_unity_view(appController)) unityReady = YES;
+        });
+        if (!unityReady) usleep(200 * 1000);
+    }
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [ZSCombatTipPatcher install];
+    });
+    return NULL;
+}
+
+__attribute__((constructor))
+static void ZSCombatTipPatcherConstructor(void) {
+    pthread_t t;
+    pthread_create(&t, NULL, ZSCombatTipPatcher_WaitForUnityThenInstall, NULL);
     pthread_detach(t);
 }
 
