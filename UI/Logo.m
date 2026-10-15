@@ -403,10 +403,12 @@ static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
 static const NSInteger kZSLogoTranscodeFPS = 24;
 static const CGFloat kZSLogoTranscodeMaxEdge = 2048;
-static const size_t kZSLogoTranscodeFrameBudgetBytes = 192 * 1024 * 1024;
+static const size_t kZSLogoTranscodeFrameBudgetBytes = 128 * 1024 * 1024;
 static const double kZSLogoTranscodeMaxLoopMs = 30000.0;
 static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
-static const NSTimeInterval kZSLogoTranscodeStepTimeout = 10.0;
+static const NSTimeInterval kZSLogoTranscodeStepTimeout = 45.0;
+static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
+static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
 static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
 static const uint32_t kZSLogoTranscodeVersion = 4;
@@ -415,7 +417,7 @@ static const double kZSLogoVideoQuality = 1.0;
 static const double kZSLogoVideoMinBitRate = 8000000.0;
 static const double kZSLogoVideoMaxBitRate = 200000000.0;
 static const NSInteger kZSLogoVideoKeyframeInterval = 48;
-static const NSTimeInterval kZSLogoVideoAppendTimeout = 10.0;
+static const NSTimeInterval kZSLogoVideoAppendTimeout = 60.0;
 
 static void zs_logo_transcode_pack_directory(NSString *directory);
 
@@ -437,17 +439,26 @@ static BOOL zs_logo_is_image_file(NSString *filename) {
     return [extensions containsObject:filename.pathExtension.lowercaseString];
 }
 
+static BOOL zs_logo_is_video_file(NSString *filename) {
+    static NSSet<NSString *> *extensions;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        extensions = [NSSet setWithArray:@[@"mov", @"mp4", @"m4v"]];
+    });
+    return [extensions containsObject:filename.pathExtension.lowercaseString];
+}
+
 static BOOL zs_logo_is_style_file(NSString *filename) {
     return [filename.lowercaseString isEqualToString:kZSLogoStyleFilename];
 }
 
 static BOOL zs_logo_is_relevant_file(NSString *filename) {
-    return zs_logo_is_font_file(filename) || zs_logo_is_image_file(filename) || zs_logo_is_style_file(filename);
+    return zs_logo_is_font_file(filename) || zs_logo_is_image_file(filename) || zs_logo_is_video_file(filename) || zs_logo_is_style_file(filename);
 }
 
 static BOOL zs_logo_role_accepts_file(NSString *role, NSString *filename) {
     if ([role isEqualToString:kZSLogoRoleFont]) return zs_logo_is_font_file(filename);
-    return zs_logo_is_image_file(filename);
+    return zs_logo_is_image_file(filename) || zs_logo_is_video_file(filename);
 }
 
 static NSDictionary *zs_logo_parse_style_json(NSData *data) {
@@ -474,7 +485,14 @@ static NSDictionary<NSString *, NSString *> *zs_logo_resolve_roles(NSDictionary 
 
     NSString *(^match)(NSString *, NSString *) = ^NSString *(NSString *role, NSString *wanted) {
         NSString *found = [available containsObject:wanted] ? wanted : lowered[wanted.lowercaseString];
-        return found && zs_logo_role_accepts_file(role, found) ? found : nil;
+        if (!found || !zs_logo_role_accepts_file(role, found)) return nil;
+        if (zs_logo_is_svg_file(found)) {
+            NSString *stem = found.stringByDeletingPathExtension.lowercaseString;
+            for (NSString *candidate in [lowered.allValues sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
+                if (zs_logo_is_video_file(candidate) && [candidate.stringByDeletingPathExtension.lowercaseString isEqualToString:stem]) return candidate;
+            }
+        }
+        return found;
     };
 
     NSMutableDictionary<NSString *, NSString *> *resolved = [NSMutableDictionary dictionary];
@@ -1347,8 +1365,13 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
     NSMutableArray *samples = [NSMutableArray array];
     NSMutableArray<NSNumber *> *keyframes = [NSMutableArray array];
     CMSampleBufferRef sample = NULL;
+    CMTime lastPresentation = kCMTimeInvalid;
+    BOOL reordered = NO;
     while ((sample = [output copyNextSampleBuffer])) {
         if (CMSampleBufferGetNumSamples(sample) > 0 && CMSampleBufferGetDataBuffer(sample)) {
+            CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
+            if (CMTIME_IS_VALID(lastPresentation) && CMTIME_IS_VALID(presentation) && CMTimeCompare(presentation, lastPresentation) <= 0) reordered = YES;
+            lastPresentation = presentation;
             BOOL sync = YES;
             CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
             if (attachments && CFArrayGetCount(attachments) > 0) {
@@ -1362,6 +1385,10 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
         CFRelease(sample);
     }
     if (reader.status != AVAssetReaderStatusCompleted || samples.count == 0 || keyframes.firstObject.unsignedIntegerValue != 0) return nil;
+    if (reordered) {
+        ZLog(@"[Logo] %@ uses frame reordering, encode it without B-frames", path.lastPathComponent);
+        return nil;
+    }
 
     CGSize size = track.naturalSize;
     if (size.width <= 0 || size.height <= 0) return nil;
@@ -1391,10 +1418,11 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     dispatch_once(&once, ^{ lock = [[NSObject alloc] init]; });
 
     @synchronized (lock) {
-        ZSLogoVideo *cached = [zs_logo_video_cache() objectForKey:path];
+        NSString *key = zs_logo_animation_key(path);
+        ZSLogoVideo *cached = [zs_logo_video_cache() objectForKey:key];
         if (cached) return cached;
         ZSLogoVideo *video = zs_logo_video_load(path);
-        if (video) [zs_logo_video_cache() setObject:video forKey:path];
+        if (video) [zs_logo_video_cache() setObject:video forKey:key];
         return video;
     }
 }
@@ -1600,11 +1628,53 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didProbe:(NSDictionary *)probe;
 - (void)renderWorkerDidBecomeReady:(ZSLogoRenderWorker *)worker;
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didCaptureIndex:(NSUInteger)index black:(UIImage *)black white:(UIImage *)white;
+- (void)renderWorker:(ZSLogoRenderWorker *)worker didStallAtIndex:(NSUInteger)index reason:(NSString *)reason;
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didFail:(NSString *)reason;
 @end
 
+static NSString * const kZSLogoSVGHideScript =
+    @"(function(){var s=document.querySelector('svg');if(s)s.style.setProperty('visibility','hidden','important');"
+    @"document.documentElement.style.setProperty('background-color','transparent','important');return 1;})()";
+
+static NSString * const kZSLogoSVGShowScript =
+    @"(function(){var s=document.querySelector('svg');if(s)s.style.removeProperty('visibility');return 1;})()";
+
+static BOOL zs_logo_snapshot_set_transparent(WKSnapshotConfiguration *configuration, BOOL transparent) {
+    SEL setter = NSSelectorFromString(@"_setUsesTransparentBackground:");
+    if (![configuration respondsToSelector:setter]) return NO;
+    NSMethodSignature *signature = [configuration methodSignatureForSelector:setter];
+    if (!signature || signature.numberOfArguments != 3) return NO;
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.target = configuration;
+    invocation.selector = setter;
+    [invocation setArgument:&transparent atIndex:2];
+    [invocation invoke];
+    return YES;
+}
+
+static BOOL zs_logo_image_is_clear(UIImage *image) {
+    CGImageRef cgImage = image.CGImage;
+    if (!cgImage) return NO;
+    enum { side = 16 };
+    uint8_t pixels[side * side * 4];
+    memset(pixels, 0xFF, sizeof(pixels));
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels, side, side, 8, side * 4, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(colorSpace);
+    if (!context) return NO;
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    CGContextDrawImage(context, CGRectMake(0, 0, side, side), cgImage);
+    CGContextRelease(context);
+    for (size_t i = 3; i < sizeof(pixels); i += 4) {
+        if (pixels[i] != 0) return NO;
+    }
+    return YES;
+}
+
 @interface ZSLogoRenderWorker : NSObject <WKNavigationDelegate>
 @property (nonatomic, assign) CGSize pointSize;
+@property (nonatomic, assign) double timeoutScale;
+@property (nonatomic, assign, readonly) BOOL transparentCapture;
 - (instancetype)initWithDelegate:(id<ZSLogoRenderWorkerDelegate>)delegate svg:(ZSLogoSVG *)svg window:(UIWindow *)window;
 - (void)load;
 - (void)captureAtTime:(double)timeMs index:(NSUInteger)index;
@@ -1617,9 +1687,12 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     UIView *_host;
     WKWebView *_web;
     BOOL _dead;
+    BOOL _failed;
+    BOOL _transparent;
     NSUInteger _generation;
     NSUInteger _loadStep;
     NSUInteger _viewportAttempt;
+    NSUInteger _captureIndex;
 }
 
 - (instancetype)initWithDelegate:(id<ZSLogoRenderWorkerDelegate>)delegate svg:(ZSLogoSVG *)svg window:(UIWindow *)window {
@@ -1627,6 +1700,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     if (!self) return nil;
     _delegate = delegate;
     _svg = svg;
+    _timeoutScale = 1;
+    _captureIndex = NSNotFound;
 
     _host = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
     _host.userInteractionEnabled = NO;
@@ -1652,6 +1727,10 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     return self;
 }
 
+- (BOOL)transparentCapture {
+    return _transparent;
+}
+
 - (void)load {
     if (_dead) return;
     _loadStep = [self zs_beginStep];
@@ -1669,14 +1748,20 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 }
 
 - (void)zs_failWithReason:(NSString *)reason {
-    if (_dead) return;
-    [_delegate renderWorker:self didFail:reason];
+    if (_dead || _failed) return;
+    _failed = YES;
+    _generation++;
+    NSUInteger index = _captureIndex;
+    _captureIndex = NSNotFound;
+    if (index != NSNotFound) [_delegate renderWorker:self didStallAtIndex:index reason:reason];
+    else [_delegate renderWorker:self didFail:reason];
 }
 
 - (NSUInteger)zs_beginStep {
     NSUInteger generation = ++_generation;
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoTranscodeStepTimeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    NSTimeInterval timeout = kZSLogoTranscodeStepTimeout * MAX(1.0, _timeoutScale);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || strongSelf->_dead || strongSelf->_generation != generation) return;
         [strongSelf zs_failWithReason:@"a render step timed out"];
@@ -1685,7 +1770,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 }
 
 - (BOOL)zs_stepIsCurrent:(NSUInteger)generation {
-    return !_dead && _generation == generation;
+    return !_dead && !_failed && _generation == generation;
 }
 
 - (void)zs_endStep {
@@ -1753,7 +1838,10 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
         if (matched || ++self->_viewportAttempt >= kZSLogoTranscodeViewportAttempts) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self->_dead) return;
-                [self->_delegate renderWorkerDidBecomeReady:self];
+                [self zs_calibrateThen:^{
+                    if (self->_dead) return;
+                    [self->_delegate renderWorkerDidBecomeReady:self];
+                }];
             });
             return;
         }
@@ -1761,6 +1849,33 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
             if (self->_dead) return;
             [self zs_waitForViewport];
         });
+    }];
+}
+
+- (void)zs_useOpaqueSurface:(BOOL)opaque {
+    UIColor *color = opaque ? UIColor.whiteColor : UIColor.clearColor;
+    _web.opaque = opaque;
+    _web.backgroundColor = color;
+    _web.scrollView.backgroundColor = color;
+}
+
+- (void)zs_calibrateThen:(void (^)(void))next {
+    WKSnapshotConfiguration *probe = [[WKSnapshotConfiguration alloc] init];
+    if (!zs_logo_snapshot_set_transparent(probe, YES)) {
+        next();
+        return;
+    }
+    [self zs_useOpaqueSurface:NO];
+    _transparent = YES;
+    [self zs_runScript:kZSLogoSVGHideScript then:^{
+        [self zs_snapshot:^(UIImage *image) {
+            BOOL supported = zs_logo_image_is_clear(image);
+            if (!supported) {
+                self->_transparent = NO;
+                [self zs_useOpaqueSurface:YES];
+            }
+            [self zs_runScript:kZSLogoSVGShowScript then:next];
+        }];
     }];
 }
 
@@ -1786,6 +1901,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     configuration.rect = CGRectMake(0, 0, self.pointSize.width, self.pointSize.height);
     configuration.snapshotWidth = @(self.pointSize.width);
     configuration.afterScreenUpdates = YES;
+    if (_transparent) zs_logo_snapshot_set_transparent(configuration, YES);
     [_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *error) {
         if (![self zs_stepIsCurrent:step]) return;
         [self zs_endStep];
@@ -1797,16 +1913,27 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     }];
 }
 
+- (void)zs_finishCaptureAtIndex:(NSUInteger)index first:(UIImage *)first second:(UIImage *)second {
+    if (_dead || _failed) return;
+    _captureIndex = NSNotFound;
+    [_delegate renderWorker:self didCaptureIndex:index black:first white:second];
+}
+
 - (void)captureAtTime:(double)timeMs index:(NSUInteger)index {
-    if (_dead) return;
-    NSString *seek = [NSString stringWithFormat:kZSLogoSVGSeekScript, timeMs, @"#000"];
-    NSString *whiten = [NSString stringWithFormat:kZSLogoSVGBackgroundScript, @"#fff"];
+    if (_dead || _failed) return;
+    _captureIndex = index;
+    NSString *seek = [NSString stringWithFormat:kZSLogoSVGSeekScript, timeMs, _transparent ? @"transparent" : @"#000"];
 
     [self zs_runScript:seek then:^{
-        [self zs_snapshot:^(UIImage *black) {
+        [self zs_snapshot:^(UIImage *first) {
+            if (self->_transparent) {
+                [self zs_finishCaptureAtIndex:index first:first second:nil];
+                return;
+            }
+            NSString *whiten = [NSString stringWithFormat:kZSLogoSVGBackgroundScript, @"#fff"];
             [self zs_runScript:whiten then:^{
                 [self zs_snapshot:^(UIImage *white) {
-                    [self->_delegate renderWorker:self didCaptureIndex:index black:black white:white];
+                    [self zs_finishCaptureAtIndex:index first:first second:white];
                 }];
             }];
         }];
@@ -1828,9 +1955,13 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     NSMutableArray<ZSLogoRenderWorker *> *_workers;
     NSMutableArray<ZSLogoRenderWorker *> *_parked;
     NSMutableDictionary<NSNumber *, NSData *> *_pending;
+    NSMutableArray<NSNumber *> *_retry;
+    NSMutableDictionary<NSNumber *, NSNumber *> *_attempts;
     ZSLogoRenderWorker *_primary;
     BOOL _finished;
     BOOL _closing;
+    BOOL _planned;
+    NSUInteger _replacements;
     NSUInteger _windowAttempts;
     NSInteger _scale;
     CGSize _pointSize;
@@ -1858,6 +1989,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     _workers = [NSMutableArray array];
     _parked = [NSMutableArray array];
     _pending = [NSMutableDictionary dictionary];
+    _retry = [NSMutableArray array];
+    _attempts = [NSMutableDictionary dictionary];
     return self;
 }
 
@@ -1885,7 +2018,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 }
 
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didProbe:(NSDictionary *)probe {
-    if (_finished || _closing || worker != _primary) return;
+    if (_finished || _closing || _planned) return;
+    _planned = YES;
 
     ZLog(@"[Logo] %@: probe animated=%d periods=%@ end=%.0fms lead=%.0fms", _path.lastPathComponent, [probe[@"anim"] boolValue], [probe[@"periods"] componentsJoinedByString:@","] ?: @"", [probe[@"end"] doubleValue], [probe[@"lead"] doubleValue]);
     double duration = 0;
@@ -1900,7 +2034,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     NSUInteger cores = MAX((NSUInteger)1, (NSUInteger)NSProcessInfo.processInfo.activeProcessorCount);
     NSUInteger count = MIN(cores, _frameCount);
     size_t frameBytes = MAX((size_t)1, _pixelWidth * _pixelHeight * 4);
-    _lookahead = MAX((NSUInteger)2, MIN(count * 2 + 2, (NSUInteger)(kZSLogoTranscodeFrameBudgetBytes / frameBytes)));
+    _lookahead = MAX((NSUInteger)2, MIN(count + 2, (NSUInteger)(kZSLogoTranscodeFrameBudgetBytes / frameBytes)));
     ZLog(@"[Logo] %@: plan %lu frame(s) at %zux%zu px, %ld fps, loop %.2fs, lead %.0fms, %lu renderer(s)", _path.lastPathComponent, (unsigned long)_frameCount, _pixelWidth, _pixelHeight, (long)kZSLogoTranscodeFPS, duration / 1000.0, lead, (unsigned long)count);
 
     _writer = [[ZSLogoVideoWriter alloc] initWithFinalPath:_videoPath width:_pixelWidth height:_pixelHeight frameCount:_frameCount];
@@ -1925,18 +2059,25 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     if (_captureStart == 0) {
         _captureStart = CFAbsoluteTimeGetCurrent();
         _lastLog = _captureStart;
-        ZLog(@"[Logo] %@: capture started, %.2fs of setup", _path.lastPathComponent, _captureStart - _jobStart);
+        ZLog(@"[Logo] %@: capture started, %.2fs of setup, %@", _path.lastPathComponent, _captureStart - _jobStart, worker.transparentCapture ? @"single pass alpha capture" : @"black/white matte capture");
     }
     [self zs_assignWork:worker];
 }
 
 - (void)zs_assignWork:(ZSLogoRenderWorker *)worker {
-    if (_finished || _closing || _nextFrame >= _frameCount) return;
-    if (_nextFrame >= _written + _lookahead) {
-        if (![_parked containsObject:worker]) [_parked addObject:worker];
-        return;
+    if (_finished || _closing) return;
+    NSUInteger index;
+    if (_retry.count > 0) {
+        index = _retry.firstObject.unsignedIntegerValue;
+        [_retry removeObjectAtIndex:0];
+    } else {
+        if (_nextFrame >= _frameCount) return;
+        if (_nextFrame >= _written + _lookahead) {
+            if (![_parked containsObject:worker]) [_parked addObject:worker];
+            return;
+        }
+        index = _nextFrame++;
     }
-    NSUInteger index = _nextFrame++;
     double time = _leadMs + (double)index * 1000.0 / (double)kZSLogoTranscodeFPS;
     [worker captureAtTime:time index:index];
 }
@@ -1953,19 +2094,22 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     [self zs_assignWork:worker];
 
     CGImageRef blackImage = CGImageRetain(black.CGImage);
-    CGImageRef whiteImage = CGImageRetain(white.CGImage);
+    CGImageRef whiteImage = white ? CGImageRetain(white.CGImage) : NULL;
     size_t width = _pixelWidth;
     size_t height = _pixelHeight;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         size_t bytes = width * height * 4;
         uint8_t *blackBuffer = malloc(bytes);
-        uint8_t *whiteBuffer = malloc(bytes);
-        BOOL ok = blackBuffer && whiteBuffer && zs_logo_draw_snapshot(blackImage, blackBuffer, width, height) && zs_logo_draw_snapshot(whiteImage, whiteBuffer, width, height);
+        BOOL ok = blackBuffer && zs_logo_draw_snapshot(blackImage, blackBuffer, width, height);
         CGImageRelease(blackImage);
-        CGImageRelease(whiteImage);
-        if (ok) zs_logo_matte_frame(blackBuffer, whiteBuffer, blackBuffer, width * height);
-        free(whiteBuffer);
+        if (ok && whiteImage) {
+            uint8_t *whiteBuffer = malloc(bytes);
+            ok = whiteBuffer && zs_logo_draw_snapshot(whiteImage, whiteBuffer, width, height);
+            if (ok) zs_logo_matte_frame(blackBuffer, whiteBuffer, blackBuffer, width * height);
+            free(whiteBuffer);
+        }
+        if (whiteImage) CGImageRelease(whiteImage);
         NSData *frame = nil;
         if (ok) frame = [NSData dataWithBytesNoCopy:blackBuffer length:bytes freeWhenDone:YES];
         else free(blackBuffer);
@@ -2040,8 +2184,50 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     });
 }
 
+- (BOOL)zs_replaceWorker:(ZSLogoRenderWorker *)worker timeoutScale:(double)scale {
+    [worker teardown];
+    [_workers removeObject:worker];
+    [_parked removeObject:worker];
+    if (worker == _primary) _primary = nil;
+    if (++_replacements > kZSLogoTranscodeMaxWorkerReplacements) {
+        [self zs_failWithReason:@"the renderers kept failing"];
+        return NO;
+    }
+    UIWindow *window = zs_logo_host_window();
+    if (!window) {
+        [self zs_failWithReason:@"no window to render in"];
+        return NO;
+    }
+    ZSLogoRenderWorker *fresh = [[ZSLogoRenderWorker alloc] initWithDelegate:self svg:_svg window:window];
+    fresh.pointSize = _pointSize;
+    fresh.timeoutScale = scale;
+    [_workers addObject:fresh];
+    [fresh load];
+    return YES;
+}
+
+- (void)renderWorker:(ZSLogoRenderWorker *)worker didStallAtIndex:(NSUInteger)index reason:(NSString *)reason {
+    if (_finished || _closing) return;
+    NSNumber *key = @(index);
+    NSUInteger attempts = _attempts[key].unsignedIntegerValue + 1;
+    _attempts[key] = @(attempts);
+    ZLog(@"[Logo] %@: frame %lu stalled (%@), attempt %lu of %lu", _path.lastPathComponent, (unsigned long)index, reason, (unsigned long)attempts, (unsigned long)kZSLogoTranscodeMaxFrameAttempts);
+    if (attempts >= kZSLogoTranscodeMaxFrameAttempts) {
+        [self zs_failWithReason:[NSString stringWithFormat:@"frame %lu kept failing: %@", (unsigned long)index, reason]];
+        return;
+    }
+    [_retry addObject:key];
+    if ([self zs_replaceWorker:worker timeoutScale:(double)(attempts + 1)]) [self zs_wakeParked];
+}
+
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didFail:(NSString *)reason {
-    [self zs_failWithReason:reason];
+    if (_finished || _closing) return;
+    if (!_planned) {
+        [self zs_failWithReason:reason];
+        return;
+    }
+    ZLog(@"[Logo] %@: a renderer was lost (%@), starting another", _path.lastPathComponent, reason);
+    if ([self zs_replaceWorker:worker timeoutScale:1]) [self zs_wakeParked];
 }
 
 - (void)zs_failWithReason:(NSString *)reason {
@@ -2069,6 +2255,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     [_workers removeAllObjects];
     [_parked removeAllObjects];
     [_pending removeAllObjects];
+    [_retry removeAllObjects];
     _primary = nil;
 }
 
@@ -2342,7 +2529,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
     _path = [path copy];
     __weak typeof(self) weakSelf = self;
 
-    if (zs_logo_is_transcoded_path(path)) {
+    if (zs_logo_is_transcoded_path(path) || zs_logo_is_video_file(path)) {
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             ZSLogoVideo *video = zs_logo_video_for_path(path);
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -2689,7 +2876,7 @@ void zs_logo_prewarm(void) {
 
     for (NSString *source in sources) {
         NSString *asset = zs_logo_effect_asset_path(source);
-        if (!asset || !zs_logo_is_transcoded_path(asset)) continue;
+        if (!asset || !(zs_logo_is_transcoded_path(asset) || zs_logo_is_video_file(asset))) continue;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             (void)zs_logo_video_for_path(asset);
         });
@@ -2748,8 +2935,8 @@ void zs_logo_effects_set_paused(BOOL paused) {
 @end
 
 static const NSUInteger kZSLogoZipMaxEntries = 4096;
-static const uint32_t kZSLogoZipMaxEntrySize = 64 * 1024 * 1024;
-static const uint64_t kZSLogoZipMaxTotalSize = 160ull * 1024 * 1024;
+static const uint32_t kZSLogoZipMaxEntrySize = 128 * 1024 * 1024;
+static const uint64_t kZSLogoZipMaxTotalSize = 256ull * 1024 * 1024;
 
 static uint16_t zs_zip_u16(const uint8_t *p) {
     return (uint16_t)(p[0] | (p[1] << 8));
