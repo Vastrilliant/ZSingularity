@@ -402,18 +402,18 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
 static const NSInteger kZSLogoTranscodeFPS = 24;
-static const CGFloat kZSLogoTranscodeMaxEdge = 1536;
-static const CGFloat kZSLogoTranscodeMinEdge = 64;
+static const CGFloat kZSLogoTranscodeMaxEdge = 2048;
+static const size_t kZSLogoTranscodeFrameBudgetBytes = 192 * 1024 * 1024;
 static const double kZSLogoTranscodeMaxLoopMs = 30000.0;
 static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
 static const NSTimeInterval kZSLogoTranscodeStepTimeout = 10.0;
 static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
-static const uint32_t kZSLogoTranscodeVersion = 3;
-static const double kZSLogoVideoBitsPerPixel = 1.0;
-static const double kZSLogoVideoQuality = 0.9;
-static const double kZSLogoVideoMinBitRate = 1000000.0;
-static const double kZSLogoVideoMaxBitRate = 80000000.0;
+static const uint32_t kZSLogoTranscodeVersion = 4;
+static const double kZSLogoVideoBitsPerPixel = 2.0;
+static const double kZSLogoVideoQuality = 1.0;
+static const double kZSLogoVideoMinBitRate = 8000000.0;
+static const double kZSLogoVideoMaxBitRate = 200000000.0;
 static const NSInteger kZSLogoVideoKeyframeInterval = 48;
 static const NSTimeInterval kZSLogoVideoAppendTimeout = 10.0;
 
@@ -1584,7 +1584,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     CGFloat shorter = MIN(intrinsic.width, intrinsic.height);
     if (longer <= 0 || shorter <= 0) longer = shorter = 1;
     double ratio = (double)shorter / (double)longer;
-    double edge = MIN((double)kZSLogoTranscodeMaxEdge, MAX((double)kZSLogoTranscodeMinEdge, ceil((double)kZSLogoTranscodeMinEdge / ratio)));
+    double edge = (double)kZSLogoTranscodeMaxEdge;
     BOOL landscape = intrinsic.width >= intrinsic.height;
     double width = landscape ? edge : edge * ratio;
     double height = landscape ? edge * ratio : edge;
@@ -1899,7 +1899,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 
     NSUInteger cores = MAX((NSUInteger)1, (NSUInteger)NSProcessInfo.processInfo.activeProcessorCount);
     NSUInteger count = MIN(cores, _frameCount);
-    _lookahead = count * 2 + 2;
+    size_t frameBytes = MAX((size_t)1, _pixelWidth * _pixelHeight * 4);
+    _lookahead = MAX((NSUInteger)2, MIN(count * 2 + 2, (NSUInteger)(kZSLogoTranscodeFrameBudgetBytes / frameBytes)));
     ZLog(@"[Logo] %@: plan %lu frame(s) at %zux%zu px, %ld fps, loop %.2fs, lead %.0fms, %lu renderer(s)", _path.lastPathComponent, (unsigned long)_frameCount, _pixelWidth, _pixelHeight, (long)kZSLogoTranscodeFPS, duration / 1000.0, lead, (unsigned long)count);
 
     _writer = [[ZSLogoVideoWriter alloc] initWithFinalPath:_videoPath width:_pixelWidth height:_pixelHeight frameCount:_frameCount];
