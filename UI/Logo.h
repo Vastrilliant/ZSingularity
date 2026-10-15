@@ -58,12 +58,14 @@ typedef NS_ENUM(NSInteger, ZSLogoTextCase) {
 typedef void (^ZSLogoSelectCompletion)(BOOL success);
 typedef void (^ZSLogoNamesCompletion)(NSArray<NSString *> *names);
 typedef void (^ZSLogoImportCompletion)(NSArray<NSString *> *importedNames, NSString * _Nullable errorMessage);
+typedef void (^ZSLogoCreateCompletion)(NSURL * _Nullable outputURL, NSString * _Nullable errorMessage);
 
 NSArray<NSString *> *zs_logo_cached_names(void);
 void zs_logo_refresh_names(ZSLogoNamesCompletion completion);
 
 BOOL zs_logo_is_local(NSString *name);
 void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion);
+void zs_logo_create_pack(NSURL *url, ZSLogoCreateCompletion completion);
 
 NSString *zs_logo_selected_name(void);
 void zs_logo_select(NSString *name, ZSLogoSelectCompletion _Nullable completion);

@@ -6477,6 +6477,7 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 
 @property (nonatomic, weak) UIDocumentPickerViewController *patchLCPicker;
 @property (nonatomic, weak) UIDocumentPickerViewController *logoImportPicker;
+@property (nonatomic, weak) UIDocumentPickerViewController *createLogosPicker;
 
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSTimer *> *doctorPollTimers;
 
@@ -13181,6 +13182,102 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
     }];
 }
 
+#pragma mark Developer (Create Logos)
+
+- (void)zs_createLogosTapped {
+    UIDocumentPickerViewController *picker;
+    if (@available(iOS 14.0, *)) {
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP, UTTypeFolder]];
+    } else {
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder"] inMode:UIDocumentPickerModeOpen];
+    }
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) {
+        ZLog(@"[Logo] no root view controller to present the file picker from");
+        return;
+    }
+    self.createLogosPicker = picker;
+    [presenter presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)zs_handleCreateLogosPickedURL:(NSURL *)url {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    UIAlertController *working = [UIAlertController alertControllerWithTitle:@"Creating Logos\u2026"
+                                                                      message:@"Transcoding SVGs, stripping fonts and compressing."
+                                                               preferredStyle:UIAlertControllerStyleAlert];
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [working.view addSubview:spinner];
+    [spinner startAnimating];
+    [NSLayoutConstraint activateConstraints:@[
+        [spinner.centerXAnchor constraintEqualToAnchor:working.view.centerXAnchor],
+        [spinner.bottomAnchor constraintEqualToAnchor:working.view.bottomAnchor constant:-16],
+    ]];
+
+    __block BOOL workingShown = (presenter == nil);
+    __block dispatch_block_t pendingResult = nil;
+    if (presenter) {
+        [presenter presentViewController:working animated:YES completion:^{
+            workingShown = YES;
+            if (pendingResult) {
+                dispatch_block_t result = pendingResult;
+                pendingResult = nil;
+                result();
+            }
+        }];
+    }
+
+    __weak typeof(self) weakSelf = self;
+    zs_logo_create_pack(url, ^(NSURL *outputURL, NSString *errorMessage) {
+        dispatch_block_t present = ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            if (!outputURL) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeError];
+                [strongSelf zs_presentModsAlertWithTitle:@"Create Logos Failed" message:errorMessage ?: @"Unknown error."];
+                return;
+            }
+
+            UIViewController *sharePresenter = zs_key_window().rootViewController;
+            while (sharePresenter.presentedViewController) sharePresenter = sharePresenter.presentedViewController;
+            if (!sharePresenter) {
+                [NSFileManager.defaultManager removeItemAtURL:outputURL.URLByDeletingLastPathComponent error:nil];
+                return;
+            }
+
+            UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[outputURL] applicationActivities:nil];
+            activityVC.popoverPresentationController.sourceView = sharePresenter.view;
+            activityVC.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(sharePresenter.view.bounds), CGRectGetMidY(sharePresenter.view.bounds), 0, 0);
+            activityVC.popoverPresentationController.permittedArrowDirections = 0;
+            activityVC.completionWithItemsHandler = ^(UIActivityType activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+                [NSFileManager.defaultManager removeItemAtURL:outputURL.URLByDeletingLastPathComponent error:nil];
+            };
+            [sharePresenter presentViewController:activityVC animated:YES completion:nil];
+            [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+        };
+
+        dispatch_block_t finish = ^{
+            if (working.presentingViewController) {
+                [working dismissViewControllerAnimated:YES completion:present];
+            } else {
+                present();
+            }
+        };
+
+        if (workingShown) {
+            finish();
+        } else {
+            pendingResult = finish;
+        }
+    });
+}
+
 #pragma mark Developer (Library Symlink)
 
 - (void)librarySymlinkTapped {
@@ -13498,6 +13595,11 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
     if (controller == self.patchLCPicker) {
         self.patchLCPicker = nil;
         [self zs_handlePatchLCPickedURL:urls.firstObject];
+        return;
+    }
+    if (controller == self.createLogosPicker) {
+        self.createLogosPicker = nil;
+        [self zs_handleCreateLogosPickedURL:urls.firstObject];
         return;
     }
     if (controller == self.loadModsPicker) {
@@ -16897,6 +16999,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         @{@"name": @"/sigkill", @"desc": @"SIGKILL the process"},
         @{@"name": @"/symlink", @"desc": @"Expose Library in Files"},
         @{@"name": @"/patchlc", @"desc": @"Patch an IPA for LiveContainer"},
+        @{@"name": @"/createlogos", @"desc": @"Pack a logo folder or zip into a .zs"},
         @{@"name": @"/keepalive", @"desc": @"Toggle Keep Alive"},
         @{@"name": @"/memlog", @"desc": @"Start the RamBypass allocation profiler"},
     ];
@@ -17009,6 +17112,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         [self librarySymlinkTapped];
     } else if ([name isEqualToString:@"/patchlc"]) {
         [self patchLCTapped];
+    } else if ([name isEqualToString:@"/createlogos"]) {
+        [self zs_createLogosTapped];
     } else if ([name isEqualToString:@"/keepalive"]) {
         [self toggleKeepAliveTapped];
         [self zs_showSyslogToastWithText:self.keepAliveEnabled ? @"Keep Alive enabled" : @"Keep Alive disabled"];
@@ -23813,9 +23918,10 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
 - (void)zs_presentLogoImportPicker {
     UIDocumentPickerViewController *picker;
     if (@available(iOS 14.0, *)) {
-        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP, UTTypeFolder]];
+        UTType *packType = [UTType typeWithFilenameExtension:@"zs" conformingToType:UTTypeData] ?: UTTypeData;
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeZIP, UTTypeFolder, packType]];
     } else {
-        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder"] inMode:UIDocumentPickerModeOpen];
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.zip-archive", @"public.folder", @"public.data"] inMode:UIDocumentPickerModeOpen];
     }
     picker.delegate = self;
     picker.allowsMultipleSelection = NO;

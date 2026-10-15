@@ -11,6 +11,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <objc/runtime.h>
 #import <compression.h>
+#import "lz4hc.h"
 #import <unistd.h>
 
 NSString * const kZSLogoDefaultName = @"Default";
@@ -409,7 +410,6 @@ static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
 static const NSTimeInterval kZSLogoTranscodeStepTimeout = 45.0;
 static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
 static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
-static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
 static const uint32_t kZSLogoTranscodeVersion = 6;
 static const double kZSLogoVideoBitsPerPixel = 0.15;
@@ -417,8 +417,6 @@ static const double kZSLogoVideoMinBitRate = 1000000.0;
 static const double kZSLogoVideoMaxBitRate = 60000000.0;
 static const NSInteger kZSLogoVideoKeyframeInterval = 96;
 static const NSTimeInterval kZSLogoVideoAppendTimeout = 60.0;
-
-static void zs_logo_transcode_pack_directory(NSString *directory);
 
 static BOOL zs_logo_is_font_file(NSString *filename) {
     NSString *ext = filename.pathExtension.lowercaseString;
@@ -632,6 +630,9 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
             }
 
             NSMutableDictionary<NSString *, NSString *> *roleFiles = [resolved mutableCopy];
+            for (NSString *role in @[kZSLogoRoleFill, kZSLogoRoleVfx]) {
+                if (roleFiles[role] && zs_logo_is_svg_file(roleFiles[role])) [roleFiles removeObjectForKey:role];
+            }
             if (styleName && styleData) roleFiles[kZSLogoRoleStyle] = styleName;
 
             NSMutableSet<NSString *> *okFiles = [NSMutableSet set];
@@ -666,7 +667,6 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
                     }
                     zs_logo_write_meta(name, newMeta);
                     zs_logo_invalidate_pack(name);
-                    zs_logo_transcode_pack_directory(directory);
                 }
                 completion(success);
             });
@@ -1296,23 +1296,6 @@ static NSString *zs_logo_transcoded_video_path(NSString *svgPath) {
     NSString *key = [zs_logo_animation_key(svgPath) stringByAppendingFormat:@"|v%u", kZSLogoTranscodeVersion];
     NSString *name = [NSString stringWithFormat:@"%@%016llx.mov", zs_logo_transcode_prefix(svgPath), (unsigned long long)zs_logo_hash_string(key)];
     return [zs_logo_transcode_directory() stringByAppendingPathComponent:name];
-}
-
-static NSString *zs_logo_ready_video_path(NSString *svgPath) {
-    NSString *video = zs_logo_transcoded_video_path(svgPath);
-    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:video error:nil];
-    return attributes.fileSize > 0 ? video : nil;
-}
-
-static void zs_logo_transcode_prune(NSString *svgPath, NSString *keepVideo) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSString *directory = zs_logo_transcode_directory();
-    NSString *prefix = zs_logo_transcode_prefix(svgPath);
-    NSString *keep = keepVideo.lastPathComponent;
-    for (NSString *name in [fm contentsOfDirectoryAtPath:directory error:nil]) {
-        if (![name hasPrefix:prefix] || [name hasPrefix:keep]) continue;
-        [fm removeItemAtPath:[directory stringByAppendingPathComponent:name] error:nil];
-    }
 }
 
 #pragma mark - HEVC playback
@@ -2344,110 +2327,19 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
 
 @end
 
-static NSMutableArray<NSString *> *zs_logo_transcode_queue(void) {
-    static NSMutableArray<NSString *> *queue;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ queue = [NSMutableArray array]; });
-    return queue;
-}
-
-static NSMutableDictionary<NSString *, NSDate *> *zs_logo_transcode_failures(void) {
-    static NSMutableDictionary<NSString *, NSDate *> *failures;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ failures = [NSMutableDictionary dictionary]; });
-    return failures;
-}
-
-static NSString *gZSLogoTranscodeActive;
 static ZSLogoSVGJob *gZSLogoTranscodeJob;
 
-static void zs_logo_transcode_pump(void);
-
-static void zs_logo_transcode_finish_active(NSString *videoPath) {
-    gZSLogoTranscodeActive = nil;
-    gZSLogoTranscodeJob = nil;
-    if (videoPath) [[NSNotificationCenter defaultCenter] postNotificationName:ZSLogoDidChangeNotification object:nil];
-    zs_logo_transcode_pump();
-}
-
-static void zs_logo_transcode_pump(void) {
-    if (gZSLogoTranscodeActive || zs_logo_transcode_queue().count == 0) return;
-    NSString *path = zs_logo_transcode_queue().firstObject;
-    [zs_logo_transcode_queue() removeObjectAtIndex:0];
-    gZSLogoTranscodeActive = path;
-
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!svg) {
-                ZLog(@"[Logo] %@ isn't a readable SVG", path.lastPathComponent);
-                zs_logo_transcode_failures()[path] = [NSDate date];
-                zs_logo_transcode_finish_active(nil);
-                return;
-            }
-            ZSLogoSVGJob *job = [[ZSLogoSVGJob alloc] initWithPath:path svg:svg];
-            gZSLogoTranscodeJob = job;
-            job.completion = ^(NSString *videoPath) {
-                if (!videoPath) {
-                    zs_logo_transcode_failures()[path] = [NSDate date];
-                    zs_logo_transcode_finish_active(nil);
-                    return;
-                }
-                [zs_logo_transcode_failures() removeObjectForKey:path];
-                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                    CFAbsoluteTime loadBegan = CFAbsoluteTimeGetCurrent();
-                    zs_logo_transcode_prune(path, videoPath);
-                    ZSLogoVideo *video = zs_logo_video_for_path(videoPath);
-                    if (video) ZLog(@"[Logo] %@: %lu frame(s) loaded into memory in %.2fs", path.lastPathComponent, (unsigned long)video.count, CFAbsoluteTimeGetCurrent() - loadBegan);
-                    else ZLog(@"[Logo] couldn't read back the HEVC movie for %@", path.lastPathComponent);
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        zs_logo_transcode_finish_active(video ? videoPath : nil);
-                    });
-                });
-            };
-            [job start];
-        });
-    });
-}
-
-static void zs_logo_transcode_svg_notify(NSString *svgPath) {
-    if (svgPath.length == 0) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (zs_logo_ready_video_path(svgPath)) return;
-        NSDate *failedAt = zs_logo_transcode_failures()[svgPath];
-        if (failedAt && -failedAt.timeIntervalSinceNow < kZSLogoTranscodeRetryInterval) return;
-        if ([gZSLogoTranscodeActive isEqualToString:svgPath] || [zs_logo_transcode_queue() containsObject:svgPath]) return;
-        [zs_logo_transcode_queue() addObject:svgPath];
-        ZLog(@"[Logo] %@: queued for transcoding (%lu waiting, %@)", svgPath.lastPathComponent, (unsigned long)zs_logo_transcode_queue().count, gZSLogoTranscodeActive ? @"another job is running" : @"starting now");
-        zs_logo_transcode_pump();
-    });
-}
-
-static void zs_logo_transcode_pack_directory(NSString *directory) {
+static void zs_logo_transcode_clear_cache(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *meta = zs_logo_read_meta_in(directory);
-    NSString *styleFile = meta[kZSLogoRoleStyle][@"file"];
-    NSString *stylePath = [styleFile isKindOfClass:[NSString class]] && styleFile.length > 0
-        ? [directory stringByAppendingPathComponent:styleFile.lastPathComponent]
-        : nil;
-    ZSLogoStyle *style = zs_logo_load_style(stylePath);
-
-    for (NSString *role in @[kZSLogoRoleFill, kZSLogoRoleVfx]) {
-        NSString *file = meta[role][@"file"];
-        if (![file isKindOfClass:[NSString class]] || !zs_logo_is_svg_file(file)) continue;
-        BOOL enabled = [role isEqualToString:kZSLogoRoleFill] ? style.fill.enabled : style.vfx.enabled;
-        NSString *path = [directory stringByAppendingPathComponent:file.lastPathComponent];
-        if (enabled && [fm fileExistsAtPath:path]) zs_logo_transcode_svg_notify(path);
+    NSString *directory = zs_logo_transcode_directory();
+    for (NSString *name in [fm contentsOfDirectoryAtPath:directory error:nil]) {
+        [fm removeItemAtPath:[directory stringByAppendingPathComponent:name] error:nil];
     }
 }
 
 static NSString *zs_logo_effect_asset_path(NSString *path) {
     if (path.length == 0) return nil;
-    if (!zs_logo_is_svg_file(path)) return path;
-    NSString *video = zs_logo_ready_video_path(path);
-    if (video) return video;
-    zs_logo_transcode_svg_notify(path);
-    return nil;
+    return zs_logo_is_svg_file(path) ? nil : path;
 }
 
 static void zs_logo_svg_remove_legacy_cache(void) {
@@ -2967,6 +2859,7 @@ __attribute__((constructor)) static void zs_logo_prewarm_init(void) {
         zs_logo_prewarm();
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             zs_logo_svg_remove_legacy_cache();
+            zs_logo_transcode_clear_cache();
         });
         for (NSNumber *delay in @[@3, @10]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -3152,6 +3045,993 @@ static NSData *zs_zip_extract(NSData *zip, ZSLogoZipRecord *record, NSString **e
     return result;
 }
 
+typedef struct {
+    uint32_t tag;
+    uint32_t offset;
+    uint32_t length;
+} ZSFontTableEntry;
+
+typedef struct {
+    const uint8_t *base;
+    size_t length;
+    int bad;
+} ZSFontReader;
+
+static uint32_t zs_font_u16(ZSFontReader *r, size_t offset) {
+    if (offset + 2 > r->length) {
+        r->bad = 1;
+        return 0;
+    }
+    return ((uint32_t)r->base[offset] << 8) | r->base[offset + 1];
+}
+
+static uint32_t zs_font_u32(ZSFontReader *r, size_t offset) {
+    if (offset + 4 > r->length) {
+        r->bad = 1;
+        return 0;
+    }
+    return ((uint32_t)r->base[offset] << 24) | ((uint32_t)r->base[offset + 1] << 16) | ((uint32_t)r->base[offset + 2] << 8) | r->base[offset + 3];
+}
+
+static void zs_font_put16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 8);
+    p[1] = (uint8_t)v;
+}
+
+static void zs_font_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static uint32_t zs_font_tag(const char *s) {
+    return ((uint32_t)(uint8_t)s[0] << 24) | ((uint32_t)(uint8_t)s[1] << 16) | ((uint32_t)(uint8_t)s[2] << 8) | (uint32_t)(uint8_t)s[3];
+}
+
+static uint32_t zs_font_checksum(const uint8_t *p, size_t length) {
+    uint32_t sum = 0;
+    size_t i = 0;
+    for (; i + 4 <= length; i += 4) sum += ((uint32_t)p[i] << 24) | ((uint32_t)p[i + 1] << 16) | ((uint32_t)p[i + 2] << 8) | p[i + 3];
+    if (i < length) {
+        uint32_t tail = 0;
+        for (size_t k = 0; k < 4; k++) tail = (tail << 8) | (i + k < length ? p[i + k] : 0);
+        sum += tail;
+    }
+    return sum;
+}
+
+static const ZSFontTableEntry *zs_font_find(const ZSFontTableEntry *tables, size_t count, const char *tag) {
+    uint32_t wanted = zs_font_tag(tag);
+    for (size_t i = 0; i < count; i++) if (tables[i].tag == wanted) return &tables[i];
+    return NULL;
+}
+
+static uint32_t zs_font_cmap_subtable_lookup(ZSFontReader *r, size_t start, uint32_t cp) {
+    uint32_t format = zs_font_u16(r, start);
+    if (format == 0) {
+        if (cp > 255 || start + 6 + cp >= r->length) return 0;
+        return r->base[start + 6 + cp];
+    }
+    if (format == 4) {
+        if (cp > 0xFFFF) return 0;
+        uint32_t segX2 = zs_font_u16(r, start + 6);
+        size_t endCodes = start + 14;
+        size_t startCodes = endCodes + segX2 + 2;
+        size_t deltas = startCodes + segX2;
+        size_t rangeOffsets = deltas + segX2;
+        for (uint32_t i = 0; i < segX2; i += 2) {
+            uint32_t end = zs_font_u16(r, endCodes + i);
+            if (cp > end) continue;
+            uint32_t first = zs_font_u16(r, startCodes + i);
+            if (cp < first) return 0;
+            uint32_t delta = zs_font_u16(r, deltas + i);
+            uint32_t rangeOffset = zs_font_u16(r, rangeOffsets + i);
+            if (rangeOffset == 0) return (cp + delta) & 0xFFFF;
+            uint32_t glyph = zs_font_u16(r, rangeOffsets + i + rangeOffset + 2 * (cp - first));
+            return glyph == 0 ? 0 : (glyph + delta) & 0xFFFF;
+        }
+        return 0;
+    }
+    if (format == 6) {
+        uint32_t first = zs_font_u16(r, start + 6);
+        uint32_t count = zs_font_u16(r, start + 8);
+        if (cp < first || cp >= first + count) return 0;
+        return zs_font_u16(r, start + 10 + 2 * (cp - first));
+    }
+    if (format == 12) {
+        uint32_t groups = zs_font_u32(r, start + 12);
+        for (uint32_t i = 0; i < groups && !r->bad; i++) {
+            size_t g = start + 16 + (size_t)i * 12;
+            uint32_t first = zs_font_u32(r, g);
+            uint32_t end = zs_font_u32(r, g + 4);
+            if (cp >= first && cp <= end) return zs_font_u32(r, g + 8) + (cp - first);
+        }
+        return 0;
+    }
+    return 0;
+}
+
+static uint32_t zs_font_cmap_lookup(ZSFontReader *r, uint32_t cp) {
+    uint32_t records = zs_font_u16(r, 2);
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint32_t i = 0; i < records && !r->bad; i++) {
+            size_t rec = 4 + (size_t)i * 8;
+            uint32_t platform = zs_font_u16(r, rec);
+            uint32_t encoding = zs_font_u16(r, rec + 2);
+            BOOL preferred = (platform == 3 && (encoding == 1 || encoding == 10)) || platform == 0;
+            if ((pass == 0) != preferred) continue;
+            uint32_t glyph = zs_font_cmap_subtable_lookup(r, zs_font_u32(r, rec + 4), cp);
+            if (glyph != 0) return glyph;
+        }
+    }
+    return 0;
+}
+
+static size_t zs_font_coverage_list(ZSFontReader *r, size_t start, uint32_t *glyphs, uint32_t *indices, size_t capacity) {
+    uint32_t format = zs_font_u16(r, start);
+    size_t n = 0;
+    if (format == 1) {
+        uint32_t count = zs_font_u16(r, start + 2);
+        for (uint32_t i = 0; i < count && n < capacity && !r->bad; i++) {
+            glyphs[n] = zs_font_u16(r, start + 4 + 2 * (size_t)i);
+            indices[n++] = i;
+        }
+    } else if (format == 2) {
+        uint32_t count = zs_font_u16(r, start + 2);
+        for (uint32_t i = 0; i < count && !r->bad; i++) {
+            size_t rec = start + 4 + (size_t)i * 6;
+            uint32_t first = zs_font_u16(r, rec);
+            uint32_t last = zs_font_u16(r, rec + 2);
+            uint32_t index = zs_font_u16(r, rec + 4);
+            for (uint32_t g = first; g <= last && n < capacity; g++) {
+                glyphs[n] = g;
+                indices[n++] = index + (g - first);
+            }
+        }
+    }
+    return n;
+}
+
+static BOOL zs_font_mark(uint8_t *keep, uint32_t glyphCount, uint32_t glyph) {
+    if (glyph >= glyphCount || keep[glyph]) return NO;
+    keep[glyph] = 1;
+    return YES;
+}
+
+static BOOL zs_font_gsub_subtable(ZSFontReader *r, size_t start, uint32_t type, uint8_t *keep, uint32_t glyphCount, uint32_t *glyphs, uint32_t *indices) {
+    BOOL changed = NO;
+    if (type == 7) {
+        if (zs_font_u16(r, start) != 1) return NO;
+        uint32_t actual = zs_font_u16(r, start + 2);
+        if (actual == 7) return NO;
+        return zs_font_gsub_subtable(r, start + zs_font_u32(r, start + 4), actual, keep, glyphCount, glyphs, indices);
+    }
+    if (type == 1) {
+        uint32_t format = zs_font_u16(r, start);
+        size_t n = zs_font_coverage_list(r, start + zs_font_u16(r, start + 2), glyphs, indices, glyphCount);
+        for (size_t i = 0; i < n && !r->bad; i++) {
+            if (glyphs[i] >= glyphCount || !keep[glyphs[i]]) continue;
+            uint32_t out;
+            if (format == 1) out = (glyphs[i] + zs_font_u16(r, start + 4)) & 0xFFFF;
+            else out = zs_font_u16(r, start + 6 + 2 * (size_t)indices[i]);
+            changed |= zs_font_mark(keep, glyphCount, out);
+        }
+        return changed;
+    }
+    if (type == 2 || type == 3) {
+        size_t n = zs_font_coverage_list(r, start + zs_font_u16(r, start + 2), glyphs, indices, glyphCount);
+        uint32_t setCount = zs_font_u16(r, start + 4);
+        for (size_t i = 0; i < n && !r->bad; i++) {
+            if (glyphs[i] >= glyphCount || !keep[glyphs[i]] || indices[i] >= setCount) continue;
+            size_t set = start + zs_font_u16(r, start + 6 + 2 * (size_t)indices[i]);
+            uint32_t count = zs_font_u16(r, set);
+            for (uint32_t k = 0; k < count && !r->bad; k++) changed |= zs_font_mark(keep, glyphCount, zs_font_u16(r, set + 2 + 2 * (size_t)k));
+        }
+        return changed;
+    }
+    if (type == 4) {
+        size_t n = zs_font_coverage_list(r, start + zs_font_u16(r, start + 2), glyphs, indices, glyphCount);
+        uint32_t setCount = zs_font_u16(r, start + 4);
+        for (size_t i = 0; i < n && !r->bad; i++) {
+            if (glyphs[i] >= glyphCount || !keep[glyphs[i]] || indices[i] >= setCount) continue;
+            size_t set = start + zs_font_u16(r, start + 6 + 2 * (size_t)indices[i]);
+            uint32_t ligatures = zs_font_u16(r, set);
+            for (uint32_t k = 0; k < ligatures && !r->bad; k++) {
+                size_t lig = set + zs_font_u16(r, set + 2 + 2 * (size_t)k);
+                uint32_t ligGlyph = zs_font_u16(r, lig);
+                uint32_t components = zs_font_u16(r, lig + 2);
+                BOOL all = components > 0;
+                for (uint32_t c = 1; c < components && all && !r->bad; c++) {
+                    uint32_t component = zs_font_u16(r, lig + 4 + 2 * (size_t)(c - 1));
+                    if (component >= glyphCount || !keep[component]) all = NO;
+                }
+                if (all) changed |= zs_font_mark(keep, glyphCount, ligGlyph);
+            }
+        }
+        return changed;
+    }
+    if (type == 8) {
+        size_t coverage = start + zs_font_u16(r, start + 2);
+        uint32_t backtrack = zs_font_u16(r, start + 4);
+        size_t cursor = start + 6 + 2 * (size_t)backtrack;
+        uint32_t lookahead = zs_font_u16(r, cursor);
+        cursor += 2 + 2 * (size_t)lookahead;
+        uint32_t count = zs_font_u16(r, cursor);
+        size_t n = zs_font_coverage_list(r, coverage, glyphs, indices, glyphCount);
+        for (size_t i = 0; i < n && !r->bad; i++) {
+            if (glyphs[i] >= glyphCount || !keep[glyphs[i]] || indices[i] >= count) continue;
+            changed |= zs_font_mark(keep, glyphCount, zs_font_u16(r, cursor + 2 + 2 * (size_t)indices[i]));
+        }
+        return changed;
+    }
+    return NO;
+}
+
+static void zs_font_gsub_closure(const uint8_t *gsub, size_t length, uint8_t *keep, uint32_t glyphCount) {
+    ZSFontReader reader = { gsub, length, 0 };
+    ZSFontReader *r = &reader;
+    uint32_t *glyphs = malloc(sizeof(uint32_t) * (size_t)glyphCount * 2);
+    if (!glyphs) return;
+    uint32_t *indices = glyphs + glyphCount;
+
+    size_t lookupList = zs_font_u16(r, 8);
+    uint32_t lookupCount = zs_font_u16(r, lookupList);
+    for (int pass = 0; pass < 64 && !r->bad; pass++) {
+        BOOL changed = NO;
+        for (uint32_t i = 0; i < lookupCount && !r->bad; i++) {
+            size_t lookup = lookupList + zs_font_u16(r, lookupList + 2 + 2 * (size_t)i);
+            uint32_t type = zs_font_u16(r, lookup);
+            uint32_t subtables = zs_font_u16(r, lookup + 4);
+            for (uint32_t k = 0; k < subtables && !r->bad; k++) {
+                size_t sub = lookup + zs_font_u16(r, lookup + 6 + 2 * (size_t)k);
+                changed |= zs_font_gsub_subtable(r, sub, type, keep, glyphCount, glyphs, indices);
+            }
+        }
+        if (!changed) break;
+    }
+    free(glyphs);
+}
+
+static BOOL zs_font_composite_closure(const uint8_t *glyf, size_t glyfLength, const uint32_t *offsets, uint8_t *keep, uint32_t glyphCount) {
+    BOOL changed = YES;
+    int guard = 0;
+    while (changed && guard++ < 64) {
+        changed = NO;
+        for (uint32_t g = 0; g < glyphCount; g++) {
+            if (!keep[g]) continue;
+            size_t start = offsets[g];
+            size_t end = offsets[g + 1];
+            if (end <= start + 10) continue;
+            if (end > glyfLength) return NO;
+            ZSFontReader r = { glyf, end, 0 };
+            int16_t contours = (int16_t)zs_font_u16(&r, start);
+            if (contours >= 0) continue;
+            size_t cursor = start + 10;
+            uint32_t flags;
+            do {
+                flags = zs_font_u16(&r, cursor);
+                uint32_t component = zs_font_u16(&r, cursor + 2);
+                if (r.bad) return NO;
+                changed |= zs_font_mark(keep, glyphCount, component);
+                cursor += 4 + ((flags & 0x0001) ? 4 : 2);
+                if (flags & 0x0008) cursor += 2;
+                else if (flags & 0x0040) cursor += 4;
+                else if (flags & 0x0080) cursor += 8;
+            } while (flags & 0x0020);
+        }
+    }
+    return YES;
+}
+
+static BOOL zs_font_cff_operand(const uint8_t *p, size_t length, size_t *cursor, double *value) {
+    if (*cursor >= length) return NO;
+    uint8_t b0 = p[*cursor];
+    if (b0 >= 32 && b0 <= 246) {
+        *value = (double)b0 - 139;
+        *cursor += 1;
+    } else if (b0 >= 247 && b0 <= 250 && *cursor + 1 < length) {
+        *value = ((double)b0 - 247) * 256 + p[*cursor + 1] + 108;
+        *cursor += 2;
+    } else if (b0 >= 251 && b0 <= 254 && *cursor + 1 < length) {
+        *value = -((double)b0 - 251) * 256 - p[*cursor + 1] - 108;
+        *cursor += 2;
+    } else if (b0 == 28 && *cursor + 2 < length) {
+        *value = (int16_t)((p[*cursor + 1] << 8) | p[*cursor + 2]);
+        *cursor += 3;
+    } else if (b0 == 29 && *cursor + 4 < length) {
+        *value = (int32_t)(((uint32_t)p[*cursor + 1] << 24) | ((uint32_t)p[*cursor + 2] << 16) | ((uint32_t)p[*cursor + 3] << 8) | p[*cursor + 4]);
+        *cursor += 5;
+    } else if (b0 == 30) {
+        *cursor += 1;
+        while (*cursor < length) {
+            uint8_t b = p[(*cursor)++];
+            if ((b & 0x0F) == 0x0F || (b >> 4) == 0x0F) break;
+        }
+        *value = 0;
+    } else {
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL zs_font_cff_index_end(ZSFontReader *r, size_t start, size_t *end) {
+    uint32_t count = zs_font_u16(r, start);
+    if (count == 0) {
+        *end = start + 2;
+        return !r->bad;
+    }
+    uint32_t offSize = r->base[start + 2 < r->length ? start + 2 : 0];
+    if (offSize < 1 || offSize > 4) return NO;
+    size_t offsets = start + 3;
+    size_t last = offsets + (size_t)count * offSize;
+    if (last + offSize > r->length) return NO;
+    uint32_t v = 0;
+    for (uint32_t i = 0; i < offSize; i++) v = (v << 8) | r->base[last + i];
+    *end = offsets + (size_t)(count + 1) * offSize + v - 1;
+    return *end <= r->length;
+}
+
+static uint32_t zs_font_cff_index_offset(const uint8_t *p, size_t offsets, uint32_t offSize, uint32_t i) {
+    uint32_t v = 0;
+    for (uint32_t k = 0; k < offSize; k++) v = (v << 8) | p[offsets + (size_t)i * offSize + k];
+    return v;
+}
+
+static BOOL zs_font_cff_blank(uint8_t *cff, size_t length, const uint8_t *keep, uint32_t glyphCount) {
+    ZSFontReader reader = { cff, length, 0 };
+    ZSFontReader *r = &reader;
+    if (length < 4) return NO;
+    size_t cursor = cff[2];
+    size_t nameEnd, topEnd;
+    if (!zs_font_cff_index_end(r, cursor, &nameEnd)) return NO;
+    uint32_t topCount = zs_font_u16(r, nameEnd);
+    if (topCount < 1 || !zs_font_cff_index_end(r, nameEnd, &topEnd)) return NO;
+    uint32_t topOffSize = cff[nameEnd + 2];
+    size_t topOffsets = nameEnd + 3;
+    size_t topData = topOffsets + (size_t)(topCount + 1) * topOffSize - 1;
+    size_t dictStart = topData + zs_font_cff_index_offset(cff, topOffsets, topOffSize, 0);
+    size_t dictEnd = topData + zs_font_cff_index_offset(cff, topOffsets, topOffSize, 1);
+    if (dictEnd > length || dictStart >= dictEnd) return NO;
+
+    double stack[48];
+    int depth = 0;
+    double charStringsOffset = -1;
+    size_t p = dictStart;
+    while (p < dictEnd) {
+        uint8_t b0 = cff[p];
+        if (b0 <= 21) {
+            int op = b0;
+            p++;
+            if (op == 12) {
+                if (p >= dictEnd) return NO;
+                op = 1200 + cff[p++];
+            }
+            if (op == 17 && depth >= 1) charStringsOffset = stack[depth - 1];
+            depth = 0;
+        } else {
+            double value;
+            if (!zs_font_cff_operand(cff, dictEnd, &p, &value)) return NO;
+            if (depth < 48) stack[depth++] = value;
+        }
+    }
+    if (charStringsOffset <= 0 || charStringsOffset >= (double)length) return NO;
+
+    size_t index = (size_t)charStringsOffset;
+    size_t indexEnd;
+    if (!zs_font_cff_index_end(r, index, &indexEnd)) return NO;
+    uint32_t count = zs_font_u16(r, index);
+    if (count != glyphCount || count == 0) return NO;
+    uint32_t offSize = cff[index + 2];
+    size_t offsets = index + 3;
+    size_t data = offsets + (size_t)(count + 1) * offSize - 1;
+
+    size_t total = 0;
+    for (uint32_t g = 0; g < count; g++) {
+        uint32_t a = zs_font_cff_index_offset(cff, offsets, offSize, g);
+        uint32_t b = zs_font_cff_index_offset(cff, offsets, offSize, g + 1);
+        if (b < a || data + b > indexEnd) return NO;
+        total += keep[g] ? (b - a) : 1;
+    }
+
+    uint8_t *copy = malloc(indexEnd - index);
+    if (!copy) return NO;
+    memcpy(copy, cff + index, indexEnd - index);
+    size_t oldSize = indexEnd - index;
+
+    uint32_t newOffSize = total + 1 <= 0xFF ? 1 : (total + 1 <= 0xFFFF ? 2 : (total + 1 <= 0xFFFFFF ? 3 : 4));
+    if (newOffSize > offSize) {
+        free(copy);
+        return NO;
+    }
+    size_t newSize = 3 + (size_t)(count + 1) * newOffSize + total;
+    if (newSize > oldSize) {
+        free(copy);
+        return NO;
+    }
+
+    memset(cff + index, 0, oldSize);
+    zs_font_put16(cff + index, count);
+    cff[index + 2] = (uint8_t)newOffSize;
+    size_t newOffsets = index + 3;
+    size_t newData = newOffsets + (size_t)(count + 1) * newOffSize;
+    uint32_t running = 1;
+    size_t writeCursor = newData;
+    for (uint32_t g = 0; g <= count; g++) {
+        for (uint32_t k = 0; k < newOffSize; k++) cff[newOffsets + (size_t)g * newOffSize + k] = (uint8_t)(running >> (8 * (newOffSize - 1 - k)));
+        if (g == count) break;
+        uint32_t a = zs_font_cff_index_offset(copy, 3, offSize, g);
+        uint32_t b = zs_font_cff_index_offset(copy, 3, offSize, g + 1);
+        size_t dataStart = 3 + (size_t)(count + 1) * offSize - 1;
+        if (keep[g]) {
+            memcpy(cff + writeCursor, copy + dataStart + a, b - a);
+            writeCursor += b - a;
+            running += b - a;
+        } else {
+            cff[writeCursor++] = 14;
+            running += 1;
+        }
+    }
+    free(copy);
+    return YES;
+}
+
+static uint8_t *zs_font_subset_bytes(const uint8_t *input, size_t inputLength, const uint32_t *codepoints, size_t codepointCount, size_t *outLength, const char **error) {
+    ZSFontReader reader = { input, inputLength, 0 };
+    ZSFontReader *r = &reader;
+    uint32_t version = zs_font_u32(r, 0);
+    BOOL isCFF = version == zs_font_tag("OTTO");
+    if (version == zs_font_tag("ttcf")) {
+        *error = "font collections aren't supported";
+        return NULL;
+    }
+    if (!isCFF && version != 0x00010000 && version != zs_font_tag("true")) {
+        *error = "unrecognized font format";
+        return NULL;
+    }
+    uint32_t tableCount = zs_font_u16(r, 4);
+    if (tableCount == 0 || tableCount > 128 || r->bad) {
+        *error = "corrupt table directory";
+        return NULL;
+    }
+
+    ZSFontTableEntry *tables = calloc(tableCount, sizeof(ZSFontTableEntry));
+    if (!tables) {
+        *error = "out of memory";
+        return NULL;
+    }
+    for (uint32_t i = 0; i < tableCount; i++) {
+        size_t rec = 12 + (size_t)i * 16;
+        tables[i].tag = zs_font_u32(r, rec);
+        tables[i].offset = zs_font_u32(r, rec + 8);
+        tables[i].length = zs_font_u32(r, rec + 12);
+        if (r->bad || (size_t)tables[i].offset + tables[i].length > inputLength) {
+            free(tables);
+            *error = "corrupt table directory";
+            return NULL;
+        }
+    }
+
+    const ZSFontTableEntry *head = zs_font_find(tables, tableCount, "head");
+    const ZSFontTableEntry *hhea = zs_font_find(tables, tableCount, "hhea");
+    const ZSFontTableEntry *hmtx = zs_font_find(tables, tableCount, "hmtx");
+    const ZSFontTableEntry *maxp = zs_font_find(tables, tableCount, "maxp");
+    const ZSFontTableEntry *cmap = zs_font_find(tables, tableCount, "cmap");
+    const ZSFontTableEntry *glyf = zs_font_find(tables, tableCount, "glyf");
+    const ZSFontTableEntry *loca = zs_font_find(tables, tableCount, "loca");
+    const ZSFontTableEntry *cffTable = zs_font_find(tables, tableCount, "CFF ");
+    const ZSFontTableEntry *gsub = zs_font_find(tables, tableCount, "GSUB");
+    const ZSFontTableEntry *post = zs_font_find(tables, tableCount, "post");
+
+    uint8_t *result = NULL;
+    uint8_t *keep = NULL;
+    uint32_t *offsets = NULL;
+    uint8_t *newGlyf = NULL;
+    uint8_t *newLoca = NULL;
+    uint8_t *newHmtx = NULL;
+    uint8_t *newCff = NULL;
+    uint8_t *newHead = NULL;
+    uint8_t *newPost = NULL;
+    uint8_t *newCmap = NULL;
+
+    if (!head || !hhea || !hmtx || !maxp || !cmap || head->length < 54 || hhea->length < 36 || maxp->length < 6 || (isCFF ? !cffTable : (!glyf || !loca))) {
+        *error = "missing required tables";
+        goto done;
+    }
+
+    ZSFontReader maxpReader = { input + maxp->offset, maxp->length, 0 };
+    uint32_t glyphCount = zs_font_u16(&maxpReader, 4);
+    ZSFontReader headReader = { input + head->offset, head->length, 0 };
+    uint32_t locaFormat = zs_font_u16(&headReader, 50);
+    ZSFontReader hheaReader = { input + hhea->offset, hhea->length, 0 };
+    uint32_t metricCount = zs_font_u16(&hheaReader, 34);
+    if (glyphCount == 0 || metricCount == 0 || metricCount > glyphCount || (size_t)metricCount * 4 + (size_t)(glyphCount - metricCount) * 2 > hmtx->length) {
+        *error = "corrupt metrics";
+        goto done;
+    }
+
+    keep = calloc(glyphCount, 1);
+    if (!keep) {
+        *error = "out of memory";
+        goto done;
+    }
+    keep[0] = 1;
+
+    ZSFontReader cmapReader = { input + cmap->offset, cmap->length, 0 };
+    uint32_t *mapped = calloc(codepointCount, sizeof(uint32_t));
+    if (!mapped) {
+        *error = "out of memory";
+        goto done;
+    }
+    size_t mappedCount = 0;
+    uint32_t *mappedCodes = calloc(codepointCount, sizeof(uint32_t));
+    if (!mappedCodes) {
+        free(mapped);
+        *error = "out of memory";
+        goto done;
+    }
+    for (size_t i = 0; i < codepointCount; i++) {
+        uint32_t glyph = zs_font_cmap_lookup(&cmapReader, codepoints[i]);
+        if (glyph == 0 || glyph >= glyphCount) continue;
+        mapped[mappedCount] = glyph;
+        mappedCodes[mappedCount++] = codepoints[i];
+        keep[glyph] = 1;
+    }
+    if (mappedCount == 0) {
+        free(mapped);
+        free(mappedCodes);
+        *error = "font has none of the required letters";
+        goto done;
+    }
+
+    if (gsub && gsub->length > 10) zs_font_gsub_closure(input + gsub->offset, gsub->length, keep, glyphCount);
+
+    uint32_t outLocaFormat = locaFormat;
+    size_t newGlyfLength = 0;
+    size_t newLocaLength = 0;
+    size_t newCffLength = 0;
+
+    if (isCFF) {
+        newCff = malloc(cffTable->length);
+        if (!newCff) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "out of memory";
+            goto done;
+        }
+        memcpy(newCff, input + cffTable->offset, cffTable->length);
+        newCffLength = cffTable->length;
+        if (!zs_font_cff_blank(newCff, newCffLength, keep, glyphCount)) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "unsupported CFF layout";
+            goto done;
+        }
+    } else {
+        if ((locaFormat != 0 && locaFormat != 1) || loca->length < (size_t)(glyphCount + 1) * (locaFormat ? 4 : 2)) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "corrupt loca table";
+            goto done;
+        }
+        offsets = malloc(sizeof(uint32_t) * ((size_t)glyphCount + 1));
+        if (!offsets) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "out of memory";
+            goto done;
+        }
+        ZSFontReader locaReader = { input + loca->offset, loca->length, 0 };
+        for (uint32_t i = 0; i <= glyphCount; i++) {
+            offsets[i] = locaFormat ? zs_font_u32(&locaReader, (size_t)i * 4) : zs_font_u16(&locaReader, (size_t)i * 2) * 2;
+            if (i > 0 && offsets[i] < offsets[i - 1]) {
+                free(mapped);
+                free(mappedCodes);
+                *error = "corrupt loca table";
+                goto done;
+            }
+        }
+        if (offsets[glyphCount] > glyf->length) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "corrupt glyf table";
+            goto done;
+        }
+        if (!zs_font_composite_closure(input + glyf->offset, glyf->length, offsets, keep, glyphCount)) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "corrupt composite glyph";
+            goto done;
+        }
+
+        size_t capacity = 0;
+        for (uint32_t g = 0; g < glyphCount; g++) if (keep[g]) capacity += (offsets[g + 1] - offsets[g] + 3) & ~(size_t)3;
+        newGlyf = malloc(capacity ? capacity : 4);
+        newLoca = malloc((size_t)(glyphCount + 1) * 4);
+        if (!newGlyf || !newLoca) {
+            free(mapped);
+            free(mappedCodes);
+            *error = "out of memory";
+            goto done;
+        }
+        for (uint32_t g = 0; g < glyphCount; g++) {
+            zs_font_put32(newLoca + (size_t)g * 4, (uint32_t)newGlyfLength);
+            if (!keep[g]) continue;
+            size_t length = offsets[g + 1] - offsets[g];
+            memcpy(newGlyf + newGlyfLength, input + glyf->offset + offsets[g], length);
+            size_t padded = (length + 3) & ~(size_t)3;
+            memset(newGlyf + newGlyfLength + length, 0, padded - length);
+            newGlyfLength += padded;
+        }
+        zs_font_put32(newLoca + (size_t)glyphCount * 4, (uint32_t)newGlyfLength);
+        newLocaLength = (size_t)(glyphCount + 1) * 4;
+        outLocaFormat = 1;
+    }
+
+    newHmtx = malloc(hmtx->length);
+    if (!newHmtx) {
+        free(mapped);
+        free(mappedCodes);
+        *error = "out of memory";
+        goto done;
+    }
+    memcpy(newHmtx, input + hmtx->offset, hmtx->length);
+    for (uint32_t g = 0; g < glyphCount; g++) {
+        if (keep[g]) continue;
+        if (g < metricCount) {
+            if (g == metricCount - 1) continue;
+            memset(newHmtx + (size_t)g * 4, 0, 4);
+        } else {
+            memset(newHmtx + (size_t)metricCount * 4 + (size_t)(g - metricCount) * 2, 0, 2);
+        }
+    }
+
+    newHead = malloc(head->length);
+    if (!newHead) {
+        free(mapped);
+        free(mappedCodes);
+        *error = "out of memory";
+        goto done;
+    }
+    memcpy(newHead, input + head->offset, head->length);
+    zs_font_put32(newHead + 8, 0);
+    zs_font_put16(newHead + 50, outLocaFormat);
+
+    size_t newPostLength = 0;
+    if (post && post->length >= 32) {
+        newPost = malloc(32);
+        if (newPost) {
+            memcpy(newPost, input + post->offset, 32);
+            zs_font_put32(newPost, 0x00030000);
+            newPostLength = 32;
+        }
+    }
+
+    for (size_t i = 0; i < mappedCount; i++) {
+        for (size_t j = i + 1; j < mappedCount; j++) {
+            if (mappedCodes[j] < mappedCodes[i]) {
+                uint32_t c = mappedCodes[i]; mappedCodes[i] = mappedCodes[j]; mappedCodes[j] = c;
+                uint32_t g = mapped[i]; mapped[i] = mapped[j]; mapped[j] = g;
+            }
+        }
+    }
+    size_t bmp = 0;
+    for (size_t i = 0; i < mappedCount; i++) if (mappedCodes[i] <= 0xFFFE) bmp++;
+    size_t segments = bmp + 1;
+    size_t subtableLength = 16 + segments * 8;
+    size_t newCmapLength = 4 + 16 + subtableLength;
+    newCmap = calloc(1, newCmapLength);
+    if (!newCmap) {
+        free(mapped);
+        free(mappedCodes);
+        *error = "out of memory";
+        goto done;
+    }
+    zs_font_put16(newCmap, 0);
+    zs_font_put16(newCmap + 2, 2);
+    zs_font_put16(newCmap + 4, 0);
+    zs_font_put16(newCmap + 6, 3);
+    zs_font_put32(newCmap + 8, 20);
+    zs_font_put16(newCmap + 12, 3);
+    zs_font_put16(newCmap + 14, 1);
+    zs_font_put32(newCmap + 16, 20);
+    uint8_t *sub = newCmap + 20;
+    zs_font_put16(sub, 4);
+    zs_font_put16(sub + 2, (uint32_t)subtableLength);
+    zs_font_put16(sub + 4, 0);
+    zs_font_put16(sub + 6, (uint32_t)(segments * 2));
+    uint32_t entrySelector = 0;
+    while ((2u << entrySelector) <= segments) entrySelector++;
+    uint32_t searchRange = 2u << entrySelector;
+    zs_font_put16(sub + 8, searchRange);
+    zs_font_put16(sub + 10, entrySelector);
+    zs_font_put16(sub + 12, (uint32_t)(segments * 2) - searchRange);
+    uint8_t *endCodes = sub + 14;
+    uint8_t *startCodes = endCodes + segments * 2 + 2;
+    uint8_t *deltas = startCodes + segments * 2;
+    uint8_t *rangeOffsets = deltas + segments * 2;
+    size_t segment = 0;
+    for (size_t i = 0; i < mappedCount; i++) {
+        if (mappedCodes[i] > 0xFFFE) continue;
+        zs_font_put16(endCodes + segment * 2, mappedCodes[i]);
+        zs_font_put16(startCodes + segment * 2, mappedCodes[i]);
+        zs_font_put16(deltas + segment * 2, (mapped[i] - mappedCodes[i]) & 0xFFFF);
+        zs_font_put16(rangeOffsets + segment * 2, 0);
+        segment++;
+    }
+    zs_font_put16(endCodes + segment * 2, 0xFFFF);
+    zs_font_put16(startCodes + segment * 2, 0xFFFF);
+    zs_font_put16(deltas + segment * 2, 1);
+    zs_font_put16(rangeOffsets + segment * 2, 0);
+    free(mapped);
+    free(mappedCodes);
+
+    struct { const char *tag; const uint8_t *data; size_t length; } outputs[24];
+    size_t outputCount = 0;
+    static const char *const passthrough[] = { "OS/2", "cvt ", "fpgm", "gasp", "hhea", "maxp", "name", "prep", "kern", "GPOS", "GDEF", "GSUB", NULL };
+    for (size_t i = 0; passthrough[i]; i++) {
+        const ZSFontTableEntry *t = zs_font_find(tables, tableCount, passthrough[i]);
+        if (t && outputCount < 24) {
+            outputs[outputCount].tag = passthrough[i];
+            outputs[outputCount].data = input + t->offset;
+            outputs[outputCount].length = t->length;
+            outputCount++;
+        }
+    }
+    outputs[outputCount].tag = "cmap"; outputs[outputCount].data = newCmap; outputs[outputCount].length = newCmapLength; outputCount++;
+    outputs[outputCount].tag = "head"; outputs[outputCount].data = newHead; outputs[outputCount].length = head->length; outputCount++;
+    outputs[outputCount].tag = "hmtx"; outputs[outputCount].data = newHmtx; outputs[outputCount].length = hmtx->length; outputCount++;
+    if (newPost) { outputs[outputCount].tag = "post"; outputs[outputCount].data = newPost; outputs[outputCount].length = newPostLength; outputCount++; }
+    if (isCFF) {
+        outputs[outputCount].tag = "CFF "; outputs[outputCount].data = newCff; outputs[outputCount].length = newCffLength; outputCount++;
+    } else {
+        outputs[outputCount].tag = "glyf"; outputs[outputCount].data = newGlyf; outputs[outputCount].length = newGlyfLength; outputCount++;
+        outputs[outputCount].tag = "loca"; outputs[outputCount].data = newLoca; outputs[outputCount].length = newLocaLength; outputCount++;
+    }
+
+    for (size_t i = 0; i < outputCount; i++) {
+        for (size_t j = i + 1; j < outputCount; j++) {
+            if (zs_font_tag(outputs[j].tag) < zs_font_tag(outputs[i].tag)) {
+                __typeof__(outputs[0]) tmp = outputs[i]; outputs[i] = outputs[j]; outputs[j] = tmp;
+            }
+        }
+    }
+
+    size_t total = 12 + outputCount * 16;
+    for (size_t i = 0; i < outputCount; i++) total += (outputs[i].length + 3) & ~(size_t)3;
+    result = calloc(1, total);
+    if (!result) {
+        *error = "out of memory";
+        goto done;
+    }
+    zs_font_put32(result, version);
+    zs_font_put16(result + 4, (uint32_t)outputCount);
+    uint32_t tableSelector = 0;
+    while ((2u << tableSelector) <= outputCount) tableSelector++;
+    uint32_t tableSearch = (1u << tableSelector) * 16;
+    zs_font_put16(result + 6, tableSearch);
+    zs_font_put16(result + 8, tableSelector);
+    zs_font_put16(result + 10, (uint32_t)(outputCount * 16) - tableSearch);
+    size_t cursor = 12 + outputCount * 16;
+    size_t headOffset = 0;
+    for (size_t i = 0; i < outputCount; i++) {
+        uint8_t *rec = result + 12 + i * 16;
+        uint32_t tag = zs_font_tag(outputs[i].tag);
+        zs_font_put32(rec, tag);
+        zs_font_put32(rec + 4, zs_font_checksum(outputs[i].data, outputs[i].length));
+        zs_font_put32(rec + 8, (uint32_t)cursor);
+        zs_font_put32(rec + 12, (uint32_t)outputs[i].length);
+        memcpy(result + cursor, outputs[i].data, outputs[i].length);
+        if (tag == zs_font_tag("head")) headOffset = cursor;
+        cursor += (outputs[i].length + 3) & ~(size_t)3;
+    }
+    if (headOffset) zs_font_put32(result + headOffset + 8, 0xB1B0AFBAu - zs_font_checksum(result, total));
+    *outLength = total;
+
+done:
+    free(tables);
+    free(keep);
+    free(offsets);
+    free(newGlyf);
+    free(newLoca);
+    free(newHmtx);
+    free(newCff);
+    free(newHead);
+    free(newPost);
+    free(newCmap);
+    return result;
+}
+
+typedef struct {
+    const char *path;
+    const uint8_t *data;
+    uint32_t size;
+} ZSPackFile;
+
+typedef struct {
+    uint32_t pathOffset;
+    uint32_t pathLength;
+    uint32_t method;
+    uint32_t rawSize;
+    uint32_t storedSize;
+    uint32_t crc;
+    uint64_t dataOffset;
+} ZSPackRecord;
+
+static const uint32_t kZSPackVersion = 1;
+static const uint32_t kZSPackMaxEntries = 4096;
+static const uint32_t kZSPackMaxEntrySize = 128u * 1024u * 1024u;
+
+static void zs_pack_put16(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void zs_pack_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t zs_pack_get16(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8);
+}
+
+static uint32_t zs_pack_get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static BOOL zs_pack_has_magic(const uint8_t *data, size_t length) {
+    return length >= 4 && memcmp(data, "ZSLP", 4) == 0;
+}
+
+static uint8_t *zs_pack_encode(const ZSPackFile *files, uint32_t count, size_t *outLength, const char **error) {
+    if (count == 0 || count > kZSPackMaxEntries) {
+        *error = "no files to pack";
+        return NULL;
+    }
+
+    uint8_t **blobs = calloc(count, sizeof(uint8_t *));
+    uint32_t *stored = calloc(count, sizeof(uint32_t));
+    uint8_t *methods = calloc(count, 1);
+    uint8_t *result = NULL;
+    if (!blobs || !stored || !methods) {
+        *error = "out of memory";
+        goto done;
+    }
+
+    size_t header = 12;
+    size_t total = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        size_t pathLength = strlen(files[i].path);
+        if (pathLength == 0 || pathLength > 0xFFFF || files[i].size > kZSPackMaxEntrySize) {
+            *error = "a file is too large or has an invalid name";
+            goto done;
+        }
+        header += 2 + pathLength + 1 + 12;
+
+        const uint8_t *source = files[i].data;
+        uint32_t size = files[i].size;
+        stored[i] = size;
+        if (size > 0) {
+            int bound = LZ4_compressBound((int)size);
+            uint8_t *buffer = malloc((size_t)bound);
+            if (!buffer) {
+                *error = "out of memory";
+                goto done;
+            }
+            int written = LZ4_compress_HC((const char *)source, (char *)buffer, (int)size, bound, LZ4HC_CLEVEL_MAX);
+            if (written > 0 && (uint32_t)written < size) {
+                blobs[i] = buffer;
+                stored[i] = (uint32_t)written;
+                methods[i] = 1;
+            } else {
+                free(buffer);
+            }
+        }
+        total += stored[i];
+    }
+
+    size_t length = header + total;
+    result = malloc(length);
+    if (!result) {
+        *error = "out of memory";
+        goto done;
+    }
+    memcpy(result, "ZSLP", 4);
+    zs_pack_put32(result + 4, kZSPackVersion);
+    zs_pack_put32(result + 8, count);
+    size_t cursor = 12;
+    size_t dataCursor = header;
+    for (uint32_t i = 0; i < count; i++) {
+        size_t pathLength = strlen(files[i].path);
+        zs_pack_put16(result + cursor, (uint32_t)pathLength);
+        cursor += 2;
+        memcpy(result + cursor, files[i].path, pathLength);
+        cursor += pathLength;
+        result[cursor++] = methods[i];
+        zs_pack_put32(result + cursor, files[i].size);
+        zs_pack_put32(result + cursor + 4, stored[i]);
+        zs_pack_put32(result + cursor + 8, zs_zip_crc32(files[i].data, files[i].size));
+        cursor += 12;
+        if (stored[i] > 0) memcpy(result + dataCursor, methods[i] ? blobs[i] : files[i].data, stored[i]);
+        dataCursor += stored[i];
+    }
+    *outLength = length;
+
+done:
+    if (blobs) for (uint32_t i = 0; i < count; i++) free(blobs[i]);
+    free(blobs);
+    free(stored);
+    free(methods);
+    return result;
+}
+
+static ZSPackRecord *zs_pack_records(const uint8_t *data, size_t length, uint32_t *countOut, const char **error) {
+    if (!zs_pack_has_magic(data, length) || length < 12) {
+        *error = "That file isn't a valid logo pack.";
+        return NULL;
+    }
+    if (zs_pack_get32(data + 4) != kZSPackVersion) {
+        *error = "That logo pack was made by a different version.";
+        return NULL;
+    }
+    uint32_t count = zs_pack_get32(data + 8);
+    if (count == 0 || count > kZSPackMaxEntries) {
+        *error = "That file isn't a valid logo pack.";
+        return NULL;
+    }
+    ZSPackRecord *records = calloc(count, sizeof(ZSPackRecord));
+    if (!records) {
+        *error = "Out of memory.";
+        return NULL;
+    }
+
+    size_t cursor = 12;
+    for (uint32_t i = 0; i < count; i++) {
+        if (cursor + 2 > length) goto corrupt;
+        uint32_t pathLength = zs_pack_get16(data + cursor);
+        cursor += 2;
+        if (pathLength == 0 || cursor + pathLength + 13 > length) goto corrupt;
+        records[i].pathOffset = (uint32_t)cursor;
+        records[i].pathLength = pathLength;
+        cursor += pathLength;
+        records[i].method = data[cursor++];
+        records[i].rawSize = zs_pack_get32(data + cursor);
+        records[i].storedSize = zs_pack_get32(data + cursor + 4);
+        records[i].crc = zs_pack_get32(data + cursor + 8);
+        cursor += 12;
+        if (records[i].method > 1 || records[i].rawSize > kZSPackMaxEntrySize || (records[i].method == 0 && records[i].storedSize != records[i].rawSize)) goto corrupt;
+    }
+    uint64_t dataCursor = cursor;
+    for (uint32_t i = 0; i < count; i++) {
+        records[i].dataOffset = dataCursor;
+        dataCursor += records[i].storedSize;
+        if (dataCursor > length) goto corrupt;
+    }
+    *countOut = count;
+    return records;
+
+corrupt:
+    free(records);
+    *error = "That logo pack is corrupt.";
+    return NULL;
+}
+
+static BOOL zs_pack_extract(const uint8_t *data, size_t length, const ZSPackRecord *record, uint8_t *out) {
+    if (record->dataOffset + record->storedSize > length) return NO;
+    const uint8_t *source = data + record->dataOffset;
+    if (record->rawSize == 0) return zs_zip_crc32(out, 0) == record->crc;
+    if (record->method == 0) {
+        memcpy(out, source, record->rawSize);
+    } else {
+        int decoded = LZ4_decompress_safe((const char *)source, (char *)out, (int)record->storedSize, (int)record->rawSize);
+        if (decoded < 0 || (uint32_t)decoded != record->rawSize) return NO;
+    }
+    return zs_zip_crc32(out, record->rawSize) == record->crc;
+}
+
 static BOOL zs_logo_font_data_is_valid(NSData *data) {
     CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
     if (!provider) return NO;
@@ -3160,6 +4040,90 @@ static BOOL zs_logo_font_data_is_valid(NSData *data) {
     if (!font) return NO;
     CGFontRelease(font);
     return YES;
+}
+
+static NSString * const kZSLogoKeptLetters = @"ZSINGULARITYzsingularity";
+
+static NSUInteger zs_logo_font_letter_count(NSData *data) {
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+    if (!provider) return 0;
+    CGFontRef font = CGFontCreateWithDataProvider(provider);
+    CGDataProviderRelease(provider);
+    if (!font) return 0;
+    CTFontRef ctFont = CTFontCreateWithGraphicsFont(font, 24, NULL, NULL);
+    CGFontRelease(font);
+    if (!ctFont) return 0;
+    UniChar characters[64];
+    CGGlyph glyphs[64];
+    CFIndex length = (CFIndex)MIN(kZSLogoKeptLetters.length, (NSUInteger)64);
+    [kZSLogoKeptLetters getCharacters:characters range:NSMakeRange(0, (NSUInteger)length)];
+    CTFontGetGlyphsForCharacters(ctFont, characters, glyphs, length);
+    NSUInteger found = 0;
+    for (CFIndex i = 0; i < length; i++) if (glyphs[i] != 0) found++;
+    CFRelease(ctFont);
+    return found;
+}
+
+static NSData *zs_logo_font_subset(NSData *font, NSString *label) {
+    uint32_t codepoints[32];
+    size_t count = 0;
+    for (NSUInteger i = 0; i < kZSLogoKeptLetters.length && count < 32; i++) {
+        uint32_t c = [kZSLogoKeptLetters characterAtIndex:i];
+        BOOL duplicate = NO;
+        for (size_t k = 0; k < count; k++) if (codepoints[k] == c) duplicate = YES;
+        if (!duplicate) codepoints[count++] = c;
+    }
+
+    size_t length = 0;
+    const char *error = NULL;
+    uint8_t *bytes = zs_font_subset_bytes(font.bytes, font.length, codepoints, count, &length, &error);
+    if (!bytes) {
+        ZLog(@"[Logo] couldn't strip %@ (%s), keeping it whole", label, error ?: "unknown error");
+        return font;
+    }
+    NSData *result = [NSData dataWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+    if (!zs_logo_font_data_is_valid(result) || zs_logo_font_letter_count(result) != zs_logo_font_letter_count(font)) {
+        ZLog(@"[Logo] stripped %@ failed verification, keeping it whole", label);
+        return font;
+    }
+    ZLog(@"[Logo] %@: font stripped %.2f MB -> %.2f MB", label, (double)font.length / (1024.0 * 1024.0), (double)result.length / (1024.0 * 1024.0));
+    return result;
+}
+
+static BOOL zs_logo_pack_data_has_magic(NSData *data) {
+    return zs_pack_has_magic(data.bytes, data.length);
+}
+
+static NSArray<ZSLogoSourceEntry *> *zs_logo_pack_entries(NSData *data, NSString **errorOut) {
+    const char *error = NULL;
+    uint32_t count = 0;
+    ZSPackRecord *records = zs_pack_records(data.bytes, data.length, &count, &error);
+    if (!records) {
+        *errorOut = error ? [NSString stringWithUTF8String:error] : @"That logo pack is corrupt.";
+        return nil;
+    }
+
+    NSMutableArray<ZSLogoSourceEntry *> *entries = [NSMutableArray arrayWithCapacity:count];
+    for (uint32_t i = 0; i < count; i++) {
+        ZSPackRecord record = records[i];
+        NSString *path = [[NSString alloc] initWithBytes:(const uint8_t *)data.bytes + record.pathOffset length:record.pathLength encoding:NSUTF8StringEncoding] ?: @"";
+        NSString *label = path.lastPathComponent;
+        ZSLogoSourceEntry *entry = [[ZSLogoSourceEntry alloc] init];
+        entry.path = path;
+        entry.size = record.rawSize;
+        entry.load = ^NSData *(NSString **loadError) {
+            if (record.rawSize == 0) return [NSData data];
+            NSMutableData *out = [NSMutableData dataWithLength:record.rawSize];
+            if (!out || !zs_pack_extract(data.bytes, data.length, &record, out.mutableBytes)) {
+                *loadError = [NSString stringWithFormat:@"%@ is corrupt.", label];
+                return nil;
+            }
+            return out;
+        };
+        [entries addObject:entry];
+    }
+    free(records);
+    return entries;
 }
 
 static NSString *zs_logo_import_resolve_name(NSString *rawName, NSMutableSet<NSString *> *used, NSSet<NSString *> *remoteNames) {
@@ -3208,11 +4172,10 @@ static BOOL zs_logo_import_commit(NSString *name, NSDictionary<NSString *, NSArr
         return NO;
     }
     zs_logo_invalidate_pack(name);
-    zs_logo_transcode_pack_directory(target);
     return YES;
 }
 
-static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSString **errorOut) {
+static NSDictionary<NSString *, NSDictionary<NSString *, ZSLogoSourceEntry *> *> *zs_logo_group_entries(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSDictionary<NSString *, NSString *> **namesOut) {
     NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, ZSLogoSourceEntry *> *> *groups = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, NSString *> *groupNames = [NSMutableDictionary dictionary];
 
@@ -3243,6 +4206,13 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
         }
         if (!group[filename]) group[filename] = entry;
     }
+    *namesOut = groupNames;
+    return groups;
+}
+
+static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSString **errorOut) {
+    NSDictionary<NSString *, NSString *> *groupNames = nil;
+    NSDictionary<NSString *, NSDictionary<NSString *, ZSLogoSourceEntry *> *> *groups = zs_logo_group_entries(entries, fallbackName, &groupNames);
 
     NSSet<NSString *> *remoteNames = [NSSet setWithArray:zs_logo_remote_cached_names()];
     NSMutableSet<NSString *> *usedNames = [NSMutableSet set];
@@ -3289,6 +4259,12 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
             ZSLogoSourceEntry *entry = group[file];
             BOOL isFont = [role isEqualToString:kZSLogoRoleFont];
 
+            if (!isFont && zs_logo_is_svg_file(file)) {
+                firstError = firstError ?: [NSString stringWithFormat:@"%@ is an SVG. Run /createlogos in the console log on this pack first, then add the .zs file.", file];
+                groupOK = NO;
+                break;
+            }
+
             NSData *data = loaded[file];
             NSString *extractError = nil;
             if (!data) {
@@ -3327,19 +4303,13 @@ static NSArray<NSString *> *zs_logo_import_entries(NSArray<ZSLogoSourceEntry *> 
     }
 
     if (imported.count == 0) {
-        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional images or SVGs and a style.json that points to them, in a folder or a zip.";
+        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional images or SVGs and a style.json that points to them, in a folder, a zip or a .zs pack.";
         return nil;
     }
     return imported;
 }
 
-static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **errorOut) {
-    NSData *zip = [NSData dataWithContentsOfURL:zipURL options:NSDataReadingMappedIfSafe error:nil];
-    if (!zip) {
-        *errorOut = @"Couldn't read that file.";
-        return nil;
-    }
-
+static NSArray<ZSLogoSourceEntry *> *zs_logo_zip_entries(NSData *zip, NSString **errorOut) {
     NSString *error = nil;
     NSArray<ZSLogoZipRecord *> *records = zs_zip_records(zip, &error);
     if (!records) {
@@ -3357,10 +4327,10 @@ static NSArray<NSString *> *zs_logo_import_zip_sync(NSURL *zipURL, NSString **er
         };
         [entries addObject:entry];
     }
-    return zs_logo_import_entries(entries, zipURL.lastPathComponent.stringByDeletingPathExtension, errorOut);
+    return entries;
 }
 
-static NSArray<NSString *> *zs_logo_import_folder_sync(NSURL *folderURL, NSString **errorOut) {
+static NSArray<ZSLogoSourceEntry *> *zs_logo_folder_entries(NSURL *folderURL, NSString **errorOut) {
     NSString *root = folderURL.path;
     NSFileManager *fm = [NSFileManager defaultManager];
     NSDirectoryEnumerator<NSString *> *enumerator = [fm enumeratorAtPath:root];
@@ -3401,7 +4371,24 @@ static NSArray<NSString *> *zs_logo_import_folder_sync(NSURL *folderURL, NSStrin
         };
         [entries addObject:entry];
     }
-    return zs_logo_import_entries(entries, folderURL.lastPathComponent, errorOut);
+    return entries;
+}
+
+static NSArray<ZSLogoSourceEntry *> *zs_logo_source_entries(NSURL *url, NSString **errorOut, NSString **fallbackNameOut) {
+    NSNumber *isDirectory = nil;
+    [url getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
+    if (isDirectory.boolValue) {
+        *fallbackNameOut = url.lastPathComponent;
+        return zs_logo_folder_entries(url, errorOut);
+    }
+
+    NSData *data = [NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:nil];
+    if (!data) {
+        *errorOut = @"Couldn't read that file.";
+        return nil;
+    }
+    *fallbackNameOut = url.lastPathComponent.stringByDeletingPathExtension;
+    return zs_logo_pack_data_has_magic(data) ? zs_logo_pack_entries(data, errorOut) : zs_logo_zip_entries(data, errorOut);
 }
 
 static NSArray<NSString *> *zs_logo_import_item_sync(NSURL *url, NSString **errorOut) {
@@ -3410,10 +4397,10 @@ static NSArray<NSString *> *zs_logo_import_item_sync(NSURL *url, NSString **erro
     NSError *coordinationError = nil;
     NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
     [coordinator coordinateReadingItemAtURL:url options:0 error:&coordinationError byAccessor:^(NSURL *readURL) {
-        NSNumber *isDirectory = nil;
-        [readURL getResourceValue:&isDirectory forKey:NSURLIsDirectoryKey error:nil];
         NSString *error = nil;
-        result = isDirectory.boolValue ? zs_logo_import_folder_sync(readURL, &error) : zs_logo_import_zip_sync(readURL, &error);
+        NSString *fallbackName = nil;
+        NSArray<ZSLogoSourceEntry *> *entries = zs_logo_source_entries(readURL, &error, &fallbackName);
+        if (entries) result = zs_logo_import_entries(entries, fallbackName, &error);
         failure = error;
     }];
     if (!result) *errorOut = failure ?: (coordinationError ? @"Couldn't read that item." : nil);
@@ -3432,3 +4419,316 @@ void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion) {
     });
 }
 
+#pragma mark - Pack creation
+
+static BOOL gZSLogoPackBusy;
+
+static NSString *zs_logo_pack_file_stem(NSString *raw) {
+    NSString *name = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    for (NSString *bad in @[@"/", @"\\", @":"]) name = [name stringByReplacingOccurrencesOfString:bad withString:@"-"];
+    while ([name hasPrefix:@"."]) name = [name substringFromIndex:1];
+    return name.length > 0 ? name : @"Logos";
+}
+
+static NSArray<NSMutableDictionary *> *zs_logo_pack_load_groups(NSArray<ZSLogoSourceEntry *> *entries, NSString *fallbackName, NSString **errorOut) {
+    NSDictionary<NSString *, NSString *> *groupNames = nil;
+    NSDictionary<NSString *, NSDictionary<NSString *, ZSLogoSourceEntry *> *> *groups = zs_logo_group_entries(entries, fallbackName, &groupNames);
+
+    NSMutableArray<NSMutableDictionary *> *result = [NSMutableArray array];
+    NSString *firstError = nil;
+    uint64_t totalSize = 0;
+
+    for (NSString *groupKey in [groups.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        NSDictionary<NSString *, ZSLogoSourceEntry *> *group = groups[groupKey];
+
+        NSString *styleName = nil;
+        for (NSString *file in group.allKeys) {
+            if (zs_logo_is_style_file(file)) {
+                styleName = file;
+                break;
+            }
+        }
+
+        NSData *styleData = nil;
+        if (styleName) {
+            ZSLogoSourceEntry *styleEntry = group[styleName];
+            NSString *styleError = nil;
+            styleData = styleEntry.size <= kZSLogoZipMaxEntrySize ? styleEntry.load(&styleError) : nil;
+        }
+        NSDictionary *json = zs_logo_parse_style_json(styleData);
+
+        NSString *missing = nil;
+        NSDictionary<NSString *, NSString *> *resolved = zs_logo_resolve_roles(json, group.allKeys, &missing);
+        if (!resolved[kZSLogoRoleFont]) {
+            if (missing) firstError = firstError ?: [NSString stringWithFormat:@"style.json points to %@, which isn't in the folder.", missing];
+            continue;
+        }
+
+        NSMutableDictionary<NSString *, NSMutableArray *> *files = [NSMutableDictionary dictionary];
+        BOOL groupOK = YES;
+        for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx]) {
+            NSString *file = resolved[role];
+            if (!file) continue;
+            ZSLogoSourceEntry *entry = group[file];
+            BOOL isFont = [role isEqualToString:kZSLogoRoleFont];
+
+            totalSize += entry.size;
+            if (totalSize > kZSLogoZipMaxTotalSize) {
+                firstError = firstError ?: @"The logo files are too large.";
+                groupOK = NO;
+                break;
+            }
+
+            NSString *loadError = nil;
+            NSData *data = entry.load(&loadError);
+            if (data && isFont && !zs_logo_font_data_is_valid(data)) {
+                data = nil;
+                loadError = [NSString stringWithFormat:@"%@ isn't a readable font.", file];
+            }
+            if (!data) {
+                if (isFont) {
+                    firstError = firstError ?: loadError;
+                    groupOK = NO;
+                    break;
+                }
+                continue;
+            }
+            files[role] = [@[file, [NSData dataWithBytes:data.bytes length:data.length]] mutableCopy];
+        }
+        if (!groupOK) continue;
+
+        [result addObject:[@{
+            @"folder": groupKey,
+            @"name": groupNames[groupKey] ?: fallbackName,
+            @"style": json ?: (id)[NSNull null],
+            @"files": files,
+        } mutableCopy]];
+    }
+
+    if (result.count == 0) {
+        *errorOut = firstError ?: @"No logo found. Add a .ttf or .otf font, plus optional images, videos or SVGs and a style.json that points to them, in a folder or a zip.";
+        return nil;
+    }
+    return result;
+}
+
+static void zs_logo_transcode_svg(NSString *path, void (^completion)(NSString * _Nullable videoPath)) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!svg) {
+                ZLog(@"[Logo] %@ isn't a readable SVG", path.lastPathComponent);
+                completion(nil);
+                return;
+            }
+            ZSLogoSVGJob *job = [[ZSLogoSVGJob alloc] initWithPath:path svg:svg];
+            gZSLogoTranscodeJob = job;
+            job.completion = ^(NSString *videoPath) {
+                gZSLogoTranscodeJob = nil;
+                completion(videoPath);
+            };
+            [job start];
+        });
+    });
+}
+
+static void zs_logo_pack_run_transcodes(NSArray<NSDictionary *> *tasks, NSUInteger index, NSString *workDirectory, NSMutableDictionary<NSString *, NSArray *> *converted, void (^completion)(NSString * _Nullable error)) {
+    if (index >= tasks.count) {
+        completion(nil);
+        return;
+    }
+
+    NSMutableDictionary *pack = tasks[index][@"pack"];
+    NSString *role = tasks[index][@"role"];
+    NSMutableDictionary<NSString *, NSMutableArray *> *files = pack[@"files"];
+    NSString *svgName = files[role][0];
+    NSData *svgData = files[role][1];
+    NSString *cacheKey = [NSString stringWithFormat:@"%p|%@", pack, svgName];
+
+    NSArray *existing = converted[cacheKey];
+    if (existing) {
+        files[role] = [existing mutableCopy];
+        zs_logo_pack_run_transcodes(tasks, index + 1, workDirectory, converted, completion);
+        return;
+    }
+
+    NSString *svgPath = [workDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%lu-%@", (unsigned long)index, svgName]];
+    if (![svgData writeToFile:svgPath atomically:YES]) {
+        completion([NSString stringWithFormat:@"Couldn't stage %@ for transcoding.", svgName]);
+        return;
+    }
+
+    ZLog(@"[Logo] createlogos: transcoding %@ (%lu of %lu)", svgName, (unsigned long)index + 1, (unsigned long)tasks.count);
+    zs_logo_transcode_svg(svgPath, ^(NSString *videoPath) {
+        NSData *video = videoPath ? [NSData dataWithContentsOfFile:videoPath] : nil;
+        if (videoPath) [[NSFileManager defaultManager] removeItemAtPath:videoPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:svgPath error:nil];
+        if (video.length == 0) {
+            completion([NSString stringWithFormat:@"%@ couldn't be transcoded.", svgName]);
+            return;
+        }
+
+        NSMutableSet<NSString *> *used = [NSMutableSet set];
+        for (NSString *otherRole in files) {
+            if (![otherRole isEqualToString:role]) [used addObject:[files[otherRole][0] lowercaseString]];
+        }
+        NSString *stem = svgName.stringByDeletingPathExtension;
+        NSString *videoName = [stem stringByAppendingPathExtension:@"mov"];
+        NSUInteger suffix = 1;
+        while ([used containsObject:videoName.lowercaseString]) {
+            videoName = [[stem stringByAppendingFormat:@"-hevc%@", suffix > 1 ? [NSString stringWithFormat:@"%lu", (unsigned long)suffix] : @""] stringByAppendingPathExtension:@"mov"];
+            suffix++;
+        }
+
+        NSArray *item = @[videoName, video];
+        converted[cacheKey] = item;
+        files[role] = [item mutableCopy];
+        ZLog(@"[Logo] createlogos: %@ -> %@ (%.2f MB)", svgName, videoName, (double)video.length / (1024.0 * 1024.0));
+        zs_logo_pack_run_transcodes(tasks, index + 1, workDirectory, converted, completion);
+    });
+}
+
+static NSData *zs_logo_pack_build(NSArray<NSMutableDictionary *> *packs, NSString **errorOut) {
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    NSMutableArray<NSData *> *blobs = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+
+    void (^add)(NSString *, NSString *, NSData *) = ^(NSString *folder, NSString *file, NSData *data) {
+        NSString *path = folder.length > 0 ? [folder stringByAppendingPathComponent:file] : file;
+        if ([seen containsObject:path]) return;
+        [seen addObject:path];
+        [paths addObject:path];
+        [blobs addObject:data];
+    };
+
+    for (NSMutableDictionary *pack in packs) {
+        NSString *folder = pack[@"folder"];
+        NSDictionary<NSString *, NSArray *> *files = pack[@"files"];
+        NSDictionary *json = [pack[@"style"] isKindOfClass:[NSDictionary class]] ? pack[@"style"] : nil;
+        NSMutableDictionary *style = json ? [json mutableCopy] : nil;
+
+        for (NSString *role in @[kZSLogoRoleFont, kZSLogoRoleFill, kZSLogoRoleVfx]) {
+            NSArray *item = files[role];
+            if (!item) continue;
+            NSString *file = item[0];
+            NSData *data = item[1];
+            if ([role isEqualToString:kZSLogoRoleFont]) data = zs_logo_font_subset(data, file);
+            add(folder, file, data);
+
+            if ([style[role] isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *section = [style[role] mutableCopy];
+                section[@"file"] = file;
+                style[role] = section;
+            }
+        }
+
+        if (style) {
+            NSData *styleData = [NSJSONSerialization dataWithJSONObject:style options:0 error:nil];
+            if (styleData) add(folder, kZSLogoStyleFilename, styleData);
+        }
+    }
+
+    ZSPackFile *cFiles = calloc(paths.count, sizeof(ZSPackFile));
+    if (!cFiles) {
+        *errorOut = @"Out of memory.";
+        return nil;
+    }
+    for (NSUInteger i = 0; i < paths.count; i++) {
+        cFiles[i].path = strdup(paths[i].UTF8String);
+        cFiles[i].data = blobs[i].bytes;
+        cFiles[i].size = (uint32_t)blobs[i].length;
+    }
+
+    size_t length = 0;
+    const char *error = NULL;
+    uint8_t *bytes = zs_pack_encode(cFiles, (uint32_t)paths.count, &length, &error);
+    for (NSUInteger i = 0; i < paths.count; i++) free((void *)cFiles[i].path);
+    free(cFiles);
+    if (!bytes) {
+        *errorOut = [NSString stringWithFormat:@"Couldn't compress the pack: %s.", error ?: "unknown error"];
+        return nil;
+    }
+    return [NSData dataWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+}
+
+void zs_logo_create_pack(NSURL *url, ZSLogoCreateCompletion completion) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gZSLogoPackBusy) {
+            completion(nil, @"A logo pack is already being created.");
+            return;
+        }
+        gZSLogoPackBusy = YES;
+
+        NSString *workDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"ZSLogoWork-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        [[NSFileManager defaultManager] createDirectoryAtPath:workDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+
+        void (^finish)(NSURL *, NSString *) = ^(NSURL *output, NSString *error) {
+            [[NSFileManager defaultManager] removeItemAtPath:workDirectory error:nil];
+            zs_logo_transcode_clear_cache();
+            dispatch_async(dispatch_get_main_queue(), ^{
+                gZSLogoPackBusy = NO;
+                completion(output, error);
+            });
+        };
+
+        BOOL scoped = [url startAccessingSecurityScopedResource];
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            __block NSArray<NSMutableDictionary *> *packs = nil;
+            __block NSString *failure = nil;
+            __block NSString *fallbackName = nil;
+            NSError *coordinationError = nil;
+            NSFileCoordinator *coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+            [coordinator coordinateReadingItemAtURL:url options:0 error:&coordinationError byAccessor:^(NSURL *readURL) {
+                NSString *error = nil;
+                NSArray<ZSLogoSourceEntry *> *entries = zs_logo_source_entries(readURL, &error, &fallbackName);
+                if (entries) packs = zs_logo_pack_load_groups(entries, fallbackName, &error);
+                failure = error;
+            }];
+            if (scoped) [url stopAccessingSecurityScopedResource];
+
+            if (!packs) {
+                finish(nil, failure ?: (coordinationError ? @"Couldn't read that item." : @"Couldn't add that logo."));
+                return;
+            }
+            ZLog(@"[Logo] createlogos: %lu pack(s) found in %@", (unsigned long)packs.count, fallbackName);
+
+            NSMutableArray<NSDictionary *> *tasks = [NSMutableArray array];
+            for (NSMutableDictionary *pack in packs) {
+                NSDictionary<NSString *, NSArray *> *files = pack[@"files"];
+                for (NSString *role in @[kZSLogoRoleFill, kZSLogoRoleVfx]) {
+                    if (files[role] && zs_logo_is_svg_file(files[role][0])) [tasks addObject:@{@"pack": pack, @"role": role}];
+                }
+            }
+
+            void (^build)(NSString *) = ^(NSString *transcodeError) {
+                if (transcodeError) {
+                    finish(nil, transcodeError);
+                    return;
+                }
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    NSString *buildError = nil;
+                    NSData *packed = zs_logo_pack_build(packs, &buildError);
+                    if (!packed) {
+                        finish(nil, buildError ?: @"Couldn't create the pack.");
+                        return;
+                    }
+
+                    NSString *outputDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"ZSLogoPack-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+                    [[NSFileManager defaultManager] createDirectoryAtPath:outputDirectory withIntermediateDirectories:YES attributes:nil error:nil];
+                    NSString *outputPath = [outputDirectory stringByAppendingPathComponent:[zs_logo_pack_file_stem(fallbackName) stringByAppendingPathExtension:@"zs"]];
+                    if (![packed writeToFile:outputPath atomically:YES]) {
+                        [[NSFileManager defaultManager] removeItemAtPath:outputDirectory error:nil];
+                        finish(nil, @"Couldn't write the pack.");
+                        return;
+                    }
+                    ZLog(@"[Logo] createlogos: wrote %@ (%.2f MB)", outputPath.lastPathComponent, (double)packed.length / (1024.0 * 1024.0));
+                    finish([NSURL fileURLWithPath:outputPath], nil);
+                });
+            };
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                zs_logo_pack_run_transcodes(tasks, 0, workDirectory, [NSMutableDictionary dictionary], build);
+            });
+        });
+    });
+}
