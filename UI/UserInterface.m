@@ -10325,13 +10325,6 @@ static const CGFloat kContentFadeHeight = 22;
     [battleScaleRow.slider addTarget:self action:@selector(battleScaleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.stack addArrangedSubview:battleScaleRow];
 
-    ZSRow *apRenderScaleMultRow = zs_make_slider_row(@"AP RS Mult", 0.0, 2.0, zs_exp_get_number(@"APRenderScaleMultiplier"), ^NSString *(float v){ return [NSString stringWithFormat:@"%.2f", v]; });
-    apRenderScaleMultRow.slider.defaultValue = zs_exp_get_default_number(@"APRenderScaleMultiplier");
-    apRenderScaleMultRow.slider.hasDefaultValue = YES;
-    objc_setAssociatedObject(apRenderScaleMultRow.slider, @"zs_exp_key", @"APRenderScaleMultiplier", OBJC_ASSOCIATION_RETAIN);
-    [apRenderScaleMultRow.slider addTarget:self action:@selector(expSliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.stack addArrangedSubview:apRenderScaleMultRow];
-
     ZSRow *texRow = zs_make_mode_slider_row(@"Texture MIP", @[@"0", @"1", @"2", @"3", @"4"], g_textureMip, kDefaultTextureMipEngine);
     [texRow.modeSlider addTarget:self action:@selector(texModeChanged:) forControlEvents:UIControlEventValueChanged];
     [self.stack addArrangedSubview:texRow];
@@ -24480,14 +24473,6 @@ static NSString *zs_docs_release_header_title(ZSUpdateCheckMode mode, NSString *
     else if ([key isEqualToString:@"NumIterationsEnclosingSphere"]) g_expNumIterationsEnclosingSphere = (int32_t)roundf(v);
     else if ([key isEqualToString:@"APMaxShadowDistanceMultiplier"]) g_expAPMaxShadowDistanceMultiplier = v;
     else if ([key isEqualToString:@"APShadowmapResolutionMultiplier"]) g_expAPShadowmapResolutionMultiplier = v;
-    else if ([key isEqualToString:@"APRenderScaleMultiplier"]) {
-        g_expAPRenderScaleMultiplier = v;
-        if (fabsf(v - zs_exp_get_default_number(@"APRenderScaleMultiplier")) > kDefaultValueEpsilon && !g_expAdaptivePerformance) {
-            g_expAdaptivePerformance = YES;
-            self.expAdaptivePerformanceToggle.on = YES;
-            zs_exp_apply_key(@"AdaptivePerformance");
-        }
-    }
     else if ([key isEqualToString:@"APDecalsDrawDistance"]) g_expAPDecalsDrawDistance = v;
     else if ([key isEqualToString:@"APLutBias"]) g_expAPLutBias = v;
     else if ([key isEqualToString:@"RigidbodySleepThreshold"]) g_expRigidbodySleepThreshold = v;

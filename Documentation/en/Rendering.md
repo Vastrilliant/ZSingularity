@@ -17,18 +17,6 @@ Short for **Battle Render Scale**
 
 This is a custom setting, by leveraging `isBattle=1`, ZSingularity can detect whenever a combat encounter is active, lowering the resolution to the desired value. 
 
-## AP RS Mult
-
-Short for **Adaptive Performance Render Scale Multiplier**.
-
-This is an alternative render scale method primarily used by the Android (AOS) port of the game — it works through Unity's Adaptive Performance system rather than the normal engine render scale pipeline.
-
-Its values range from 0 to 2.00 and multiply whatever render scale Adaptive Performance would otherwise choose on its own.
-
-Setting this to anything other than its default of 1.00 automatically enables Adaptive Performance, since the multiplier has no effect unless Adaptive Performance is actively driving the render scale.
-
-**NOTE: This setting is extremely unstable, do not change this value during a combat encounter, doing so will freeze the game, also do not set its value to 0.00, doing so, will also freeze the game**
-
 ## Texture MIP
 
 Internally known as the Texture Mipmap Limit.

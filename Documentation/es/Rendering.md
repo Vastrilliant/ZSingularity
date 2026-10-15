@@ -17,18 +17,6 @@ Abreviatura de **Battle Render Scale**.
 
 Mediante `isBattle=1`, ZSingularity puede detectar cuándo hay un combate activo y reducir la resolución al valor deseado.
 
-## AP RS Mult
-
-Abreviatura de **Adaptive Performance Render Scale Multiplier**.
-
-Es un método alternativo de render scale utilizado principalmente por el port Android (AOS) del juego. Funciona mediante el sistema Adaptive Performance de Unity en lugar del engine render scale pipeline normal.
-
-Sus valores van de 0 a 2.00 y multiplican el render scale que Adaptive Performance elegiría por sí mismo.
-
-Establecerlo en cualquier valor distinto de su valor predeterminado 1.00 activa automáticamente Adaptive Performance, ya que el multiplier no tiene efecto a menos que Adaptive Performance esté controlando activamente el render scale.
-
-**NOTA: esta configuración es extremadamente inestable. No cambies este valor durante un combate, ya que congelará el juego. Tampoco lo establezcas en 0.00, ya que también congelará el juego.**
-
 ## Texture MIP
 
 Conocido internamente como Texture Mipmap Limit.

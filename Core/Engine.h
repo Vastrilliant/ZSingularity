@@ -261,7 +261,6 @@ extern BOOL    g_expLightsUseLinearIntensity;
 extern BOOL    g_expLightsUseColorTemperature;
 extern float   g_expAPMaxShadowDistanceMultiplier;
 extern float   g_expAPShadowmapResolutionMultiplier;
-extern float   g_expAPRenderScaleMultiplier;
 extern float   g_expAPDecalsDrawDistance;
 extern int32_t g_expAPShadowCascadesBias;
 extern int32_t g_expAPShadowQualityBias;

@@ -1750,7 +1750,6 @@ X(BOOL, LightsUseLinearIntensity, YES, NO) \
 X(BOOL, LightsUseColorTemperature, YES, NO) \
 X(float, APMaxShadowDistanceMultiplier, 1.0f, NO) \
 X(float, APShadowmapResolutionMultiplier, 1.0f, NO) \
-X(float, APRenderScaleMultiplier, 1.0f, YES) \
 X(float, APDecalsDrawDistance, 100.0f, NO) \
 X(int32_t, APShadowCascadesBias, 0, NO) \
 X(int32_t, APShadowQualityBias, 0, NO) \
@@ -4093,7 +4092,6 @@ static BOOL zs_exp_apply_key_internal(NSString *key) {
     if ([key hasPrefix:@"AP"]) {
         if ([key isEqualToString:@"APMaxShadowDistanceMultiplier"]) return mt_call_static_float("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_MaxShadowDistanceMultiplier", g_expAPMaxShadowDistanceMultiplier);
         if ([key isEqualToString:@"APShadowmapResolutionMultiplier"]) return mt_call_static_float("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_MainLightShadowmapResolutionMultiplier", g_expAPShadowmapResolutionMultiplier);
-        if ([key isEqualToString:@"APRenderScaleMultiplier"]) return mt_call_static_float("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_RenderScaleMultiplier", g_expAPRenderScaleMultiplier);
         if ([key isEqualToString:@"APDecalsDrawDistance"]) return mt_call_static_float("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_DecalsDrawDistance", g_expAPDecalsDrawDistance);
         if ([key isEqualToString:@"APShadowCascadesBias"]) return mt_call_static_int("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_MainLightShadowCascadesCountBias", g_expAPShadowCascadesBias);
         if ([key isEqualToString:@"APShadowQualityBias"]) return mt_call_static_int("UnityEngine.AdaptivePerformance", "AdaptivePerformanceRenderSettings", "AdaptivePerformanceModule", "set_ShadowQualityBias", g_expAPShadowQualityBias);

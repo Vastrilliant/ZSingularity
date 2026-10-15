@@ -17,18 +17,6 @@
 
 `isBattle=1`을 활용하여 전투가 진행 중인지 감지하고, 원하는 값으로 해상도를 낮춥니다.
 
-## AP RS Mult
-
-**Adaptive Performance Render Scale Multiplier**의 약어입니다.
-
-이는 주로 Android (AOS) 포트에서 사용되는 대체 render scale 방식입니다. 일반적인 engine render scale pipeline이 아니라 Unity의 Adaptive Performance 시스템을 통해 동작합니다.
-
-값의 범위는 0에서 2.00이며, Adaptive Performance가 자체적으로 선택했을 render scale에 이 값을 곱합니다.
-
-기본값인 1.00 이외의 값으로 설정하면 Adaptive Performance가 자동으로 활성화됩니다. Adaptive Performance가 실제로 render scale을 제어하지 않는 한 multiplier는 효과가 없기 때문입니다.
-
-**참고: 이 설정은 매우 불안정합니다. 전투 중에는 이 값을 변경하지 마세요. 변경하면 게임이 멈춥니다. 또한 값을 0.00으로 설정하지 마세요. 이 경우에도 게임이 멈춥니다.**
-
 ## Texture MIP
 
 내부적으로 Texture Mipmap Limit이라고 알려져 있습니다.

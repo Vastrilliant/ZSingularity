@@ -17,18 +17,6 @@
 
 Используя `isBattle=1`, ZSingularity может определить, идёт ли бой, и снизить разрешение до указанного значения.
 
-## AP RS Mult
-
-Сокращение от **Adaptive Performance Render Scale Multiplier**.
-
-Это альтернативный метод render scale, главным образом используемый Android (AOS) портом игры. Он работает через систему Unity Adaptive Performance, а не через обычный engine render scale pipeline.
-
-Значения находятся от 0 до 2.00 и умножают render scale, который Adaptive Performance выбрала бы самостоятельно.
-
-Установка любого значения, кроме 1.00 по умолчанию, автоматически включает Adaptive Performance, поскольку multiplier не действует, пока Adaptive Performance активно не управляет render scale.
-
-**ПРИМЕЧАНИЕ: эта настройка крайне нестабильна. Не изменяйте значение во время боя — это приведёт к зависанию игры. Также не устанавливайте 0.00, поскольку это тоже приведёт к зависанию.**
-
 ## Texture MIP
 
 Внутри игры известна как Texture Mipmap Limit.
