@@ -1323,10 +1323,12 @@ static void zs_logo_transcode_prune(NSString *svgPath, NSString *keepVideo) {
 @interface ZSLogoVideo : NSObject
 @property (nonatomic, strong) NSArray *samples;
 @property (nonatomic, strong) NSArray<NSNumber *> *keyframes;
+@property (nonatomic, strong, nullable) NSArray<NSNumber *> *displayOrder;
 @property (nonatomic, assign) CGSize size;
 @property (nonatomic, assign) NSTimeInterval frameDuration;
 - (NSUInteger)count;
 - (NSUInteger)keyframeAtOrBefore:(NSUInteger)index;
+- (NSUInteger)decodeIndexForDisplay:(NSUInteger)index;
 - (CMVideoFormatDescriptionRef)formatDescription;
 @end
 
@@ -1342,6 +1344,11 @@ static void zs_logo_transcode_prune(NSString *svgPath, NSString *keepVideo) {
         result = key.unsignedIntegerValue;
     }
     return result;
+}
+
+- (NSUInteger)decodeIndexForDisplay:(NSUInteger)index {
+    if (!self.displayOrder || index >= self.displayOrder.count) return index;
+    return self.displayOrder[index].unsignedIntegerValue;
 }
 
 - (CMVideoFormatDescriptionRef)formatDescription {
@@ -1365,6 +1372,7 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
     NSMutableArray *samples = [NSMutableArray array];
     NSMutableArray<NSNumber *> *keyframes = [NSMutableArray array];
     CMSampleBufferRef sample = NULL;
+    NSMutableArray<NSNumber *> *presentationTimes = [NSMutableArray array];
     CMTime lastPresentation = kCMTimeInvalid;
     BOOL reordered = NO;
     while ((sample = [output copyNextSampleBuffer])) {
@@ -1372,6 +1380,7 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
             CMTime presentation = CMSampleBufferGetPresentationTimeStamp(sample);
             if (CMTIME_IS_VALID(lastPresentation) && CMTIME_IS_VALID(presentation) && CMTimeCompare(presentation, lastPresentation) <= 0) reordered = YES;
             lastPresentation = presentation;
+            [presentationTimes addObject:@(CMTIME_IS_VALID(presentation) ? CMTimeGetSeconds(presentation) : (double)samples.count)];
             BOOL sync = YES;
             CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
             if (attachments && CFArrayGetCount(attachments) > 0) {
@@ -1385,9 +1394,13 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
         CFRelease(sample);
     }
     if (reader.status != AVAssetReaderStatusCompleted || samples.count == 0 || keyframes.firstObject.unsignedIntegerValue != 0) return nil;
-    if (reordered) {
-        ZLog(@"[Logo] %@ uses frame reordering, encode it without B-frames", path.lastPathComponent);
-        return nil;
+    NSArray<NSNumber *> *displayOrder = nil;
+    if (reordered && presentationTimes.count == samples.count) {
+        NSMutableArray<NSNumber *> *indices = [NSMutableArray arrayWithCapacity:samples.count];
+        for (NSUInteger i = 0; i < samples.count; i++) [indices addObject:@(i)];
+        displayOrder = [indices sortedArrayUsingComparator:^NSComparisonResult(NSNumber *a, NSNumber *b) {
+            return [presentationTimes[a.unsignedIntegerValue] compare:presentationTimes[b.unsignedIntegerValue]];
+        }];
     }
 
     CGSize size = track.naturalSize;
@@ -1397,6 +1410,7 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
     ZSLogoVideo *video = [[ZSLogoVideo alloc] init];
     video.samples = samples;
     video.keyframes = keyframes;
+    video.displayOrder = displayOrder;
     video.size = size;
     video.frameDuration = rate > 0 ? 1.0 / (double)rate : 1.0 / (double)kZSLogoTranscodeFPS;
     return video;
@@ -1438,6 +1452,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     dispatch_queue_t _queue;
     VTDecompressionSessionRef _session;
     NSInteger _decoded;
+    NSMutableDictionary<NSNumber *, id> *_recent;
     BOOL _invalid;
 }
 
@@ -1447,6 +1462,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     _video = video;
     _queue = dispatch_queue_create("zs.logo.decode", DISPATCH_QUEUE_SERIAL);
     _decoded = -1;
+    _recent = [NSMutableDictionary dictionary];
     return self;
 }
 
@@ -1454,7 +1470,21 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     [self zs_closeSession];
 }
 
+- (void)zs_clearRecent {
+    [_recent removeAllObjects];
+}
+
+- (void)zs_remember:(CVPixelBufferRef)buffer atIndex:(NSUInteger)index {
+    if (!_video.displayOrder) return;
+    _recent[@(index)] = (__bridge id)buffer;
+    while (_recent.count > 4) {
+        NSNumber *oldest = [_recent.allKeys sortedArrayUsingSelector:@selector(compare:)].firstObject;
+        [_recent removeObjectForKey:oldest];
+    }
+}
+
 - (void)zs_closeSession {
+    [self zs_clearRecent];
     if (_session) {
         VTDecompressionSessionInvalidate(_session);
         CFRelease(_session);
@@ -1494,6 +1524,8 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
 }
 
 - (CVPixelBufferRef)zs_decodeTo:(NSUInteger)target {
+    id cached = _recent[@(target)];
+    if (cached) return CVPixelBufferRetain((__bridge CVPixelBufferRef)cached);
     NSUInteger key = [_video keyframeAtOrBefore:target];
     for (int attempt = 0; attempt < 2; attempt++) {
         if (![self zs_openSession]) return NULL;
@@ -1509,6 +1541,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
                 ok = NO;
                 break;
             }
+            [self zs_remember:buffer atIndex:i];
             if (output) CVPixelBufferRelease(output);
             output = buffer;
         }
@@ -2616,7 +2649,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
 
     _decoding = YES;
     __weak typeof(self) weakSelf = self;
-    [decoder decodeIndex:index completion:^(CVPixelBufferRef buffer) {
+    [decoder decodeIndex:[video decodeIndexForDisplay:index] completion:^(CVPixelBufferRef buffer) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || strongSelf->_decoder != decoder) return;
         strongSelf->_decoding = NO;
