@@ -4,12 +4,13 @@
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
-#import <objc/message.h>
 #import <compression.h>
-#import <ctype.h>
-#import <stdlib.h>
-#import <math.h>
+#import <sys/mman.h>
+#import <sys/stat.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 NSString * const kZSLogoDefaultName = @"Default";
 NSNotificationName const ZSLogoDidChangeNotification = @"ZSLogoDidChangeNotification";
@@ -399,6 +400,21 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
+static const NSInteger kZSLogoTranscodeFPS = 60;
+static const CGFloat kZSLogoTranscodeMaxEdge = 1536;
+static const CGFloat kZSLogoTranscodeMinEdge = 64;
+static const double kZSLogoTranscodeByteBudget = 384.0 * 1024 * 1024;
+static const double kZSLogoTranscodeMaxLoopMs = 30000.0;
+static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
+static const NSTimeInterval kZSLogoTranscodeStepTimeout = 10.0;
+static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
+static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
+static const uint32_t kZSLogoFrameCacheMagic = 0x5A4C4647;
+static const uint32_t kZSLogoFrameCacheVersion = 2;
+static const size_t kZSLogoFrameCacheHeaderBytes = 16384;
+static const size_t kZSLogoFrameCacheRowAlignment = 64;
+
+static void zs_logo_transcode_pack_directory(NSString *directory);
 
 static BOOL zs_logo_is_font_file(NSString *filename) {
     NSString *ext = filename.pathExtension.lowercaseString;
@@ -630,6 +646,7 @@ static void zs_logo_sync(NSString *name, void (^completion)(BOOL success)) {
                     }
                     zs_logo_write_meta(name, newMeta);
                     zs_logo_invalidate_pack(name);
+                    zs_logo_transcode_pack_directory(directory);
                 }
                 completion(success);
             });
@@ -892,1324 +909,1246 @@ static ZSLogoAnimation *zs_logo_animation_for_path(NSString *path) {
 @property (nonatomic, assign) BOOL animationsPaused;
 - (void)loadAssetAtPath:(NSString *)path;
 - (void)releaseAssets;
-@end
-
-static NSString *zs_svg_trim(NSString *value) {
-    return [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-}
-
-static CGFloat zs_svg_number(NSString *value, CGFloat fallback) {
-    if (![value isKindOfClass:NSString.class] || value.length == 0) return fallback;
-    double number = value.doubleValue;
-    return isfinite(number) ? (CGFloat)number : fallback;
-}
-
-static CGFloat zs_svg_length(NSString *value) {
-    if (![value isKindOfClass:NSString.class] || value.length == 0 || [value containsString:@"%"] || [value hasPrefix:@"auto"]) return 0;
-    CGFloat number = zs_svg_number(value, 0);
-    return number > 0 ? number : 0;
-}
-
-static CGFloat zs_svg_fraction(NSString *value, CGFloat fallback) {
-    NSString *text = zs_svg_trim(value ?: @"");
-    if ([text hasSuffix:@"%"] && text.length > 1) return zs_svg_number([text substringToIndex:text.length - 1], fallback * 100) / 100.0;
-    return zs_svg_number(text, fallback);
-}
-
-static UIColor *zs_svg_color_alpha(UIColor *color, CGFloat alpha) {
-    if (!color) return nil;
-    CGFloat red = 0, green = 0, blue = 0, oldAlpha = 1;
-    if (![color getRed:&red green:&green blue:&blue alpha:&oldAlpha]) {
-        CGFloat white = 0;
-        if ([color getWhite:&white alpha:&oldAlpha]) return [UIColor colorWithWhite:white alpha:oldAlpha * alpha];
-        return color;
-    }
-    return [UIColor colorWithRed:red green:green blue:blue alpha:oldAlpha * alpha];
-}
-
-static UIColor *zs_svg_color(NSString *value, UIColor *currentColor) {
-    NSString *text = zs_svg_trim(value ?: @"").lowercaseString;
-    if (text.length == 0 || [text isEqualToString:@"none"]) return nil;
-    if ([text isEqualToString:@"transparent"]) return UIColor.clearColor;
-    if ([text isEqualToString:@"currentcolor"]) return currentColor ?: UIColor.blackColor;
-    if ([text hasPrefix:@"#"]) {
-        NSString *hex = [text substringFromIndex:1];
-        if (hex.length == 3 || hex.length == 4) {
-            unsigned int r = 0, g = 0, b = 0, a = 15;
-            [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(0, 1)]] scanHexInt:&r];
-            [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(1, 1)]] scanHexInt:&g];
-            [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(2, 1)]] scanHexInt:&b];
-            if (hex.length == 4) [[NSScanner scannerWithString:[hex substringWithRange:NSMakeRange(3, 1)]] scanHexInt:&a];
-            return [UIColor colorWithRed:(r * 17) / 255.0 green:(g * 17) / 255.0 blue:(b * 17) / 255.0 alpha:(a * 17) / 255.0];
-        }
-        if (hex.length == 6 || hex.length == 8) {
-            unsigned long long raw = 0;
-            if (![[NSScanner scannerWithString:hex] scanHexLongLong:&raw]) return nil;
-            CGFloat r, g, b, a = 1;
-            if (hex.length == 8) {
-                r = ((raw >> 24) & 255) / 255.0;
-                g = ((raw >> 16) & 255) / 255.0;
-                b = ((raw >> 8) & 255) / 255.0;
-                a = (raw & 255) / 255.0;
-            } else {
-                r = ((raw >> 16) & 255) / 255.0;
-                g = ((raw >> 8) & 255) / 255.0;
-                b = (raw & 255) / 255.0;
-            }
-            return [UIColor colorWithRed:r green:g blue:b alpha:a];
-        }
-        return nil;
-    }
-    if ([text hasPrefix:@"rgb("] || [text hasPrefix:@"rgba("]) {
-        NSRange open = [text rangeOfString:@"("];
-        NSRange close = [text rangeOfString:@")" options:NSBackwardsSearch];
-        if (open.location == NSNotFound || close.location <= open.location) return nil;
-        NSString *body = [text substringWithRange:NSMakeRange(open.location + 1, close.location - open.location - 1)];
-        NSMutableArray<NSString *> *parts = [NSMutableArray array];
-        for (NSString *part in [body componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@", /\t\r\n"]]) if (part.length) [parts addObject:part];
-        if (parts.count < 3) return nil;
-        CGFloat components[4] = {0, 0, 0, 1};
-        for (NSUInteger i = 0; i < MIN((NSUInteger)4, parts.count); i++) {
-            NSString *part = parts[i];
-            BOOL percent = [part hasSuffix:@"%"];
-            if (percent) part = [part substringToIndex:part.length - 1];
-            CGFloat number = zs_svg_number(part, 0);
-            components[i] = i < 3 ? (percent ? number / 100.0 : number / 255.0) : (percent ? number / 100.0 : number);
-            components[i] = MIN(1, MAX(0, components[i]));
-        }
-        return [UIColor colorWithRed:components[0] green:components[1] blue:components[2] alpha:components[3]];
-    }
-    static NSDictionary<NSString *, UIColor *> *named;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        named = @{
-            @"black": UIColor.blackColor, @"white": UIColor.whiteColor, @"red": UIColor.redColor,
-            @"green": [UIColor colorWithRed:0 green:0.5 blue:0 alpha:1], @"blue": UIColor.blueColor,
-            @"yellow": UIColor.yellowColor, @"cyan": UIColor.cyanColor, @"aqua": UIColor.cyanColor,
-            @"magenta": UIColor.magentaColor, @"fuchsia": UIColor.magentaColor, @"gray": UIColor.grayColor,
-            @"grey": UIColor.grayColor, @"silver": [UIColor colorWithWhite:0.75 alpha:1], @"maroon": [UIColor colorWithRed:0.5 green:0 blue:0 alpha:1],
-            @"olive": [UIColor colorWithRed:0.5 green:0.5 blue:0 alpha:1], @"lime": [UIColor colorWithRed:0 green:1 blue:0 alpha:1],
-            @"teal": [UIColor colorWithRed:0 green:0.5 blue:0.5 alpha:1], @"navy": [UIColor colorWithRed:0 green:0 blue:0.5 alpha:1],
-            @"purple": [UIColor colorWithRed:0.5 green:0 blue:0.5 alpha:1], @"orange": UIColor.orangeColor,
-            @"pink": UIColor.systemPinkColor, @"rebeccapurple": [UIColor colorWithRed:102/255.0 green:51/255.0 blue:153/255.0 alpha:1],
-            @"aliceblue": [UIColor colorWithRed:240/255.0 green:248/255.0 blue:1 alpha:1], @"gold": [UIColor colorWithRed:1 green:215/255.0 blue:0 alpha:1],
-            @"tomato": [UIColor colorWithRed:1 green:99/255.0 blue:71/255.0 alpha:1], @"crimson": [UIColor colorWithRed:220/255.0 green:20/255.0 blue:60/255.0 alpha:1],
-            @"darkred": [UIColor colorWithRed:139/255.0 green:0 blue:0 alpha:1], @"darkblue": [UIColor colorWithRed:0 green:0 blue:139/255.0 alpha:1],
-            @"lightgray": [UIColor colorWithWhite:0.83 alpha:1], @"lightgrey": [UIColor colorWithWhite:0.83 alpha:1],
-            @"darkgray": [UIColor colorWithWhite:0.33 alpha:1], @"darkgrey": [UIColor colorWithWhite:0.33 alpha:1],
-            @"indigo": [UIColor colorWithRed:75/255.0 green:0 blue:130/255.0 alpha:1], @"violet": [UIColor colorWithRed:238/255.0 green:130/255.0 blue:238/255.0 alpha:1]
-        };
-    });
-    return named[text];
-}
-
-static NSDictionary<NSString *, NSString *> *zs_svg_parse_declarations(NSString *text) {
-    NSMutableDictionary<NSString *, NSString *> *result = [NSMutableDictionary dictionary];
-    for (NSString *declaration in [text componentsSeparatedByString:@";"]) {
-        NSRange colon = [declaration rangeOfString:@":"];
-        if (colon.location == NSNotFound) continue;
-        NSString *key = zs_svg_trim([declaration substringToIndex:colon.location]).lowercaseString;
-        NSString *value = zs_svg_trim([declaration substringFromIndex:colon.location + 1]);
-        if (key.length && value.length) result[key] = value;
-    }
-    return result;
-}
-
-static NSArray<NSDictionary *> *zs_svg_css_rules(NSString *markup) {
-    NSMutableArray<NSDictionary *> *rules = [NSMutableArray array];
-    NSRegularExpression *styleExpression = [NSRegularExpression regularExpressionWithPattern:@"<style\\b[^>]*>(.*?)</style\\s*>" options:NSRegularExpressionCaseInsensitive | NSRegularExpressionDotMatchesLineSeparators error:nil];
-    NSRegularExpression *ruleExpression = [NSRegularExpression regularExpressionWithPattern:@"([^{}]+)\\{([^{}]*)\\}" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-    for (NSTextCheckingResult *block in [styleExpression matchesInString:markup options:0 range:NSMakeRange(0, markup.length)]) {
-        NSString *css = [markup substringWithRange:[block rangeAtIndex:1]];
-        NSRegularExpression *comments = [NSRegularExpression regularExpressionWithPattern:@"/\\*.*?\\*/" options:NSRegularExpressionDotMatchesLineSeparators error:nil];
-        css = [comments stringByReplacingMatchesInString:css options:0 range:NSMakeRange(0, css.length) withTemplate:@""];
-        for (NSTextCheckingResult *match in [ruleExpression matchesInString:css options:0 range:NSMakeRange(0, css.length)]) {
-            NSString *selectorText = zs_svg_trim([css substringWithRange:[match rangeAtIndex:1]]);
-            NSString *body = [css substringWithRange:[match rangeAtIndex:2]];
-            if ([selectorText hasPrefix:@"@"] || !selectorText.length) continue;
-            NSDictionary *declarations = zs_svg_parse_declarations(body);
-            for (NSString *selector in [selectorText componentsSeparatedByString:@","]) {
-                NSString *trimmed = zs_svg_trim(selector);
-                if (trimmed.length) [rules addObject:@{@"selector": trimmed, @"declarations": declarations}];
-            }
-        }
-    }
-    return rules;
-}
-
-static BOOL zs_svg_selector_matches(NSString *selector, NSString *tag, NSDictionary<NSString *, NSString *> *attributes) {
-    if ([selector containsString:@" "] || [selector containsString:@">"] || [selector containsString:@"+"] || [selector containsString:@"~"] || [selector containsString:@"["] || [selector containsString:@":"]) return NO;
-    NSString *elementID = attributes[@"id"] ?: @"";
-    NSMutableSet<NSString *> *classes = [NSMutableSet set];
-    for (NSString *className in [zs_svg_trim(attributes[@"class"] ?: @"") componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]) if (className.length) [classes addObject:className];
-    if ([selector hasPrefix:@"#"]) return [elementID isEqualToString:[selector substringFromIndex:1]];
-    if ([selector hasPrefix:@"."]) return [classes containsObject:[selector substringFromIndex:1]];
-    NSRange dot = [selector rangeOfString:@"."];
-    if (dot.location != NSNotFound) {
-        NSString *className = [selector substringFromIndex:dot.location + 1];
-        NSString *tagName = [selector substringToIndex:dot.location];
-        return ([tagName isEqualToString:@"*"] || [tagName caseInsensitiveCompare:tag] == NSOrderedSame) && [classes containsObject:className];
-    }
-    NSRange hash = [selector rangeOfString:@"#"];
-    if (hash.location != NSNotFound) return [[selector substringToIndex:hash.location] isEqualToString:tag] && [elementID isEqualToString:[selector substringFromIndex:hash.location + 1]];
-    return [selector isEqualToString:@"*"] || [selector caseInsensitiveCompare:tag] == NSOrderedSame;
-}
-
-static void zs_svg_skip_separators(const char **cursor) {
-    while (**cursor && (isspace((unsigned char)**cursor) || **cursor == ',')) (*cursor)++;
-}
-
-static BOOL zs_svg_read_number(const char **cursor, CGFloat *value) {
-    zs_svg_skip_separators(cursor);
-    if (!**cursor) return NO;
-    char *end = NULL;
-    double number = strtod(*cursor, &end);
-    if (end == *cursor || !isfinite(number)) return NO;
-    *cursor = end;
-    *value = (CGFloat)number;
-    return YES;
-}
-
-static BOOL zs_svg_has_number(const char *cursor) {
-    zs_svg_skip_separators(&cursor);
-    return *cursor && (*cursor == '+' || *cursor == '-' || *cursor == '.' || isdigit((unsigned char)*cursor));
-}
-
-static void zs_svg_add_arc(CGMutablePathRef path, CGPoint start, CGFloat rx, CGFloat ry, CGFloat rotation, BOOL largeArc, BOOL sweep, CGPoint end) {
-    rx = fabs(rx);
-    ry = fabs(ry);
-    if (rx < 1e-8 || ry < 1e-8 || (fabs(start.x - end.x) < 1e-8 && fabs(start.y - end.y) < 1e-8)) {
-        CGPathAddLineToPoint(path, NULL, end.x, end.y);
-        return;
-    }
-    CGFloat phi = fmod(rotation, 360.0) * (CGFloat)M_PI / 180.0;
-    CGFloat cosine = cos(phi), sine = sin(phi);
-    CGFloat dx = (start.x - end.x) / 2, dy = (start.y - end.y) / 2;
-    CGFloat xp = cosine * dx + sine * dy;
-    CGFloat yp = -sine * dx + cosine * dy;
-    CGFloat lambda = xp * xp / (rx * rx) + yp * yp / (ry * ry);
-    if (lambda > 1) {
-        CGFloat scale = sqrt(lambda);
-        rx *= scale;
-        ry *= scale;
-    }
-    CGFloat numerator = MAX(0, rx * rx * ry * ry - rx * rx * yp * yp - ry * ry * xp * xp);
-    CGFloat denominator = rx * rx * yp * yp + ry * ry * xp * xp;
-    CGFloat coefficient = denominator > 0 ? sqrt(numerator / denominator) : 0;
-    if (largeArc == sweep) coefficient = -coefficient;
-    CGFloat cxp = coefficient * (rx * yp / ry);
-    CGFloat cyp = coefficient * (-ry * xp / rx);
-    CGFloat cx = cosine * cxp - sine * cyp + (start.x + end.x) / 2;
-    CGFloat cy = sine * cxp + cosine * cyp + (start.y + end.y) / 2;
-    CGFloat ux = (xp - cxp) / rx;
-    CGFloat uy = (yp - cyp) / ry;
-    CGFloat vx = (-xp - cxp) / rx;
-    CGFloat vy = (-yp - cyp) / ry;
-    CGFloat theta = atan2(uy, ux);
-    CGFloat delta = atan2(ux * vy - uy * vx, ux * vx + uy * vy);
-    if (!sweep && delta > 0) delta -= 2 * M_PI;
-    if (sweep && delta < 0) delta += 2 * M_PI;
-    NSUInteger segments = MAX(1, (NSUInteger)ceil(fabs(delta) / (M_PI / 2)));
-    CGFloat segmentDelta = delta / segments;
-    for (NSUInteger i = 0; i < segments; i++) {
-        CGFloat t0 = theta + i * segmentDelta;
-        CGFloat t1 = t0 + segmentDelta;
-        CGFloat k = (4.0 / 3.0) * tan((t1 - t0) / 4.0);
-        CGPoint p0 = CGPointMake(cx + rx * cosine * cos(t0) - ry * sine * sin(t0), cy + rx * sine * cos(t0) + ry * cosine * sin(t0));
-        CGPoint p3 = CGPointMake(cx + rx * cosine * cos(t1) - ry * sine * sin(t1), cy + rx * sine * cos(t1) + ry * cosine * sin(t1));
-        CGPoint d0 = CGPointMake(-rx * cosine * sin(t0) - ry * sine * cos(t0), -rx * sine * sin(t0) + ry * cosine * cos(t0));
-        CGPoint d1 = CGPointMake(-rx * cosine * sin(t1) - ry * sine * cos(t1), -rx * sine * sin(t1) + ry * cosine * cos(t1));
-        CGPoint c1 = CGPointMake(p0.x + k * d0.x, p0.y + k * d0.y);
-        CGPoint c2 = CGPointMake(p3.x - k * d1.x, p3.y - k * d1.y);
-        CGPathAddCurveToPoint(path, NULL, c1.x, c1.y, c2.x, c2.y, p3.x, p3.y);
-    }
-}
-
-static UIBezierPath *zs_svg_path_from_data(NSString *data) {
-    if (![data isKindOfClass:NSString.class] || data.length == 0) return nil;
-    const char *cursor = data.UTF8String;
-    if (!cursor) return nil;
-    CGMutablePathRef path = CGPathCreateMutable();
-    CGFloat x = 0, y = 0, startX = 0, startY = 0;
-    CGFloat cubicX = 0, cubicY = 0, quadX = 0, quadY = 0;
-    char command = 0, previous = 0;
-    while (*cursor) {
-        zs_svg_skip_separators(&cursor);
-        if (!*cursor) break;
-        if (isalpha((unsigned char)*cursor)) command = *cursor++;
-        else if (!command || !zs_svg_has_number(cursor)) break;
-        BOOL relative = islower((unsigned char)command);
-        char upper = (char)toupper((unsigned char)command);
-        CGFloat a, b, c, d, e, f;
-        if (upper == 'Z') {
-            CGPathCloseSubpath(path);
-            x = startX;
-            y = startY;
-            previous = command;
-            command = 0;
-            continue;
-        }
-        if (upper == 'M' || upper == 'L' || upper == 'T') {
-            BOOL first = YES;
-            do {
-                if (!zs_svg_read_number(&cursor, &a) || !zs_svg_read_number(&cursor, &b)) break;
-                CGFloat nx = relative ? x + a : a;
-                CGFloat ny = relative ? y + b : b;
-                if (upper == 'M' && first) {
-                    CGPathMoveToPoint(path, NULL, nx, ny);
-                    startX = nx;
-                    startY = ny;
-                } else if (upper == 'T') {
-                    CGFloat qx = (toupper((unsigned char)previous) == 'Q' || toupper((unsigned char)previous) == 'T') ? 2 * x - quadX : x;
-                    CGFloat qy = (toupper((unsigned char)previous) == 'Q' || toupper((unsigned char)previous) == 'T') ? 2 * y - quadY : y;
-                    CGPathAddQuadCurveToPoint(path, NULL, qx, qy, nx, ny);
-                    quadX = qx;
-                    quadY = qy;
-                } else {
-                    CGPathAddLineToPoint(path, NULL, nx, ny);
-                }
-                x = nx;
-                y = ny;
-                previous = command;
-                first = NO;
-            } while (zs_svg_has_number(cursor));
-            if (upper == 'M') command = relative ? 'l' : 'L';
-        } else if (upper == 'H' || upper == 'V') {
-            do {
-                if (!zs_svg_read_number(&cursor, &a)) break;
-                if (upper == 'H') x = relative ? x + a : a; else y = relative ? y + a : a;
-                CGPathAddLineToPoint(path, NULL, x, y);
-                previous = command;
-            } while (zs_svg_has_number(cursor));
-        } else if (upper == 'C') {
-            do {
-                if (!zs_svg_read_number(&cursor, &a) || !zs_svg_read_number(&cursor, &b) || !zs_svg_read_number(&cursor, &c) || !zs_svg_read_number(&cursor, &d) || !zs_svg_read_number(&cursor, &e) || !zs_svg_read_number(&cursor, &f)) break;
-                CGPoint p1 = CGPointMake(relative ? x + a : a, relative ? y + b : b);
-                CGPoint p2 = CGPointMake(relative ? x + c : c, relative ? y + d : d);
-                CGPoint p3 = CGPointMake(relative ? x + e : e, relative ? y + f : f);
-                CGPathAddCurveToPoint(path, NULL, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
-                x = p3.x; y = p3.y; cubicX = p2.x; cubicY = p2.y; previous = command;
-            } while (zs_svg_has_number(cursor));
-        } else if (upper == 'S') {
-            do {
-                if (!zs_svg_read_number(&cursor, &a) || !zs_svg_read_number(&cursor, &b) || !zs_svg_read_number(&cursor, &c) || !zs_svg_read_number(&cursor, &d)) break;
-                CGFloat px = (toupper((unsigned char)previous) == 'C' || toupper((unsigned char)previous) == 'S') ? 2 * x - cubicX : x;
-                CGFloat py = (toupper((unsigned char)previous) == 'C' || toupper((unsigned char)previous) == 'S') ? 2 * y - cubicY : y;
-                CGPoint p2 = CGPointMake(relative ? x + a : a, relative ? y + b : b);
-                CGPoint p3 = CGPointMake(relative ? x + c : c, relative ? y + d : d);
-                CGPathAddCurveToPoint(path, NULL, px, py, p2.x, p2.y, p3.x, p3.y);
-                x = p3.x; y = p3.y; cubicX = p2.x; cubicY = p2.y; previous = command;
-            } while (zs_svg_has_number(cursor));
-        } else if (upper == 'Q') {
-            do {
-                if (!zs_svg_read_number(&cursor, &a) || !zs_svg_read_number(&cursor, &b) || !zs_svg_read_number(&cursor, &c) || !zs_svg_read_number(&cursor, &d)) break;
-                CGPoint control = CGPointMake(relative ? x + a : a, relative ? y + b : b);
-                CGPoint end = CGPointMake(relative ? x + c : c, relative ? y + d : d);
-                CGPathAddQuadCurveToPoint(path, NULL, control.x, control.y, end.x, end.y);
-                x = end.x; y = end.y; quadX = control.x; quadY = control.y; previous = command;
-            } while (zs_svg_has_number(cursor));
-        } else if (upper == 'A') {
-            do {
-                CGFloat largeValue, sweepValue;
-                if (!zs_svg_read_number(&cursor, &a) || !zs_svg_read_number(&cursor, &b) || !zs_svg_read_number(&cursor, &c) || !zs_svg_read_number(&cursor, &largeValue) || !zs_svg_read_number(&cursor, &sweepValue) || !zs_svg_read_number(&cursor, &d) || !zs_svg_read_number(&cursor, &e)) break;
-                CGPoint end = CGPointMake(relative ? x + d : d, relative ? y + e : e);
-                zs_svg_add_arc(path, CGPointMake(x, y), a, b, c, largeValue != 0, sweepValue != 0, end);
-                x = end.x; y = end.y; previous = command;
-            } while (zs_svg_has_number(cursor));
-        } else {
-            command = 0;
-        }
-    }
-    UIBezierPath *result = [UIBezierPath bezierPathWithCGPath:path];
-    CGPathRelease(path);
-    return result;
-}
-
-static CGAffineTransform zs_svg_transform(NSString *text) {
-    if (!text.length) return CGAffineTransformIdentity;
-    static NSRegularExpression *expression;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ expression = [NSRegularExpression regularExpressionWithPattern:@"([A-Za-z]+)\\s*\\(([^)]*)\\)" options:0 error:nil]; });
-    CGAffineTransform result = CGAffineTransformIdentity;
-    for (NSTextCheckingResult *match in [expression matchesInString:text options:0 range:NSMakeRange(0, text.length)]) {
-        NSString *name = [[text substringWithRange:[match rangeAtIndex:1]] lowercaseString];
-        NSString *body = [text substringWithRange:[match rangeAtIndex:2]];
-        NSMutableArray<NSNumber *> *values = [NSMutableArray array];
-        const char *cursor = body.UTF8String;
-        CGFloat value = 0;
-        while (zs_svg_read_number(&cursor, &value)) [values addObject:@(value)];
-        CGAffineTransform next = CGAffineTransformIdentity;
-        if ([name isEqualToString:@"matrix"] && values.count >= 6) {
-            next = CGAffineTransformMake(values[0].doubleValue, values[1].doubleValue, values[2].doubleValue, values[3].doubleValue, values[4].doubleValue, values[5].doubleValue);
-        } else if ([name isEqualToString:@"translate"] && values.count >= 1) {
-            next = CGAffineTransformMakeTranslation(values[0].doubleValue, values.count > 1 ? values[1].doubleValue : 0);
-        } else if ([name isEqualToString:@"scale"] && values.count >= 1) {
-            next = CGAffineTransformMakeScale(values[0].doubleValue, values.count > 1 ? values[1].doubleValue : values[0].doubleValue);
-        } else if ([name isEqualToString:@"rotate"] && values.count >= 1) {
-            CGFloat angle = values[0].doubleValue * (CGFloat)M_PI / 180.0;
-            next = CGAffineTransformMakeRotation(angle);
-            if (values.count >= 3) next = CGAffineTransformConcat(CGAffineTransformConcat(CGAffineTransformMakeTranslation(-values[1].doubleValue, -values[2].doubleValue), next), CGAffineTransformMakeTranslation(values[1].doubleValue, values[2].doubleValue));
-        } else if ([name isEqualToString:@"skewx"] && values.count >= 1) {
-            next.c = tan(values[0].doubleValue * (CGFloat)M_PI / 180.0);
-        } else if ([name isEqualToString:@"skewy"] && values.count >= 1) {
-            next.b = tan(values[0].doubleValue * (CGFloat)M_PI / 180.0);
-        }
-        result = CGAffineTransformConcat(next, result);
-    }
-    return result;
-}
-
-static UIBezierPath *zs_svg_geometry(NSString *tag, NSDictionary<NSString *, NSString *> *attributes) {
-    if ([tag isEqualToString:@"path"]) return zs_svg_path_from_data(attributes[@"d"]);
-    CGFloat x = zs_svg_number(attributes[@"x"], 0);
-    CGFloat y = zs_svg_number(attributes[@"y"], 0);
-    CGFloat width = zs_svg_number(attributes[@"width"], 0);
-    CGFloat height = zs_svg_number(attributes[@"height"], 0);
-    if ([tag isEqualToString:@"rect"] && width > 0 && height > 0) {
-        CGFloat rx = zs_svg_number(attributes[@"rx"], zs_svg_number(attributes[@"ry"], 0));
-        CGFloat ry = zs_svg_number(attributes[@"ry"], rx);
-        rx = MIN(fabs(rx), width / 2); ry = MIN(fabs(ry), height / 2);
-        if (rx > 0 || ry > 0) return [UIBezierPath bezierPathWithRoundedRect:CGRectMake(x, y, width, height) cornerRadius:MAX(rx, ry)];
-        return [UIBezierPath bezierPathWithRect:CGRectMake(x, y, width, height)];
-    }
-    if ([tag isEqualToString:@"circle"] || [tag isEqualToString:@"ellipse"]) {
-        CGFloat cx = zs_svg_number(attributes[@"cx"], 0), cy = zs_svg_number(attributes[@"cy"], 0);
-        CGFloat rx = [tag isEqualToString:@"circle"] ? zs_svg_number(attributes[@"r"], 0) : zs_svg_number(attributes[@"rx"], 0);
-        CGFloat ry = [tag isEqualToString:@"circle"] ? rx : zs_svg_number(attributes[@"ry"], 0);
-        if (rx > 0 && ry > 0) return [UIBezierPath bezierPathWithOvalInRect:CGRectMake(cx - rx, cy - ry, rx * 2, ry * 2)];
-    }
-    if ([tag isEqualToString:@"line"]) {
-        UIBezierPath *path = [UIBezierPath bezierPath];
-        [path moveToPoint:CGPointMake(zs_svg_number(attributes[@"x1"], 0), zs_svg_number(attributes[@"y1"], 0))];
-        [path addLineToPoint:CGPointMake(zs_svg_number(attributes[@"x2"], 0), zs_svg_number(attributes[@"y2"], 0))];
-        return path;
-    }
-    if ([tag isEqualToString:@"polyline"] || [tag isEqualToString:@"polygon"]) {
-        NSString *points = attributes[@"points"];
-        const char *cursor = points.UTF8String;
-        if (!cursor) return nil;
-        UIBezierPath *path = [UIBezierPath bezierPath];
-        CGFloat px, py;
-        BOOL first = YES;
-        while (zs_svg_read_number(&cursor, &px) && zs_svg_read_number(&cursor, &py)) {
-            if (first) { [path moveToPoint:CGPointMake(px, py)]; first = NO; }
-            else [path addLineToPoint:CGPointMake(px, py)];
-        }
-        if (!first && [tag isEqualToString:@"polygon"]) [path closePath];
-        return first ? nil : path;
-    }
-    return nil;
-}
-
-static NSString *zs_svg_url_identifier(NSString *value) {
-    if (![value isKindOfClass:NSString.class]) return nil;
-    static NSRegularExpression *expression;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ expression = [NSRegularExpression regularExpressionWithPattern:@"url\\(\\s*['\"]?#([^)'\"]+)['\"]?\\s*\\)" options:NSRegularExpressionCaseInsensitive error:nil]; });
-    NSTextCheckingResult *match = [expression firstMatchInString:value options:0 range:NSMakeRange(0, value.length)];
-    return match ? [value substringWithRange:[match rangeAtIndex:1]] : nil;
-}
-
-static CFTimeInterval zs_svg_duration(NSString *value) {
-    NSString *text = zs_svg_trim(value ?: @"").lowercaseString;
-    if ([text hasSuffix:@"ms"]) return MAX(0, [text substringToIndex:text.length - 2].doubleValue / 1000.0);
-    if ([text hasSuffix:@"min"]) return MAX(0, [text substringToIndex:text.length - 3].doubleValue * 60.0);
-    if ([text hasSuffix:@"h"]) return MAX(0, [text substringToIndex:text.length - 1].doubleValue * 3600.0);
-    if ([text hasSuffix:@"s"]) return MAX(0, [text substringToIndex:text.length - 1].doubleValue);
-    return MAX(0, text.doubleValue);
-}
-
-static UIBezierPath *zs_svg_text_path(NSString *source, NSDictionary<NSString *, NSString *> *attributes, NSDictionary<NSString *, NSString *> *styles) {
-    if (!source.length) return nil;
-    NSMutableString *text = [source mutableCopy];
-    NSRegularExpression *whitespace = [NSRegularExpression regularExpressionWithPattern:@"[\\t\\r\\n ]+" options:0 error:nil];
-    [whitespace replaceMatchesInString:text options:0 range:NSMakeRange(0, text.length) withTemplate:@" "];
-    text = [zs_svg_trim(text) mutableCopy];
-    if (!text.length) return nil;
-    NSString *family = styles[@"font-family"] ?: attributes[@"font-family"] ?: @"Helvetica";
-    family = [[[[family componentsSeparatedByString:@","] firstObject] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"'\""]];
-    CGFloat fontSize = MAX(1, zs_svg_number(styles[@"font-size"] ?: attributes[@"font-size"], 16));
-    CTFontRef font = CTFontCreateWithName((__bridge CFStringRef)(family.length ? family : @"Helvetica"), fontSize, NULL);
-    NSString *weight = [styles[@"font-weight"] lowercaseString] ?: @"normal";
-    NSString *fontStyle = [styles[@"font-style"] lowercaseString] ?: @"normal";
-    CTFontSymbolicTraits traits = 0;
-    if ([weight isEqualToString:@"bold"] || [weight isEqualToString:@"bolder"] || weight.doubleValue >= 600) traits |= kCTFontBoldTrait;
-    if ([fontStyle isEqualToString:@"italic"] || [fontStyle isEqualToString:@"oblique"]) traits |= kCTFontItalicTrait;
-    if (traits) {
-        CTFontRef styled = CTFontCreateCopyWithSymbolicTraits(font, fontSize, NULL, traits, traits);
-        if (styled) { CFRelease(font); font = styled; }
-    }
-    NSMutableDictionary *textAttributes = [NSMutableDictionary dictionaryWithObject:(__bridge id)font forKey:(__bridge id)kCTFontAttributeName];
-    CGFloat tracking = zs_svg_number(styles[@"letter-spacing"], 0);
-    if (tracking != 0) textAttributes[(__bridge id)kCTKernAttributeName] = @(tracking);
-    NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:text attributes:textAttributes];
-    CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)attributed);
-    double lineWidth = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-    CGFloat x = zs_svg_number(attributes[@"x"], 0);
-    CGFloat y = zs_svg_number(attributes[@"y"], 0);
-    NSString *anchor = [styles[@"text-anchor"] lowercaseString] ?: @"start";
-    if ([anchor isEqualToString:@"middle"]) x -= lineWidth / 2.0;
-    else if ([anchor isEqualToString:@"end"]) x -= lineWidth;
-    CGMutablePathRef path = CGPathCreateMutable();
-    CFArrayRef runs = CTLineGetGlyphRuns(line);
-    for (CFIndex runIndex = 0; runIndex < CFArrayGetCount(runs); runIndex++) {
-        CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, runIndex);
-        NSDictionary *runAttributes = (__bridge NSDictionary *)CTRunGetAttributes(run);
-        CTFontRef runFont = (__bridge CTFontRef)runAttributes[(__bridge id)kCTFontAttributeName];
-        if (!runFont) runFont = font;
-        CFIndex glyphCount = CTRunGetGlyphCount(run);
-        if (glyphCount <= 0) continue;
-        CGGlyph *glyphs = calloc((size_t)glyphCount, sizeof(CGGlyph));
-        CGPoint *positions = calloc((size_t)glyphCount, sizeof(CGPoint));
-        if (!glyphs || !positions) { free(glyphs); free(positions); continue; }
-        CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), glyphs);
-        CTRunGetPositions(run, CFRangeMake(0, glyphCount), positions);
-        for (CFIndex glyphIndex = 0; glyphIndex < glyphCount; glyphIndex++) {
-            CGPathRef glyphPath = CTFontCreatePathForGlyph(runFont, glyphs[glyphIndex], NULL);
-            if (!glyphPath) continue;
-            CGAffineTransform transform = CGAffineTransformMake(1, 0, 0, -1, x + positions[glyphIndex].x, y - positions[glyphIndex].y);
-            CGPathAddPath(path, &transform, glyphPath);
-            CGPathRelease(glyphPath);
-        }
-        free(glyphs);
-        free(positions);
-    }
-    CFRelease(line);
-    CFRelease(font);
-    UIBezierPath *result = [UIBezierPath bezierPathWithCGPath:path];
-    CGPathRelease(path);
-    return result;
-}
-
-typedef struct {
-    float m11, m12, m13, m14, m15;
-    float m21, m22, m23, m24, m25;
-    float m31, m32, m33, m34, m35;
-    float m41, m42, m43, m44, m45;
-} ZSSVGColorMatrix;
-
-@interface ZSLogoSVGElement : NSObject
-@property (nonatomic, copy) NSString *tag;
-@property (nonatomic, copy) NSDictionary<NSString *, NSString *> *attributes;
-@property (nonatomic, strong) NSMutableArray<ZSLogoSVGElement *> *children;
-@property (nonatomic, strong) NSMutableString *text;
-@property (nonatomic, strong, nullable) UIBezierPath *path;
-@end
-
-@implementation ZSLogoSVGElement
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _tag = @"";
-        _attributes = @{};
-        _children = [NSMutableArray array];
-        _text = [NSMutableString string];
-    }
-    return self;
-}
+- (void)zs_advanceBy:(NSTimeInterval)delta;
 @end
 
 @interface ZSLogoSVG : NSObject
+@property (nonatomic, copy) NSString *html;
 @property (nonatomic, assign) CGSize size;
-@property (nonatomic, assign) CGRect viewBox;
-@property (nonatomic, copy) NSString *preserveAspectRatio;
-@property (nonatomic, strong) ZSLogoSVGElement *root;
-@property (nonatomic, copy) NSDictionary<NSString *, ZSLogoSVGElement *> *elements;
-@property (nonatomic, copy) NSArray<NSDictionary *> *cssRules;
 @end
 
 @implementation ZSLogoSVG
 @end
 
-@interface ZSLogoSVGParser : NSObject <NSXMLParserDelegate>
-@property (nonatomic, strong, nullable) ZSLogoSVGElement *root;
-@property (nonatomic, strong) NSMutableArray<ZSLogoSVGElement *> *stack;
-@property (nonatomic, strong) NSMutableDictionary<NSString *, ZSLogoSVGElement *> *elements;
+@interface ZSLogoSVGRootReader : NSObject <NSXMLParserDelegate>
+@property (nonatomic, copy, nullable) NSDictionary<NSString *, NSString *> *attributes;
 @end
 
-@implementation ZSLogoSVGParser
-- (instancetype)init {
-    self = [super init];
-    if (self) {
-        _stack = [NSMutableArray array];
-        _elements = [NSMutableDictionary dictionary];
-    }
-    return self;
-}
-
-- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *,NSString *> *)attributeDict {
-    NSString *tag = [[(qName.length ? qName : elementName) componentsSeparatedByString:@":"] lastObject].lowercaseString;
-    NSMutableDictionary<NSString *, NSString *> *attributes = [attributeDict mutableCopy] ?: [NSMutableDictionary dictionary];
-    if (!attributes[@"href"] && attributes[@"xlink:href"]) attributes[@"href"] = attributes[@"xlink:href"];
-    ZSLogoSVGElement *element = [[ZSLogoSVGElement alloc] init];
-    element.tag = tag;
-    element.attributes = attributes;
-    static NSSet<NSString *> *drawable;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ drawable = [NSSet setWithArray:@[@"path", @"rect", @"circle", @"ellipse", @"line", @"polyline", @"polygon"]]; });
-    if ([drawable containsObject:tag]) element.path = zs_svg_geometry(tag, attributes);
-    NSString *identifier = attributes[@"id"];
-    if (identifier.length && !self.elements[identifier]) self.elements[identifier] = element;
-    ZSLogoSVGElement *parent = self.stack.lastObject;
-    if (parent) [parent.children addObject:element];
-    else if (!self.root) self.root = element;
-    [self.stack addObject:element];
-}
-
-- (void)parser:(NSXMLParser *)parser foundCharacters:(NSString *)string {
-    ZSLogoSVGElement *element = self.stack.lastObject;
-    if (!element || !string.length) return;
-    if ([element.tag isEqualToString:@"text"] || [element.tag isEqualToString:@"tspan"]) [element.text appendString:string];
-}
-
-- (void)parser:(NSXMLParser *)parser didEndElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName {
-    if (self.stack.count) [self.stack removeLastObject];
+@implementation ZSLogoSVGRootReader
+- (void)parser:(NSXMLParser *)parser didStartElement:(NSString *)elementName namespaceURI:(NSString *)namespaceURI qualifiedName:(NSString *)qName attributes:(NSDictionary<NSString *, NSString *> *)attributeDict {
+    if ([elementName isEqualToString:@"svg"]) self.attributes = attributeDict ?: @{};
+    [parser abortParsing];
 }
 @end
 
-static void zs_svg_append_text(ZSLogoSVGElement *element, NSMutableString *buffer) {
-    [buffer appendString:element.text];
-    for (ZSLogoSVGElement *child in element.children) zs_svg_append_text(child, buffer);
+static CGFloat zs_logo_svg_length(NSString *value) {
+    if (![value isKindOfClass:[NSString class]] || value.length == 0 || [value containsString:@"%"]) return 0;
+    double number = value.doubleValue;
+    return (isfinite(number) && number > 0) ? (CGFloat)number : 0;
 }
 
-static NSDictionary<NSString *, NSString *> *zs_svg_resolve_styles(NSString *tag, NSDictionary<NSString *, NSString *> *attributes, NSDictionary<NSString *, NSString *> *parent, NSArray<NSDictionary *> *rules) {
-    NSMutableDictionary<NSString *, NSString *> *styles = [parent mutableCopy] ?: [NSMutableDictionary dictionary];
-    for (NSString *key in @[@"opacity", @"clip-path", @"mask", @"filter", @"display"]) [styles removeObjectForKey:key];
-    for (NSString *key in @[@"fill", @"stroke", @"color", @"fill-rule", @"clip-rule", @"fill-opacity", @"stroke-opacity", @"stroke-width", @"stroke-linecap", @"stroke-linejoin", @"stroke-miterlimit", @"stroke-dasharray", @"stroke-dashoffset", @"visibility", @"display", @"opacity", @"clip-path", @"mask", @"filter", @"stop-color", @"stop-opacity", @"font-family", @"font-size", @"font-weight", @"font-style", @"text-anchor", @"letter-spacing", @"dominant-baseline", @"baseline-shift"]) {
-        if (attributes[key]) styles[key] = attributes[key];
-    }
-    for (NSDictionary *rule in rules) {
-        if (zs_svg_selector_matches(rule[@"selector"], tag, attributes)) [styles addEntriesFromDictionary:rule[@"declarations"]];
-    }
-    [styles addEntriesFromDictionary:zs_svg_parse_declarations(attributes[@"style"] ?: @"")];
-    if (!styles[@"fill"] && ![tag isEqualToString:@"stop"]) styles[@"fill"] = @"#000000";
-    if (!styles[@"stroke"]) styles[@"stroke"] = @"none";
-    if (!styles[@"color"]) styles[@"color"] = @"#000000";
-    return styles;
-}
-
-static CFTimeInterval zs_svg_begin(NSString *value) {
-    NSString *text = zs_svg_trim([[(value ?: @"") componentsSeparatedByString:@";"] firstObject] ?: @"");
-    if (!text.length) return 0;
-    BOOL negative = [text hasPrefix:@"-"];
-    NSString *magnitude = (negative || [text hasPrefix:@"+"]) ? [text substringFromIndex:1] : text;
-    if (!magnitude.length) return 0;
-    unichar first = [magnitude characterAtIndex:0];
-    if (!(first >= '0' && first <= '9') && first != '.') return 0;
-    CFTimeInterval seconds = zs_svg_duration(magnitude);
-    return negative ? -seconds : seconds;
-}
-
-static CGAffineTransform zs_svg_animated_transform(NSString *type, NSString *value) {
-    const char *cursor = value.UTF8String;
-    CGFloat numbers[6] = {0, 0, 0, 0, 0, 0};
-    NSUInteger count = 0;
-    while (cursor && count < 6 && zs_svg_read_number(&cursor, &numbers[count])) count++;
-    if ([type isEqualToString:@"translate"]) return CGAffineTransformMakeTranslation(numbers[0], count > 1 ? numbers[1] : 0);
-    if ([type isEqualToString:@"scale"]) return CGAffineTransformMakeScale(numbers[0], count > 1 ? numbers[1] : numbers[0]);
-    if ([type isEqualToString:@"rotate"]) {
-        CGAffineTransform rotation = CGAffineTransformMakeRotation(numbers[0] * (CGFloat)M_PI / 180.0);
-        if (count >= 3) {
-            rotation = CGAffineTransformConcat(CGAffineTransformConcat(CGAffineTransformMakeTranslation(-numbers[1], -numbers[2]), rotation), CGAffineTransformMakeTranslation(numbers[1], numbers[2]));
-        }
-        return rotation;
-    }
-    CGAffineTransform transform = CGAffineTransformIdentity;
-    if ([type isEqualToString:@"skewx"]) transform.c = tan(numbers[0] * (CGFloat)M_PI / 180.0);
-    else if ([type isEqualToString:@"skewy"]) transform.b = tan(numbers[0] * (CGFloat)M_PI / 180.0);
-    else if ([type isEqualToString:@"matrix"] && count >= 6) transform = CGAffineTransformMake(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]);
-    return transform;
-}
-
-static id zs_svg_make_native_filter(NSString *type) {
-    Class filterClass = NSClassFromString(@"CAFilter");
-    SEL selector = NSSelectorFromString(@"filterWithType:");
-    if (!filterClass || ![filterClass respondsToSelector:selector]) return nil;
-    return ((id (*)(id, SEL, NSString *))objc_msgSend)(filterClass, selector, type);
-}
-
-@interface ZSLogoSVGBuilder : NSObject
-- (instancetype)initWithSVG:(ZSLogoSVG *)svg;
-- (nullable CALayer *)buildRoot;
-@end
-
-@implementation ZSLogoSVGBuilder {
-    ZSLogoSVG *_svg;
-    CGRect _extent;
-}
-
-- (instancetype)initWithSVG:(ZSLogoSVG *)svg {
-    self = [super init];
-    if (self) {
-        _svg = svg;
-        _extent = CGRectMake(svg.viewBox.origin.x, svg.viewBox.origin.y, MAX(1, svg.viewBox.size.width), MAX(1, svg.viewBox.size.height));
-    }
-    return self;
-}
-
-- (nullable CALayer *)buildRoot {
-    return [self zs_layerForElement:_svg.root parentStyles:@{} depth:0];
-}
-
-- (CALayer *)zs_container {
-    CALayer *layer = [CALayer layer];
-    layer.anchorPoint = CGPointMake(-_extent.origin.x / _extent.size.width, -_extent.origin.y / _extent.size.height);
-    layer.bounds = _extent;
-    layer.position = CGPointZero;
-    return layer;
-}
-
-- (void)zs_configureShape:(CAShapeLayer *)layer {
-    layer.anchorPoint = CGPointZero;
-    layer.bounds = CGRectMake(0, 0, _extent.size.width, _extent.size.height);
-    layer.position = CGPointZero;
-}
-
-- (nullable ZSLogoSVGElement *)zs_target:(NSString *)reference {
-    NSString *identifier = zs_svg_trim(reference ?: @"");
-    if ([identifier hasPrefix:@"#"]) identifier = [identifier substringFromIndex:1];
-    return identifier.length ? _svg.elements[identifier] : nil;
-}
-
-- (nullable CALayer *)zs_layerForElement:(ZSLogoSVGElement *)element parentStyles:(NSDictionary<NSString *, NSString *> *)parentStyles depth:(NSUInteger)depth {
-    if (!element || depth > 32) return nil;
-    static NSSet<NSString *> *skipped, *containers, *shapes, *animations;
+static NSString *zs_logo_svg_strip_noise(NSString *markup) {
+    static NSArray<NSRegularExpression *> *expressions;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        skipped = [NSSet setWithArray:@[@"defs", @"symbol", @"clippath", @"mask", @"lineargradient", @"radialgradient", @"filter", @"title", @"desc", @"metadata", @"style", @"stop", @"pattern", @"marker"]];
-        containers = [NSSet setWithArray:@[@"g", @"svg", @"a", @"switch"]];
-        shapes = [NSSet setWithArray:@[@"path", @"rect", @"circle", @"ellipse", @"line", @"polyline", @"polygon", @"text"]];
-        animations = [NSSet setWithArray:@[@"animate", @"animatetransform", @"animatecolor"]];
+        NSRegularExpressionOptions options = NSRegularExpressionDotMatchesLineSeparators;
+        expressions = @[
+            [NSRegularExpression regularExpressionWithPattern:@"<!--.*?-->" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<metadata\\b.*?</metadata>" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<sodipodi:namedview\\b[^>]*?/>" options:options error:nil],
+            [NSRegularExpression regularExpressionWithPattern:@"<sodipodi:namedview\\b.*?</sodipodi:namedview>" options:options error:nil],
+        ];
     });
-    NSString *tag = element.tag;
-    if ([skipped containsObject:tag]) return nil;
-    NSDictionary<NSString *, NSString *> *attributes = element.attributes;
-    NSDictionary<NSString *, NSString *> *styles = zs_svg_resolve_styles(tag, attributes, parentStyles, _svg.cssRules);
-    if ([[styles[@"display"] lowercaseString] isEqualToString:@"none"]) return nil;
-    CGAffineTransform local = zs_svg_transform(attributes[@"transform"]);
-    CALayer *layer = nil;
-    if ([tag isEqualToString:@"use"]) {
-        ZSLogoSVGElement *target = [self zs_target:attributes[@"href"]];
-        if (!target) return nil;
-        CGFloat x = zs_svg_number(attributes[@"x"], 0), y = zs_svg_number(attributes[@"y"], 0);
-        if (x != 0 || y != 0) local = CGAffineTransformConcat(CGAffineTransformMakeTranslation(x, y), local);
-        CALayer *child = [self zs_layerForElement:target parentStyles:styles depth:depth + 1];
-        if (!child) return nil;
-        layer = [self zs_container];
-        [layer addSublayer:child];
-    } else if ([containers containsObject:tag]) {
-        layer = [self zs_container];
-        for (ZSLogoSVGElement *child in element.children) {
-            CALayer *sublayer = [self zs_layerForElement:child parentStyles:styles depth:depth + 1];
-            if (sublayer) [layer addSublayer:sublayer];
-        }
-    } else if ([shapes containsObject:tag]) {
-        if ([[styles[@"visibility"] lowercaseString] isEqualToString:@"hidden"]) return nil;
-        layer = [self zs_shapeLayerForElement:element styles:styles];
-    }
-    if (!layer) return nil;
-
-    layer.transform = CATransform3DMakeAffineTransform(local);
-    layer.opacity = (float)MIN(1, MAX(0, zs_svg_fraction(styles[@"opacity"] ?: @"1", 1)));
-
-    NSString *filterID = zs_svg_url_identifier(styles[@"filter"]);
-    if (filterID) [self zs_applyFilter:filterID toLayer:layer];
-    NSString *maskID = zs_svg_url_identifier(styles[@"mask"]);
-    if (maskID) {
-        CALayer *mask = [self zs_maskLayer:maskID depth:depth + 1];
-        if (mask) layer.mask = mask;
-    }
-    NSString *clipID = zs_svg_url_identifier(styles[@"clip-path"]);
-    if (clipID && !layer.mask) {
-        CALayer *clip = [self zs_clipLayer:clipID];
-        if (clip) layer.mask = clip;
-    }
-
-    NSUInteger index = 0;
-    for (ZSLogoSVGElement *child in element.children) {
-        if (![animations containsObject:child.tag]) continue;
-        CAAnimation *animation = [self zs_animationForElement:child layer:layer base:local];
-        if (animation) [layer addAnimation:animation forKey:[NSString stringWithFormat:@"zs.svg.%lu", (unsigned long)index++]];
-    }
-    return layer;
-}
-
-- (void)zs_applyFilter:(NSString *)identifier toLayer:(CALayer *)layer {
-    ZSLogoSVGElement *filter = _svg.elements[identifier];
-    if (!filter || ![filter.tag isEqualToString:@"filter"]) return;
-    NSMutableArray *filters = [NSMutableArray array];
-    for (ZSLogoSVGElement *primitive in filter.children) {
-        id native = nil;
-        if ([primitive.tag isEqualToString:@"fegaussianblur"]) {
-            CGFloat sigma = zs_svg_number(primitive.attributes[@"stdDeviation"], 0);
-            if (sigma <= 0) continue;
-            native = zs_svg_make_native_filter(@"gaussianBlur");
-            [native setValue:@(sigma) forKey:@"inputRadius"];
-        } else if ([primitive.tag isEqualToString:@"fecolormatrix"]) {
-            NSString *type = [primitive.attributes[@"type"] lowercaseString] ?: @"matrix";
-            if (![type isEqualToString:@"matrix"]) continue;
-            const char *cursor = primitive.attributes[@"values"].UTF8String;
-            ZSSVGColorMatrix matrix;
-            float *slots = (float *)&matrix;
-            NSUInteger count = 0;
-            CGFloat value = 0;
-            while (cursor && count < 20 && zs_svg_read_number(&cursor, &value)) slots[count++] = (float)value;
-            if (count != 20) continue;
-            native = zs_svg_make_native_filter(@"colorMatrix");
-            [native setValue:[NSValue valueWithBytes:&matrix objCType:@encode(ZSSVGColorMatrix)] forKey:@"inputColorMatrix"];
-        }
-        if (native) [filters addObject:native];
-    }
-    if (filters.count) layer.filters = filters;
-}
-
-- (nullable CALayer *)zs_maskLayer:(NSString *)identifier depth:(NSUInteger)depth {
-    ZSLogoSVGElement *mask = _svg.elements[identifier];
-    if (!mask || ![mask.tag isEqualToString:@"mask"]) return nil;
-    CALayer *container = [self zs_container];
-    for (ZSLogoSVGElement *child in mask.children) {
-        CALayer *sublayer = [self zs_layerForElement:child parentStyles:@{} depth:depth + 1];
-        if (sublayer) [container addSublayer:sublayer];
-    }
-    return container.sublayers.count ? container : nil;
-}
-
-- (nullable CALayer *)zs_clipLayer:(NSString *)identifier {
-    ZSLogoSVGElement *clip = _svg.elements[identifier];
-    if (!clip || ![clip.tag isEqualToString:@"clippath"]) return nil;
-    CGMutablePathRef combined = CGPathCreateMutable();
-    BOOL evenOdd = NO;
-    for (ZSLogoSVGElement *child in clip.children) {
-        if (!child.path) continue;
-        CGAffineTransform transform = zs_svg_transform(child.attributes[@"transform"]);
-        CGPathAddPath(combined, &transform, child.path.CGPath);
-        if ([[child.attributes[@"clip-rule"] lowercaseString] isEqualToString:@"evenodd"]) evenOdd = YES;
-    }
-    if (CGPathIsEmpty(combined)) {
-        CGPathRelease(combined);
-        return nil;
-    }
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    [self zs_configureShape:mask];
-    mask.path = combined;
-    mask.fillColor = UIColor.whiteColor.CGColor;
-    mask.fillRule = evenOdd ? kCAFillRuleEvenOdd : kCAFillRuleNonZero;
-    CGPathRelease(combined);
-    return mask;
-}
-
-- (CAShapeLayer *)zs_solidWithPath:(CGPathRef)path styles:(NSDictionary<NSString *, NSString *> *)styles fill:(nullable UIColor *)fill stroke:(nullable UIColor *)stroke {
-    CAShapeLayer *solid = [CAShapeLayer layer];
-    [self zs_configureShape:solid];
-    solid.path = path;
-    solid.fillRule = [[styles[@"fill-rule"] lowercaseString] isEqualToString:@"evenodd"] ? kCAFillRuleEvenOdd : kCAFillRuleNonZero;
-    solid.lineWidth = MAX(0, zs_svg_number(styles[@"stroke-width"], 1));
-    solid.miterLimit = MAX(1, zs_svg_number(styles[@"stroke-miterlimit"], 4));
-    NSString *cap = [styles[@"stroke-linecap"] lowercaseString];
-    solid.lineCap = [cap isEqualToString:@"round"] ? kCALineCapRound : ([cap isEqualToString:@"square"] ? kCALineCapSquare : kCALineCapButt);
-    NSString *join = [styles[@"stroke-linejoin"] lowercaseString];
-    solid.lineJoin = [join isEqualToString:@"round"] ? kCALineJoinRound : ([join isEqualToString:@"bevel"] ? kCALineJoinBevel : kCALineJoinMiter);
-    NSString *dashText = styles[@"stroke-dasharray"];
-    if (dashText.length && ![dashText isEqualToString:@"none"]) {
-        NSMutableArray<NSNumber *> *dash = [NSMutableArray array];
-        const char *cursor = dashText.UTF8String;
-        CGFloat dashValue = 0;
-        while (zs_svg_read_number(&cursor, &dashValue)) [dash addObject:@(MAX(0, dashValue))];
-        if (dash.count) solid.lineDashPattern = dash;
-    }
-    solid.lineDashPhase = zs_svg_number(styles[@"stroke-dashoffset"], 0);
-    solid.fillColor = fill.CGColor;
-    solid.strokeColor = stroke.CGColor;
-    return solid;
-}
-
-- (nullable CALayer *)zs_shapeLayerForElement:(ZSLogoSVGElement *)element styles:(NSDictionary<NSString *, NSString *> *)styles {
-    UIBezierPath *path = element.path;
-    if ([element.tag isEqualToString:@"text"]) {
-        NSMutableString *buffer = [NSMutableString string];
-        zs_svg_append_text(element, buffer);
-        path = zs_svg_text_path(buffer, element.attributes, styles);
-    }
-    if (!path || CGPathIsEmpty(path.CGPath)) return nil;
-    UIColor *current = zs_svg_color(styles[@"color"], UIColor.blackColor) ?: UIColor.blackColor;
-    NSString *fill = styles[@"fill"] ?: @"black";
-    NSString *stroke = styles[@"stroke"] ?: @"none";
-    NSString *fillGradientID = zs_svg_url_identifier(fill);
-    NSString *strokeGradientID = zs_svg_url_identifier(stroke);
-    CGFloat fillOpacity = MIN(1, MAX(0, zs_svg_fraction(styles[@"fill-opacity"] ?: @"1", 1)));
-    CGFloat strokeOpacity = MIN(1, MAX(0, zs_svg_fraction(styles[@"stroke-opacity"] ?: @"1", 1)));
-    CGFloat strokeWidth = MAX(0, zs_svg_number(styles[@"stroke-width"], 1));
-    UIColor *fillColor = fillGradientID ? nil : zs_svg_color_alpha(zs_svg_color(fill, current), fillOpacity);
-    UIColor *strokeColor = (strokeGradientID || strokeWidth <= 0) ? nil : zs_svg_color_alpha(zs_svg_color(stroke, current), strokeOpacity);
-    CGPathRef cgPath = path.CGPath;
-    if (!fillGradientID && !strokeGradientID) {
-        if (!fillColor && !strokeColor) return nil;
-        return [self zs_solidWithPath:cgPath styles:styles fill:fillColor stroke:strokeColor];
-    }
-    CALayer *group = [self zs_container];
-    NSString *rule = [[styles[@"fill-rule"] lowercaseString] isEqualToString:@"evenodd"] ? @"evenodd" : @"nonzero";
-    if (fillGradientID) {
-        CAGradientLayer *gradient = [self zs_gradientLayerForID:fillGradientID path:cgPath stroke:NO lineWidth:strokeWidth fillRule:rule opacity:fillOpacity];
-        if (gradient) [group addSublayer:gradient];
-    } else if (fillColor) {
-        [group addSublayer:[self zs_solidWithPath:cgPath styles:styles fill:fillColor stroke:nil]];
-    }
-    if (strokeGradientID && strokeWidth > 0) {
-        CAGradientLayer *gradient = [self zs_gradientLayerForID:strokeGradientID path:cgPath stroke:YES lineWidth:strokeWidth fillRule:rule opacity:strokeOpacity];
-        if (gradient) [group addSublayer:gradient];
-    } else if (strokeColor) {
-        [group addSublayer:[self zs_solidWithPath:cgPath styles:styles fill:nil stroke:strokeColor]];
-    }
-    return group.sublayers.count ? group : nil;
-}
-
-- (nullable CAGradientLayer *)zs_gradientLayerForID:(NSString *)identifier path:(CGPathRef)path stroke:(BOOL)stroke lineWidth:(CGFloat)lineWidth fillRule:(NSString *)fillRule opacity:(CGFloat)opacity {
-    ZSLogoSVGElement *element = _svg.elements[identifier];
-    if (!element || !([element.tag isEqualToString:@"lineargradient"] || [element.tag isEqualToString:@"radialgradient"])) return nil;
-    NSMutableDictionary<NSString *, NSString *> *attributes = [NSMutableDictionary dictionary];
-    NSArray<ZSLogoSVGElement *> *stops = nil;
-    ZSLogoSVGElement *cursor = element;
-    for (NSUInteger hop = 0; cursor && hop < 8; hop++) {
-        for (NSString *key in cursor.attributes) if (!attributes[key]) attributes[key] = cursor.attributes[key];
-        if (!stops.count) {
-            NSMutableArray<ZSLogoSVGElement *> *found = [NSMutableArray array];
-            for (ZSLogoSVGElement *child in cursor.children) if ([child.tag isEqualToString:@"stop"]) [found addObject:child];
-            stops = found;
-        }
-        cursor = [self zs_target:cursor.attributes[@"href"]];
-    }
-    if (!stops.count) return nil;
-
-    NSMutableArray *colors = [NSMutableArray array];
-    NSMutableArray<NSNumber *> *locations = [NSMutableArray array];
-    CGFloat previous = 0;
-    for (ZSLogoSVGElement *stop in stops) {
-        NSDictionary<NSString *, NSString *> *stopStyles = zs_svg_resolve_styles(@"stop", stop.attributes, @{}, _svg.cssRules);
-        UIColor *color = zs_svg_color(stopStyles[@"stop-color"] ?: @"black", UIColor.blackColor) ?: UIColor.clearColor;
-        CGFloat stopOpacity = MIN(1, MAX(0, zs_svg_fraction(stopStyles[@"stop-opacity"] ?: @"1", 1)));
-        UIColor *resolved = zs_svg_color_alpha(color, stopOpacity * opacity) ?: UIColor.clearColor;
-        [colors addObject:(__bridge id)resolved.CGColor];
-        previous = MAX(previous, MIN(1, MAX(0, zs_svg_fraction(stop.attributes[@"offset"] ?: @"0", 0))));
-        [locations addObject:@(previous)];
-    }
-    if (colors.count == 1) {
-        [colors addObject:colors.firstObject];
-        locations = [@[@0, @1] mutableCopy];
-    }
-
-    CGRect bbox = CGPathGetPathBoundingBox(path);
-    if (CGRectIsNull(bbox) || CGRectIsInfinite(bbox)) return nil;
-    if (bbox.size.width <= 0) bbox.size.width = 1;
-    if (bbox.size.height <= 0) bbox.size.height = 1;
-    CGFloat extra = stroke ? lineWidth / 2.0 : 0;
-    CGRect box = CGRectInset(bbox, -extra, -extra);
-    BOOL user = [[attributes[@"gradientUnits"] lowercaseString] isEqualToString:@"userspaceonuse"];
-    CGRect viewport = _extent;
-
-    CGFloat (^position)(NSString *, CGFloat, BOOL) = ^CGFloat(NSString *value, CGFloat fallback, BOOL horizontal) {
-        NSString *text = zs_svg_trim(value ?: @"");
-        CGFloat fraction = fallback;
-        if (text.length) {
-            BOOL percent = [text hasSuffix:@"%"];
-            CGFloat number = zs_svg_number(percent ? [text substringToIndex:text.length - 1] : text, fallback);
-            if (percent) fraction = number / 100.0;
-            else if (user) return number;
-            else fraction = number;
-        }
-        if (user) return horizontal ? viewport.origin.x + fraction * viewport.size.width : viewport.origin.y + fraction * viewport.size.height;
-        return horizontal ? bbox.origin.x + fraction * bbox.size.width : bbox.origin.y + fraction * bbox.size.height;
-    };
-    CGFloat (^length)(NSString *, CGFloat, BOOL) = ^CGFloat(NSString *value, CGFloat fallback, BOOL horizontal) {
-        NSString *text = zs_svg_trim(value ?: @"");
-        CGFloat fraction = fallback;
-        if (text.length) {
-            BOOL percent = [text hasSuffix:@"%"];
-            CGFloat number = zs_svg_number(percent ? [text substringToIndex:text.length - 1] : text, fallback);
-            if (percent) fraction = number / 100.0;
-            else if (user) return number;
-            else fraction = number;
-        }
-        if (user) return fraction * (horizontal ? viewport.size.width : viewport.size.height);
-        return fraction * (horizontal ? bbox.size.width : bbox.size.height);
-    };
-    CGPoint (^unit)(CGPoint) = ^CGPoint(CGPoint point) {
-        return CGPointMake((point.x - box.origin.x) / box.size.width, (point.y - box.origin.y) / box.size.height);
-    };
-
-    CAGradientLayer *layer = [CAGradientLayer layer];
-    layer.frame = box;
-    layer.colors = colors;
-    layer.locations = locations;
-    if ([element.tag isEqualToString:@"radialgradient"]) {
-        layer.type = kCAGradientLayerRadial;
-        CGPoint center = CGPointMake(position(attributes[@"cx"], 0.5, YES), position(attributes[@"cy"], 0.5, NO));
-        CGFloat rx = length(attributes[@"r"], 0.5, YES), ry = length(attributes[@"r"], 0.5, NO);
-        CGPoint start = unit(center);
-        layer.startPoint = start;
-        layer.endPoint = CGPointMake(start.x + rx / box.size.width, start.y + ry / box.size.height);
-    } else {
-        layer.type = kCAGradientLayerAxial;
-        layer.startPoint = unit(CGPointMake(position(attributes[@"x1"], 0, YES), position(attributes[@"y1"], 0, NO)));
-        layer.endPoint = unit(CGPointMake(position(attributes[@"x2"], 1, YES), position(attributes[@"y2"], 0, NO)));
-    }
-
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.bounds = CGRectMake(0, 0, box.size.width, box.size.height);
-    mask.position = CGPointMake(box.size.width / 2.0, box.size.height / 2.0);
-    CGAffineTransform shift = CGAffineTransformMakeTranslation(-box.origin.x, -box.origin.y);
-    CGPathRef localPath = CGPathCreateCopyByTransformingPath(path, &shift);
-    mask.path = localPath;
-    CGPathRelease(localPath);
-    mask.fillRule = [fillRule isEqualToString:@"evenodd"] ? kCAFillRuleEvenOdd : kCAFillRuleNonZero;
-    if (stroke) {
-        mask.fillColor = UIColor.clearColor.CGColor;
-        mask.strokeColor = UIColor.whiteColor.CGColor;
-        mask.lineWidth = lineWidth;
-    } else {
-        mask.fillColor = UIColor.whiteColor.CGColor;
-    }
-    layer.mask = mask;
-    return layer;
-}
-
-- (nullable CAAnimation *)zs_animationForElement:(ZSLogoSVGElement *)node layer:(CALayer *)layer base:(CGAffineTransform)base {
-    NSDictionary<NSString *, NSString *> *attributes = node.attributes;
-    BOOL isTransform = [node.tag isEqualToString:@"animatetransform"];
-    NSString *attribute = isTransform ? @"transform" : ([attributes[@"attributeName"] lowercaseString] ?: ([node.tag isEqualToString:@"animatecolor"] ? @"fill" : @""));
-    NSMutableArray<NSString *> *values = [NSMutableArray array];
-    if (attributes[@"values"].length) {
-        for (NSString *item in [attributes[@"values"] componentsSeparatedByString:@";"]) if (zs_svg_trim(item).length) [values addObject:zs_svg_trim(item)];
-    } else {
-        if (attributes[@"from"]) [values addObject:attributes[@"from"]];
-        if (attributes[@"to"]) [values addObject:attributes[@"to"]];
-    }
-    CFTimeInterval duration = zs_svg_duration(attributes[@"dur"] ?: @"0s");
-    if (!values.count || duration <= 0) return nil;
-
-    BOOL isShape = [layer isKindOfClass:CAShapeLayer.class];
-    NSString *keyPath = nil;
-    NSMutableArray *native = [NSMutableArray array];
-    if ([attribute isEqualToString:@"opacity"] || [attribute isEqualToString:@"fill-opacity"] || [attribute isEqualToString:@"stroke-opacity"]) {
-        keyPath = @"opacity";
-        for (NSString *value in values) [native addObject:@(zs_svg_fraction(value, 1))];
-    } else if (isShape && ([attribute isEqualToString:@"fill"] || [attribute isEqualToString:@"stroke"])) {
-        keyPath = [attribute isEqualToString:@"stroke"] ? @"strokeColor" : @"fillColor";
-        for (NSString *value in values) {
-            UIColor *color = zs_svg_color(value, UIColor.blackColor) ?: UIColor.clearColor;
-            [native addObject:(__bridge id)color.CGColor];
-        }
-    } else if (isShape && [attribute isEqualToString:@"stroke-width"]) {
-        keyPath = @"lineWidth";
-        for (NSString *value in values) [native addObject:@(MAX(0, zs_svg_number(value, 1)))];
-    } else if (isShape && [attribute isEqualToString:@"d"]) {
-        keyPath = @"path";
-        for (NSString *value in values) {
-            UIBezierPath *bezier = zs_svg_path_from_data(value);
-            if (bezier) [native addObject:(__bridge id)bezier.CGPath];
-        }
-    } else if (isTransform) {
-        keyPath = @"transform";
-        NSString *type = [attributes[@"type"] lowercaseString] ?: @"translate";
-        BOOL additive = [[attributes[@"additive"] lowercaseString] isEqualToString:@"sum"];
-        for (NSString *value in values) {
-            CGAffineTransform transform = zs_svg_animated_transform(type, value);
-            if (additive) transform = CGAffineTransformConcat(transform, base);
-            [native addObject:[NSValue valueWithCATransform3D:CATransform3DMakeAffineTransform(transform)]];
-        }
-    }
-    if (!keyPath || native.count < 1) return nil;
-    if (native.count == 1) [native addObject:native.firstObject];
-
-    CAKeyframeAnimation *result = [CAKeyframeAnimation animationWithKeyPath:keyPath];
-    result.values = native;
-    result.duration = duration;
-    result.repeatCount = [[attributes[@"repeatCount"] lowercaseString] isEqualToString:@"indefinite"] ? HUGE_VALF : (float)MAX(1, zs_svg_number(attributes[@"repeatCount"], 1));
-    CFTimeInterval begin = zs_svg_begin(attributes[@"begin"]);
-    result.beginTime = begin != 0 ? begin : 1e-6;
-    if ([[attributes[@"fill"] lowercaseString] isEqualToString:@"freeze"]) {
-        result.fillMode = kCAFillModeForwards;
-        result.removedOnCompletion = NO;
-    }
-    NSString *mode = [attributes[@"calcMode"] lowercaseString] ?: @"linear";
-    result.calculationMode = [mode isEqualToString:@"discrete"] ? kCAAnimationDiscrete : kCAAnimationLinear;
-    if (![mode isEqualToString:@"paced"]) {
-        NSMutableArray<NSNumber *> *times = [NSMutableArray array];
-        for (NSString *part in [attributes[@"keyTimes"] componentsSeparatedByString:@";"]) if (zs_svg_trim(part).length) [times addObject:@(zs_svg_number(zs_svg_trim(part), 0))];
-        if (times.count == native.count && times.firstObject.doubleValue == 0 && (times.lastObject.doubleValue == 1 || [mode isEqualToString:@"discrete"])) result.keyTimes = times;
-    }
-    if ([mode isEqualToString:@"spline"] && result.keyTimes.count == native.count) {
-        NSMutableArray<CAMediaTimingFunction *> *functions = [NSMutableArray array];
-        for (NSString *segment in [attributes[@"keySplines"] componentsSeparatedByString:@";"]) {
-            const char *cursor = zs_svg_trim(segment).UTF8String;
-            CGFloat points[4] = {0, 0, 1, 1};
-            NSUInteger count = 0;
-            while (cursor && count < 4 && zs_svg_read_number(&cursor, &points[count])) count++;
-            if (count == 4) [functions addObject:[CAMediaTimingFunction functionWithControlPoints:points[0] :points[1] :points[2] :points[3]]];
-        }
-        if (functions.count == native.count - 1) result.timingFunctions = functions;
+    NSMutableString *result = [markup mutableCopy];
+    for (NSRegularExpression *expression in expressions) {
+        [expression replaceMatchesInString:result options:0 range:NSMakeRange(0, result.length) withTemplate:@""];
     }
     return result;
 }
-@end
-
-static NSCache<NSString *, ZSLogoSVG *> *zs_logo_svg_cache(void) {
-    static NSCache<NSString *, ZSLogoSVG *> *cache;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; cache.countLimit = 8; });
-    return cache;
-}
 
 static ZSLogoSVG *zs_logo_svg_for_path(NSString *path) {
-    NSString *key = zs_logo_animation_key(path);
-    ZSLogoSVG *cached = [zs_logo_svg_cache() objectForKey:key];
-    if (cached) return cached;
     NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
     if (data.length == 0 || data.length > kZSLogoSVGMaxBytes) return nil;
-    NSString *markup = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (!markup.length || [markup rangeOfString:@"<svg" options:NSCaseInsensitiveSearch].location == NSNotFound) return nil;
-    ZSLogoSVGParser *reader = [[ZSLogoSVGParser alloc] init];
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSRange start = text ? [text rangeOfString:@"<svg"] : NSMakeRange(NSNotFound, 0);
+    if (start.location == NSNotFound) return nil;
+
+    ZSLogoSVGRootReader *reader = [[ZSLogoSVGRootReader alloc] init];
     NSXMLParser *parser = [[NSXMLParser alloc] initWithData:data];
     parser.delegate = reader;
     parser.shouldResolveExternalEntities = NO;
-    if (![parser parse] || !reader.root || reader.root.attributes.count == 0) return nil;
-    NSDictionary<NSString *, NSString *> *attributes = reader.root.attributes;
-    CGRect viewBox = CGRectZero;
-    NSString *viewBoxText = attributes[@"viewBox"];
-    if (viewBoxText.length) {
-        const char *cursor = viewBoxText.UTF8String;
-        CGFloat x, y, width, height;
-        if (zs_svg_read_number(&cursor, &x) && zs_svg_read_number(&cursor, &y) && zs_svg_read_number(&cursor, &width) && zs_svg_read_number(&cursor, &height) && width > 0 && height > 0) viewBox = CGRectMake(x, y, width, height);
+    [parser parse];
+    NSDictionary<NSString *, NSString *> *attributes = reader.attributes;
+    if (!attributes) return nil;
+
+    CGSize boxSize = CGSizeZero;
+    BOOL hasViewBox = NO;
+    NSString *viewBox = attributes[@"viewBox"];
+    if (viewBox.length > 0) {
+        NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        for (NSString *part in [viewBox componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@", \t\r\n"]]) {
+            if (part.length > 0) [parts addObject:part];
+        }
+        if (parts.count == 4) {
+            CGFloat w = (CGFloat)[parts[2] doubleValue];
+            CGFloat h = (CGFloat)[parts[3] doubleValue];
+            if (w > 0 && h > 0) {
+                boxSize = CGSizeMake(w, h);
+                hasViewBox = YES;
+            }
+        }
     }
-    CGFloat width = zs_svg_length(attributes[@"width"]), height = zs_svg_length(attributes[@"height"]);
-    if (viewBox.size.width <= 0 || viewBox.size.height <= 0) {
-        viewBox = CGRectMake(0, 0, width > 0 ? width : 1, height > 0 ? height : 1);
+
+    CGFloat width = zs_logo_svg_length(attributes[@"width"]);
+    CGFloat height = zs_logo_svg_length(attributes[@"height"]);
+    BOOL hasDimensions = width > 0 && height > 0;
+    CGSize size = hasDimensions ? CGSizeMake(width, height) : boxSize;
+    if (size.width <= 0 || size.height <= 0) size = CGSizeMake(1, 1);
+
+    NSString *markup = [text substringFromIndex:start.location];
+    if (!hasViewBox && hasDimensions) {
+        markup = [markup stringByReplacingCharactersInRange:NSMakeRange(0, 4)
+                                                 withString:[NSString stringWithFormat:@"<svg viewBox=\"0 0 %g %g\"", width, height]];
     }
-    CGSize size = (width > 0 && height > 0) ? CGSizeMake(width, height) : viewBox.size;
+    markup = zs_logo_svg_strip_noise(markup);
+
     ZSLogoSVG *svg = [[ZSLogoSVG alloc] init];
-    svg.size = CGSizeMake(MAX(1, size.width), MAX(1, size.height));
-    svg.viewBox = viewBox;
-    svg.preserveAspectRatio = attributes[@"preserveAspectRatio"] ?: @"xMidYMid meet";
-    svg.root = reader.root;
-    svg.elements = reader.elements;
-    svg.cssRules = zs_svg_css_rules(markup);
-    [zs_logo_svg_cache() setObject:svg forKey:key];
+    svg.size = size;
+    svg.html = [NSString stringWithFormat:
+        @"<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+        @"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,maximum-scale=1\">"
+        @"<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:\">"
+        @"<style>html,body{margin:0;padding:0;width:100%%;height:100%%;background:transparent;overflow:hidden}"
+        @"svg{display:block;width:100%%;height:100%%}"
+        @"</style></head><body>%@</body></html>", markup];
     return svg;
 }
 
-@interface ZSLogoSVGRenderer : NSObject
-@property (nonatomic, copy) NSString *key;
-@property (nonatomic, strong) ZSLogoSVG *svg;
-@property (nonatomic, weak, nullable) ZSLogoEffectView *owner;
-@property (nonatomic, assign, getter=isHidden) BOOL hidden;
-- (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg;
-- (void)mountInto:(UIView *)host;
-- (void)placeWithSize:(CGSize)size center:(CGPoint)center rotation:(CGFloat)radians;
-- (void)park;
-- (void)teardown;
-- (void)invalidate;
-- (void)setSpeed:(double)speed paused:(BOOL)paused;
-@end
+static NSString * const kZSLogoSVGProbeScript =
+    @"(function(){\n"
+    @"var out={periods:[],end:0,lead:0,anim:false};\n"
+    @"var svg=document.querySelector('svg');\n"
+    @"window.__zsa=[];\n"
+    @"function num(v){var m=/^\\s*([+-]?\\d*\\.?\\d+)\\s*(ms|s|min|h)?\\s*$/.exec(v||'');if(!m)return NaN;var x=parseFloat(m[1]);var u=m[2];return u==='ms'?x:(u==='min'?x*60000:(u==='h'?x*3600000:x*1000));}\n"
+    @"if(svg&&svg.getCurrentTime){\n"
+    @"var els=svg.querySelectorAll('animate,animateTransform,animateMotion,animateColor,set');\n"
+    @"for(var i=0;i<els.length;i++){\n"
+    @"var el=els[i],sd=NaN,st=0;\n"
+    @"try{sd=el.getSimpleDuration()*1000;}catch(e){}\n"
+    @"try{st=el.getStartTime()*1000;}catch(e){}\n"
+    @"if(!(sd>0)||!isFinite(sd))continue;\n"
+    @"out.anim=true;\n"
+    @"var rc=el.getAttribute('repeatCount'),rd=el.getAttribute('repeatDur');\n"
+    @"if(rc==='indefinite'||rd==='indefinite'){out.periods.push(sd);out.lead=Math.max(out.lead,st);}\n"
+    @"else{var total=sd,n=parseFloat(rc),d=num(rd);if(isFinite(n)&&n>0)total=sd*n;if(isFinite(d)&&d>0)total=d;out.end=Math.max(out.end,st+total);}\n"
+    @"}}\n"
+    @"var an=document.getAnimations?document.getAnimations():[];\n"
+    @"for(var j=0;j<an.length;j++){\n"
+    @"var a=an[j],t=null;\n"
+    @"try{t=a.effect.getComputedTiming();}catch(e){}\n"
+    @"if(!t||typeof t.duration!=='number'||!(t.duration>0))continue;\n"
+    @"window.__zsa.push(a);\n"
+    @"out.anim=true;\n"
+    @"var per=t.duration*((t.direction==='alternate'||t.direction==='alternate-reverse')?2:1);\n"
+    @"if(t.iterations===Infinity){out.periods.push(per);out.lead=Math.max(out.lead,t.delay||0);}\n"
+    @"else if(isFinite(t.endTime)){out.end=Math.max(out.end,t.endTime);}\n"
+    @"}\n"
+    @"return JSON.stringify(out);\n"
+    @"})()";
 
-@implementation ZSLogoSVGRenderer {
-    BOOL _hidden;
-    CALayer *_rootLayer;
-    CALayer *_artworkLayer;
-    BOOL _clockPaused;
-    BOOL _hasSavedTime;
-    CFTimeInterval _savedTime;
-    double _speed;
-    BOOL _paused;
-    BOOL _appliedPaused;
-    double _appliedSpeed;
+static NSString * const kZSLogoSVGSeekScript =
+    @"(function(t,c){\n"
+    @"var svg=document.querySelector('svg');\n"
+    @"if(svg&&svg.pauseAnimations){svg.pauseAnimations();svg.setCurrentTime(t/1000);}\n"
+    @"var a=window.__zsa||[];\n"
+    @"for(var i=0;i<a.length;i++){try{a[i].pause();a[i].currentTime=t;}catch(e){}}\n"
+    @"document.documentElement.style.setProperty('background-color',c,'important');\n"
+    @"if(svg){svg.getBoundingClientRect();}\n"
+    @"return 1;\n"
+    @"})(%f,'%@')";
+
+static NSString * const kZSLogoSVGBackgroundScript =
+    @"(function(c){document.documentElement.style.setProperty('background-color',c,'important');return 1;})('%@')";
+
+static UIWindow *zs_logo_host_window(void) {
+    UIWindow *fallback = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.isKeyWindow) return window;
+            if (!fallback) fallback = window;
+        }
+    }
+    return fallback;
 }
 
-- (instancetype)initWithKey:(NSString *)key svg:(ZSLogoSVG *)svg {
+#pragma mark - APNG encoder
+
+static size_t zs_logo_deflate(const uint8_t *source, size_t length, uint8_t *destination, size_t capacity) {
+    return compression_encode_buffer(destination, capacity, source, length, NULL, COMPRESSION_ZLIB);
+}
+
+typedef struct {
+    FILE *file;
+    char tempPath[1024];
+    char finalPath[1024];
+    uint32_t width;
+    uint32_t height;
+    uint32_t expectedFrames;
+    uint32_t frames;
+    uint32_t sequence;
+    bool failed;
+    uint8_t *rgba;
+    uint8_t *filtered;
+    uint8_t *packed;
+    size_t packedCapacity;
+    uint32_t crcTable[256];
+} ZSApngEncoder;
+
+static void zs_png_put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24);
+    p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);
+    p[3] = (uint8_t)v;
+}
+
+static uint32_t zs_png_crc(const ZSApngEncoder *e, uint32_t crc, const uint8_t *bytes, size_t length) {
+    for (size_t i = 0; i < length; i++) crc = e->crcTable[(crc ^ bytes[i]) & 0xFF] ^ (crc >> 8);
+    return crc;
+}
+
+static void zs_png_write_chunk(ZSApngEncoder *e, const char *type, const uint8_t *prefix, size_t prefixLength, const uint8_t *data, size_t dataLength) {
+    uint8_t head[8];
+    zs_png_put32(head, (uint32_t)(prefixLength + dataLength));
+    memcpy(head + 4, type, 4);
+    fwrite(head, 1, 8, e->file);
+    uint32_t crc = zs_png_crc(e, 0xFFFFFFFFu, (const uint8_t *)type, 4);
+    if (prefixLength) {
+        fwrite(prefix, 1, prefixLength, e->file);
+        crc = zs_png_crc(e, crc, prefix, prefixLength);
+    }
+    if (dataLength) {
+        fwrite(data, 1, dataLength, e->file);
+        crc = zs_png_crc(e, crc, data, dataLength);
+    }
+    uint8_t tail[4];
+    zs_png_put32(tail, crc ^ 0xFFFFFFFFu);
+    fwrite(tail, 1, 4, e->file);
+}
+
+static uint32_t zs_png_adler32(const uint8_t *bytes, size_t length) {
+    uint32_t a = 1, b = 0;
+    while (length > 0) {
+        size_t n = length < 5552 ? length : 5552;
+        for (size_t i = 0; i < n; i++) {
+            a += bytes[i];
+            b += a;
+        }
+        a %= 65521;
+        b %= 65521;
+        bytes += n;
+        length -= n;
+    }
+    return (b << 16) | a;
+}
+
+static void zs_png_filter_rows(const uint8_t *rgba, uint8_t *out, uint32_t width, uint32_t height) {
+    size_t stride = (size_t)width * 4;
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *row = rgba + y * stride;
+        const uint8_t *above = y ? row - stride : NULL;
+        uint8_t *dst = out + y * (stride + 1);
+        uint64_t costNone = 0, costSub = 0, costUp = 0;
+        for (size_t i = 0; i < stride; i++) {
+            int left = i >= 4 ? row[i - 4] : 0;
+            int up = above ? above[i] : 0;
+            int s = (int)row[i] - left;
+            int u = (int)row[i] - up;
+            costNone += row[i] < 128 ? row[i] : 256 - row[i];
+            costSub += (uint8_t)s < 128 ? (uint8_t)s : 256 - (uint8_t)s;
+            costUp += (uint8_t)u < 128 ? (uint8_t)u : 256 - (uint8_t)u;
+        }
+        int type = 0;
+        uint64_t best = costNone;
+        if (costSub < best) { best = costSub; type = 1; }
+        if (above && costUp < best) { type = 2; }
+        dst[0] = (uint8_t)type;
+        for (size_t i = 0; i < stride; i++) {
+            int left = i >= 4 ? row[i - 4] : 0;
+            int up = above ? above[i] : 0;
+            int predictor = type == 1 ? left : (type == 2 ? up : 0);
+            dst[1 + i] = (uint8_t)(row[i] - predictor);
+        }
+    }
+}
+
+static void zs_png_release(ZSApngEncoder *e) {
+    if (!e) return;
+    free(e->rgba);
+    free(e->filtered);
+    free(e->packed);
+    memset(e, 0, sizeof(*e));
+}
+
+static bool zs_apng_encoder_open(ZSApngEncoder *e, const char *finalPath, const char *tempPath, uint32_t width, uint32_t height, uint32_t frameCount) {
+    memset(e, 0, sizeof(*e));
+    if (width == 0 || height == 0 || width > 65535 || height > 65535 || frameCount == 0) return false;
+    if (strlen(finalPath) >= sizeof(e->finalPath) || strlen(tempPath) >= sizeof(e->tempPath)) return false;
+    strcpy(e->finalPath, finalPath);
+    strcpy(e->tempPath, tempPath);
+    e->width = width;
+    e->height = height;
+    e->expectedFrames = frameCount;
+    size_t rawBytes = ((size_t)width * 4 + 1) * height;
+    e->packedCapacity = rawBytes + rawBytes / 16 + 4096;
+    e->rgba = malloc((size_t)width * height * 4);
+    e->filtered = malloc(rawBytes);
+    e->packed = malloc(e->packedCapacity);
+    if (!e->rgba || !e->filtered || !e->packed) {
+        zs_png_release(e);
+        return false;
+    }
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t c = i;
+        for (int k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+        e->crcTable[i] = c;
+    }
+    e->file = fopen(tempPath, "wb");
+    if (!e->file) {
+        zs_png_release(e);
+        return false;
+    }
+    setvbuf(e->file, NULL, _IOFBF, 1 << 20);
+
+    static const uint8_t signature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+    fwrite(signature, 1, 8, e->file);
+
+    uint8_t header[13];
+    zs_png_put32(header, width);
+    zs_png_put32(header + 4, height);
+    header[8] = 8;
+    header[9] = 6;
+    header[10] = 0;
+    header[11] = 0;
+    header[12] = 0;
+    zs_png_write_chunk(e, "IHDR", header, 13, NULL, 0);
+
+    uint8_t control[8];
+    zs_png_put32(control, frameCount);
+    zs_png_put32(control + 4, 0);
+    zs_png_write_chunk(e, "acTL", control, 8, NULL, 0);
+    return true;
+}
+
+static bool zs_apng_encoder_add(ZSApngEncoder *e, const uint8_t *bgra, size_t bytesPerRow, uint16_t delayNumerator, uint16_t delayDenominator) {
+    if (!e || !e->file || e->failed || e->frames >= e->expectedFrames) return false;
+    uint32_t width = e->width, height = e->height;
+
+    for (uint32_t y = 0; y < height; y++) {
+        const uint8_t *p = bgra + (size_t)y * bytesPerRow;
+        uint8_t *q = e->rgba + (size_t)y * width * 4;
+        for (uint32_t x = 0; x < width; x++, p += 4, q += 4) {
+            uint32_t a = p[3];
+            if (a == 0) {
+                q[0] = q[1] = q[2] = q[3] = 0;
+            } else if (a == 255) {
+                q[0] = p[2]; q[1] = p[1]; q[2] = p[0]; q[3] = 255;
+            } else {
+                uint32_t r = (p[2] * 255u + a / 2) / a;
+                uint32_t g = (p[1] * 255u + a / 2) / a;
+                uint32_t b = (p[0] * 255u + a / 2) / a;
+                q[0] = (uint8_t)(r > 255 ? 255 : r);
+                q[1] = (uint8_t)(g > 255 ? 255 : g);
+                q[2] = (uint8_t)(b > 255 ? 255 : b);
+                q[3] = (uint8_t)a;
+            }
+        }
+    }
+
+    size_t rawBytes = ((size_t)width * 4 + 1) * height;
+    zs_png_filter_rows(e->rgba, e->filtered, width, height);
+
+    e->packed[0] = 0x78;
+    e->packed[1] = 0x9C;
+    size_t deflated = zs_logo_deflate(e->filtered, rawBytes, e->packed + 2, e->packedCapacity - 6);
+    if (deflated == 0) {
+        e->failed = true;
+        return false;
+    }
+    zs_png_put32(e->packed + 2 + deflated, zs_png_adler32(e->filtered, rawBytes));
+    size_t packedLength = deflated + 6;
+
+    uint8_t control[26];
+    zs_png_put32(control, e->sequence++);
+    zs_png_put32(control + 4, width);
+    zs_png_put32(control + 8, height);
+    zs_png_put32(control + 12, 0);
+    zs_png_put32(control + 16, 0);
+    control[20] = (uint8_t)(delayNumerator >> 8);
+    control[21] = (uint8_t)delayNumerator;
+    control[22] = (uint8_t)(delayDenominator >> 8);
+    control[23] = (uint8_t)delayDenominator;
+    control[24] = 0;
+    control[25] = 0;
+    zs_png_write_chunk(e, "fcTL", control, 26, NULL, 0);
+
+    if (e->frames == 0) {
+        zs_png_write_chunk(e, "IDAT", NULL, 0, e->packed, packedLength);
+    } else {
+        uint8_t sequence[4];
+        zs_png_put32(sequence, e->sequence++);
+        zs_png_write_chunk(e, "fdAT", sequence, 4, e->packed, packedLength);
+    }
+
+    if (ferror(e->file)) e->failed = true;
+    if (!e->failed) e->frames++;
+    return !e->failed;
+}
+
+static bool zs_apng_encoder_finish(ZSApngEncoder *e, bool commit) {
+    if (!e) return false;
+    bool ok = false;
+    if (e->file) {
+        bool complete = commit && !e->failed && e->frames == e->expectedFrames;
+        if (complete) zs_png_write_chunk(e, "IEND", NULL, 0, NULL, 0);
+        if (ferror(e->file)) e->failed = true;
+        if (fclose(e->file) != 0) e->failed = true;
+        e->file = NULL;
+        ok = complete && !e->failed;
+        if (ok) {
+            remove(e->finalPath);
+            ok = rename(e->tempPath, e->finalPath) == 0;
+        }
+        if (!ok) remove(e->tempPath);
+    }
+    zs_png_release(e);
+    return ok;
+}
+
+static void zs_apng_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, uint8_t *out, size_t pixelCount) {
+    for (size_t i = 0; i < pixelCount; i++, onBlack += 4, onWhite += 4, out += 4) {
+        int difference = ((int)onWhite[0] - (int)onBlack[0]) + ((int)onWhite[1] - (int)onBlack[1]) + ((int)onWhite[2] - (int)onBlack[2]);
+        int alpha = 255 - (difference + (difference >= 0 ? 1 : -1)) / 3;
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+        for (int c = 0; c < 3; c++) out[c] = onBlack[c] > alpha ? (uint8_t)alpha : onBlack[c];
+        out[3] = (uint8_t)alpha;
+    }
+}
+
+#pragma mark - Transcode paths
+
+static NSString *zs_logo_transcode_directory(void) {
+    NSArray<NSString *> *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+    NSString *dir = [paths.firstObject stringByAppendingPathComponent:@"ZSLogoTranscode"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
+static BOOL zs_logo_is_transcoded_path(NSString *path) {
+    return [path hasPrefix:[zs_logo_transcode_directory() stringByAppendingString:@"/"]];
+}
+
+static uint64_t zs_logo_hash_string(NSString *string) {
+    const char *bytes = string.UTF8String;
+    uint64_t hash = 1469598103934665603ULL;
+    for (const char *p = bytes; p && *p; p++) {
+        hash ^= (uint8_t)*p;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static NSString *zs_logo_transcode_prefix(NSString *svgPath) {
+    return [NSString stringWithFormat:@"%016llx-", (unsigned long long)zs_logo_hash_string(svgPath)];
+}
+
+static NSString *zs_logo_transcoded_apng_path(NSString *svgPath) {
+    NSString *key = [zs_logo_animation_key(svgPath) stringByAppendingFormat:@"|v%u", kZSLogoFrameCacheVersion];
+    NSString *name = [NSString stringWithFormat:@"%@%016llx.apng", zs_logo_transcode_prefix(svgPath), (unsigned long long)zs_logo_hash_string(key)];
+    return [zs_logo_transcode_directory() stringByAppendingPathComponent:name];
+}
+
+static NSString *zs_logo_frames_path(NSString *apngPath) {
+    return [apngPath stringByAppendingString:@".frames"];
+}
+
+static NSString *zs_logo_ready_apng_path(NSString *svgPath) {
+    NSString *gif = zs_logo_transcoded_apng_path(svgPath);
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:gif error:nil];
+    return attributes.fileSize > 0 ? gif : nil;
+}
+
+static void zs_logo_transcode_prune(NSString *svgPath, NSString *keepGif) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *directory = zs_logo_transcode_directory();
+    NSString *prefix = zs_logo_transcode_prefix(svgPath);
+    NSString *keep = keepGif.lastPathComponent;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:directory error:nil]) {
+        if (![name hasPrefix:prefix] || [name hasPrefix:keep]) continue;
+        [fm removeItemAtPath:[directory stringByAppendingPathComponent:name] error:nil];
+    }
+}
+
+#pragma mark - Clean-file frame cache
+
+@interface ZSLogoFileMap : NSObject
+@property (nonatomic, assign) void *base;
+@property (nonatomic, assign) size_t length;
+@end
+
+@implementation ZSLogoFileMap
+- (void)dealloc {
+    if (_base && _base != MAP_FAILED) munmap(_base, _length);
+}
+@end
+
+@interface ZSLogoMappedAnimation : NSObject
+@property (nonatomic, strong) NSArray *frames;
+@property (nonatomic, assign) CGSize size;
+@property (nonatomic, assign) NSTimeInterval frameDuration;
+- (NSUInteger)count;
+@end
+
+@implementation ZSLogoMappedAnimation
+- (NSUInteger)count {
+    return self.frames.count;
+}
+@end
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t assetLength;
+    uint64_t assetHash;
+    uint32_t frameCount;
+    uint32_t width;
+    uint32_t height;
+    uint32_t bytesPerRow;
+    uint64_t frameBytes;
+    uint32_t fps;
+    uint32_t reserved;
+} ZSLogoFrameCacheHeader;
+
+static uint64_t zs_logo_data_fingerprint(NSData *data) {
+    const uint8_t *bytes = data.bytes;
+    uint64_t hash = 1469598103934665603ULL ^ (uint64_t)data.length;
+    for (NSUInteger i = 0; i < data.length; i += 4096) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static BOOL zs_logo_write_all(int fd, const void *bytes, size_t length, off_t offset) {
+    const uint8_t *cursor = bytes;
+    while (length > 0) {
+        ssize_t written = pwrite(fd, cursor, length, offset);
+        if (written <= 0) return NO;
+        cursor += written;
+        offset += written;
+        length -= (size_t)written;
+    }
+    return YES;
+}
+
+static BOOL zs_logo_frame_cache_build(NSData *assetData, NSString *apngPath, NSString *cachePath) {
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)[NSURL fileURLWithPath:apngPath], (__bridge CFDictionaryRef)@{
+        (__bridge NSString *)kCGImageSourceShouldCache: @NO,
+    });
+    if (!source) return NO;
+
+    size_t count = CGImageSourceGetCount(source);
+    NSDictionary *firstProps = count > 0 ? (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, 0, NULL) : nil;
+    size_t width = [firstProps[(__bridge NSString *)kCGImagePropertyPixelWidth] unsignedLongValue];
+    size_t height = [firstProps[(__bridge NSString *)kCGImagePropertyPixelHeight] unsignedLongValue];
+    if (count == 0 || width == 0 || height == 0) {
+        CFRelease(source);
+        return NO;
+    }
+
+    size_t bytesPerRow = ((width * 4 + kZSLogoFrameCacheRowAlignment - 1) / kZSLogoFrameCacheRowAlignment) * kZSLogoFrameCacheRowAlignment;
+    size_t frameBytes = bytesPerRow * height;
+
+    NSString *tempPath = [cachePath stringByAppendingString:@".tmp"];
+    unlink(tempPath.fileSystemRepresentation);
+    int fd = open(tempPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        CFRelease(source);
+        return NO;
+    }
+
+    uint8_t *scratch = calloc(1, frameBytes);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    BOOL ok = scratch && colorSpace;
+    size_t written = 0;
+
+    for (size_t i = 0; ok && i < count; i++) {
+        @autoreleasepool {
+            CGImageRef image = CGImageSourceCreateImageAtIndex(source, i, (__bridge CFDictionaryRef)@{
+                (__bridge NSString *)kCGImageSourceShouldCache: @NO,
+            });
+            if (!image) {
+                ok = NO;
+            } else {
+                memset(scratch, 0, frameBytes);
+                CGContextRef ctx = CGBitmapContextCreate(scratch, width, height, 8, bytesPerRow, colorSpace,
+                    (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+                if (!ctx) {
+                    ok = NO;
+                } else {
+                    CGContextSetBlendMode(ctx, kCGBlendModeCopy);
+                    CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)width, (CGFloat)height), image);
+                    CGContextRelease(ctx);
+                    ok = zs_logo_write_all(fd, scratch, frameBytes, (off_t)(kZSLogoFrameCacheHeaderBytes + written * frameBytes));
+                    if (ok) written++;
+                }
+                CGImageRelease(image);
+            }
+        }
+    }
+    CFRelease(source);
+
+    if (ok) {
+        ZSLogoFrameCacheHeader header = {
+            .magic = kZSLogoFrameCacheMagic,
+            .version = kZSLogoFrameCacheVersion,
+            .assetLength = assetData.length,
+            .assetHash = zs_logo_data_fingerprint(assetData),
+            .frameCount = (uint32_t)written,
+            .width = (uint32_t)width,
+            .height = (uint32_t)height,
+            .bytesPerRow = (uint32_t)bytesPerRow,
+            .frameBytes = frameBytes,
+            .fps = (uint32_t)kZSLogoTranscodeFPS,
+        };
+        ok = zs_logo_write_all(fd, &header, sizeof(header), 0);
+    }
+
+    free(scratch);
+    if (colorSpace) CGColorSpaceRelease(colorSpace);
+    close(fd);
+
+    if (!ok) {
+        unlink(tempPath.fileSystemRepresentation);
+        return NO;
+    }
+    unlink(cachePath.fileSystemRepresentation);
+    return rename(tempPath.fileSystemRepresentation, cachePath.fileSystemRepresentation) == 0;
+}
+
+static void zs_logo_release_file_map(void *info, const void *data, size_t size) {
+    CFRelease(info);
+}
+
+static ZSLogoMappedAnimation *zs_logo_frame_cache_load(NSData *assetData, NSString *cachePath) {
+    int fd = open(cachePath.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return nil;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || (size_t)st.st_size < kZSLogoFrameCacheHeaderBytes) {
+        close(fd);
+        return nil;
+    }
+
+    void *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return nil;
+
+    ZSLogoFileMap *fileMap = [[ZSLogoFileMap alloc] init];
+    fileMap.base = map;
+    fileMap.length = (size_t)st.st_size;
+
+    const ZSLogoFrameCacheHeader *header = map;
+    BOOL valid = header->magic == kZSLogoFrameCacheMagic
+        && header->version == kZSLogoFrameCacheVersion
+        && header->assetLength == assetData.length
+        && header->assetHash == zs_logo_data_fingerprint(assetData)
+        && header->fps == (uint32_t)kZSLogoTranscodeFPS
+        && header->frameCount > 0
+        && header->width > 0 && header->height > 0
+        && header->bytesPerRow >= header->width * 4
+        && header->frameBytes == (uint64_t)header->bytesPerRow * header->height
+        && (uint64_t)st.st_size == kZSLogoFrameCacheHeaderBytes + (uint64_t)header->frameCount * header->frameBytes;
+    if (!valid) return nil;
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (!colorSpace) return nil;
+
+    NSMutableArray *frames = [NSMutableArray arrayWithCapacity:header->frameCount];
+    for (uint32_t i = 0; i < header->frameCount; i++) {
+        const uint8_t *frameBase = (const uint8_t *)map + kZSLogoFrameCacheHeaderBytes + (size_t)i * header->frameBytes;
+        CGDataProviderRef provider = CGDataProviderCreateWithData((void *)CFBridgingRetain(fileMap), frameBase, header->frameBytes, zs_logo_release_file_map);
+        CGImageRef image = provider ? CGImageCreate(header->width, header->height, 8, 32, header->bytesPerRow, colorSpace,
+            (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+            provider, NULL, false, kCGRenderingIntentDefault) : NULL;
+        if (provider) CGDataProviderRelease(provider);
+        if (!image) {
+            CGColorSpaceRelease(colorSpace);
+            return nil;
+        }
+        [frames addObject:(__bridge id)image];
+        CGImageRelease(image);
+    }
+    CGColorSpaceRelease(colorSpace);
+
+    ZSLogoMappedAnimation *animation = [[ZSLogoMappedAnimation alloc] init];
+    animation.frames = frames;
+    animation.size = CGSizeMake(header->width, header->height);
+    animation.frameDuration = 1.0 / (double)header->fps;
+    return animation;
+}
+
+static NSMapTable<NSString *, ZSLogoMappedAnimation *> *zs_logo_mapped_registry(void) {
+    static NSMapTable<NSString *, ZSLogoMappedAnimation *> *registry;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ registry = [NSMapTable strongToWeakObjectsMapTable]; });
+    return registry;
+}
+
+static ZSLogoMappedAnimation *zs_logo_mapped_animation_for_apng(NSString *apngPath) {
+    static NSObject *lock;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSObject alloc] init]; });
+
+    @synchronized (lock) {
+        ZSLogoMappedAnimation *existing = [zs_logo_mapped_registry() objectForKey:apngPath];
+        if (existing) return existing;
+
+        NSData *assetData = [NSData dataWithContentsOfFile:apngPath options:NSDataReadingMappedIfSafe error:nil];
+        if (assetData.length == 0) return nil;
+
+        NSString *cachePath = zs_logo_frames_path(apngPath);
+        ZSLogoMappedAnimation *animation = zs_logo_frame_cache_load(assetData, cachePath);
+        if (!animation && zs_logo_frame_cache_build(assetData, apngPath, cachePath)) {
+            animation = zs_logo_frame_cache_load(assetData, cachePath);
+        }
+        if (animation) [zs_logo_mapped_registry() setObject:animation forKey:apngPath];
+        return animation;
+    }
+}
+
+#pragma mark - SVG to APNG transcoding
+
+static BOOL zs_logo_draw_snapshot(CGImageRef image, uint8_t *buffer, size_t width, size_t height) {
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (!colorSpace) return NO;
+    CGContextRef context = CGBitmapContextCreate(buffer, width, height, 8, width * 4, colorSpace,
+        (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(colorSpace);
+    if (!context) return NO;
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextDrawImage(context, CGRectMake(0, 0, (CGFloat)width, (CGFloat)height), image);
+    CGContextRelease(context);
+    return YES;
+}
+
+static uint64_t zs_logo_gcd(uint64_t a, uint64_t b) {
+    while (b) {
+        uint64_t t = a % b;
+        a = b;
+        b = t;
+    }
+    return a;
+}
+
+static void zs_logo_transcode_plan(NSDictionary *probe, double *durationOut, double *leadOut) {
+    double duration = 0;
+    double lead = 0;
+    if ([probe[@"anim"] boolValue]) {
+        NSArray *periods = [probe[@"periods"] isKindOfClass:[NSArray class]] ? probe[@"periods"] : @[];
+        double end = [probe[@"end"] doubleValue];
+        double rawLead = [probe[@"lead"] doubleValue];
+        uint64_t cap = (uint64_t)kZSLogoTranscodeMaxLoopMs;
+        uint64_t lcm = 0;
+        BOOL overflow = NO;
+        double widest = 0;
+        for (id item in periods) {
+            if (![item isKindOfClass:[NSNumber class]]) continue;
+            double period = [item doubleValue];
+            if (!(period >= 1) || !isfinite(period)) continue;
+            widest = MAX(widest, period);
+            uint64_t value = (uint64_t)llround(period);
+            if (lcm == 0) {
+                lcm = value;
+            } else if (!overflow) {
+                uint64_t divisor = zs_logo_gcd(lcm, value);
+                uint64_t left = lcm / divisor;
+                if (left > cap / value) overflow = YES;
+                else lcm = left * value;
+            }
+        }
+        double periodic = overflow ? widest : (double)lcm;
+        if (end > 0 && isfinite(end)) {
+            duration = periodic > 0 ? ceil(end / periodic) * periodic : end;
+        } else {
+            duration = periodic;
+            lead = isfinite(rawLead) && rawLead > 0 ? rawLead : 0;
+        }
+        duration = MIN(duration, kZSLogoTranscodeMaxLoopMs);
+        if (overflow) ZLog(@"[Logo] SVG loop periods don't line up within %.0fs - using the longest period", kZSLogoTranscodeMaxLoopMs / 1000.0);
+    }
+    *durationOut = duration;
+    *leadOut = lead;
+}
+
+static void zs_logo_transcode_geometry(CGSize intrinsic, NSUInteger frames, NSInteger scale, size_t *widthOut, size_t *heightOut) {
+    CGFloat longer = MAX(intrinsic.width, intrinsic.height);
+    CGFloat shorter = MIN(intrinsic.width, intrinsic.height);
+    if (longer <= 0 || shorter <= 0) longer = shorter = 1;
+    double ratio = (double)shorter / (double)longer;
+    double budgetEdge = sqrt(kZSLogoTranscodeByteBudget / (4.0 * (double)MAX(frames, 1) * ratio));
+    double edge = MIN((double)kZSLogoTranscodeMaxEdge, MAX((double)kZSLogoTranscodeMinEdge, floor(budgetEdge)));
+    BOOL landscape = intrinsic.width >= intrinsic.height;
+    double width = landscape ? edge : edge * ratio;
+    double height = landscape ? edge * ratio : edge;
+    size_t unit = (size_t)MAX(scale, 1);
+    *widthOut = MAX(unit, (size_t)ceil(width / (double)unit) * unit);
+    *heightOut = MAX(unit, (size_t)ceil(height / (double)unit) * unit);
+}
+
+@interface ZSLogoSVGJob : NSObject <WKNavigationDelegate>
+@property (nonatomic, copy, nullable) void (^completion)(NSString * _Nullable apngPath);
+- (instancetype)initWithPath:(NSString *)path svg:(ZSLogoSVG *)svg;
+- (void)start;
+@end
+
+@implementation ZSLogoSVGJob {
+    NSString *_path;
+    ZSLogoSVG *_svg;
+    NSString *_apngPath;
+    NSString *_tempPath;
+    UIView *_host;
+    WKWebView *_web;
+    BOOL _finished;
+    BOOL _closing;
+    NSUInteger _windowAttempts;
+    NSUInteger _generation;
+    NSUInteger _loadStep;
+    NSUInteger _viewportAttempt;
+    NSInteger _scale;
+    CGSize _pointSize;
+    size_t _pixelWidth;
+    size_t _pixelHeight;
+    NSUInteger _frameCount;
+    NSUInteger _nextFrame;
+    NSUInteger _inFlight;
+    BOOL _waiting;
+    double _leadMs;
+    ZSApngEncoder *_encoder;
+    dispatch_queue_t _queue;
+    uint8_t *_black;
+    uint8_t *_white;
+}
+
+- (instancetype)initWithPath:(NSString *)path svg:(ZSLogoSVG *)svg {
     self = [super init];
     if (!self) return nil;
-    _key = [key copy];
+    _path = [path copy];
     _svg = svg;
-    _speed = 1;
-    _paused = YES;
-    _rootLayer = [CALayer layer];
-    _rootLayer.anchorPoint = CGPointMake(0.5, 0.5);
-    _rootLayer.masksToBounds = YES;
-    _rootLayer.backgroundColor = UIColor.clearColor.CGColor;
-    _artworkLayer = [CALayer layer];
-    _artworkLayer.anchorPoint = CGPointMake(0, 0);
-    _artworkLayer.bounds = CGRectMake(0, 0, MAX(1, svg.viewBox.size.width), MAX(1, svg.viewBox.size.height));
-    _artworkLayer.position = CGPointZero;
-    _artworkLayer.masksToBounds = NO;
-    [_rootLayer addSublayer:_artworkLayer];
-
-    ZSLogoSVGBuilder *builder = [[ZSLogoSVGBuilder alloc] initWithSVG:svg];
-    CALayer *content = [builder buildRoot];
-    if (content) {
-        content.transform = CATransform3DMakeTranslation(-svg.viewBox.origin.x, -svg.viewBox.origin.y, 0);
-        [_artworkLayer addSublayer:content];
-    }
-    _rootLayer.speed = 0;
-    _rootLayer.timeOffset = 0;
-    _clockPaused = YES;
-    [self zs_updateArtworkFrame];
+    _apngPath = zs_logo_transcoded_apng_path(path);
+    _tempPath = [_apngPath stringByAppendingString:@".tmp"];
     return self;
 }
 
-- (void)zs_updateArtworkFrame {
-    CGSize size = _rootLayer.bounds.size;
-    CGSize source = CGSizeMake(MAX(1, _svg.viewBox.size.width), MAX(1, _svg.viewBox.size.height));
-    NSString *preserve = _svg.preserveAspectRatio.lowercaseString;
-    CGFloat scaleX, scaleY;
-    if ([preserve containsString:@"none"]) {
-        scaleX = size.width / source.width;
-        scaleY = size.height / source.height;
-    } else {
-        BOOL slice = [preserve containsString:@"slice"];
-        CGFloat scale = slice ? MAX(size.width / source.width, size.height / source.height) : MIN(size.width / source.width, size.height / source.height);
-        scaleX = scale;
-        scaleY = scale;
-    }
-    CGSize rendered = CGSizeMake(source.width * scaleX, source.height * scaleY);
-    CGFloat x = [preserve containsString:@"none"] || [preserve containsString:@"xmin"] ? 0 : ([preserve containsString:@"xmax"] ? size.width - rendered.width : (size.width - rendered.width) / 2);
-    CGFloat y = [preserve containsString:@"none"] || [preserve containsString:@"ymin"] ? 0 : ([preserve containsString:@"ymax"] ? size.height - rendered.height : (size.height - rendered.height) / 2);
-    _artworkLayer.transform = CATransform3DIdentity;
-    _artworkLayer.bounds = CGRectMake(0, 0, source.width, source.height);
-    _artworkLayer.position = CGPointMake(x, y);
-    _artworkLayer.transform = CATransform3DMakeScale(scaleX, scaleY, 1);
-}
-
-- (void)mountInto:(UIView *)host {
-    if (_rootLayer.superlayer == host.layer) return;
-    [_rootLayer removeFromSuperlayer];
-    [host.layer addSublayer:_rootLayer];
-}
-
-- (void)placeWithSize:(CGSize)size center:(CGPoint)center rotation:(CGFloat)radians {
-    [CATransaction begin];
-    [CATransaction setDisableActions:YES];
-    _rootLayer.bounds = CGRectMake(0, 0, MAX(1, size.width), MAX(1, size.height));
-    _rootLayer.position = center;
-    _rootLayer.transform = CATransform3DMakeRotation(radians, 0, 0, 1);
-    [self zs_updateArtworkFrame];
-    [CATransaction commit];
-}
-
-- (void)setHidden:(BOOL)hidden {
-    _hidden = hidden;
-    _rootLayer.hidden = hidden;
-}
-
-- (BOOL)isHidden {
-    return _hidden;
-}
-
-- (void)park {
-    self.owner = nil;
-    _rootLayer.hidden = YES;
-    [_rootLayer removeFromSuperlayer];
-    [self setSpeed:_speed paused:YES];
-}
-
-- (void)teardown {
-    self.owner = nil;
-    [_rootLayer removeFromSuperlayer];
-}
-
-- (void)invalidate {
-    _appliedPaused = !_paused;
-    [self setSpeed:_speed paused:_paused];
-}
-
-- (void)setSpeed:(double)speed paused:(BOOL)paused {
-    _speed = isfinite(speed) ? MAX(0, speed) : 1;
-    _paused = paused || _speed <= 0;
-    if (_appliedSpeed == _speed && _appliedPaused == _paused) return;
-    _appliedSpeed = _speed;
-    _appliedPaused = _paused;
-    if (_paused) {
-        if (!_clockPaused) {
-            _savedTime = [_rootLayer convertTime:CACurrentMediaTime() fromLayer:nil];
-            _rootLayer.speed = 0;
-            _rootLayer.timeOffset = _speed <= 0 ? 0 : _savedTime;
-            _clockPaused = YES;
-            _hasSavedTime = YES;
-        } else if (_speed <= 0) {
-            _rootLayer.timeOffset = 0;
-            _savedTime = 0;
-            _hasSavedTime = YES;
+- (void)start {
+    if (_finished || _closing) return;
+    UIWindow *window = zs_logo_host_window();
+    if (!window) {
+        if (++_windowAttempts > 120) {
+            [self zs_failWithReason:@"no window to render in"];
+            return;
         }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self start];
+        });
         return;
     }
-    if (_clockPaused) {
-        CFTimeInterval pausedTime = _hasSavedTime ? _rootLayer.timeOffset : 0;
-        _rootLayer.speed = _speed;
-        _rootLayer.timeOffset = 0;
-        _rootLayer.beginTime = 0;
-        _rootLayer.beginTime = CACurrentMediaTime() - pausedTime / _speed;
-        _clockPaused = NO;
-        _hasSavedTime = NO;
-    } else {
-        CFTimeInterval currentTime = [_rootLayer convertTime:CACurrentMediaTime() fromLayer:nil];
-        _rootLayer.speed = 0;
-        _rootLayer.timeOffset = currentTime;
-        _rootLayer.beginTime = 0;
-        _rootLayer.speed = _speed;
-        _rootLayer.beginTime = CACurrentMediaTime() - currentTime / _speed;
+
+    _scale = MAX(1, (NSInteger)llround(UIScreen.mainScreen.scale));
+
+    _host = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+    _host.userInteractionEnabled = NO;
+    _host.clipsToBounds = YES;
+    _host.alpha = 0.02;
+    _host.backgroundColor = UIColor.clearColor;
+    [window insertSubview:_host atIndex:0];
+
+    WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+    configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
+    configuration.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
+    _web = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 256, 256) configuration:configuration];
+    _web.navigationDelegate = self;
+    _web.opaque = YES;
+    _web.backgroundColor = UIColor.whiteColor;
+    _web.scrollView.backgroundColor = UIColor.whiteColor;
+    _web.scrollView.scrollEnabled = NO;
+    _web.scrollView.bounces = NO;
+    _web.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    _web.userInteractionEnabled = NO;
+    _web.allowsLinkPreview = NO;
+    [_host addSubview:_web];
+
+    _loadStep = [self zs_beginStep];
+    [_web loadHTMLString:_svg.html baseURL:nil];
+}
+
+- (NSUInteger)zs_beginStep {
+    NSUInteger generation = ++_generation;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoTranscodeStepTimeout * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_finished || strongSelf->_generation != generation) return;
+        [strongSelf zs_failWithReason:@"a render step timed out"];
+    });
+    return generation;
+}
+
+- (BOOL)zs_stepIsCurrent:(NSUInteger)generation {
+    return !_finished && !_closing && _generation == generation;
+}
+
+- (void)zs_endStep {
+    _generation++;
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    if (![self zs_stepIsCurrent:_loadStep]) return;
+    [self zs_endStep];
+    [self zs_probe];
+}
+
+- (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self zs_failWithReason:error.localizedDescription ?: @"load failed"];
+}
+
+- (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+    [self zs_failWithReason:error.localizedDescription ?: @"load failed"];
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    [self zs_failWithReason:@"the web content process ended"];
+}
+
+- (void)zs_probe {
+    NSUInteger step = [self zs_beginStep];
+    [_web evaluateJavaScript:kZSLogoSVGProbeScript completionHandler:^(id result, NSError *error) {
+        if (![self zs_stepIsCurrent:step]) return;
+        [self zs_endStep];
+
+        NSDictionary *probe = nil;
+        if ([result isKindOfClass:[NSString class]]) {
+            id json = [NSJSONSerialization JSONObjectWithData:[(NSString *)result dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]]) probe = json;
+        }
+        if (!probe) {
+            [self zs_failWithReason:error.localizedDescription ?: @"couldn't read the animation timing"];
+            return;
+        }
+
+        double duration = 0;
+        double lead = 0;
+        zs_logo_transcode_plan(probe, &duration, &lead);
+        self->_leadMs = lead;
+        self->_frameCount = duration > 0 ? (NSUInteger)MAX(1, llround(duration * (double)kZSLogoTranscodeFPS / 1000.0)) : 1;
+        zs_logo_transcode_geometry(self->_svg.size, self->_frameCount, self->_scale, &self->_pixelWidth, &self->_pixelHeight);
+        self->_pointSize = CGSizeMake((CGFloat)self->_pixelWidth / (CGFloat)self->_scale, (CGFloat)self->_pixelHeight / (CGFloat)self->_scale);
+        ZLog(@"[Logo] transcoding %@: %lu frame(s) at %zux%zu, loop %.2fs", self->_path.lastPathComponent, (unsigned long)self->_frameCount, self->_pixelWidth, self->_pixelHeight, duration / 1000.0);
+
+        self->_web.frame = CGRectMake(0, 0, self->_pointSize.width, self->_pointSize.height);
+        self->_viewportAttempt = 0;
+        [self zs_waitForViewport];
+    }];
+}
+
+- (void)zs_waitForViewport {
+    NSUInteger step = [self zs_beginStep];
+    [_web evaluateJavaScript:@"window.innerWidth+','+window.innerHeight" completionHandler:^(id result, NSError *error) {
+        if (![self zs_stepIsCurrent:step]) return;
+        [self zs_endStep];
+        if (error) {
+            [self zs_failWithReason:error.localizedDescription];
+            return;
+        }
+        BOOL matched = NO;
+        if ([result isKindOfClass:[NSString class]]) {
+            NSArray<NSString *> *parts = [(NSString *)result componentsSeparatedByString:@","];
+            if (parts.count == 2) {
+                matched = fabs(parts[0].doubleValue - self->_pointSize.width) < 1.5 && fabs(parts[1].doubleValue - self->_pointSize.height) < 1.5;
+            }
+        }
+        if (matched || ++self->_viewportAttempt >= kZSLogoTranscodeViewportAttempts) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self zs_beginCapture];
+            });
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.03 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self->_finished || self->_closing) return;
+            [self zs_waitForViewport];
+        });
+    }];
+}
+
+- (void)zs_beginCapture {
+    if (_finished || _closing) return;
+    size_t bytes = _pixelWidth * _pixelHeight * 4;
+    _encoder = calloc(1, sizeof(ZSApngEncoder));
+    _black = malloc(bytes);
+    _white = malloc(bytes);
+    if (!_encoder || !_black || !_white ||
+        !zs_apng_encoder_open(_encoder, _apngPath.fileSystemRepresentation, _tempPath.fileSystemRepresentation, (uint32_t)_pixelWidth, (uint32_t)_pixelHeight, (uint32_t)_frameCount)) {
+        [self zs_failWithReason:@"couldn't allocate the APNG encoder"];
+        return;
     }
+    _queue = dispatch_queue_create("zs.logo.transcode", DISPATCH_QUEUE_SERIAL);
+    [self zs_captureNextFrame];
 }
 
-@end
-
-static NSMutableArray<ZSLogoSVGRenderer *> *zs_logo_svg_renderers(void) {
-    static NSMutableArray<ZSLogoSVGRenderer *> *renderers;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ renderers = [NSMutableArray array]; });
-    return renderers;
+- (void)zs_runScript:(NSString *)script then:(void (^)(void))next {
+    NSUInteger step = [self zs_beginStep];
+    [_web evaluateJavaScript:script completionHandler:^(id result, NSError *error) {
+        if (![self zs_stepIsCurrent:step]) return;
+        [self zs_endStep];
+        if (error) {
+            [self zs_failWithReason:error.localizedDescription ?: @"script failed"];
+            return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kZSLogoTranscodeSettleDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self->_finished || self->_closing) return;
+            next();
+        });
+    }];
 }
 
-static NSString *zs_logo_svg_renderer_key(NSString *path, BOOL fill) {
-    return [zs_logo_animation_key(path) stringByAppendingString:fill ? @"|fill" : @"|vfx"];
+- (void)zs_snapshot:(void (^)(UIImage *image))next {
+    NSUInteger step = [self zs_beginStep];
+    WKSnapshotConfiguration *configuration = [[WKSnapshotConfiguration alloc] init];
+    configuration.rect = CGRectMake(0, 0, _pointSize.width, _pointSize.height);
+    configuration.snapshotWidth = @(_pointSize.width);
+    configuration.afterScreenUpdates = YES;
+    [_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *error) {
+        if (![self zs_stepIsCurrent:step]) return;
+        [self zs_endStep];
+        if (!image.CGImage) {
+            [self zs_failWithReason:error.localizedDescription ?: @"snapshot failed"];
+            return;
+        }
+        next(image);
+    }];
 }
 
-static ZSLogoSVGRenderer *zs_logo_svg_free_renderer(NSString *key) {
-    for (ZSLogoSVGRenderer *renderer in zs_logo_svg_renderers()) {
-        if (!renderer.owner && [renderer.key isEqualToString:key]) return renderer;
+- (void)zs_captureNextFrame {
+    if (_finished || _closing) return;
+    if (_nextFrame >= _frameCount) {
+        [self zs_finishIfDrained];
+        return;
     }
-    return nil;
-}
-
-static BOOL zs_logo_svg_renderer_exists(NSString *key) {
-    for (ZSLogoSVGRenderer *renderer in zs_logo_svg_renderers()) {
-        if ([renderer.key isEqualToString:key]) return YES;
+    if (_inFlight >= 2) {
+        _waiting = YES;
+        return;
     }
-    return NO;
+
+    NSUInteger index = _nextFrame++;
+    double time = _leadMs + (double)index * 1000.0 / (double)kZSLogoTranscodeFPS;
+    NSString *seek = [NSString stringWithFormat:kZSLogoSVGSeekScript, time, @"#000"];
+    NSString *whiten = [NSString stringWithFormat:kZSLogoSVGBackgroundScript, @"#fff"];
+
+    [self zs_runScript:seek then:^{
+        [self zs_snapshot:^(UIImage *black) {
+            [self zs_runScript:whiten then:^{
+                [self zs_snapshot:^(UIImage *white) {
+                    [self zs_enqueueBlack:black white:white index:index];
+                    [self zs_captureNextFrame];
+                }];
+            }];
+        }];
+    }];
 }
 
-static ZSLogoSVGRenderer *zs_logo_svg_make_renderer(NSString *key, ZSLogoSVG *svg) {
-    ZSLogoSVGRenderer *renderer = [[ZSLogoSVGRenderer alloc] initWithKey:key svg:svg];
-    [zs_logo_svg_renderers() addObject:renderer];
-    return renderer;
-}
+- (void)zs_enqueueBlack:(UIImage *)black white:(UIImage *)white index:(NSUInteger)index {
+    _inFlight++;
+    CGImageRef blackImage = CGImageRetain(black.CGImage);
+    CGImageRef whiteImage = CGImageRetain(white.CGImage);
+    size_t width = _pixelWidth;
+    size_t height = _pixelHeight;
+    ZSApngEncoder *encoder = _encoder;
+    uint8_t *blackBuffer = _black;
+    uint8_t *whiteBuffer = _white;
 
-static void zs_logo_svg_preload(NSString *path, BOOL fill) {
-    NSString *key = zs_logo_svg_renderer_key(path, fill);
-    if (zs_logo_svg_renderer_exists(key)) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
-        if (!svg) return;
+    dispatch_async(_queue, ^{
+        BOOL ok = zs_logo_draw_snapshot(blackImage, blackBuffer, width, height) && zs_logo_draw_snapshot(whiteImage, whiteBuffer, width, height);
+        CGImageRelease(blackImage);
+        CGImageRelease(whiteImage);
+        if (ok) {
+            zs_apng_matte_frame(blackBuffer, whiteBuffer, blackBuffer, width * height);
+            ok = zs_apng_encoder_add(encoder, blackBuffer, width * 4, 1, (uint16_t)kZSLogoTranscodeFPS);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (zs_logo_svg_renderer_exists(key)) return;
-            zs_logo_svg_make_renderer(key, svg);
+            self->_inFlight--;
+            if (!ok) {
+                [self zs_failWithReason:@"couldn't encode a frame"];
+                return;
+            }
+            if (self->_waiting) {
+                self->_waiting = NO;
+                [self zs_captureNextFrame];
+            } else {
+                [self zs_finishIfDrained];
+            }
         });
     });
 }
 
-static void zs_logo_svg_evict_unwanted(NSSet<NSString *> *wanted) {
-    NSMutableArray<ZSLogoSVGRenderer *> *pool = zs_logo_svg_renderers();
-    for (ZSLogoSVGRenderer *renderer in [pool copy]) {
-        if (renderer.owner || [wanted containsObject:renderer.key]) continue;
-        [renderer teardown];
-        [pool removeObject:renderer];
+- (void)zs_finishIfDrained {
+    if (_finished || _closing || _nextFrame < _frameCount || _inFlight > 0) return;
+    _closing = YES;
+    [self zs_teardownWeb];
+    ZSApngEncoder *encoder = _encoder;
+    dispatch_async(_queue, ^{
+        BOOL ok = zs_apng_encoder_finish(encoder, true);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self zs_completeWithSuccess:ok];
+        });
+    });
+}
+
+- (void)zs_failWithReason:(NSString *)reason {
+    if (_finished || _closing) return;
+    _closing = YES;
+    ZLog(@"[Logo] SVG transcode failed for %@: %@", _path.lastPathComponent, reason);
+    [self zs_teardownWeb];
+    ZSApngEncoder *encoder = _encoder;
+    if (!_queue || !encoder) {
+        [self zs_completeWithSuccess:NO];
+        return;
     }
+    dispatch_async(_queue, ^{
+        zs_apng_encoder_finish(encoder, false);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self zs_completeWithSuccess:NO];
+        });
+    });
+}
+
+- (void)zs_teardownWeb {
+    _web.navigationDelegate = nil;
+    [_web stopLoading];
+    [_web removeFromSuperview];
+    [_host removeFromSuperview];
+    _web = nil;
+    _host = nil;
+}
+
+- (void)zs_completeWithSuccess:(BOOL)success {
+    if (_finished) return;
+    _finished = YES;
+    [self zs_teardownWeb];
+    free(_encoder);
+    free(_black);
+    free(_white);
+    _encoder = NULL;
+    _black = NULL;
+    _white = NULL;
+    void (^completion)(NSString *) = self.completion;
+    self.completion = nil;
+    if (completion) completion(success ? _apngPath : nil);
+}
+
+@end
+
+static NSMutableArray<NSString *> *zs_logo_transcode_queue(void) {
+    static NSMutableArray<NSString *> *queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ queue = [NSMutableArray array]; });
+    return queue;
+}
+
+static NSMutableDictionary<NSString *, NSDate *> *zs_logo_transcode_failures(void) {
+    static NSMutableDictionary<NSString *, NSDate *> *failures;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ failures = [NSMutableDictionary dictionary]; });
+    return failures;
+}
+
+static NSString *gZSLogoTranscodeActive;
+static ZSLogoSVGJob *gZSLogoTranscodeJob;
+
+static void zs_logo_transcode_pump(void);
+
+static void zs_logo_transcode_finish_active(NSString *apngPath) {
+    gZSLogoTranscodeActive = nil;
+    gZSLogoTranscodeJob = nil;
+    if (apngPath) [[NSNotificationCenter defaultCenter] postNotificationName:ZSLogoDidChangeNotification object:nil];
+    zs_logo_transcode_pump();
+}
+
+static void zs_logo_transcode_pump(void) {
+    if (gZSLogoTranscodeActive || zs_logo_transcode_queue().count == 0) return;
+    NSString *path = zs_logo_transcode_queue().firstObject;
+    [zs_logo_transcode_queue() removeObjectAtIndex:0];
+    gZSLogoTranscodeActive = path;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!svg) {
+                ZLog(@"[Logo] %@ isn't a readable SVG", path.lastPathComponent);
+                zs_logo_transcode_failures()[path] = [NSDate date];
+                zs_logo_transcode_finish_active(nil);
+                return;
+            }
+            ZSLogoSVGJob *job = [[ZSLogoSVGJob alloc] initWithPath:path svg:svg];
+            gZSLogoTranscodeJob = job;
+            job.completion = ^(NSString *apngPath) {
+                if (!apngPath) {
+                    zs_logo_transcode_failures()[path] = [NSDate date];
+                    zs_logo_transcode_finish_active(nil);
+                    return;
+                }
+                [zs_logo_transcode_failures() removeObjectForKey:path];
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+                    zs_logo_transcode_prune(path, apngPath);
+                    BOOL cached = zs_logo_mapped_animation_for_apng(apngPath) != nil;
+                    if (!cached) ZLog(@"[Logo] couldn't build the frame cache for %@", path.lastPathComponent);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        zs_logo_transcode_finish_active(cached ? apngPath : nil);
+                    });
+                });
+            };
+            [job start];
+        });
+    });
+}
+
+static void zs_logo_transcode_svg_notify(NSString *svgPath) {
+    if (svgPath.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (zs_logo_ready_apng_path(svgPath)) return;
+        NSDate *failedAt = zs_logo_transcode_failures()[svgPath];
+        if (failedAt && -failedAt.timeIntervalSinceNow < kZSLogoTranscodeRetryInterval) return;
+        if ([gZSLogoTranscodeActive isEqualToString:svgPath] || [zs_logo_transcode_queue() containsObject:svgPath]) return;
+        [zs_logo_transcode_queue() addObject:svgPath];
+        zs_logo_transcode_pump();
+    });
+}
+
+static void zs_logo_transcode_pack_directory(NSString *directory) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *meta = zs_logo_read_meta_in(directory);
+    NSString *styleFile = meta[kZSLogoRoleStyle][@"file"];
+    NSString *stylePath = [styleFile isKindOfClass:[NSString class]] && styleFile.length > 0
+        ? [directory stringByAppendingPathComponent:styleFile.lastPathComponent]
+        : nil;
+    ZSLogoStyle *style = zs_logo_load_style(stylePath);
+
+    for (NSString *role in @[kZSLogoRoleFill, kZSLogoRoleVfx]) {
+        NSString *file = meta[role][@"file"];
+        if (![file isKindOfClass:[NSString class]] || !zs_logo_is_svg_file(file)) continue;
+        BOOL enabled = [role isEqualToString:kZSLogoRoleFill] ? style.fill.enabled : style.vfx.enabled;
+        NSString *path = [directory stringByAppendingPathComponent:file.lastPathComponent];
+        if (enabled && [fm fileExistsAtPath:path]) zs_logo_transcode_svg_notify(path);
+    }
+}
+
+static NSString *zs_logo_effect_asset_path(NSString *path) {
+    if (path.length == 0) return nil;
+    if (!zs_logo_is_svg_file(path)) return path;
+    NSString *gif = zs_logo_ready_apng_path(path);
+    if (gif) return gif;
+    zs_logo_transcode_svg_notify(path);
+    return nil;
 }
 
 static void zs_logo_svg_remove_legacy_cache(void) {
@@ -2225,22 +2164,86 @@ static void zs_logo_svg_remove_legacy_cache(void) {
     }
 }
 
+@interface ZSLogoFrameClock : NSObject
++ (instancetype)shared;
+- (void)addView:(ZSLogoEffectView *)view;
+- (void)removeView:(ZSLogoEffectView *)view;
+@end
+
+@implementation ZSLogoFrameClock {
+    NSHashTable<ZSLogoEffectView *> *_views;
+    CADisplayLink *_link;
+    CFTimeInterval _last;
+}
+
++ (instancetype)shared {
+    static ZSLogoFrameClock *shared;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [[ZSLogoFrameClock alloc] init]; });
+    return shared;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) _views = [NSHashTable weakObjectsHashTable];
+    return self;
+}
+
+- (void)addView:(ZSLogoEffectView *)view {
+    [_views addObject:view];
+    [self zs_updateLink];
+}
+
+- (void)removeView:(ZSLogoEffectView *)view {
+    if (![_views containsObject:view]) return;
+    [_views removeObject:view];
+    [self zs_updateLink];
+}
+
+- (void)zs_updateLink {
+    BOOL needed = _views.allObjects.count > 0;
+    if (needed && !_link) {
+        _last = 0;
+        _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_tick:)];
+        if (@available(iOS 15.0, *)) {
+            _link.preferredFrameRateRange = CAFrameRateRangeMake(60, 60, 60);
+        } else {
+            _link.preferredFramesPerSecond = 60;
+        }
+        [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    } else if (!needed && _link) {
+        [_link invalidate];
+        _link = nil;
+    }
+}
+
+- (void)zs_tick:(CADisplayLink *)link {
+    CFTimeInterval now = link.timestamp;
+    NSTimeInterval delta = _last > 0 ? MIN(now - _last, 0.25) : 0;
+    _last = now;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (ZSLogoEffectView *view in _views.allObjects) [view zs_advanceBy:delta];
+    [CATransaction commit];
+}
+
+@end
+
 @implementation ZSLogoEffectView {
     UIView *_clipView;
     CALayer *_clipLayer;
-    ZSLogoSVGRenderer *_renderer;
     CALayer *_contentLayer;
     CALayer *_maskLayer;
     ZSLogoAnimation *_animation;
+    ZSLogoMappedAnimation *_mapped;
     NSString *_path;
     id _activeObserver;
     UIImage *_maskImage;
     NSAttributedString *_maskText;
     CGSize _maskSize;
-    BOOL _svgPlaced;
-    CGSize _placedSize;
-    CGPoint _placedPosition;
-    CGFloat _placedRotation;
+    NSTimeInterval _playhead;
+    NSInteger _shownIndex;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -2250,6 +2253,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
         self.userInteractionEnabled = NO;
         self.isAccessibilityElement = NO;
         self.backgroundColor = UIColor.clearColor;
+        _shownIndex = -1;
 
         _clipView = [[UIView alloc] initWithFrame:CGRectZero];
         _clipView.userInteractionEnabled = NO;
@@ -2265,7 +2269,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
                                                                             object:nil
                                                                              queue:[NSOperationQueue mainQueue]
                                                                         usingBlock:^(NSNotification *note) {
-            [weakSelf zs_resumeAfterActivation];
+            [weakSelf zs_applyFrames];
         }];
     }
     return self;
@@ -2273,12 +2277,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
 
 - (void)dealloc {
     if (_activeObserver) [[NSNotificationCenter defaultCenter] removeObserver:_activeObserver];
-    [_renderer park];
-}
-
-- (void)zs_resumeAfterActivation {
-    [_renderer invalidate];
-    [self zs_applyFrames];
+    [[ZSLogoFrameClock shared] removeView:self];
 }
 
 - (void)setLayerStyle:(ZSLogoLayerStyle *)layerStyle {
@@ -2297,18 +2296,26 @@ static void zs_logo_svg_remove_legacy_cache(void) {
 
 - (void)loadAssetAtPath:(NSString *)path {
     _path = [path copy];
-    if (zs_logo_is_svg_file(path)) {
-        [self zs_loadSVGAtPath:path];
+    __weak typeof(self) weakSelf = self;
+
+    if (zs_logo_is_transcoded_path(path)) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            ZSLogoMappedAnimation *mapped = zs_logo_mapped_animation_for_apng(path);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                typeof(self) strongSelf = weakSelf;
+                if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
+                [strongSelf zs_setMapped:mapped];
+            });
+        });
         return;
     }
-    [self zs_releaseRenderer];
+
     ZSLogoAnimation *cached = zs_logo_cached_animation(path);
     if (cached) {
         [self zs_setAnimation:cached];
         return;
     }
 
-    __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         ZSLogoAnimation *decoded = zs_logo_animation_for_path(path);
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2319,56 +2326,28 @@ static void zs_logo_svg_remove_legacy_cache(void) {
     });
 }
 
-- (void)zs_loadSVGAtPath:(NSString *)path {
-    NSString *key = zs_logo_svg_renderer_key(path, self.fillsText);
-    ZSLogoSVGRenderer *ready = zs_logo_svg_free_renderer(key);
-    if (ready) {
-        [self zs_attachRenderer:ready];
-        return;
-    }
-
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        ZSLogoSVG *svg = zs_logo_svg_for_path(path);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf || ![strongSelf->_path isEqualToString:path]) return;
-            if (!svg) {
-                [strongSelf zs_releaseRenderer];
-                [strongSelf setNeedsLayout];
-                return;
-            }
-            [strongSelf zs_attachRenderer:zs_logo_svg_free_renderer(key) ?: zs_logo_svg_make_renderer(key, svg)];
-        });
-    });
+- (void)releaseAssets {
+    [[ZSLogoFrameClock shared] removeView:self];
+    _mapped = nil;
+    _shownIndex = -1;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _contentLayer.contents = nil;
+    [CATransaction commit];
 }
 
-- (void)zs_attachRenderer:(ZSLogoSVGRenderer *)renderer {
-    if (_renderer != renderer) {
-        [self zs_releaseRenderer];
-        _renderer = renderer;
-        renderer.owner = self;
-    }
-    _animation = nil;
-    _svgPlaced = NO;
-    [renderer mountInto:_clipView];
+- (void)zs_setAnimation:(ZSLogoAnimation *)animation {
+    _mapped = nil;
+    _animation = animation;
     [self setNeedsLayout];
     [self zs_applyFrames];
 }
 
-- (void)zs_releaseRenderer {
-    ZSLogoSVGRenderer *renderer = _renderer;
-    _renderer = nil;
-    _svgPlaced = NO;
-    if (renderer.owner == self) [renderer park];
-}
-
-- (void)releaseAssets {
-    [self zs_releaseRenderer];
-}
-
-- (void)zs_setAnimation:(ZSLogoAnimation *)animation {
-    _animation = animation;
+- (void)zs_setMapped:(ZSLogoMappedAnimation *)mapped {
+    _animation = nil;
+    _mapped = mapped;
+    _playhead = 0;
+    _shownIndex = -1;
     [self setNeedsLayout];
     [self zs_applyFrames];
 }
@@ -2378,17 +2357,53 @@ static void zs_logo_svg_remove_legacy_cache(void) {
     [self zs_applyFrames];
 }
 
+- (void)zs_showMappedFrame {
+    ZSLogoMappedAnimation *mapped = _mapped;
+    NSUInteger count = mapped.count;
+    if (count == 0) return;
+    NSUInteger index = 0;
+    if (count > 1) {
+        index = (NSUInteger)llround(_playhead / mapped.frameDuration);
+        if (index >= count) index = 0;
+    }
+    if ((NSInteger)index == _shownIndex && _contentLayer.contents) return;
+    _shownIndex = (NSInteger)index;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _contentLayer.contents = mapped.frames[index];
+    [CATransaction commit];
+}
+
+- (void)zs_advanceBy:(NSTimeInterval)delta {
+    ZSLogoMappedAnimation *mapped = _mapped;
+    if (!mapped || mapped.count < 2) return;
+    CGFloat speed = _layerStyle ? _layerStyle.speed : 1;
+    if (speed <= 0 || _animationsPaused || !self.window) return;
+    NSTimeInterval total = mapped.frameDuration * (NSTimeInterval)mapped.count;
+    _playhead += delta * speed;
+    if (_playhead >= total) _playhead = fmod(_playhead, total);
+    [self zs_showMappedFrame];
+}
+
+- (void)zs_applyMappedPlayback {
+    ZSLogoMappedAnimation *mapped = _mapped;
+    CGFloat speed = _layerStyle ? _layerStyle.speed : 1;
+    if (speed <= 0) _playhead = 0;
+    [self zs_showMappedFrame];
+
+    BOOL animating = mapped.count > 1 && speed > 0 && !_animationsPaused && self.window != nil;
+    if (animating) [[ZSLogoFrameClock shared] addView:self];
+    else [[ZSLogoFrameClock shared] removeView:self];
+}
+
 - (void)zs_applyFrames {
     [_contentLayer removeAnimationForKey:kZSLogoFrameAnimationKey];
 
-    if (_renderer) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        _contentLayer.contents = nil;
-        [CATransaction commit];
-        [_renderer setSpeed:_layerStyle ? _layerStyle.speed : 1 paused:_animationsPaused || !self.window];
+    if (_mapped) {
+        [self zs_applyMappedPlayback];
         return;
     }
+    [[ZSLogoFrameClock shared] removeView:self];
 
     ZSLogoAnimation *animation = _animation;
     [CATransaction begin];
@@ -2408,7 +2423,6 @@ static void zs_logo_svg_remove_legacy_cache(void) {
     frames.removedOnCompletion = NO;
     [_contentLayer addAnimation:frames forKey:kZSLogoFrameAnimationKey];
 }
-
 - (UIImage *)zs_renderTextMask {
     UILabel *label = self.label;
     CGSize size = self.bounds.size;
@@ -2480,7 +2494,7 @@ static void zs_logo_svg_remove_legacy_cache(void) {
         _clipLayer.mask = nil;
     }
 
-    CGSize imageSize = _renderer ? _renderer.svg.size : _animation.size;
+    CGSize imageSize = _mapped ? _mapped.size : _animation.size;
     if (imageSize.width > 0 && imageSize.height > 0 && bounds.size.width > 0 && bounds.size.height > 0) {
         CGFloat aspect = imageSize.width / imageSize.height;
         CGFloat width, height;
@@ -2503,29 +2517,13 @@ static void zs_logo_svg_remove_legacy_cache(void) {
                                        CGRectGetMidY(bounds) + style.offset.height);
         CGFloat radians = style.rotation * M_PI / 180.0;
 
-        if (_renderer) {
-            _contentLayer.hidden = YES;
-            CGSize size = CGSizeMake(width, height);
-            if (!_svgPlaced || !CGSizeEqualToSize(_placedSize, size) ||
-                !CGPointEqualToPoint(_placedPosition, position) || _placedRotation != radians) {
-                [_renderer placeWithSize:size center:position rotation:radians];
-                _svgPlaced = YES;
-                _placedSize = size;
-                _placedPosition = position;
-                _placedRotation = radians;
-            }
-            _renderer.hidden = NO;
-        } else {
-            _contentLayer.transform = CATransform3DIdentity;
-            _contentLayer.bounds = CGRectMake(0, 0, width, height);
-            _contentLayer.position = position;
-            _contentLayer.transform = CATransform3DMakeRotation(radians, 0, 0, 1);
-            _contentLayer.hidden = NO;
-        }
+        _contentLayer.transform = CATransform3DIdentity;
+        _contentLayer.bounds = CGRectMake(0, 0, width, height);
+        _contentLayer.position = position;
+        _contentLayer.transform = CATransform3DMakeRotation(radians, 0, 0, 1);
+        _contentLayer.hidden = NO;
     } else {
         _contentLayer.hidden = YES;
-        _renderer.hidden = YES;
-        _svgPlaced = NO;
     }
 
     [CATransaction commit];
@@ -2584,15 +2582,17 @@ void zs_logo_effects_attach(UILabel *label) {
     NSMutableArray<UIView *> *attached = [NSMutableArray array];
     ZSLogoEffectView *fill = nil;
 
-    if (pack.fillPath && style.fill.enabled) {
-        fill = zs_logo_make_effect_view(label, style.fill, pack.fillPath, YES);
+    NSString *fillAsset = pack.fillPath && style.fill.enabled ? zs_logo_effect_asset_path(pack.fillPath) : nil;
+    if (fillAsset) {
+        fill = zs_logo_make_effect_view(label, style.fill, fillAsset, YES);
         [parent insertSubview:fill aboveSubview:label];
         zs_logo_pin_effect_view(fill, label);
         [attached addObject:fill];
     }
 
-    if (pack.vfxPath && style.vfx.enabled) {
-        ZSLogoEffectView *vfx = zs_logo_make_effect_view(label, style.vfx, pack.vfxPath, NO);
+    NSString *vfxAsset = pack.vfxPath && style.vfx.enabled ? zs_logo_effect_asset_path(pack.vfxPath) : nil;
+    if (vfxAsset) {
+        ZSLogoEffectView *vfx = zs_logo_make_effect_view(label, style.vfx, vfxAsset, NO);
         if (style.vfx.aboveText) {
             UIView *anchor = fill ? (UIView *)fill : (UIView *)label;
             [parent insertSubview:vfx aboveSubview:anchor];
@@ -2608,18 +2608,19 @@ void zs_logo_effects_attach(UILabel *label) {
 
 void zs_logo_prewarm(void) {
     ZSLogoPack *pack = zs_logo_selected_pack();
-    NSMutableSet<NSString *> *wanted = [NSMutableSet set];
-    if (pack) {
-        if (pack.fillPath && pack.style.fill.enabled && zs_logo_is_svg_file(pack.fillPath)) {
-            [wanted addObject:zs_logo_svg_renderer_key(pack.fillPath, YES)];
-            zs_logo_svg_preload(pack.fillPath, YES);
-        }
-        if (pack.vfxPath && pack.style.vfx.enabled && zs_logo_is_svg_file(pack.vfxPath)) {
-            [wanted addObject:zs_logo_svg_renderer_key(pack.vfxPath, NO)];
-            zs_logo_svg_preload(pack.vfxPath, NO);
-        }
+    if (!pack) return;
+
+    NSMutableArray<NSString *> *sources = [NSMutableArray array];
+    if (pack.fillPath && pack.style.fill.enabled) [sources addObject:pack.fillPath];
+    if (pack.vfxPath && pack.style.vfx.enabled) [sources addObject:pack.vfxPath];
+
+    for (NSString *source in sources) {
+        NSString *asset = zs_logo_effect_asset_path(source);
+        if (!asset || !zs_logo_is_transcoded_path(asset)) continue;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            (void)zs_logo_mapped_animation_for_apng(asset);
+        });
     }
-    zs_logo_svg_evict_unwanted(wanted);
 }
 
 __attribute__((constructor)) static void zs_logo_prewarm_init(void) {
@@ -2874,6 +2875,7 @@ static BOOL zs_logo_import_commit(NSString *name, NSDictionary<NSString *, NSArr
         return NO;
     }
     zs_logo_invalidate_pack(name);
+    zs_logo_transcode_pack_directory(target);
     return YES;
 }
 
@@ -3096,3 +3098,4 @@ void zs_logo_import_item(NSURL *url, ZSLogoImportCompletion completion) {
         });
     });
 }
+
