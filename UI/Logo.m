@@ -2018,16 +2018,23 @@ static CAAnimation *zs_svg_make_animation(ZSLogoSVGAnimation *animation, ZSLogoS
     CGSize size = _rootLayer.bounds.size;
     CGSize source = CGSizeMake(MAX(1, _svg.viewBox.size.width), MAX(1, _svg.viewBox.size.height));
     NSString *preserve = _svg.preserveAspectRatio.lowercaseString;
+    CGFloat scaleX, scaleY;
     if ([preserve containsString:@"none"]) {
-        _artworkLayer.frame = CGRectMake(0, 0, size.width, size.height);
-        return;
+        scaleX = size.width / source.width;
+        scaleY = size.height / source.height;
+    } else {
+        BOOL slice = [preserve containsString:@"slice"];
+        CGFloat scale = slice ? MAX(size.width / source.width, size.height / source.height) : MIN(size.width / source.width, size.height / source.height);
+        scaleX = scale;
+        scaleY = scale;
     }
-    BOOL slice = [preserve containsString:@"slice"];
-    CGFloat scale = slice ? MAX(size.width / source.width, size.height / source.height) : MIN(size.width / source.width, size.height / source.height);
-    CGSize rendered = CGSizeMake(source.width * scale, source.height * scale);
-    CGFloat x = [preserve containsString:@"xmin"] ? 0 : ([preserve containsString:@"xmax"] ? size.width - rendered.width : (size.width - rendered.width) / 2);
-    CGFloat y = [preserve containsString:@"ymin"] ? 0 : ([preserve containsString:@"ymax"] ? size.height - rendered.height : (size.height - rendered.height) / 2);
-    _artworkLayer.frame = CGRectMake(x, y, rendered.width, rendered.height);
+    CGSize rendered = CGSizeMake(source.width * scaleX, source.height * scaleY);
+    CGFloat x = [preserve containsString:@"none"] || [preserve containsString:@"xmin"] ? 0 : ([preserve containsString:@"xmax"] ? size.width - rendered.width : (size.width - rendered.width) / 2);
+    CGFloat y = [preserve containsString:@"none"] || [preserve containsString:@"ymin"] ? 0 : ([preserve containsString:@"ymax"] ? size.height - rendered.height : (size.height - rendered.height) / 2);
+    _artworkLayer.transform = CATransform3DIdentity;
+    _artworkLayer.bounds = CGRectMake(0, 0, source.width, source.height);
+    _artworkLayer.position = CGPointMake(x, y);
+    _artworkLayer.transform = CATransform3DMakeScale(scaleX, scaleY, 1);
 }
 
 - (void)mountInto:(UIView *)host {
