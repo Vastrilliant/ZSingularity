@@ -1600,6 +1600,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     size_t _pixelHeight;
     NSUInteger _frameCount;
     NSUInteger _nextFrame;
+    NSUInteger _enqueuedCount;
     NSUInteger _inFlight;
     BOOL _waiting;
     double _leadMs;
@@ -1855,6 +1856,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 
 - (void)zs_enqueueBlack:(UIImage *)black white:(UIImage *)white index:(NSUInteger)index {
     _inFlight++;
+    _enqueuedCount++;
     CGImageRef blackImage = CGImageRetain(black.CGImage);
     CGImageRef whiteImage = CGImageRetain(white.CGImage);
     size_t width = _pixelWidth;
@@ -1908,7 +1910,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 }
 
 - (void)zs_finishIfDrained {
-    if (_finished || _closing || _nextFrame < _frameCount || _inFlight > 0) return;
+    if (_finished || _closing || _enqueuedCount < _frameCount || _inFlight > 0) return;
     _closing = YES;
     [self zs_teardownWeb];
     ZSLogoVideoWriter *writer = _writer;
