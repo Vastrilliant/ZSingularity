@@ -4474,9 +4474,29 @@ static void ZSCustomGreeting_Tick(void) {
 
 @end
 
+static void *ZSCustomGreetingPatcher_WaitForUnityThenInstall(void *arg) {
+    (void)arg;
+
+    __block BOOL unityReady = NO;
+    while (!unityReady) {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            id appController = [[UIApplication sharedApplication] delegate];
+            if (appController && find_unity_view(appController)) unityReady = YES;
+        });
+        if (!unityReady) usleep(200 * 1000);
+    }
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        [ZSCustomGreetingPatcher install];
+    });
+    return NULL;
+}
+
 __attribute__((constructor))
 static void ZSCustomGreetingPatcherConstructor(void) {
-    [ZSCustomGreetingPatcher install];
+    pthread_t t;
+    pthread_create(&t, NULL, ZSCustomGreetingPatcher_WaitForUnityThenInstall, NULL);
+    pthread_detach(t);
 }
 
 #pragma mark - UID Redactor
