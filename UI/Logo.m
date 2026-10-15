@@ -411,12 +411,12 @@ static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
 static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
 static const NSTimeInterval kZSLogoTranscodeRetryInterval = 60.0;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
-static const uint32_t kZSLogoTranscodeVersion = 4;
+static const uint32_t kZSLogoTranscodeVersion = 5;
 static const double kZSLogoVideoBitsPerPixel = 2.0;
-static const double kZSLogoVideoQuality = 1.0;
+static const double kZSLogoVideoQuality = 0.8;
 static const double kZSLogoVideoMinBitRate = 8000000.0;
 static const double kZSLogoVideoMaxBitRate = 200000000.0;
-static const NSInteger kZSLogoVideoKeyframeInterval = 48;
+static const NSInteger kZSLogoVideoKeyframeInterval = 96;
 static const NSTimeInterval kZSLogoVideoAppendTimeout = 60.0;
 
 static void zs_logo_transcode_pack_directory(NSString *directory);
@@ -1155,7 +1155,7 @@ static void zs_logo_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, 
     NSDictionary *common = @{
         AVVideoExpectedSourceFrameRateKey: @(kZSLogoTranscodeFPS),
         AVVideoMaxKeyFrameIntervalKey: @(kZSLogoVideoKeyframeInterval),
-        AVVideoAllowFrameReorderingKey: @NO,
+        AVVideoAllowFrameReorderingKey: @YES,
     };
     NSMutableDictionary *qualityAlpha = [common mutableCopy];
     qualityAlpha[AVVideoQualityKey] = @(kZSLogoVideoQuality);
@@ -1324,6 +1324,7 @@ static void zs_logo_transcode_prune(NSString *svgPath, NSString *keepVideo) {
 @property (nonatomic, strong) NSArray *samples;
 @property (nonatomic, strong) NSArray<NSNumber *> *keyframes;
 @property (nonatomic, strong, nullable) NSArray<NSNumber *> *displayOrder;
+@property (nonatomic, assign) BOOL containsAlpha;
 @property (nonatomic, assign) CGSize size;
 @property (nonatomic, assign) NSTimeInterval frameDuration;
 - (NSUInteger)count;
@@ -1411,6 +1412,9 @@ static ZSLogoVideo *zs_logo_video_load(NSString *path) {
     video.samples = samples;
     video.keyframes = keyframes;
     video.displayOrder = displayOrder;
+    CMFormatDescriptionRef firstDescription = CMSampleBufferGetFormatDescription((__bridge CMSampleBufferRef)samples.firstObject);
+    CFTypeRef alphaExtension = firstDescription ? CMFormatDescriptionGetExtension(firstDescription, CFSTR("ContainsAlphaChannel")) : NULL;
+    video.containsAlpha = alphaExtension && CFGetTypeID(alphaExtension) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)alphaExtension);
     video.size = size;
     video.frameDuration = rate > 0 ? 1.0 / (double)rate : 1.0 / (double)kZSLogoTranscodeFPS;
     return video;
@@ -1453,6 +1457,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     VTDecompressionSessionRef _session;
     NSInteger _decoded;
     NSMutableDictionary<NSNumber *, id> *_recent;
+    NSInteger _matte;
     BOOL _invalid;
 }
 
@@ -1463,6 +1468,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     _queue = dispatch_queue_create("zs.logo.decode", DISPATCH_QUEUE_SERIAL);
     _decoded = -1;
     _recent = [NSMutableDictionary dictionary];
+    _matte = video.containsAlpha ? 2 : 0;
     return self;
 }
 
@@ -1477,7 +1483,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
 - (void)zs_remember:(CVPixelBufferRef)buffer atIndex:(NSUInteger)index {
     if (!_video.displayOrder) return;
     _recent[@(index)] = (__bridge id)buffer;
-    while (_recent.count > 4) {
+    while (_recent.count > 5) {
         NSNumber *oldest = [_recent.allKeys sortedArrayUsingSelector:@selector(compare:)].firstObject;
         [_recent removeObjectForKey:oldest];
     }
@@ -1509,6 +1515,42 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
     return YES;
 }
 
+- (void)zs_applyMatte:(CVPixelBufferRef)buffer {
+    if (_matte == 2 || CVPixelBufferGetPixelFormatType(buffer) != kCVPixelFormatType_32BGRA) return;
+    if (CVPixelBufferLockBaseAddress(buffer, 0) != kCVReturnSuccess) return;
+    uint8_t *base = CVPixelBufferGetBaseAddress(buffer);
+    size_t width = CVPixelBufferGetWidth(buffer);
+    size_t height = CVPixelBufferGetHeight(buffer);
+    size_t stride = CVPixelBufferGetBytesPerRow(buffer);
+    if (base) {
+        if (_matte == 0) {
+            BOOL opaque = YES;
+            for (size_t y = 0; y < height && opaque; y++) {
+                const uint8_t *row = base + y * stride;
+                for (size_t x = 0; x < width; x++) {
+                    if (row[x * 4 + 3] != 255) {
+                        opaque = NO;
+                        break;
+                    }
+                }
+            }
+            _matte = opaque ? 1 : 2;
+        }
+        if (_matte == 1) {
+            for (size_t y = 0; y < height; y++) {
+                uint8_t *row = base + y * stride;
+                for (size_t x = 0; x < width; x++) {
+                    uint8_t *pixel = row + x * 4;
+                    uint8_t peak = pixel[0] > pixel[1] ? pixel[0] : pixel[1];
+                    if (pixel[2] > peak) peak = pixel[2];
+                    pixel[3] = peak;
+                }
+            }
+        }
+    }
+    CVPixelBufferUnlockBaseAddress(buffer, 0);
+}
+
 - (CVPixelBufferRef)zs_decodeSample:(NSUInteger)index {
     __block CVPixelBufferRef result = NULL;
     OSStatus status = VTDecompressionSessionDecodeFrameWithOutputHandler(_session, (__bridge CMSampleBufferRef)_video.samples[index], 0, NULL,
@@ -1520,6 +1562,7 @@ static ZSLogoVideo *zs_logo_video_for_path(NSString *path) {
         CVPixelBufferRelease(result);
         result = NULL;
     }
+    if (result) [self zs_applyMatte:result];
     return result;
 }
 
