@@ -403,7 +403,7 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
 static const NSInteger kZSLogoTranscodeFPS = 24;
-static const CGFloat kZSLogoTranscodeMaxEdge = 2048;
+static const CGFloat kZSLogoTranscodeMaxEdge = 768;
 static const size_t kZSLogoTranscodeFrameBudgetBytes = 128 * 1024 * 1024;
 static const double kZSLogoTranscodeMaxLoopMs = 30000.0;
 static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
@@ -411,10 +411,11 @@ static const NSTimeInterval kZSLogoTranscodeStepTimeout = 45.0;
 static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
 static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
-static const uint32_t kZSLogoTranscodeVersion = 6;
+static const uint32_t kZSLogoTranscodeVersion = 7;
 static const double kZSLogoVideoBitsPerPixel = 0.15;
 static const double kZSLogoVideoMinBitRate = 1000000.0;
-static const double kZSLogoVideoMaxBitRate = 60000000.0;
+static const double kZSLogoVideoMaxBitRate = 12000000.0;
+static const double kZSLogoVideoSizeBudgetBytes = 8.5 * 1024.0 * 1024.0;
 static const NSInteger kZSLogoVideoKeyframeInterval = 96;
 static const NSTimeInterval kZSLogoVideoAppendTimeout = 60.0;
 
@@ -1077,9 +1078,6 @@ static NSString * const kZSLogoSVGSeekScript =
     @"return 1;\n"
     @"})(%f,'%@')";
 
-static NSString * const kZSLogoSVGBackgroundScript =
-    @"(function(c){document.documentElement.style.setProperty('background-color',c,'important');return 1;})('%@')";
-
 static UIWindow *zs_logo_host_window(void) {
     UIWindow *fallback = nil;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
@@ -1093,20 +1091,6 @@ static UIWindow *zs_logo_host_window(void) {
 }
 
 #pragma mark - HEVC writer
-
-static void zs_logo_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, uint8_t *out, size_t pixelCount) {
-    for (size_t i = 0; i < pixelCount; i++, onBlack += 4, onWhite += 4, out += 4) {
-        int difference = ((int)onWhite[0] - (int)onBlack[0]) + ((int)onWhite[1] - (int)onBlack[1]) + ((int)onWhite[2] - (int)onBlack[2]);
-        int alpha = 255 - (difference + (difference >= 0 ? 1 : -1)) / 3;
-        if (alpha < 0) alpha = 0;
-        if (alpha > 255) alpha = 255;
-        uint8_t b = onBlack[0], g = onBlack[1], r = onBlack[2];
-        out[0] = b > alpha ? (uint8_t)alpha : b;
-        out[1] = g > alpha ? (uint8_t)alpha : g;
-        out[2] = r > alpha ? (uint8_t)alpha : r;
-        out[3] = (uint8_t)alpha;
-    }
-}
 
 @interface ZSLogoVideoWriter : NSObject
 - (instancetype)initWithFinalPath:(NSString *)finalPath width:(size_t)width height:(size_t)height frameCount:(NSUInteger)frameCount;
@@ -1149,42 +1133,31 @@ static void zs_logo_matte_frame(const uint8_t *onBlack, const uint8_t *onWhite, 
         return NO;
     }
 
+    double duration = MAX(1.0, (double)_expectedFrames) / (double)kZSLogoTranscodeFPS;
     double bitRate = (double)_width * (double)_height * (double)kZSLogoTranscodeFPS * kZSLogoVideoBitsPerPixel;
+    bitRate = MIN(bitRate, kZSLogoVideoSizeBudgetBytes * 8.0 / duration);
     bitRate = MIN(kZSLogoVideoMaxBitRate, MAX(kZSLogoVideoMinBitRate, bitRate));
-    NSDictionary *common = @{
-        AVVideoExpectedSourceFrameRateKey: @(kZSLogoTranscodeFPS),
-        AVVideoMaxKeyFrameIntervalKey: @(kZSLogoVideoKeyframeInterval),
-        AVVideoAllowFrameReorderingKey: @YES,
+    NSDictionary *settings = @{
+        AVVideoCodecKey: AVVideoCodecTypeHEVC,
+        AVVideoWidthKey: @(_width),
+        AVVideoHeightKey: @(_height),
+        AVVideoColorPropertiesKey: @{
+            AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+            AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+            AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+        },
+        AVVideoCompressionPropertiesKey: @{
+            AVVideoExpectedSourceFrameRateKey: @(kZSLogoTranscodeFPS),
+            AVVideoMaxKeyFrameIntervalKey: @(kZSLogoVideoKeyframeInterval),
+            AVVideoAllowFrameReorderingKey: @YES,
+            AVVideoAverageBitRateKey: @(bitRate),
+        },
     };
-    NSMutableDictionary *rateAlpha = [common mutableCopy];
-    rateAlpha[AVVideoAverageBitRateKey] = @(bitRate);
-    rateAlpha[(__bridge NSString *)kVTCompressionPropertyKey_TargetQualityForAlpha] = @1.0;
-    NSMutableDictionary *rate = [common mutableCopy];
-    rate[AVVideoAverageBitRateKey] = @(bitRate);
-
-    NSDictionary *settings = nil;
-    for (NSDictionary *properties in @[rateAlpha, rate]) {
-        NSDictionary *candidate = @{
-            AVVideoCodecKey: AVVideoCodecTypeHEVCWithAlpha,
-            AVVideoWidthKey: @(_width),
-            AVVideoHeightKey: @(_height),
-            AVVideoColorPropertiesKey: @{
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-            },
-            AVVideoCompressionPropertiesKey: properties,
-        };
-        if ([_writer canApplyOutputSettings:candidate forMediaType:AVMediaTypeVideo]) {
-            settings = candidate;
-            ZLog(@"[Logo] encoding HEVC at %zux%zu, %.1f Mbps average%@", _width, _height, bitRate / 1000000.0, properties == rateAlpha ? @", full alpha quality" : @"");
-            break;
-        }
-    }
-    if (!settings) {
-        ZLog(@"[Logo] this device can't encode HEVC with alpha at %zux%zu", _width, _height);
+    if (![_writer canApplyOutputSettings:settings forMediaType:AVMediaTypeVideo]) {
+        ZLog(@"[Logo] this device can't encode HEVC at %zux%zu", _width, _height);
         return NO;
     }
+    ZLog(@"[Logo] encoding HEVC at %zux%zu, %.2f Mbps average over %.1fs", _width, _height, bitRate / 1000000.0, duration);
 
     _input = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:settings];
     _input.expectsMediaDataInRealTime = NO;
@@ -1683,54 +1656,14 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 @protocol ZSLogoRenderWorkerDelegate <NSObject>
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didProbe:(NSDictionary *)probe;
 - (void)renderWorkerDidBecomeReady:(ZSLogoRenderWorker *)worker;
-- (void)renderWorker:(ZSLogoRenderWorker *)worker didCaptureIndex:(NSUInteger)index black:(UIImage *)black white:(UIImage *)white;
+- (void)renderWorker:(ZSLogoRenderWorker *)worker didCaptureIndex:(NSUInteger)index image:(UIImage *)image;
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didStallAtIndex:(NSUInteger)index reason:(NSString *)reason;
 - (void)renderWorker:(ZSLogoRenderWorker *)worker didFail:(NSString *)reason;
 @end
 
-static NSString * const kZSLogoSVGHideScript =
-    @"(function(){var s=document.querySelector('svg');if(s)s.style.setProperty('visibility','hidden','important');"
-    @"document.documentElement.style.setProperty('background-color','transparent','important');return 1;})()";
-
-static NSString * const kZSLogoSVGShowScript =
-    @"(function(){var s=document.querySelector('svg');if(s)s.style.removeProperty('visibility');return 1;})()";
-
-static BOOL zs_logo_snapshot_set_transparent(WKSnapshotConfiguration *configuration, BOOL transparent) {
-    SEL setter = NSSelectorFromString(@"_setUsesTransparentBackground:");
-    if (![configuration respondsToSelector:setter]) return NO;
-    NSMethodSignature *signature = [configuration methodSignatureForSelector:setter];
-    if (!signature || signature.numberOfArguments != 3) return NO;
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    invocation.target = configuration;
-    invocation.selector = setter;
-    [invocation setArgument:&transparent atIndex:2];
-    [invocation invoke];
-    return YES;
-}
-
-static BOOL zs_logo_image_is_clear(UIImage *image) {
-    CGImageRef cgImage = image.CGImage;
-    if (!cgImage) return NO;
-    enum { side = 16 };
-    uint8_t pixels[side * side * 4];
-    memset(pixels, 0xFF, sizeof(pixels));
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(pixels, side, side, 8, side * 4, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(colorSpace);
-    if (!context) return NO;
-    CGContextSetBlendMode(context, kCGBlendModeCopy);
-    CGContextDrawImage(context, CGRectMake(0, 0, side, side), cgImage);
-    CGContextRelease(context);
-    for (size_t i = 3; i < sizeof(pixels); i += 4) {
-        if (pixels[i] != 0) return NO;
-    }
-    return YES;
-}
-
 @interface ZSLogoRenderWorker : NSObject <WKNavigationDelegate>
 @property (nonatomic, assign) CGSize pointSize;
 @property (nonatomic, assign) double timeoutScale;
-@property (nonatomic, assign, readonly) BOOL transparentCapture;
 - (instancetype)initWithDelegate:(id<ZSLogoRenderWorkerDelegate>)delegate svg:(ZSLogoSVG *)svg window:(UIWindow *)window;
 - (void)load;
 - (void)captureAtTime:(double)timeMs index:(NSUInteger)index;
@@ -1744,7 +1677,6 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     WKWebView *_web;
     BOOL _dead;
     BOOL _failed;
-    BOOL _transparent;
     NSUInteger _generation;
     NSUInteger _loadStep;
     NSUInteger _viewportAttempt;
@@ -1772,8 +1704,8 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     _web = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 256, 256) configuration:configuration];
     _web.navigationDelegate = self;
     _web.opaque = YES;
-    _web.backgroundColor = UIColor.whiteColor;
-    _web.scrollView.backgroundColor = UIColor.whiteColor;
+    _web.backgroundColor = UIColor.blackColor;
+    _web.scrollView.backgroundColor = UIColor.blackColor;
     _web.scrollView.scrollEnabled = NO;
     _web.scrollView.bounces = NO;
     _web.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
@@ -1781,10 +1713,6 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     _web.allowsLinkPreview = NO;
     [_host addSubview:_web];
     return self;
-}
-
-- (BOOL)transparentCapture {
-    return _transparent;
 }
 
 - (void)load {
@@ -1894,10 +1822,7 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
         if (matched || ++self->_viewportAttempt >= kZSLogoTranscodeViewportAttempts) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                 if (self->_dead) return;
-                [self zs_calibrateThen:^{
-                    if (self->_dead) return;
-                    [self->_delegate renderWorkerDidBecomeReady:self];
-                }];
+                [self->_delegate renderWorkerDidBecomeReady:self];
             });
             return;
         }
@@ -1905,33 +1830,6 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
             if (self->_dead) return;
             [self zs_waitForViewport];
         });
-    }];
-}
-
-- (void)zs_useOpaqueSurface:(BOOL)opaque {
-    UIColor *color = opaque ? UIColor.whiteColor : UIColor.clearColor;
-    _web.opaque = opaque;
-    _web.backgroundColor = color;
-    _web.scrollView.backgroundColor = color;
-}
-
-- (void)zs_calibrateThen:(void (^)(void))next {
-    WKSnapshotConfiguration *probe = [[WKSnapshotConfiguration alloc] init];
-    if (!zs_logo_snapshot_set_transparent(probe, YES)) {
-        next();
-        return;
-    }
-    [self zs_useOpaqueSurface:NO];
-    _transparent = YES;
-    [self zs_runScript:kZSLogoSVGHideScript then:^{
-        [self zs_snapshot:^(UIImage *image) {
-            BOOL supported = zs_logo_image_is_clear(image);
-            if (!supported) {
-                self->_transparent = NO;
-                [self zs_useOpaqueSurface:YES];
-            }
-            [self zs_runScript:kZSLogoSVGShowScript then:next];
-        }];
     }];
 }
 
@@ -1957,7 +1855,6 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     configuration.rect = CGRectMake(0, 0, self.pointSize.width, self.pointSize.height);
     configuration.snapshotWidth = @(self.pointSize.width);
     configuration.afterScreenUpdates = YES;
-    if (_transparent) zs_logo_snapshot_set_transparent(configuration, YES);
     [_web takeSnapshotWithConfiguration:configuration completionHandler:^(UIImage *image, NSError *error) {
         if (![self zs_stepIsCurrent:step]) return;
         [self zs_endStep];
@@ -1969,29 +1866,20 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     }];
 }
 
-- (void)zs_finishCaptureAtIndex:(NSUInteger)index first:(UIImage *)first second:(UIImage *)second {
+- (void)zs_finishCaptureAtIndex:(NSUInteger)index image:(UIImage *)image {
     if (_dead || _failed) return;
     _captureIndex = NSNotFound;
-    [_delegate renderWorker:self didCaptureIndex:index black:first white:second];
+    [_delegate renderWorker:self didCaptureIndex:index image:image];
 }
 
 - (void)captureAtTime:(double)timeMs index:(NSUInteger)index {
     if (_dead || _failed) return;
     _captureIndex = index;
-    NSString *seek = [NSString stringWithFormat:kZSLogoSVGSeekScript, timeMs, _transparent ? @"transparent" : @"#000"];
+    NSString *seek = [NSString stringWithFormat:kZSLogoSVGSeekScript, timeMs, @"#000"];
 
     [self zs_runScript:seek then:^{
-        [self zs_snapshot:^(UIImage *first) {
-            if (self->_transparent) {
-                [self zs_finishCaptureAtIndex:index first:first second:nil];
-                return;
-            }
-            NSString *whiten = [NSString stringWithFormat:kZSLogoSVGBackgroundScript, @"#fff"];
-            [self zs_runScript:whiten then:^{
-                [self zs_snapshot:^(UIImage *white) {
-                    [self zs_finishCaptureAtIndex:index first:first second:white];
-                }];
-            }];
+        [self zs_snapshot:^(UIImage *image) {
+            [self zs_finishCaptureAtIndex:index image:image];
         }];
     }];
 }
@@ -2115,7 +2003,7 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     if (_captureStart == 0) {
         _captureStart = CFAbsoluteTimeGetCurrent();
         _lastLog = _captureStart;
-        ZLog(@"[Logo] %@: capture started, %.2fs of setup, %@", _path.lastPathComponent, _captureStart - _jobStart, worker.transparentCapture ? @"single pass alpha capture" : @"black/white matte capture");
+        ZLog(@"[Logo] %@: capture started, %.2fs of setup", _path.lastPathComponent, _captureStart - _jobStart);
     }
     [self zs_assignWork:worker];
 }
@@ -2145,27 +2033,19 @@ static BOOL zs_logo_image_is_clear(UIImage *image) {
     for (ZSLogoRenderWorker *worker in parked) [self zs_assignWork:worker];
 }
 
-- (void)renderWorker:(ZSLogoRenderWorker *)worker didCaptureIndex:(NSUInteger)index black:(UIImage *)black white:(UIImage *)white {
+- (void)renderWorker:(ZSLogoRenderWorker *)worker didCaptureIndex:(NSUInteger)index image:(UIImage *)image {
     if (_finished || _closing) return;
     [self zs_assignWork:worker];
 
-    CGImageRef blackImage = CGImageRetain(black.CGImage);
-    CGImageRef whiteImage = white ? CGImageRetain(white.CGImage) : NULL;
+    CGImageRef cgImage = CGImageRetain(image.CGImage);
     size_t width = _pixelWidth;
     size_t height = _pixelHeight;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         size_t bytes = width * height * 4;
         uint8_t *blackBuffer = malloc(bytes);
-        BOOL ok = blackBuffer && zs_logo_draw_snapshot(blackImage, blackBuffer, width, height);
-        CGImageRelease(blackImage);
-        if (ok && whiteImage) {
-            uint8_t *whiteBuffer = malloc(bytes);
-            ok = whiteBuffer && zs_logo_draw_snapshot(whiteImage, whiteBuffer, width, height);
-            if (ok) zs_logo_matte_frame(blackBuffer, whiteBuffer, blackBuffer, width * height);
-            free(whiteBuffer);
-        }
-        if (whiteImage) CGImageRelease(whiteImage);
+        BOOL ok = blackBuffer && zs_logo_draw_snapshot(cgImage, blackBuffer, width, height);
+        CGImageRelease(cgImage);
         NSData *frame = nil;
         if (ok) frame = [NSData dataWithBytesNoCopy:blackBuffer length:bytes freeWhenDone:YES];
         else free(blackBuffer);
