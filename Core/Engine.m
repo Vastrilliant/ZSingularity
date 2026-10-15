@@ -4508,14 +4508,11 @@ static NSArray<NSString *> *ZSCombatTip_Pool(void) {
         pool = @[
             @"Going into the <Dungeon> using a burn team? You like using a bottom tier status? Huh? You like that stupid lil burn boy?",
             @"This combat tip is sponsored by N. Corp",
-            @"I have nothing but my sorrow, and I want nothing more. It has been, it still is, faithful to me.
-Why should I begrudge it, since during the hours, when my soul crushed the depths of my heart, it was seated there beside me?
-O sorrow, I have ended, you see, by respecting you, because I am certain you will never leave me. Ah, I realize it: your beauty lies in the force of your being.
-Because I know that on the day of my final agony, you will be there, lying in my sheets, O sorrow, so that you might once again attempt to enter my heart.",
+            @"I have nothing but my sorrow, and I want nothing more. It has been, it still is, faithful to me.\nWhy should I begrudge it, since during the hours, when my soul crushed the depths of my heart, it was seated there beside me?\nO sorrow, I have ended, you see, by respecting you, because I am certain you will never leave me. Ah, I realize it: your beauty lies in the force of your being.\nBecause I know that on the day of my final agony, you will be there, lying in my sheets, O sorrow, so that you might once again attempt to enter my heart.",
             @"is that the red mist",
             @"<Tick, tock, tick, tock, tick, tock>",
             @"Did esgoo upload another vid yet?",
-            @"Downloading 22 bytes of data. You will be returned to the title screen if your device has insufficient storage space. A direct internet connection (Wi-Fi) is recommended.",
+            @"Downloading 22 bytes of data.\nYou will be returned to the title screen if your device has insufficient storage space.\nA direct internet connection (Wi-Fi) is recommended.",
             @"Hwell, butter my butt and call me a biscuit!",
             @"BATH FOR THE REVERED XIANREN!!!",
             @"Have you ever wondered if little Paus from the April Fools event, is on the Gesellschaft? It's funny to think there's just a little kid running around in their gc",
