@@ -4560,7 +4560,10 @@ static void ZSCombatTip_ArmAttempts(void) {
     gZSCombatTipTicksUntilAttempt = 0;
 }
 
+static BOOL gZSCombatTipApplied;
+
 static void ZSCombatTip_Drop(void) {
+    gZSCombatTipApplied = NO;
     gZSCombatTipManagerInstance = NULL;
     gZSCombatTipTMPInstance = NULL;
     gZSCombatTipGetText = NULL;
@@ -4569,6 +4572,7 @@ static void ZSCombatTip_Drop(void) {
 }
 
 static void ZSCombatTip_HotFieldInvalidate(void) {
+    if (gZSCombatTipApplied) return;
     ZSCombatTip_Drop();
     ZSCombatTip_ArmAttempts();
 }
@@ -4606,52 +4610,53 @@ static BOOL ZSCombatTip_HotFieldResolve(void) {
     return YES;
 }
 
-static void ZSCombatTip_ApplyText(NSString *text) {
+static BOOL ZSCombatTip_ApplyText(NSString *text) {
     void *converted = [IL2CppBridge il2CppStringFromNSString:text];
-    if (!converted) return;
+    if (!converted) return NO;
 
     void *args[1] = { converted };
     void *exc = NULL;
     [IL2CppBridge invokeMethod:gZSCombatTipSetText onInstance:gZSCombatTipTMPInstance args:args outException:&exc];
-    if (exc) { ZSCombatTip_Drop(); return; }
+    if (exc) { ZSCombatTip_Drop(); return NO; }
     gZSCombatTipLastWrittenString = converted;
+    return YES;
 }
 
 static void ZSCombatTip_Tick(void) {
     if (ZSCombatTip_Pool().count == 0) return;
 
     int32_t sceneState = -1;
+    BOOL sceneChanged = NO;
     if (ZSGlobalScene_Current(&sceneState) && sceneState != gZSCombatTipLastSceneState) {
         gZSCombatTipLastSceneState = sceneState;
+        sceneChanged = YES;
+    }
+
+    if (gZSCombatTipApplied) {
+        if (ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) return;
+        ZSCombatTip_Drop();
+        return;
+    }
+
+    if (sceneChanged) {
         ZSCombatTip_Drop();
         ZSCombatTip_ArmAttempts();
     }
 
-    if (gZSCombatTipManagerInstance && !ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) {
-        ZSCombatTip_Drop();
+    if (gZSCombatTipAttemptsRemaining <= 0) return;
+    if (gZSCombatTipTicksUntilAttempt > 0) {
+        gZSCombatTipTicksUntilAttempt--;
+        return;
     }
+    gZSCombatTipAttemptsRemaining--;
+    gZSCombatTipTicksUntilAttempt = kZSCombatTipAttemptSpacingTicks;
 
-    if (!gZSCombatTipTMPInstance) {
-        if (gZSCombatTipAttemptsRemaining <= 0) return;
-        if (gZSCombatTipTicksUntilAttempt > 0) {
-            gZSCombatTipTicksUntilAttempt--;
-            return;
-        }
-        gZSCombatTipAttemptsRemaining--;
-        gZSCombatTipTicksUntilAttempt = kZSCombatTipAttemptSpacingTicks;
-        if (!ZSCombatTip_HotFieldResolve()) return;
-        gZSCombatTipAttemptsRemaining = 0;
-    }
+    if (!ZSCombatTip_HotFieldResolve()) return;
+    if (gZSCombatTipChosen.length == 0) { ZSCombatTip_Drop(); return; }
+    if (!ZSCombatTip_ApplyText(gZSCombatTipChosen)) return;
 
-    if (gZSCombatTipChosen.length == 0) return;
-
-    void *getExc = NULL;
-    void *current = [IL2CppBridge invokeMethod:gZSCombatTipGetText onInstance:gZSCombatTipTMPInstance args:NULL outException:&getExc];
-    if (getExc) { ZSCombatTip_Drop(); return; }
-
-    if (current == gZSCombatTipLastWrittenString) return;
-
-    ZSCombatTip_ApplyText(gZSCombatTipChosen);
+    gZSCombatTipApplied = YES;
+    gZSCombatTipAttemptsRemaining = 0;
 }
 
 @interface ZSCombatTipPatcher : NSObject
