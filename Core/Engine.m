@@ -4553,15 +4553,62 @@ static const void *gZSCombatTipSetText;
 static void *gZSCombatTipLastWrittenString;
 
 static int gZSCombatTipResolveFailStreak;
-static const int kZSCombatTipResolveRetryThrottleTicks = 30;
+static const int kZSCombatTipResolveRetryThrottleTicks = 10;
 
-static void ZSCombatTip_HotFieldInvalidate(void) {
+static const int kZSCombatTipSearchWindowTicks = 180;
+static int gZSCombatTipSearchWindowRemaining;
+static uint64_t gZSCombatTipLastSignature = UINT64_MAX;
+
+static void ZSCombatTip_Drop(void) {
     gZSCombatTipManagerInstance = NULL;
     gZSCombatTipTMPInstance = NULL;
     gZSCombatTipGetText = NULL;
     gZSCombatTipSetText = NULL;
     gZSCombatTipLastWrittenString = NULL;
     gZSCombatTipResolveFailStreak = 0;
+}
+
+static void ZSCombatTip_HotFieldInvalidate(void) {
+    ZSCombatTip_Drop();
+    gZSCombatTipSearchWindowRemaining = kZSCombatTipSearchWindowTicks;
+}
+
+static void *gZSCombatTipSceneManagerClass;
+static const void *gZSCombatTipSceneCountMethod;
+static const void *gZSCombatTipActiveSceneMethod;
+
+static uint64_t ZSCombatTip_SceneSignature(void) {
+    if (!gZSCombatTipSceneManagerClass) {
+        gZSCombatTipSceneManagerClass = [IL2CppBridge classNamed:"SceneManager"
+                                                      inNamespace:"UnityEngine.SceneManagement"
+                                                 assemblyContains:"CoreModule"];
+        if (!gZSCombatTipSceneManagerClass) return 0;
+    }
+    if (!gZSCombatTipSceneCountMethod) {
+        gZSCombatTipSceneCountMethod = [IL2CppBridge methodOnClass:gZSCombatTipSceneManagerClass name:"get_sceneCount" argCount:0];
+    }
+    if (!gZSCombatTipActiveSceneMethod) {
+        gZSCombatTipActiveSceneMethod = [IL2CppBridge methodOnClass:gZSCombatTipSceneManagerClass name:"GetActiveScene" argCount:0];
+    }
+
+    int32_t count = 0;
+    if (gZSCombatTipSceneCountMethod) {
+        void *exc = NULL;
+        void *boxed = [IL2CppBridge invokeMethod:gZSCombatTipSceneCountMethod onInstance:NULL args:NULL outException:&exc];
+        if (!exc && boxed) memcpy(&count, (uint8_t *)boxed + 0x10, sizeof(int32_t));
+    }
+
+    int32_t handle = 0;
+    if (gZSCombatTipActiveSceneMethod) {
+        void *exc = NULL;
+        void *boxed = [IL2CppBridge invokeMethod:gZSCombatTipActiveSceneMethod onInstance:NULL args:NULL outException:&exc];
+        if (!exc && boxed) memcpy(&handle, (uint8_t *)boxed + 0x10, sizeof(int32_t));
+    }
+
+    int32_t sceneState = -1;
+    ZSGlobalScene_Current(&sceneState);
+
+    return ((uint64_t)(uint32_t)count << 48) ^ ((uint64_t)(uint32_t)handle << 16) ^ (uint64_t)(uint16_t)sceneState;
 }
 
 static BOOL ZSCombatTip_HotFieldResolve(void) {
@@ -4610,10 +4657,20 @@ static void ZSCombatTip_ApplyText(NSString *text) {
 
 static void ZSCombatTip_Tick(void) {
     if (gZSCombatTipManagerInstance && !ZSUID_UnityObjectIsAlive(gZSCombatTipManagerInstance)) {
-        ZSCombatTip_HotFieldInvalidate();
+        ZSCombatTip_Drop();
     }
 
     if (!gZSCombatTipTMPInstance) {
+        uint64_t signature = ZSCombatTip_SceneSignature();
+        if (signature != gZSCombatTipLastSignature) {
+            gZSCombatTipLastSignature = signature;
+            gZSCombatTipSearchWindowRemaining = kZSCombatTipSearchWindowTicks;
+            gZSCombatTipResolveFailStreak = 0;
+        }
+
+        if (gZSCombatTipSearchWindowRemaining <= 0) return;
+        gZSCombatTipSearchWindowRemaining--;
+
         if (gZSCombatTipResolveFailStreak > 0) {
             gZSCombatTipResolveFailStreak = (gZSCombatTipResolveFailStreak + 1) % kZSCombatTipResolveRetryThrottleTicks;
             return;
