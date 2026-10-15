@@ -1003,6 +1003,8 @@ static void zs_attach_tap_to_confirm(UIButton *button, id target,
 static const CGFloat kCapsuleSliderHeight = 18;
 static const CGFloat kCapsuleSliderThinHeight = 6;
 static const CGFloat kCapsuleSliderFatHeight = 18;
+static const NSTimeInterval kCapsuleSliderHoldDuration = 0.18;
+static const CGFloat kCapsuleSliderHoldSlop = 8;
 static const CGFloat kDefaultSnapFraction = 0.035;
 
 static BOOL zs_pan_should_begin_horizontally(UIGestureRecognizer *gesture, UIView *view) {
@@ -1258,6 +1260,9 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
 
 @property (nonatomic, assign) float liveDragValue;
 @property (nonatomic, assign) BOOL panActive;
+@property (nonatomic, weak) UIScrollView *lockedScrollView;
+@property (nonatomic, assign) CGFloat holdAnchorTouchX;
+@property (nonatomic, assign) CGFloat holdAnchorValueX;
 @property (nonatomic, strong) UIVisualEffectView *trackGlass;
 @property (nonatomic, assign) BOOL glassEnabled;
 @end
@@ -1315,18 +1320,39 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
         self.defaultTick.hidden = YES;
         [self addSubview:self.defaultTick];
 
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
-        pan.maximumNumberOfTouches = 1;
-        [self addGestureRecognizer:pan];
+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handlePress:)];
+        hold.minimumPressDuration = kCapsuleSliderHoldDuration;
+        hold.allowableMovement = kCapsuleSliderHoldSlop;
+        hold.numberOfTouchesRequired = 1;
+        [self addGestureRecognizer:hold];
         UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleTap:)];
         [self addGestureRecognizer:tap];
     }
     return self;
 }
 
-- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
-    if (![super gestureRecognizerShouldBegin:gestureRecognizer]) return NO;
-    return zs_pan_should_begin_horizontally(gestureRecognizer, self);
+- (UIScrollView *)zs_enclosingScrollView {
+    UIView *candidate = self.superview;
+    while (candidate && ![candidate isKindOfClass:[UIScrollView class]]) candidate = candidate.superview;
+    return (UIScrollView *)candidate;
+}
+
+- (void)zs_lockEnclosingScrollView {
+    if (self.lockedScrollView) return;
+    UIScrollView *scrollView = [self zs_enclosingScrollView];
+    if (!scrollView || !scrollView.scrollEnabled) return;
+    self.lockedScrollView = scrollView;
+    scrollView.scrollEnabled = NO;
+}
+
+- (void)zs_unlockEnclosingScrollView {
+    UIScrollView *scrollView = self.lockedScrollView;
+    self.lockedScrollView = nil;
+    if (scrollView) scrollView.scrollEnabled = YES;
+}
+
+- (void)dealloc {
+    [self zs_unlockEnclosingScrollView];
 }
 
 - (void)layoutSubviews {
@@ -1614,18 +1640,27 @@ static const CGFloat kFillAlpha = 1.0;
 - (void)handlePress:(UIGestureRecognizer *)gesture {
     CGPoint location = [gesture locationInView:self];
     switch (gesture.state) {
-        case UIGestureRecognizerStateBegan:
+        case UIGestureRecognizerStateBegan: {
             self.panActive = YES;
+            CGFloat range = self.maximumValue - self.minimumValue;
+            CGFloat startFraction = range > 0 ? (self.value - self.minimumValue) / range : 0;
+            self.holdAnchorTouchX = location.x;
+            self.holdAnchorValueX = MAX(0, MIN(1, startFraction)) * self.bounds.size.width;
+            self.liveDragValue = self.value;
+            [self zs_lockEnclosingScrollView];
             [self setPillTouching:YES];
-            [self setValueFromLocation:location sendActions:YES];
             break;
-        case UIGestureRecognizerStateChanged:
-            [self setValueFromLocation:location sendActions:YES];
+        }
+        case UIGestureRecognizerStateChanged: {
+            CGFloat shiftedX = self.holdAnchorValueX + (location.x - self.holdAnchorTouchX);
+            [self setValueFromLocation:CGPointMake(shiftedX, location.y) sendActions:YES];
             break;
+        }
         case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed:
             self.panActive = NO;
+            [self zs_unlockEnclosingScrollView];
             [self setPillTouching:NO];
             break;
         default:
