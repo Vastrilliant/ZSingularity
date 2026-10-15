@@ -1003,8 +1003,8 @@ static void zs_attach_tap_to_confirm(UIButton *button, id target,
 static const CGFloat kCapsuleSliderHeight = 18;
 static const CGFloat kCapsuleSliderThinHeight = 6;
 static const CGFloat kCapsuleSliderFatHeight = 18;
-static const NSTimeInterval kCapsuleSliderHoldDuration = 0.18;
-static const CGFloat kCapsuleSliderHoldSlop = 8;
+static const NSTimeInterval kCapsuleSliderHoldDuration = 0.08;
+static const CGFloat kCapsuleSliderHoldSlop = 6;
 static const CGFloat kDefaultSnapFraction = 0.035;
 
 static BOOL zs_pan_should_begin_horizontally(UIGestureRecognizer *gesture, UIView *view) {
