@@ -1918,6 +1918,7 @@ static CAAnimation *zs_svg_make_animation(ZSLogoSVGAnimation *animation, ZSLogoS
 @end
 
 @implementation ZSLogoSVGRenderer {
+    BOOL _hidden;
     CALayer *_rootLayer;
     CALayer *_artworkLayer;
     BOOL _clockPaused;
