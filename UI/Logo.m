@@ -403,7 +403,7 @@ static void zs_logo_download_file(NSURL *url, NSString *destinationPath, void (^
 static NSString * const kZSLogoStyleFilename = @"style.json";
 static const NSUInteger kZSLogoSVGMaxBytes = 8 * 1024 * 1024;
 static const NSInteger kZSLogoTranscodeFPS = 24;
-static const CGFloat kZSLogoTranscodeMaxEdge = 768;
+static const CGFloat kZSLogoTranscodeMaxEdge = 960;
 static const size_t kZSLogoTranscodeFrameBudgetBytes = 128 * 1024 * 1024;
 static const double kZSLogoTranscodeMaxLoopMs = 30000.0;
 static const NSTimeInterval kZSLogoTranscodeSettleDelay = 0.03;
@@ -411,8 +411,9 @@ static const NSTimeInterval kZSLogoTranscodeStepTimeout = 45.0;
 static const NSUInteger kZSLogoTranscodeMaxFrameAttempts = 4;
 static const NSUInteger kZSLogoTranscodeMaxWorkerReplacements = 16;
 static const NSUInteger kZSLogoTranscodeViewportAttempts = 60;
-static const uint32_t kZSLogoTranscodeVersion = 7;
-static const double kZSLogoVideoBitsPerPixel = 0.15;
+static const uint32_t kZSLogoTranscodeVersion = 8;
+static const double kZSLogoVideoBitsPerPixel = 0.4;
+static const double kZSLogoTranscodeBlendSeconds = 1.5;
 static const double kZSLogoVideoMinBitRate = 1000000.0;
 static const double kZSLogoVideoMaxBitRate = 12000000.0;
 static const double kZSLogoVideoSizeBudgetBytes = 8.5 * 1024.0 * 1024.0;
@@ -1149,7 +1150,7 @@ static UIWindow *zs_logo_host_window(void) {
         AVVideoCompressionPropertiesKey: @{
             AVVideoExpectedSourceFrameRateKey: @(kZSLogoTranscodeFPS),
             AVVideoMaxKeyFrameIntervalKey: @(kZSLogoVideoKeyframeInterval),
-            AVVideoAllowFrameReorderingKey: @YES,
+            AVVideoAllowFrameReorderingKey: @NO,
             AVVideoAverageBitRateKey: @(bitRate),
         },
     };
@@ -1596,9 +1597,10 @@ static uint64_t zs_logo_gcd(uint64_t a, uint64_t b) {
     return a;
 }
 
-static void zs_logo_transcode_plan(NSDictionary *probe, double *durationOut, double *leadOut) {
+static void zs_logo_transcode_plan(NSDictionary *probe, double *durationOut, double *leadOut, BOOL *blendOut) {
     double duration = 0;
     double lead = 0;
+    BOOL blend = NO;
     if ([probe[@"anim"] boolValue]) {
         NSArray *periods = [probe[@"periods"] isKindOfClass:[NSArray class]] ? probe[@"periods"] : @[];
         double end = [probe[@"end"] doubleValue];
@@ -1630,10 +1632,14 @@ static void zs_logo_transcode_plan(NSDictionary *probe, double *durationOut, dou
             lead = isfinite(rawLead) && rawLead > 0 ? rawLead : 0;
         }
         duration = MIN(duration, kZSLogoTranscodeMaxLoopMs);
-        if (overflow) ZLog(@"[Logo] SVG loop periods don't line up within %.0fs - using the longest period", kZSLogoTranscodeMaxLoopMs / 1000.0);
+        if (overflow) {
+            blend = YES;
+            ZLog(@"[Logo] SVG loop periods don't line up within %.0fs - using the longest period with a crossfaded seam", kZSLogoTranscodeMaxLoopMs / 1000.0);
+        }
     }
     *durationOut = duration;
     *leadOut = lead;
+    *blendOut = blend;
 }
 
 static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t *widthOut, size_t *heightOut) {
@@ -1886,6 +1892,19 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 
 @end
 
+static NSData *zs_logo_blend_frames(NSData *current, NSData *held, double weight) {
+    if (current.length != held.length) return current;
+    NSUInteger length = current.length;
+    NSMutableData *result = [NSMutableData dataWithLength:length];
+    const uint8_t *a = current.bytes;
+    const uint8_t *b = held.bytes;
+    uint8_t *out = result.mutableBytes;
+    uint32_t w = (uint32_t)lround(weight * 256.0);
+    uint32_t iw = 256 - w;
+    for (NSUInteger i = 0; i < length; i++) out[i] = (uint8_t)((a[i] * iw + b[i] * w + 128) >> 8);
+    return result;
+}
+
 @interface ZSLogoSVGJob : NSObject <ZSLogoRenderWorkerDelegate>
 @property (nonatomic, copy, nullable) void (^completion)(NSString * _Nullable videoPath);
 - (instancetype)initWithPath:(NSString *)path svg:(ZSLogoSVG *)svg;
@@ -1899,6 +1918,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     NSMutableArray<ZSLogoRenderWorker *> *_workers;
     NSMutableArray<ZSLogoRenderWorker *> *_parked;
     NSMutableDictionary<NSNumber *, NSData *> *_pending;
+    NSMutableDictionary<NSNumber *, NSData *> *_held;
     NSMutableArray<NSNumber *> *_retry;
     NSMutableDictionary<NSNumber *, NSNumber *> *_attempts;
     ZSLogoRenderWorker *_primary;
@@ -1912,6 +1932,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     size_t _pixelWidth;
     size_t _pixelHeight;
     NSUInteger _frameCount;
+    NSUInteger _blendFrames;
+    NSUInteger _captureCount;
     NSUInteger _nextFrame;
     NSUInteger _nextWrite;
     NSUInteger _written;
@@ -1933,6 +1955,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     _workers = [NSMutableArray array];
     _parked = [NSMutableArray array];
     _pending = [NSMutableDictionary dictionary];
+    _held = [NSMutableDictionary dictionary];
     _retry = [NSMutableArray array];
     _attempts = [NSMutableDictionary dictionary];
     return self;
@@ -1968,18 +1991,21 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     ZLog(@"[Logo] %@: probe animated=%d periods=%@ end=%.0fms lead=%.0fms", _path.lastPathComponent, [probe[@"anim"] boolValue], [probe[@"periods"] componentsJoinedByString:@","] ?: @"", [probe[@"end"] doubleValue], [probe[@"lead"] doubleValue]);
     double duration = 0;
     double lead = 0;
-    zs_logo_transcode_plan(probe, &duration, &lead);
+    BOOL blend = NO;
+    zs_logo_transcode_plan(probe, &duration, &lead, &blend);
     _leadMs = lead;
     _frameCount = duration > 0 ? (NSUInteger)MAX(1, llround(duration * (double)kZSLogoTranscodeFPS / 1000.0)) : 1;
+    _blendFrames = blend && _frameCount > 3 ? MIN((NSUInteger)llround(kZSLogoTranscodeBlendSeconds * (double)kZSLogoTranscodeFPS), _frameCount / 2) : 0;
+    _captureCount = _frameCount + _blendFrames;
     zs_logo_transcode_geometry(_svg.size, _scale, &_pixelWidth, &_pixelHeight);
     _pointSize = CGSizeMake((CGFloat)_pixelWidth / (CGFloat)_scale, (CGFloat)_pixelHeight / (CGFloat)_scale);
     worker.pointSize = _pointSize;
 
     NSUInteger cores = MAX((NSUInteger)1, (NSUInteger)NSProcessInfo.processInfo.activeProcessorCount);
-    NSUInteger count = MIN(cores, _frameCount);
+    NSUInteger count = MIN(cores, _captureCount);
     size_t frameBytes = MAX((size_t)1, _pixelWidth * _pixelHeight * 4);
     _lookahead = MAX((NSUInteger)2, MIN(count + 2, (NSUInteger)(kZSLogoTranscodeFrameBudgetBytes / frameBytes)));
-    ZLog(@"[Logo] %@: plan %lu frame(s) at %zux%zu px, %ld fps, loop %.2fs, lead %.0fms, %lu renderer(s)", _path.lastPathComponent, (unsigned long)_frameCount, _pixelWidth, _pixelHeight, (long)kZSLogoTranscodeFPS, duration / 1000.0, lead, (unsigned long)count);
+    ZLog(@"[Logo] %@: plan %lu frame(s) (+%lu seam frame(s)) at %zux%zu px, %ld fps, loop %.2fs, lead %.0fms, %lu renderer(s)", _path.lastPathComponent, (unsigned long)_frameCount, (unsigned long)_blendFrames, _pixelWidth, _pixelHeight, (long)kZSLogoTranscodeFPS, duration / 1000.0, lead, (unsigned long)count);
 
     _writer = [[ZSLogoVideoWriter alloc] initWithFinalPath:_videoPath width:_pixelWidth height:_pixelHeight frameCount:_frameCount];
     _writeQueue = dispatch_queue_create("zs.logo.transcode", DISPATCH_QUEUE_SERIAL);
@@ -2015,8 +2041,8 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
         index = _retry.firstObject.unsignedIntegerValue;
         [_retry removeObjectAtIndex:0];
     } else {
-        if (_nextFrame >= _frameCount) return;
-        if (_nextFrame >= _written + _lookahead) {
+        if (_nextFrame >= _captureCount) return;
+        if (_nextFrame >= _written + _blendFrames + _lookahead) {
             if (![_parked containsObject:worker]) [_parked addObject:worker];
             return;
         }
@@ -2064,11 +2090,26 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 - (void)zs_drain {
     NSData *frame = nil;
     while ((frame = _pending[@(_nextWrite)])) {
-        [_pending removeObjectForKey:@(_nextWrite)];
+        NSUInteger captured = _nextWrite;
+        [_pending removeObjectForKey:@(captured)];
         _nextWrite++;
+        if (captured < _blendFrames) {
+            _held[@(captured)] = frame;
+            continue;
+        }
+        NSData *base = nil;
+        double weight = 0;
+        if (captured >= _frameCount) {
+            NSNumber *heldKey = @(captured - _frameCount);
+            base = _held[heldKey];
+            [_held removeObjectForKey:heldKey];
+            double u = (double)(captured - _frameCount) / (double)_blendFrames;
+            weight = u * u * (3.0 - 2.0 * u);
+        }
         ZSLogoVideoWriter *writer = _writer;
         dispatch_async(_writeQueue, ^{
-            BOOL ok = [writer appendBGRA:frame.bytes];
+            NSData *output = base ? zs_logo_blend_frames(frame, base, weight) : frame;
+            BOOL ok = [writer appendBGRA:output.bytes];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self zs_didWrite:ok];
             });
@@ -2191,6 +2232,7 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
     [_workers removeAllObjects];
     [_parked removeAllObjects];
     [_pending removeAllObjects];
+    [_held removeAllObjects];
     [_retry removeAllObjects];
     _primary = nil;
 }
