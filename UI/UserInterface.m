@@ -17026,13 +17026,33 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         CGSize glyphSize = [@"/" sizeWithAttributes:slashAttributes];
         [@"/" drawAtPoint:CGPointMake((16 - glyphSize.width) / 2, (18 - glyphSize.height) / 2) withAttributes:slashAttributes];
     }] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    UIButton *slashButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButton *slashButton = [UIButton buttonWithType:UIButtonTypeCustom];
     slashButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_icon_button_as_native_glass(slashButton, slashImage, [UIColor colorWithWhite:1 alpha:0.9]);
-    zs_configure_glass_button_fixed_corner_radius(slashButton, 9);
+    [slashButton setImage:slashImage forState:UIControlStateNormal];
+    slashButton.tintColor = [UIColor colorWithWhite:1 alpha:0.9];
     [slashButton addTarget:self action:@selector(zs_syslogSlashTapped) forControlEvents:UIControlEventTouchUpInside];
-    [overlay addSubview:slashButton];
     self.syslogSlashButton = slashButton;
+
+    UIView *slashContainer = slashButton;
+    if (zs_has_liquid_glass()) {
+        UIVisualEffectView *slashGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(YES)];
+        zs_configure_glass_corners(slashGlass, 8, NO);
+        zs_register_suspendable_glass(slashGlass);
+        [slashGlass.contentView addSubview:slashButton];
+        [NSLayoutConstraint activateConstraints:@[
+            [slashButton.leadingAnchor constraintEqualToAnchor:slashGlass.contentView.leadingAnchor],
+            [slashButton.trailingAnchor constraintEqualToAnchor:slashGlass.contentView.trailingAnchor],
+            [slashButton.topAnchor constraintEqualToAnchor:slashGlass.contentView.topAnchor],
+            [slashButton.bottomAnchor constraintEqualToAnchor:slashGlass.contentView.bottomAnchor],
+        ]];
+        slashContainer = slashGlass;
+    } else {
+        slashButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+        slashButton.layer.cornerRadius = 8;
+        slashButton.layer.cornerCurve = kCACornerCurveContinuous;
+    }
+    slashContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [overlay addSubview:slashContainer];
 
     UIImage *channelToggleImage = [UIImage systemImageNamed:@"switch.2" withConfiguration:pillSymbolConfig];
     UIButton *channelToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -17111,11 +17131,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [infoLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [infoLabel.leadingAnchor constraintEqualToAnchor:channelToggleButton.trailingAnchor constant:12],
 
-        [slashButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [slashButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
-        [slashButton.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
-        [slashButton.widthAnchor constraintEqualToConstant:30],
-        [slashButton.heightAnchor constraintEqualToConstant:30],
+        [slashContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [slashContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
+        [slashContainer.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
+        [slashContainer.widthAnchor constraintEqualToConstant:30],
+        [slashContainer.heightAnchor constraintEqualToConstant:30],
 
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
