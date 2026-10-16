@@ -558,36 +558,6 @@ static void zs_set_glass_suspended(BOOL suspended) {
     }
 }
 
-static const CGFloat kZSGlassButtonCornerRadius = 8;
-
-static void zs_configure_glass_button_fixed_corner_radius(UIButton *button, CGFloat radius) {
-    if (!button) return;
-
-    SEL getConfiguration = NSSelectorFromString(@"configuration");
-    if (![button respondsToSelector:getConfiguration]) return;
-    id configuration = ((id (*)(id, SEL))objc_msgSend)(button, getConfiguration);
-    if (!configuration) return;
-
-    SEL setCornerStyle = NSSelectorFromString(@"setCornerStyle:");
-    if ([configuration respondsToSelector:setCornerStyle]) {
-        ((void (*)(id, SEL, NSInteger))objc_msgSend)(configuration, setCornerStyle, 1 );
-    }
-
-    SEL getBackground = NSSelectorFromString(@"background");
-    if ([configuration respondsToSelector:getBackground]) {
-        id background = ((id (*)(id, SEL))objc_msgSend)(configuration, getBackground);
-        SEL setCornerRadius = NSSelectorFromString(@"setCornerRadius:");
-        if (background && [background respondsToSelector:setCornerRadius]) {
-            ((void (*)(id, SEL, CGFloat))objc_msgSend)(background, setCornerRadius, radius);
-        }
-    }
-
-    SEL setConfiguration = NSSelectorFromString(@"setConfiguration:");
-    if ([button respondsToSelector:setConfiguration]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(button, setConfiguration, configuration);
-    }
-}
-
 static const CGFloat kZSAuthFieldCornerRadius = 3;
 
 static void zs_clear_button_configuration(UIButton *button) {
@@ -597,6 +567,38 @@ static void zs_clear_button_configuration(UIButton *button) {
         ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, nil);
     }
 }
+
+static const CGFloat kZSGlassButtonCornerRadius = 8;
+static const void *kZSButtonGlassViewKey = &kZSButtonGlassViewKey;
+
+static void zs_install_slash_glass_on_button(UIButton *button, UIColor *tintColor) {
+    if (!button) return;
+    zs_clear_button_configuration(button);
+    button.backgroundColor = UIColor.clearColor;
+    button.layer.cornerRadius = 0;
+    button.layer.borderWidth = 0;
+    button.clipsToBounds = NO;
+    UIVisualEffectView *glass = objc_getAssociatedObject(button, kZSButtonGlassViewKey);
+    if (!glass) {
+        UIVisualEffect *effect = tintColor ? zs_make_glass_effect_style(0, YES, tintColor) : zs_make_glass_effect(YES);
+        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.translatesAutoresizingMaskIntoConstraints = NO;
+        zs_configure_glass_corners(glass, kZSGlassButtonCornerRadius, NO);
+        zs_register_suspendable_glass(glass);
+        [button insertSubview:glass atIndex:0];
+        [NSLayoutConstraint activateConstraints:@[
+            [glass.leadingAnchor constraintEqualToAnchor:button.leadingAnchor],
+            [glass.trailingAnchor constraintEqualToAnchor:button.trailingAnchor],
+            [glass.topAnchor constraintEqualToAnchor:button.topAnchor],
+            [glass.bottomAnchor constraintEqualToAnchor:button.bottomAnchor],
+        ]];
+        objc_setAssociatedObject(button, kZSButtonGlassViewKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else {
+        [button sendSubviewToBack:glass];
+    }
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+}
+
 
 static void * const kZSFlatButtonRadiusKey = (void *)&kZSFlatButtonRadiusKey;
 
@@ -637,43 +639,14 @@ static void zs_apply_flat_button_chrome(UIButton *button, CGFloat cornerRadius) 
 
 static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
-        Class configClass = NSClassFromString(@"UIButtonConfiguration");
-        SEL glassSel = NSSelectorFromString(@"glassButtonConfiguration");
-        if (configClass && [configClass respondsToSelector:glassSel]) {
-            id configuration = ((id (*)(id, SEL))objc_msgSend)(configClass, glassSel);
-            if (configuration) {
-                if (font) {
-                    SEL setAttributedTitle = NSSelectorFromString(@"setAttributedTitle:");
-                    if ([configuration respondsToSelector:setAttributedTitle]) {
-                        NSAttributedString *attributedTitle =
-                            [[NSAttributedString alloc] initWithString:title
-                                                             attributes:@{NSFontAttributeName: font}];
-                        ((void (*)(id, SEL, id))objc_msgSend)(configuration, setAttributedTitle, attributedTitle);
-                    }
-                } else {
-                    SEL setTitle = NSSelectorFromString(@"setTitle:");
-                    if ([configuration respondsToSelector:setTitle]) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(configuration, setTitle, title);
-                    }
-                }
-                SEL setBaseForeground = NSSelectorFromString(@"setBaseForegroundColor:");
-                if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
-                }
-
-                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
-                if ([configuration respondsToSelector:setBaseBackground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, zs_glass_tint_color());
-                }
-                SEL setConfig = NSSelectorFromString(@"setConfiguration:");
-                if ([button respondsToSelector:setConfig]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
-                    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
-                    return;
-                }
-            }
-        }
+        zs_install_slash_glass_on_button(button, nil);
+        [button setAttributedTitle:nil forState:UIControlStateNormal];
+        [button setTitle:title forState:UIControlStateNormal];
+        UIColor *foreground = tintColor ?: UIColor.whiteColor;
+        [button setTitleColor:foreground forState:UIControlStateNormal];
+        button.tintColor = foreground;
+        if (font) button.titleLabel.font = font;
+        return;
     }
 
     zs_apply_flat_button_chrome(button, 200);
@@ -735,44 +708,13 @@ static UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSS
 
 static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
-        Class configClass = NSClassFromString(@"UIButtonConfiguration");
-        SEL prominentGlassSel = NSSelectorFromString(@"prominentGlassButtonConfiguration");
-        SEL glassSel = NSSelectorFromString(@"glassButtonConfiguration");
-        SEL configSel = [configClass respondsToSelector:prominentGlassSel] ? prominentGlassSel : glassSel;
-        if (configClass && [configClass respondsToSelector:configSel]) {
-            id configuration = ((id (*)(id, SEL))objc_msgSend)(configClass, configSel);
-            if (configuration) {
-                if (font) {
-                    SEL setAttributedTitle = NSSelectorFromString(@"setAttributedTitle:");
-                    if ([configuration respondsToSelector:setAttributedTitle]) {
-                        NSAttributedString *attributedTitle =
-                            [[NSAttributedString alloc] initWithString:title
-                                                             attributes:@{NSFontAttributeName: font}];
-                        ((void (*)(id, SEL, id))objc_msgSend)(configuration, setAttributedTitle, attributedTitle);
-                    }
-                } else {
-                    SEL setTitle = NSSelectorFromString(@"setTitle:");
-                    if ([configuration respondsToSelector:setTitle]) {
-                        ((void (*)(id, SEL, id))objc_msgSend)(configuration, setTitle, title);
-                    }
-                }
-                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
-                if (tintColor && [configuration respondsToSelector:setBaseBackground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, tintColor);
-                }
-                SEL setBaseForeground = NSSelectorFromString(@"setBaseForegroundColor:");
-                if ([configuration respondsToSelector:setBaseForeground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, [UIColor whiteColor]);
-                }
-                SEL setConfig = NSSelectorFromString(@"setConfiguration:");
-                if ([button respondsToSelector:setConfig]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
-                    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
-                    return;
-                }
-            }
-        }
+        zs_install_slash_glass_on_button(button, tintColor);
+        [button setAttributedTitle:nil forState:UIControlStateNormal];
+        [button setTitle:title forState:UIControlStateNormal];
+        [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        button.tintColor = UIColor.whiteColor;
+        if (font) button.titleLabel.font = font;
+        return;
     }
 
     zs_clear_button_configuration(button);
@@ -793,32 +735,10 @@ static void zs_set_install_option_greyed_out(UIButton *button, BOOL greyedOut) {
 
 static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage *image, UIColor *tintColor) {
     if (zs_has_liquid_glass()) {
-        Class configClass = NSClassFromString(@"UIButtonConfiguration");
-        SEL glassSel = NSSelectorFromString(@"glassButtonConfiguration");
-        if (configClass && [configClass respondsToSelector:glassSel]) {
-            id configuration = ((id (*)(id, SEL))objc_msgSend)(configClass, glassSel);
-            if (configuration) {
-                SEL setImage = NSSelectorFromString(@"setImage:");
-                if ([configuration respondsToSelector:setImage]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setImage, image);
-                }
-                SEL setBaseForeground = NSSelectorFromString(@"setBaseForegroundColor:");
-                if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
-                }
-                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
-                if ([configuration respondsToSelector:setBaseBackground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, zs_glass_tint_color());
-                }
-                SEL setConfig = NSSelectorFromString(@"setConfiguration:");
-                if ([button respondsToSelector:setConfig]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
-                    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
-                    return;
-                }
-            }
-        }
+        zs_install_slash_glass_on_button(button, nil);
+        [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+        button.tintColor = tintColor ?: UIColor.whiteColor;
+        return;
     }
 
     zs_apply_flat_button_chrome(button, 200);
@@ -854,32 +774,10 @@ static UIImage *zs_mods_doctor_button_icon(NSString *sfSymbolName, CGFloat point
 
 static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *image, UIColor *tintColor) {
     if (zs_has_liquid_glass()) {
-        Class configClass = NSClassFromString(@"UIButtonConfiguration");
-        SEL glassSel = NSSelectorFromString(@"glassButtonConfiguration");
-        if (configClass && [configClass respondsToSelector:glassSel]) {
-            id configuration = ((id (*)(id, SEL))objc_msgSend)(configClass, glassSel);
-            if (configuration) {
-                SEL setImage = NSSelectorFromString(@"setImage:");
-                if ([configuration respondsToSelector:setImage]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setImage, image);
-                }
-                SEL setBaseForeground = NSSelectorFromString(@"setBaseForegroundColor:");
-                if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
-                }
-                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
-                if ([configuration respondsToSelector:setBaseBackground]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, zs_glass_tint_color());
-                }
-                SEL setConfig = NSSelectorFromString(@"setConfiguration:");
-                if ([button respondsToSelector:setConfig]) {
-                    ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
-                    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
-                    return;
-                }
-            }
-        }
+        zs_install_slash_glass_on_button(button, nil);
+        [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+        button.tintColor = tintColor ?: UIColor.whiteColor;
+        return;
     }
 
     zs_apply_flat_button_chrome(button, 9);
