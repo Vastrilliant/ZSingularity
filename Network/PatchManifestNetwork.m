@@ -27,6 +27,8 @@ static BOOL gInstalled;
 
 static NSMutableDictionary<NSNumber *, NSMutableData *> *gBuffers;
 static dispatch_queue_t gStateQueue;
+static NSMutableSet<NSString *> *gHandledSuffixes;
+static dispatch_source_t gRearmTimer;
 
 static NSString * const kSettingsSection = @"network";
 static NSString * const kZeroingEnabledKey = @"fmodManifestZeroingEnabled";
@@ -46,29 +48,107 @@ static NSString *PMMatchedSuffixForTask(NSURLSessionTask *task) {
     return nil;
 }
 
-static BOOL PMIsTargetTask(NSURLSessionDataTask *task) {
-    NSString *matchedSuffix = PMMatchedSuffixForTask(task);
-
-    ZLog(@"[PatchManifestNetwork] observed request url=%@ match=%@",
-          task.currentRequest.URL ?: task.originalRequest.URL, matchedSuffix ? @"YES" : @"NO");
-
-    return matchedSuffix != nil;
+static BOOL PMReadSceneState(int32_t *outState) {
+    int32_t sceneState = -1;
+    if (!ZSGlobalScene_Current(&sceneState)) return NO;
+    *outState = sceneState;
+    return YES;
 }
 
 static BOOL PMIsOnLoginScene(void) {
-    int32_t sceneState = 0;
-    return ZSGlobalScene_Current(&sceneState) && sceneState == ZSGlobalSceneStateLogin;
+    int32_t sceneState = -1;
+    return PMReadSceneState(&sceneState) && sceneState == ZSGlobalSceneStateLogin;
+}
+
+static BOOL PMIsSuffixHandled(NSString *suffix) {
+    __block BOOL handled = NO;
+    dispatch_sync(gStateQueue, ^{
+        handled = [gHandledSuffixes containsObject:suffix];
+    });
+    return handled;
+}
+
+static void PMMarkSuffixHandled(NSString *suffix) {
+    dispatch_sync(gStateQueue, ^{
+        [gHandledSuffixes addObject:suffix];
+    });
+}
+
+static void PMRearmIfLeftLogin(void) {
+    if (!gStateQueue) return;
+    int32_t sceneState = -1;
+    if (!PMReadSceneState(&sceneState) || sceneState == ZSGlobalSceneStateLogin) return;
+    dispatch_sync(gStateQueue, ^{
+        if (gHandledSuffixes.count == 0) return;
+        [gHandledSuffixes removeAllObjects];
+        ZLog(@"[PatchManifestNetwork] left the login scene (state=%d) - re-armed for the next login", sceneState);
+    });
+}
+
+static void PMStartRearmTimer(void) {
+    if (gRearmTimer) return;
+    gRearmTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(gRearmTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+                              2 * NSEC_PER_SEC,
+                              NSEC_PER_SEC / 2);
+    dispatch_source_set_event_handler(gRearmTimer, ^{
+        PMRearmIfLeftLogin();
+    });
+    dispatch_resume(gRearmTimer);
+}
+
+static void PMStopRearmTimer(void) {
+    if (!gRearmTimer) return;
+    dispatch_source_cancel(gRearmTimer);
+    gRearmTimer = nil;
+}
+
+static NSString *PMNormalizedPath(NSString *path) {
+    NSString *normalized = [path stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+    while ([normalized hasPrefix:@"/"] || [normalized hasPrefix:@"./"]) {
+        normalized = [normalized hasPrefix:@"./"] ? [normalized substringFromIndex:2] : [normalized substringFromIndex:1];
+    }
+    return normalized.lowercaseString;
 }
 
 static NSSet<NSString *> *PMReplacedAssetPaths(void) {
     NSMutableSet<NSString *> *paths = [NSMutableSet set];
     for (NSString *path in [BankTransplant documentsRelativePathsOfSwappedBanks]) {
-        [paths addObject:path.lowercaseString];
+        [paths addObject:PMNormalizedPath(path)];
     }
     for (NSString *path in [LocalizationTransplant documentsRelativePathsOfSwappedFiles]) {
-        [paths addObject:path.lowercaseString];
+        [paths addObject:PMNormalizedPath(path)];
     }
     return paths;
+}
+
+static BOOL PMPathHasComponentSuffix(NSString *path, NSString *suffix) {
+    if (suffix.length == 0 || path.length < suffix.length) return NO;
+    if (![path hasSuffix:suffix]) return NO;
+    if (path.length == suffix.length) return YES;
+    return [path characterAtIndex:path.length - suffix.length - 1] == '/';
+}
+
+static BOOL PMKeyMatchesReplacedPath(NSString *key, NSSet<NSString *> *replaced, NSSet<NSString *> *replacedNames) {
+    NSString *normalizedKey = PMNormalizedPath(key);
+    if ([replaced containsObject:normalizedKey]) return YES;
+
+    for (NSString *path in replaced) {
+        if (PMPathHasComponentSuffix(normalizedKey, path)) return YES;
+        if (PMPathHasComponentSuffix(path, normalizedKey)) return YES;
+    }
+
+    NSString *name = normalizedKey.lastPathComponent;
+    return name.length > 0 && [replacedNames containsObject:name];
+}
+
+static BOOL PMEntryIsZero(NSDictionary *entry) {
+    id hash = entry[@"Hash"];
+    BOOL hashZero = [hash isEqual:@"0"] || [hash isEqual:@0];
+    id size = entry[@"Size"];
+    BOOL sizeZero = [size respondsToSelector:@selector(unsignedLongLongValue)] && [size unsignedLongLongValue] == 0;
+    return hashZero && sizeZero;
 }
 
 static NSData *PMPatchManifestData(NSData *input) {
@@ -82,11 +162,17 @@ static NSData *PMPatchManifestData(NSData *input) {
     }
 
     NSSet<NSString *> *replacedPaths = nil;
+    NSMutableSet<NSString *> *replacedNames = nil;
     if (!fullZeroing) {
         replacedPaths = PMReplacedAssetPaths();
         if (replacedPaths.count == 0) {
             ZLog(@"[PatchManifestNetwork] no replaced assets - leaving manifest untouched");
             return input;
+        }
+        replacedNames = [NSMutableSet set];
+        for (NSString *path in replacedPaths) {
+            NSString *name = path.lastPathComponent;
+            if (name.length > 0) [replacedNames addObject:name];
         }
     }
 
@@ -102,26 +188,32 @@ static NSData *PMPatchManifestData(NSData *input) {
     NSMutableDictionary *manifest = (NSMutableDictionary *)root;
     NSMutableDictionary *files = manifest[@"Files"];
     if (![files isKindOfClass:[NSMutableDictionary class]]) {
-        ZLog(@"[PatchManifestNetwork] manifest has no Files dictionary");
+        ZLog(@"[PatchManifestNetwork] manifest has no Files dictionary (top-level keys: %@)", manifest.allKeys);
         return input;
     }
 
     NSUInteger patchedCount = 0;
-    for (NSString *key in files) {
-        if (!fullZeroing && ![replacedPaths containsObject:key.lowercaseString]) continue;
+    NSUInteger matchedCount = 0;
+    for (NSString *key in files.allKeys) {
+        if (!fullZeroing && !PMKeyMatchesReplacedPath(key, replacedPaths, replacedNames)) continue;
 
         NSMutableDictionary *entry = files[key];
         if (![entry isKindOfClass:[NSMutableDictionary class]]) continue;
+        matchedCount++;
 
-        BOOL hashAlreadyZero = [entry[@"Hash"] isEqual:@"0"] || [entry[@"Hash"] isEqual:@0];
-        BOOL sizeAlreadyZero = [entry[@"Size"] respondsToSelector:@selector(unsignedLongLongValue)]
-            ? [entry[@"Size"] unsignedLongLongValue] == 0
-            : NO;
-        if (hashAlreadyZero && sizeAlreadyZero) continue;
+        if (PMEntryIsZero(entry)) continue;
 
         entry[@"Hash"] = @"0";
         entry[@"Size"] = @0;
         patchedCount++;
+    }
+
+    if (!fullZeroing && matchedCount == 0) {
+        NSArray<NSString *> *allKeys = files.allKeys;
+        NSArray<NSString *> *sampleKeys = [allKeys subarrayWithRange:NSMakeRange(0, MIN((NSUInteger)5, allKeys.count))];
+        ZLog(@"[PatchManifestNetwork] none of the %lu replaced assets matched a Files key (%lu keys). replaced=%@ sampleKeys=%@",
+              (unsigned long)replacedPaths.count, (unsigned long)allKeys.count, replacedPaths.allObjects, sampleKeys);
+        return input;
     }
 
     if (patchedCount == 0) {
@@ -148,7 +240,8 @@ static void PMDidReceiveData(id self,
                              NSURLSession *session,
                              NSURLSessionDataTask *task,
                              NSData *data) {
-    if (!PMIsTargetTask(task)) {
+    NSString *suffix = PMMatchedSuffixForTask(task);
+    if (!suffix) {
         ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))gOrigDidReceiveData)(
             self, _cmd, session, task, data);
         return;
@@ -160,17 +253,25 @@ static void PMDidReceiveData(id self,
         alreadyTracking = gBuffers[key] != nil;
     });
 
-    if (!alreadyTracking && !PMIsOnLoginScene()) {
-        ZLog(@"[PatchManifestNetwork] not on the login scene - passing request through untouched");
-        ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))gOrigDidReceiveData)(
-            self, _cmd, session, task, data);
-        return;
+    if (!alreadyTracking) {
+        int32_t sceneState = -1;
+        BOOL known = PMReadSceneState(&sceneState);
+        if (!known || sceneState != ZSGlobalSceneStateLogin) {
+            ZLog(@"[PatchManifestNetwork] %@ requested outside the login scene (state=%d known=%d) - passing through untouched",
+                  suffix, sceneState, known);
+            ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))gOrigDidReceiveData)(
+                self, _cmd, session, task, data);
+            return;
+        }
+        if (PMIsSuffixHandled(suffix)) {
+            ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))gOrigDidReceiveData)(
+                self, _cmd, session, task, data);
+            return;
+        }
     }
 
-    __block NSMutableData *buffer = nil;
-
     dispatch_sync(gStateQueue, ^{
-        buffer = gBuffers[key];
+        NSMutableData *buffer = gBuffers[key];
         if (!buffer) {
             buffer = [NSMutableData data];
             gBuffers[key] = buffer;
@@ -183,7 +284,6 @@ static void PMDidReceiveData(id self,
             [buffer setLength:kMaxManifestBytes + 1];
         }
     });
-
 }
 
 static void PMDidComplete(id self,
@@ -191,8 +291,8 @@ static void PMDidComplete(id self,
                           NSURLSession *session,
                           NSURLSessionTask *task,
                           NSError *error) {
-    if (![task isKindOfClass:NSURLSessionDataTask.class] ||
-        !PMIsTargetTask((NSURLSessionDataTask *)task)) {
+    NSString *suffix = [task isKindOfClass:NSURLSessionDataTask.class] ? PMMatchedSuffixForTask(task) : nil;
+    if (!suffix) {
         ((void (*)(id, SEL, NSURLSession *, NSURLSessionTask *, NSError *))gOrigDidComplete)(
             self, _cmd, session, task, error);
         return;
@@ -213,13 +313,19 @@ static void PMDidComplete(id self,
     }
 
     if (!error && buffer.length > 0 && buffer.length <= kMaxManifestBytes) {
-        NSData *patchedData = PMPatchManifestData(buffer);
+        NSData *forwarded = buffer;
+        if (PMIsOnLoginScene()) {
+            forwarded = PMPatchManifestData(buffer);
+            PMMarkSuffixHandled(suffix);
+        } else {
+            ZLog(@"[PatchManifestNetwork] %@ finished outside the login scene - forwarding unpatched", suffix);
+        }
         ((void (*)(id, SEL, NSURLSession *, NSURLSessionDataTask *, NSData *))gOrigDidReceiveData)(
             self,
             @selector(URLSession:dataTask:didReceiveData:),
             session,
             (NSURLSessionDataTask *)task,
-            patchedData);
+            forwarded);
     } else if (buffer.length > kMaxManifestBytes) {
         ZLog(@"[PatchManifestNetwork] response exceeded %lu-byte safety cap; forwarding nothing",
               (unsigned long)kMaxManifestBytes);
@@ -316,11 +422,15 @@ static NSArray<NSString *> *PMFindCandidateDelegateClassNames(void) {
         gOrigDidComplete = method_getImplementation(didCompleteMethod);
 
         gBuffers = [NSMutableDictionary dictionary];
+        gHandledSuffixes = [NSMutableSet set];
         gStateQueue = dispatch_queue_create("com.120F.PatchManifestNetwork", DISPATCH_QUEUE_SERIAL);
 
         method_setImplementation(didReceiveMethod, (IMP)PMDidReceiveData);
         method_setImplementation(didCompleteMethod, (IMP)PMDidComplete);
         gInstalled = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PMStartRearmTimer();
+        });
 
         ZLog(@"[PatchManifestNetwork] installed on %@", NSStringFromClass(gDelegateClass));
     }
@@ -343,7 +453,11 @@ static NSArray<NSString *> *PMFindCandidateDelegateClassNames(void) {
             method_setImplementation(didCompleteMethod, gOrigDidComplete);
         }
 
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PMStopRearmTimer();
+        });
         gBuffers = nil;
+        gHandledSuffixes = nil;
         gStateQueue = nil;
         gDelegateClass = Nil;
         gOrigDidReceiveData = NULL;
