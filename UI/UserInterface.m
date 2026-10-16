@@ -6676,6 +6676,8 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL syslogFullScreenOpen;
 @property (nonatomic, strong) UIView *syslogCopyToastView;
 @property (nonatomic, strong) UIVisualEffectView *syslogCommandDropdown;
+@property (nonatomic, strong) UIButton *syslogSlashButton;
+@property (nonatomic, assign) BOOL syslogCommandBrowseActive;
 @property (nonatomic, strong) UIStackView *syslogCommandStack;
 
 @property (nonatomic, strong) ZSCapsuleSlider *normalFpsSlider;
@@ -9581,6 +9583,8 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.syslogFullScreenOverlay = nil;
     self.syslogSearchField = nil;
     self.syslogCommandDropdown = nil;
+    self.syslogSlashButton = nil;
+    self.syslogCommandBrowseActive = NO;
     self.syslogCommandStack = nil;
     self.syslogExportButton = nil;
     self.syslogChannelToggleButton = nil;
@@ -17016,6 +17020,19 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
     self.syslogExportButton = exportButton;
     [self.syslogExportButton addTarget:self action:@selector(zs_exportSyslogVisibleLogsTapped) forControlEvents:UIControlEventTouchUpInside];
 
+    UIGraphicsImageRenderer *slashRenderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(16, 18)];
+    UIImage *slashImage = [[slashRenderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        NSDictionary *slashAttributes = @{NSFontAttributeName: zs_mono_font(16, UIFontWeightSemibold), NSForegroundColorAttributeName: UIColor.whiteColor};
+        CGSize glyphSize = [@"/" sizeWithAttributes:slashAttributes];
+        [@"/" drawAtPoint:CGPointMake((16 - glyphSize.width) / 2, (18 - glyphSize.height) / 2) withAttributes:slashAttributes];
+    }] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    UIButton *slashButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    slashButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_pill_icon_button_as_native_glass(slashButton, slashImage, [UIColor colorWithWhite:1 alpha:0.9]);
+    [slashButton addTarget:self action:@selector(zs_syslogSlashTapped) forControlEvents:UIControlEventTouchUpInside];
+    [overlay addSubview:slashButton];
+    self.syslogSlashButton = slashButton;
+
     UIImage *channelToggleImage = [UIImage systemImageNamed:@"switch.2" withConfiguration:pillSymbolConfig];
     UIButton *channelToggleButton = [UIButton buttonWithType:UIButtonTypeSystem];
     channelToggleButton.translatesAutoresizingMaskIntoConstraints = NO;
@@ -17093,8 +17110,13 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
         [infoLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [infoLabel.leadingAnchor constraintEqualToAnchor:channelToggleButton.trailingAnchor constant:12],
 
+        [slashButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [slashButton.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
+        [slashButton.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
+        [slashButton.widthAnchor constraintEqualToConstant:30],
+        [slashButton.heightAnchor constraintEqualToConstant:30],
+
         [searchContainer.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [searchContainer.leadingAnchor constraintGreaterThanOrEqualToAnchor:infoLabel.trailingAnchor constant:10],
         [searchContainer.trailingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.trailingAnchor constant:-kPanelPadding],
         [searchContainer.heightAnchor constraintEqualToConstant:30],
 
@@ -17174,7 +17196,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     UIStackView *stack = self.syslogCommandStack;
     if (!dropdown || !stack) return;
 
-    NSArray<NSDictionary<NSString *, NSString *> *> *matches = self.syslogSearchField.isFirstResponder ? [self zs_syslogMatchingCommands] : @[];
+    NSArray<NSDictionary<NSString *, NSString *> *> *matches = (self.syslogSearchField.isFirstResponder || self.syslogCommandBrowseActive) ? [self zs_syslogMatchingCommands] : @[];
     NSString *trimmed = [[self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
     if (matches.count == 0 || (matches.count == 1 && [trimmed isEqualToString:matches.firstObject[@"name"]])) {
         dropdown.hidden = YES;
@@ -17216,11 +17238,40 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     NSString *name = objc_getAssociatedObject(gesture.view, "zs_commandName");
     if (name.length == 0) return;
 
+    BOOL browsing = self.syslogCommandBrowseActive && !self.syslogSearchField.isFirstResponder;
     self.syslogSearchField.text = name;
+    if (browsing) {
+        self.syslogCommandBrowseActive = NO;
+        UIImpactFeedbackGenerator *browseHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [browseHaptic impactOccurred];
+        [self zs_executeSyslogCommandIfNeeded];
+        return;
+    }
     [self zs_syslogSearchFieldChanged:self.syslogSearchField];
 
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+}
+
+- (void)zs_syslogSlashTapped {
+    UITextField *field = self.syslogSearchField;
+    if (!field) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    if (self.syslogCommandBrowseActive) {
+        [self zs_syslogEndCommandBrowse];
+        return;
+    }
+    self.syslogCommandBrowseActive = !field.isFirstResponder;
+    field.text = @"/";
+    [self zs_syslogSearchFieldChanged:field];
+}
+
+- (void)zs_syslogEndCommandBrowse {
+    if (!self.syslogCommandBrowseActive) return;
+    self.syslogCommandBrowseActive = NO;
+    self.syslogSearchField.text = @"";
+    [self zs_syslogSearchFieldChanged:self.syslogSearchField];
 }
 
 - (void)zs_executeSyslogCommandIfNeeded {
@@ -17529,6 +17580,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
 
     self.pinchDismissInFlight = YES;
     overlay.userInteractionEnabled = NO;
+    [self zs_syslogEndCommandBrowse];
     [self.syslogSearchField resignFirstResponder];
     [self.assetExplorerSearchField resignFirstResponder];
 
@@ -17566,6 +17618,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
 - (void)zs_closeSyslogFullScreenPanelTapped {
     if (!self.syslogFullScreenOpen) return;
 
+    [self zs_syslogEndCommandBrowse];
     [self.syslogSearchField resignFirstResponder];
     [self closeDocsPanel];
 
@@ -18515,6 +18568,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         [self zs_closeDocsLanguageDropdownAnimated:NO];
     }
     if (self.syslogFullScreenOpen) {
+        [self zs_syslogEndCommandBrowse];
         [self.syslogSearchField resignFirstResponder];
         self.syslogFullScreenOpen = NO;
         [self zs_syncSyslogButtonState];
@@ -21156,6 +21210,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         [self zs_closeDocsLanguageDropdownAnimated:NO];
     }
     if (self.syslogFullScreenOpen) {
+        [self zs_syslogEndCommandBrowse];
         [self.syslogSearchField resignFirstResponder];
         self.syslogFullScreenOpen = NO;
         [self zs_syncSyslogButtonState];
@@ -22288,7 +22343,10 @@ static void zs_memory_page_insets(UIView *overlay, CGFloat *leftOut, CGFloat *ri
 }
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
-    if (textField == self.syslogSearchField) [self zs_updateSyslogCommandDropdown];
+    if (textField == self.syslogSearchField) {
+        self.syslogCommandBrowseActive = NO;
+        [self zs_updateSyslogCommandDropdown];
+    }
 }
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
