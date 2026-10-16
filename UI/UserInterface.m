@@ -571,6 +571,40 @@ static void zs_clear_button_configuration(UIButton *button) {
 static const CGFloat kZSGlassButtonCornerRadius = 8;
 static const void *kZSButtonGlassViewKey = &kZSButtonGlassViewKey;
 
+@interface ZSGlassTouchProxy : UIControl
+@property (nonatomic, weak) UIButton *host;
+@end
+
+@implementation ZSGlassTouchProxy
+- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    UIButton *host = self.host;
+    if (!host || !host.enabled) return NO;
+    host.highlighted = YES;
+    [host sendActionsForControlEvents:UIControlEventTouchDown];
+    return YES;
+}
+
+- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    return YES;
+}
+
+- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
+    UIButton *host = self.host;
+    if (!host) return;
+    host.highlighted = NO;
+    CGPoint point = touch ? [touch locationInView:self] : CGPointZero;
+    BOOL inside = touch ? CGRectContainsPoint(CGRectInset(self.bounds, -20, -20), point) : YES;
+    [host sendActionsForControlEvents:inside ? UIControlEventTouchUpInside : UIControlEventTouchUpOutside];
+}
+
+- (void)cancelTrackingWithEvent:(UIEvent *)event {
+    UIButton *host = self.host;
+    if (!host) return;
+    host.highlighted = NO;
+    [host sendActionsForControlEvents:UIControlEventTouchCancel];
+}
+@end
+
 @interface ZSGlassHostButton : UIButton
 @end
 
@@ -600,6 +634,16 @@ static void zs_install_slash_glass_on_button(UIButton *button, UIColor *tintColo
         zs_configure_glass_corners(glass, kZSGlassButtonCornerRadius, NO);
         zs_register_suspendable_glass(glass);
         [button insertSubview:glass atIndex:0];
+        ZSGlassTouchProxy *proxy = [[ZSGlassTouchProxy alloc] init];
+        proxy.translatesAutoresizingMaskIntoConstraints = NO;
+        proxy.host = button;
+        [glass.contentView addSubview:proxy];
+        [NSLayoutConstraint activateConstraints:@[
+            [proxy.leadingAnchor constraintEqualToAnchor:glass.contentView.leadingAnchor],
+            [proxy.trailingAnchor constraintEqualToAnchor:glass.contentView.trailingAnchor],
+            [proxy.topAnchor constraintEqualToAnchor:glass.contentView.topAnchor],
+            [proxy.bottomAnchor constraintEqualToAnchor:glass.contentView.bottomAnchor],
+        ]];
         [NSLayoutConstraint activateConstraints:@[
             [glass.leadingAnchor constraintEqualToAnchor:button.leadingAnchor],
             [glass.trailingAnchor constraintEqualToAnchor:button.trailingAnchor],
