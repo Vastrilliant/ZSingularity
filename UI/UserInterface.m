@@ -558,6 +558,8 @@ static void zs_set_glass_suspended(BOOL suspended) {
     }
 }
 
+static const CGFloat kZSGlassButtonCornerRadius = 8;
+
 static void zs_configure_glass_button_fixed_corner_radius(UIButton *button, CGFloat radius) {
     if (!button) return;
 
@@ -667,7 +669,7 @@ static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString
                 if ([button respondsToSelector:setConfig]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
                     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-
+                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
                     return;
                 }
             }
@@ -766,7 +768,7 @@ static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString 
                 if ([button respondsToSelector:setConfig]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
                     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
-                    zs_configure_glass_button_fixed_corner_radius(button, 14);
+                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
                     return;
                 }
             }
@@ -804,10 +806,15 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
                 if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
                 }
+                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
+                if ([configuration respondsToSelector:setBaseBackground]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, zs_glass_tint_color());
+                }
                 SEL setConfig = NSSelectorFromString(@"setConfiguration:");
                 if ([button respondsToSelector:setConfig]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
                     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
                     return;
                 }
             }
@@ -860,10 +867,15 @@ static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *imag
                 if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
                 }
+                SEL setBaseBackground = NSSelectorFromString(@"setBaseBackgroundColor:");
+                if ([configuration respondsToSelector:setBaseBackground]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseBackground, zs_glass_tint_color());
+                }
                 SEL setConfig = NSSelectorFromString(@"setConfiguration:");
                 if ([button respondsToSelector:setConfig]) {
                     ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
                     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+                    zs_configure_glass_button_fixed_corner_radius(button, kZSGlassButtonCornerRadius);
                     return;
                 }
             }
