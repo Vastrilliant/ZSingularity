@@ -2762,11 +2762,19 @@ static int zt_compare_int64(const void *a, const void *b) {
     return x < y ? -1 : (x > y ? 1 : 0);
 }
 
-static NSData *zt_scan_bundle_path_ids(NSString *path) {
-    NSData *head = [UnityBundleCAB serializedFileHeadForBundleAtPath:path error:nil];
-    if (!head) return nil;
-    ZTSerializedDocument *document = zt_parse_serialized_mode(head, YES, nil);
-    if (!document || document.objects.count == 0) return nil;
+static NSData *zt_scan_bundle_path_ids(NSString *path, NSString **failure) {
+    NSError *headError = nil;
+    NSData *head = [UnityBundleCAB serializedFileHeadForBundleAtPath:path error:&headError];
+    if (!head) {
+        if (failure) *failure = headError.userInfo[NSLocalizedDescriptionKey] ?: [NSString stringWithFormat:@"bundle read error %ld", (long)headError.code];
+        return nil;
+    }
+    NSError *parseError = nil;
+    ZTSerializedDocument *document = zt_parse_serialized_mode(head, YES, &parseError);
+    if (!document || document.objects.count == 0) {
+        if (failure) *failure = parseError.userInfo[NSLocalizedDescriptionKey] ?: @"SerializedFile has no objects";
+        return nil;
+    }
     NSMutableData *ids = [NSMutableData dataWithLength:document.objects.count * sizeof(int64_t)];
     int64_t *values = ids.mutableBytes;
     NSUInteger count = 0;
@@ -2775,18 +2783,24 @@ static NSData *zt_scan_bundle_path_ids(NSString *path) {
     return ids;
 }
 
-static NSData *zt_bundle_path_ids(NSString *path) {
+static NSData *zt_bundle_path_ids(NSString *path, NSString **failure) {
     NSDictionary<NSFileAttributeKey, id> *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
-    if (!attributes) return nil;
+    if (!attributes) {
+        if (failure) *failure = @"file attributes unreadable";
+        return nil;
+    }
     NSString *signature = [NSString stringWithFormat:@"%llu:%lld", [attributes[NSFileSize] unsignedLongLongValue], (long long)[attributes[NSFileModificationDate] timeIntervalSince1970]];
     @synchronized([ZTCarra2Item class]) {
         NSDictionary *stored = zt_path_id_index()[path];
-        if ([stored[@"sig"] isEqualToString:signature] && [stored[@"ids"] isKindOfClass:NSData.class]) return stored[@"ids"];
+        NSData *storedIDs = stored[@"ids"];
+        if ([stored[@"sig"] isEqualToString:signature] && [storedIDs isKindOfClass:NSData.class] && storedIDs.length > 0) return storedIDs;
     }
-    NSData *ids = zt_scan_bundle_path_ids(path);
-    @synchronized([ZTCarra2Item class]) {
-        zt_path_id_index()[path] = @{@"sig": signature, @"ids": ids ?: [NSData data]};
-        s_ztPathIDIndexDirty = YES;
+    NSData *ids = zt_scan_bundle_path_ids(path, failure);
+    if (ids.length > 0) {
+        @synchronized([ZTCarra2Item class]) {
+            zt_path_id_index()[path] = @{@"sig": signature, @"ids": ids};
+            s_ztPathIDIndexDirty = YES;
+        }
     }
     return ids;
 }
@@ -2804,27 +2818,38 @@ static NSArray<NSString *> *zt_candidate_bundle_paths(void) {
             if ([candidate isKindOfClass:NSString.class] && [fm fileExistsAtPath:candidate]) [paths addObject:candidate];
         }
     }
-    if (paths.count == 0) {
-        for (NSString *root in [UnityCacheLocator unityCacheSharedDirectories]) {
-            NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
-            for (NSString *relative in walker) {
-                if ([relative.lastPathComponent isEqualToString:@"__data"]) [paths addObject:[root stringByAppendingPathComponent:relative]];
-            }
+    NSUInteger indexed = paths.count;
+    NSArray<NSString *> *roots = [UnityCacheLocator unityCacheSharedDirectories];
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
+        for (NSString *relative in walker) {
+            if ([relative.lastPathComponent isEqualToString:@"__data"]) [paths addObject:[root stringByAppendingPathComponent:relative]];
         }
     }
+    ZLog(@"[ZTranscoder] bundle candidates: %lu from the file index, %lu total after scanning %lu cache root(s)", (unsigned long)indexed, (unsigned long)paths.count, (unsigned long)roots.count);
     return paths.array;
 }
 
 static NSDictionary<NSString *, NSArray<ZTCarra2Item *> *> *zt_locate_carra2_items_in_game_bundles(NSArray<ZTCarra2Item *> *items) {
     NSMutableDictionary<NSString *, NSMutableArray<ZTCarra2Item *> *> *byBundle = [NSMutableDictionary dictionary];
     NSArray<NSString *> *candidates = zt_candidate_bundle_paths();
+    NSMutableDictionary<NSString *, NSNumber *> *failures = [NSMutableDictionary dictionary];
+    NSUInteger readable = 0;
+    NSUInteger objectTotal = 0;
     ZLog(@"[ZTranscoder] looking for %lu Carra2 object(s) across %lu game bundle(s)", (unsigned long)items.count, (unsigned long)candidates.count);
     for (NSString *candidate in candidates) {
         @autoreleasepool {
-            NSData *ids = zt_bundle_path_ids(candidate);
-            if (ids.length < sizeof(int64_t)) continue;
+            NSString *failure = nil;
+            NSData *ids = zt_bundle_path_ids(candidate, &failure);
+            if (ids.length < sizeof(int64_t)) {
+                NSString *reason = failure ?: @"unreadable";
+                failures[reason] = @(failures[reason].unsignedIntegerValue + 1);
+                continue;
+            }
+            readable++;
             const int64_t *sorted = ids.bytes;
             size_t count = ids.length / sizeof(int64_t);
+            objectTotal += count;
             for (ZTCarra2Item *item in items) {
                 int64_t pathID = item.pathID;
                 if (!bsearch(&pathID, sorted, count, sizeof(int64_t), zt_compare_int64)) continue;
@@ -2835,6 +2860,7 @@ static NSDictionary<NSString *, NSArray<ZTCarra2Item *> *> *zt_locate_carra2_ite
         }
     }
     zt_save_path_id_index();
+    ZLog(@"[ZTranscoder] bundle scan: %lu readable (%lu objects indexed), %lu skipped; skip reasons: %@", (unsigned long)readable, (unsigned long)objectTotal, (unsigned long)(candidates.count - readable), failures.count ? (id)failures : (id)@"none");
     return byBundle;
 }
 
