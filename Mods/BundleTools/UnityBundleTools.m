@@ -894,6 +894,98 @@ static BOOL ubc_detect_lzma(NSString *path, BOOL *outIsLZMA, UBCLZMAProperties *
     return ubc_all_node_paths(path, error);
 }
 
+static NSError *ubc_head_error(UnityBundleCABErrorCode code, NSString *message) {
+    return [NSError errorWithDomain:UnityBundleCABErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
++ (nullable NSData *)serializedFileHeadForBundleAtPath:(NSString *)path error:(NSError **)error {
+    NSData *fileData = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error];
+    if (!fileData) {
+        if (error && !*error) *error = [NSError errorWithDomain:UnityBundleCABErrorDomain code:UnityBundleCABErrorCantReadFile userInfo:nil];
+        return nil;
+    }
+
+    UBCCursor c = { .base = fileData.bytes, .size = fileData.length, .pos = 0 };
+    UBCHeader header;
+    if (!ubc_parse_header(&c, &header, NULL, NULL, error)) return nil;
+
+    NSData *blocksInfo = ubc_extract_blocks_info(fileData, &header, error);
+    if (!blocksInfo) return nil;
+
+    NSMutableArray<NSValue *> *blocks = [NSMutableArray array];
+    NSMutableArray<UnityBundleNode *> *nodes = [NSMutableArray array];
+    if (!ubc_parse_blocks_info_full(blocksInfo, blocks, nodes, error)) return nil;
+
+    UnityBundleNode *primary = nil;
+    for (UnityBundleNode *node in nodes) {
+        if (node.flags & 4u) { primary = node; break; }
+    }
+    if (!primary) primary = nodes.firstObject;
+    if (primary.offset < 0 || primary.size < 48) {
+        if (error) *error = ubc_head_error(UnityBundleCABErrorMalformedSerializedFileHeader, @"The bundle's primary node is too small to hold a SerializedFile header.");
+        return nil;
+    }
+
+    size_t dataStart = header.headerEndPos;
+    if (!header.blocksInfoAtEnd) dataStart += header.compressedBlocksInfoSize;
+    if (header.dataNeedsPaddingAtStart) {
+        size_t rem = dataStart % 16;
+        if (rem != 0) dataStart += (16 - rem);
+    }
+
+    size_t cursor = dataStart;
+    size_t fileSize = fileData.length;
+    const uint8_t *base = (const uint8_t *)fileData.bytes;
+    NSMutableData *head = [NSMutableData data];
+    uint64_t nodeStart = (uint64_t)primary.offset;
+    uint64_t need = nodeStart + 48u;
+    BOOL haveDataOffset = NO;
+
+    for (NSValue *value in blocks) {
+        if (haveDataOffset && head.length >= need) break;
+        UBCBlockEntry be; [value getValue:&be];
+        if (cursor > fileSize || be.cSize > fileSize - cursor) break;
+        const uint8_t *blockBytes = base + cursor;
+        uint8_t compType = (uint8_t)(be.bFlags & 0x3F);
+        if (compType == 0) {
+            [head appendBytes:blockBytes length:MIN(be.cSize, be.uSize)];
+        } else if (compType == 2 || compType == 3) {
+            NSMutableData *chunk = [NSMutableData dataWithLength:be.uSize];
+            if (be.uSize > 0) {
+                int written = LZ4BlockDecompress(blockBytes, be.cSize, (uint8_t *)chunk.mutableBytes, be.uSize);
+                if (written < 0 || (uint32_t)written != be.uSize) {
+                    if (error) *error = [NSError errorWithDomain:UnityBundleCABErrorDomain code:UnityBundleCABErrorDecompressFailed userInfo:nil];
+                    return nil;
+                }
+            }
+            [head appendData:chunk];
+        } else {
+            if (error) *error = ubc_head_error(UnityBundleCABErrorUnsupportedCompression, [NSString stringWithFormat:@"Data block uses compression type %u, which can't be read partially.", compType]);
+            return nil;
+        }
+        cursor += be.cSize;
+
+        if (!haveDataOffset && head.length >= nodeStart + 48u) {
+            const uint8_t *p = (const uint8_t *)head.bytes + nodeStart;
+            uint32_t version = ((uint32_t)p[8] << 24) | ((uint32_t)p[9] << 16) | ((uint32_t)p[10] << 8) | (uint32_t)p[11];
+            uint64_t dataOffset = 0;
+            for (int i = 0; i < 8; i++) dataOffset = (dataOffset << 8) | p[32 + i];
+            if (version != 22 || dataOffset < 48u || dataOffset > (uint64_t)primary.size) {
+                if (error) *error = ubc_head_error(UnityBundleCABErrorMalformedSerializedFileHeader, @"The bundle's SerializedFile header isn't a readable version 22 header.");
+                return nil;
+            }
+            need = nodeStart + dataOffset;
+            haveDataOffset = YES;
+        }
+    }
+
+    if (!haveDataOffset || head.length < need) {
+        if (error) *error = ubc_head_error(UnityBundleCABErrorMalformedBlocksInfo, @"The bundle ended before its SerializedFile metadata was complete.");
+        return nil;
+    }
+    return [head subdataWithRange:NSMakeRange((NSUInteger)nodeStart, (NSUInteger)(need - nodeStart))];
+}
+
 + (BOOL)targetPlatform:(int32_t *)outPlatform forBundleAtPath:(NSString *)path error:(NSError **)error {
     NSError *localError = nil;
     UnityBundleArchive *archive = [self decompressedArchiveAtPath:path error:&localError];
