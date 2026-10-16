@@ -6466,6 +6466,55 @@ static NSString *zs_asset_explorer_bundle_key(ZSAssetExplorerBundle *bundle) {
     return bundle.filePath.lastPathComponent ?: @"";
 }
 
+static NSMutableOrderedSet<NSString *> *zs_ae_string_set(id stored) {
+    NSMutableOrderedSet<NSString *> *set = [NSMutableOrderedSet orderedSet];
+    if (![stored isKindOfClass:[NSArray class]]) return set;
+    for (id value in (NSArray *)stored) {
+        if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) [set addObject:value];
+    }
+    return set;
+}
+
+static void zs_ae_set_detail(UILabel *label, NSString *detail, BOOL recent) {
+    if (!recent) {
+        label.attributedText = nil;
+        label.text = detail;
+        return;
+    }
+    NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:[detail stringByAppendingString:@"  •  "]
+                                                                                   attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.38], NSFontAttributeName: zs_mono_font(9, UIFontWeightRegular)}];
+    [attributed appendAttributedString:[[NSAttributedString alloc] initWithString:@"RECENTLY INSPECTED"
+                                                                       attributes:@{NSForegroundColorAttributeName: zs_accent_green_color(), NSFontAttributeName: zs_mono_font(9, UIFontWeightSemibold)}]];
+    label.attributedText = attributed;
+}
+
+static NSArray<NSNumber *> *zs_ae_section_kinds(NSUInteger bookmarked, NSUInteger modded, NSUInteger total) {
+    NSMutableArray<NSNumber *> *kinds = [NSMutableArray arrayWithCapacity:3];
+    if (bookmarked > 0) [kinds addObject:@0];
+    if (modded > 0) [kinds addObject:@1];
+    if (total > bookmarked + modded) [kinds addObject:@2];
+    return kinds;
+}
+
+static NSUInteger zs_ae_section_count(NSInteger kind, NSUInteger bookmarked, NSUInteger modded, NSUInteger total) {
+    if (kind == 0) return bookmarked;
+    if (kind == 1) return modded;
+    return total - bookmarked - modded;
+}
+
+static NSInteger zs_ae_flat_index(NSIndexPath *indexPath, NSUInteger bookmarked, NSUInteger modded, NSUInteger total) {
+    NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
+    if (indexPath.section < 0 || indexPath.section >= (NSInteger)kinds.count) return -1;
+    NSInteger kind = kinds[(NSUInteger)indexPath.section].integerValue;
+    NSUInteger start = 0;
+    for (NSInteger earlier = 0; earlier < kind; earlier++) start += zs_ae_section_count(earlier, bookmarked, modded, total);
+    return (NSInteger)start + indexPath.row;
+}
+
+static NSString *zs_ae_section_title(NSInteger kind) {
+    return kind == 0 ? @"BOOKMARKED" : (kind == 1 ? @"MODDED" : @"STOCK");
+}
+
 @interface ZSAssetThumbCell : UICollectionViewCell
 @property (nonatomic, strong) UIImageView *imageView;
 @property (nonatomic, strong) UIActivityIndicatorView *spinner;
@@ -7089,6 +7138,16 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) NSUInteger assetExplorerDisplayedBookmarkedCount;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *assetExplorerBookmarkedKeys;
 @property (nonatomic, copy) NSString *assetExplorerRecentKey;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSString *> *assetExplorerRemarks;
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *assetExplorerFMODBookmarkedKeys;
+@property (nonatomic, copy) NSString *assetExplorerFMODRecentKey;
+@property (nonatomic, assign) NSUInteger assetExplorerFMODDisplayedBookmarkedCount;
+@property (nonatomic, assign) NSUInteger assetExplorerFMODDisplayedModdedCount;
+@property (nonatomic, strong) NSMutableOrderedSet<NSString *> *assetExplorerLocalizeBookmarkedKeys;
+@property (nonatomic, copy) NSString *assetExplorerLocalizeRecentKey;
+@property (nonatomic, assign) NSUInteger assetExplorerLocalizeDisplayedBookmarkedCount;
+@property (nonatomic, assign) NSUInteger assetExplorerLocalizeDisplayedModdedCount;
+@property (nonatomic, strong) NSSet<NSString *> *assetExplorerLocalizeModdedPaths;
 @property (nonatomic, copy) NSString *assetExplorerListAnchorKey;
 @property (nonatomic, assign) CGFloat assetExplorerListAnchorOffset;
 @property (nonatomic, assign) CGFloat assetExplorerListSavedOffsetY;
@@ -10143,6 +10202,24 @@ static const CGFloat kZSSectionIndexViewWidth = 14;
 static const CGFloat kZSSectionIndexTrailingInset = 3;
 static const CGFloat kPanelWidth = 330;
 static const CGFloat kPanelPadding = 16;
+
+static UIView *zs_ae_section_header(NSString *title) {
+    UIView *header = [[UIView alloc] init];
+    header.backgroundColor = [UIColor colorWithWhite:0 alpha:0.18];
+    UILabel *label = [[UILabel alloc] init];
+    label.translatesAutoresizingMaskIntoConstraints = NO;
+    label.font = zs_mono_font(10, UIFontWeightSemibold);
+    label.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+    label.text = title;
+    [header addSubview:label];
+    UILayoutGuide *safeArea = header.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [label.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:kPanelPadding],
+        [label.trailingAnchor constraintLessThanOrEqualToAnchor:safeArea.trailingAnchor constant:-kPanelPadding],
+        [label.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+    ]];
+    return header;
+}
 
 static const CGFloat kRowSpacing = 4;
 static const CGFloat kSectionSpacing = 20;
@@ -19715,7 +19792,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     self.assetExplorerSelectedBundle = bundle;
     self.assetExplorerAssets = @[];
     self.assetExplorerCloseButton.hidden = YES;
-    self.assetExplorerTitleLabel.text = bundle.displayName;
+    self.assetExplorerTitleLabel.text = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBundle:bundle]] ?: bundle.displayName;
     self.assetExplorerStatusMessage = @"Reading…";
     self.assetExplorerBackButton.hidden = NO;
     self.assetExplorerTableView.hidden = NO;
@@ -20067,7 +20144,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 NSString *pathID = [NSString stringWithFormat:@"%lld", (long long)asset.pathID];
                 BOOL hit = [[self zs_assetExplorerNameForAsset:asset] localizedCaseInsensitiveContainsString:query] ||
                            [kind localizedCaseInsensitiveContainsString:query] ||
-                           [pathID containsString:query];
+                           [pathID containsString:query] ||
+                           [[self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForAsset:asset]] localizedCaseInsensitiveContainsString:query];
                 if (!hit) continue;
             }
             [matches addObject:asset];
@@ -20103,7 +20181,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         for (ZSAssetExplorerBundle *bundle in self.assetExplorerBundles) {
             if (query.length > 0 &&
                 ![bundle.displayName localizedCaseInsensitiveContainsString:query] &&
-                ![bundle.cabIdentifier localizedCaseInsensitiveContainsString:query]) continue;
+                ![bundle.cabIdentifier localizedCaseInsensitiveContainsString:query] &&
+                ![[self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBundle:bundle]] localizedCaseInsensitiveContainsString:query]) continue;
             [matches addObject:bundle];
         }
         BOOL descending = self.assetExplorerBundleSortDescending;
@@ -20439,17 +20518,24 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 - (NSMutableOrderedSet<NSString *> *)zs_assetExplorerBookmarks {
     if (self.assetExplorerBookmarkedKeys) return self.assetExplorerBookmarkedKeys;
     NSDictionary *section = zs_settings_section(@"assetExplorer");
-    NSMutableOrderedSet<NSString *> *keys = [NSMutableOrderedSet orderedSet];
-    id stored = section[@"bookmarkedBundles"];
-    if ([stored isKindOfClass:[NSArray class]]) {
-        for (id value in stored) {
-            if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) [keys addObject:value];
-        }
+    self.assetExplorerBookmarkedKeys = zs_ae_string_set(section[@"bookmarkedBundles"]);
+    self.assetExplorerFMODBookmarkedKeys = zs_ae_string_set(section[@"fmodBookmarks"]);
+    self.assetExplorerLocalizeBookmarkedKeys = zs_ae_string_set(section[@"localizeBookmarks"]);
+    NSMutableDictionary<NSString *, NSString *> *remarks = [NSMutableDictionary dictionary];
+    id storedRemarks = section[@"remarks"];
+    if ([storedRemarks isKindOfClass:[NSDictionary class]]) {
+        [(NSDictionary *)storedRemarks enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+            if ([key isKindOfClass:[NSString class]] && [value isKindOfClass:[NSString class]] && [(NSString *)value length] > 0) remarks[key] = value;
+        }];
     }
-    self.assetExplorerBookmarkedKeys = keys;
+    self.assetExplorerRemarks = remarks;
     id recent = section[@"recentlyInspected"];
     if (self.assetExplorerRecentKey.length == 0 && [recent isKindOfClass:[NSString class]]) self.assetExplorerRecentKey = recent;
-    return keys;
+    id fmodRecent = section[@"fmodRecent"];
+    if (self.assetExplorerFMODRecentKey.length == 0 && [fmodRecent isKindOfClass:[NSString class]]) self.assetExplorerFMODRecentKey = fmodRecent;
+    id localizeRecent = section[@"localizeRecent"];
+    if (self.assetExplorerLocalizeRecentKey.length == 0 && [localizeRecent isKindOfClass:[NSString class]]) self.assetExplorerLocalizeRecentKey = localizeRecent;
+    return self.assetExplorerBookmarkedKeys;
 }
 
 - (void)zs_assetExplorerPersistState {
@@ -20457,6 +20543,11 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     zs_write_settings_section(@"assetExplorer", @{
         @"bookmarkedBundles": keys.array ?: @[],
         @"recentlyInspected": self.assetExplorerRecentKey ?: @"",
+        @"fmodBookmarks": self.assetExplorerFMODBookmarkedKeys.array ?: @[],
+        @"fmodRecent": self.assetExplorerFMODRecentKey ?: @"",
+        @"localizeBookmarks": self.assetExplorerLocalizeBookmarkedKeys.array ?: @[],
+        @"localizeRecent": self.assetExplorerLocalizeRecentKey ?: @"",
+        @"remarks": self.assetExplorerRemarks ?: @{},
     });
 }
 
@@ -20464,17 +20555,169 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     return [[self zs_assetExplorerBookmarks] containsObject:zs_asset_explorer_bundle_key(bundle)];
 }
 
-- (void)zs_assetExplorerToggleBookmark:(ZSAssetExplorerBundle *)bundle {
-    if (!bundle) return;
-    NSMutableOrderedSet<NSString *> *keys = [self zs_assetExplorerBookmarks];
-    NSString *key = zs_asset_explorer_bundle_key(bundle);
-    if ([keys containsObject:key]) {
-        [keys removeObject:key];
+- (NSMutableOrderedSet<NSString *> *)zs_assetExplorerFMODBookmarks {
+    [self zs_assetExplorerBookmarks];
+    return self.assetExplorerFMODBookmarkedKeys;
+}
+
+- (NSMutableOrderedSet<NSString *> *)zs_assetExplorerLocalizeBookmarks {
+    [self zs_assetExplorerBookmarks];
+    return self.assetExplorerLocalizeBookmarkedKeys;
+}
+
+- (void)zs_assetExplorerRefreshCurrentList {
+    if (!self.assetExplorerFullScreenOpen) return;
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeRefreshListResettingScroll:NO];
+    } else if (self.assetExplorerFMODMode) {
+        [self zs_assetExplorerFMODRefreshListResettingScroll:NO];
     } else {
-        [keys addObject:key];
+        [self zs_assetExplorerRefreshListResettingScroll:NO];
+    }
+}
+
+- (void)zs_assetExplorerToggleBookmarkKey:(NSString *)key inSet:(NSMutableOrderedSet<NSString *> *)set {
+    if (key.length == 0 || !set) return;
+    if ([set containsObject:key]) {
+        [set removeObject:key];
+    } else {
+        [set addObject:key];
     }
     [self zs_assetExplorerPersistState];
-    [self zs_assetExplorerRefreshListResettingScroll:NO];
+    [self zs_assetExplorerRefreshCurrentList];
+}
+
+- (NSString *)zs_assetExplorerRemarkForKey:(NSString *)key {
+    if (key.length == 0) return nil;
+    [self zs_assetExplorerBookmarks];
+    NSString *remark = self.assetExplorerRemarks[key];
+    return remark.length > 0 ? remark : nil;
+}
+
+- (void)zs_assetExplorerSetRemark:(NSString *)remark forKey:(NSString *)key {
+    if (key.length == 0) return;
+    [self zs_assetExplorerBookmarks];
+    if (remark.length > 0) {
+        self.assetExplorerRemarks[key] = remark;
+    } else {
+        [self.assetExplorerRemarks removeObjectForKey:key];
+    }
+    [self zs_assetExplorerPersistState];
+    [self zs_assetExplorerRefreshCurrentList];
+}
+
+- (void)zs_assetExplorerPromptRemarkForKey:(NSString *)key {
+    if (key.length == 0) return;
+    __weak typeof(self) weakSelf = self;
+    [self zs_presentFloatingTextFieldWithInitialText:[self zs_assetExplorerRemarkForKey:key]
+                                          placeholder:@"Remark"
+                                               secure:NO
+                                           completion:^(NSString * _Nullable trimmedText) {
+        [weakSelf zs_assetExplorerSetRemark:trimmedText forKey:key];
+    }];
+}
+
+- (NSString *)zs_assetExplorerRemarkKeyForBundle:(ZSAssetExplorerBundle *)bundle {
+    return bundle ? [@"b:" stringByAppendingString:zs_asset_explorer_bundle_key(bundle)] : nil;
+}
+
+- (NSString *)zs_assetExplorerRemarkKeyForAsset:(ZSAssetExplorerAsset *)asset {
+    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
+    if (!asset || !bundle) return nil;
+    return [NSString stringWithFormat:@"a:%@:%lld", zs_asset_explorer_bundle_key(bundle), (long long)asset.pathID];
+}
+
+- (NSString *)zs_assetExplorerRemarkKeyForBankFile:(ZSFMODBankFile *)file {
+    return file.fileName.length > 0 ? [@"f:" stringByAppendingString:file.fileName] : nil;
+}
+
+- (NSString *)zs_assetExplorerRemarkKeyForStream:(ZSFMODStream *)stream {
+    ZSFMODBankFile *file = self.assetExplorerFMODBankFile;
+    if (!stream || file.fileName.length == 0) return nil;
+    return [NSString stringWithFormat:@"s:%@:%ld:%ld", file.fileName, (long)stream.fsbIndex, (long)stream.index];
+}
+
+- (NSString *)zs_assetExplorerLocalizeKeyForPath:(NSString *)path {
+    NSString *root = self.assetExplorerLocalizeRoot;
+    if (root.length > 0 && [path hasPrefix:[root stringByAppendingString:@"/"]]) return [path substringFromIndex:root.length + 1];
+    return path.lastPathComponent ?: @"";
+}
+
+- (NSString *)zs_assetExplorerRemarkKeyForLocalizePath:(NSString *)path {
+    NSString *relative = [self zs_assetExplorerLocalizeKeyForPath:path];
+    return relative.length > 0 ? [@"l:" stringByAppendingString:relative] : nil;
+}
+
+- (UIAction *)zs_assetExplorerRemarkActionForKey:(NSString *)key {
+    __weak typeof(self) weakSelf = self;
+    BOOL hasRemark = [self zs_assetExplorerRemarkForKey:key].length > 0;
+    return [UIAction actionWithTitle:(hasRemark ? @"Edit Remark" : @"Add Remark")
+                               image:[UIImage systemImageNamed:@"text.bubble"]
+                          identifier:nil
+                             handler:^(__kindof UIAction *action) {
+        [weakSelf zs_assetExplorerPromptRemarkForKey:key];
+    }];
+}
+
+- (UIAction *)zs_assetExplorerBookmarkActionForKey:(NSString *)key inSet:(NSMutableOrderedSet<NSString *> *)set {
+    __weak typeof(self) weakSelf = self;
+    BOOL bookmarked = [set containsObject:key];
+    return [UIAction actionWithTitle:(bookmarked ? @"Remove Bookmark" : @"Bookmark")
+                               image:[UIImage systemImageNamed:(bookmarked ? @"bookmark.slash" : @"bookmark")]
+                          identifier:nil
+                             handler:^(__kindof UIAction *action) {
+        [weakSelf zs_assetExplorerToggleBookmarkKey:key inSet:set];
+    }];
+}
+
+- (UIContextMenuConfiguration *)zs_assetExplorerMenuWithRemarkKey:(NSString *)remarkKey
+                                                      bookmarkKey:(NSString *)bookmarkKey
+                                                      bookmarkSet:(NSMutableOrderedSet<NSString *> *)bookmarkSet
+                                                       extraItems:(NSArray<UIMenuElement *> *)extraItems API_AVAILABLE(ios(13.0)) {
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+        typeof(self) strongSelf = weakSelf;
+        NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+        if (strongSelf && bookmarkKey.length > 0 && bookmarkSet) [items addObject:[strongSelf zs_assetExplorerBookmarkActionForKey:bookmarkKey inSet:bookmarkSet]];
+        if (strongSelf && remarkKey.length > 0) [items addObject:[strongSelf zs_assetExplorerRemarkActionForKey:remarkKey]];
+        if (extraItems.count > 0) [items addObjectsFromArray:extraItems];
+        return [UIMenu menuWithTitle:@"" children:items];
+    }];
+}
+
+- (UISwipeActionsConfiguration *)zs_assetExplorerSwipeWithRemarkKey:(NSString *)remarkKey
+                                                        bookmarkKey:(NSString *)bookmarkKey
+                                                        bookmarkSet:(NSMutableOrderedSet<NSString *> *)bookmarkSet API_AVAILABLE(ios(11.0)) {
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIContextualAction *> *actions = [NSMutableArray array];
+    if (bookmarkKey.length > 0 && bookmarkSet) {
+        BOOL bookmarked = [bookmarkSet containsObject:bookmarkKey];
+        UIContextualAction *bookmarkAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                                      title:(bookmarked ? @"Unpin" : @"Bookmark")
+                                                                                    handler:^(UIContextualAction *contextualAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            [weakSelf zs_assetExplorerToggleBookmarkKey:bookmarkKey inSet:bookmarkSet];
+            completionHandler(YES);
+        }];
+        bookmarkAction.image = [UIImage systemImageNamed:(bookmarked ? @"bookmark.slash.fill" : @"bookmark.fill")];
+        bookmarkAction.backgroundColor = bookmarked ? [UIColor colorWithWhite:0.35 alpha:1] : zs_accent_green_color();
+        [actions addObject:bookmarkAction];
+    }
+    if (remarkKey.length > 0) {
+        BOOL hasRemark = [self zs_assetExplorerRemarkForKey:remarkKey].length > 0;
+        UIContextualAction *remarkAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
+                                                                                    title:(hasRemark ? @"Edit Remark" : @"Add Remark")
+                                                                                  handler:^(UIContextualAction *contextualAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            [weakSelf zs_assetExplorerPromptRemarkForKey:remarkKey];
+            completionHandler(YES);
+        }];
+        remarkAction.image = [UIImage systemImageNamed:@"text.bubble.fill"];
+        remarkAction.backgroundColor = [UIColor colorWithRed:0.24 green:0.42 blue:0.78 alpha:1];
+        [actions addObject:remarkAction];
+    }
+    if (actions.count == 0) return nil;
+    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:actions];
+    configuration.performsFirstActionWithFullSwipe = NO;
+    return configuration;
 }
 
 - (NSUInteger)zs_assetExplorerBookmarkedDisplayCount {
@@ -20566,17 +20809,49 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     [table setContentOffset:CGPointMake(table.contentOffset.x, target) animated:NO];
 }
 
+- (BOOL)zs_assetExplorerSectionCountsForTableView:(UITableView *)tableView bookmarked:(NSUInteger *)bookmarked modded:(NSUInteger *)modded total:(NSUInteger *)total {
+    NSUInteger b = 0, m = 0, t = 0;
+    if (tableView == self.assetExplorerFMODTableView && !self.assetExplorerFMODBankFile) {
+        t = self.assetExplorerFMODDisplayedBanks.count;
+        b = MIN(self.assetExplorerFMODDisplayedBookmarkedCount, t);
+        m = MIN(self.assetExplorerFMODDisplayedModdedCount, t - b);
+    } else if (tableView == self.assetExplorerLocalizeTableView) {
+        t = self.assetExplorerLocalizeDisplayedEntries.count;
+        b = MIN(self.assetExplorerLocalizeDisplayedBookmarkedCount, t);
+        m = MIN(self.assetExplorerLocalizeDisplayedModdedCount, t - b);
+    } else {
+        return NO;
+    }
+    *bookmarked = b;
+    *modded = m;
+    *total = t;
+    return YES;
+}
+
+- (NSInteger)zs_assetExplorerListIndexForIndexPath:(NSIndexPath *)indexPath inTableView:(UITableView *)tableView {
+    NSUInteger bookmarked = 0, modded = 0, total = 0;
+    if (![self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) return indexPath.row;
+    return zs_ae_flat_index(indexPath, bookmarked, modded, total);
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    NSUInteger bookmarked = 0, modded = 0, total = 0;
+    if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
+        return MAX((NSInteger)zs_ae_section_kinds(bookmarked, modded, total).count, 1);
+    }
     if (tableView != self.assetExplorerTableView || self.assetExplorerSelectedBundle) return 1;
     return MAX((NSInteger)[self zs_assetExplorerSectionKinds].count, 1);
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerLocalizeTableView) return (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count;
-    if (tableView == self.assetExplorerLocalizeJSONTableView) return (NSInteger)self.assetExplorerLocalizeVisibleRows.count;
-    if (tableView == self.assetExplorerFMODTableView) {
-        return (NSInteger)(self.assetExplorerFMODBankFile ? self.assetExplorerFMODDisplayedStreams.count : self.assetExplorerFMODDisplayedBanks.count);
+    NSUInteger bookmarked = 0, modded = 0, total = 0;
+    if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
+        NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
+        if (section < 0 || section >= (NSInteger)kinds.count) return 0;
+        return (NSInteger)zs_ae_section_count(kinds[(NSUInteger)section].integerValue, bookmarked, modded, total);
     }
+    if (tableView == self.assetExplorerLocalizeJSONTableView) return (NSInteger)self.assetExplorerLocalizeVisibleRows.count;
+    if (tableView == self.assetExplorerFMODTableView) return (NSInteger)self.assetExplorerFMODDisplayedStreams.count;
     if (tableView != self.assetExplorerTableView) return 0;
     if (self.assetExplorerSelectedBundle) return (NSInteger)self.assetExplorerDisplayedAssets.count;
     if ([self zs_assetExplorerSectionKinds].count == 0) return 0;
@@ -20584,29 +20859,23 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    NSUInteger bookmarked = 0, modded = 0, total = 0;
+    if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
+        return total == 0 ? CGFLOAT_MIN : 26;
+    }
     if (tableView != self.assetExplorerTableView || self.assetExplorerSelectedBundle || self.assetExplorerDisplayedBundles.count == 0) return CGFLOAT_MIN;
     return 26;
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    NSUInteger bookmarked = 0, modded = 0, total = 0;
+    if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
+        NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
+        if (section < 0 || section >= (NSInteger)kinds.count) return nil;
+        return zs_ae_section_header(zs_ae_section_title(kinds[(NSUInteger)section].integerValue));
+    }
     if (tableView != self.assetExplorerTableView || self.assetExplorerSelectedBundle || self.assetExplorerDisplayedBundles.count == 0) return nil;
-
-    UIView *header = [[UIView alloc] init];
-    header.backgroundColor = [UIColor colorWithWhite:0 alpha:0.18];
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.font = zs_mono_font(10, UIFontWeightSemibold);
-    label.textColor = [UIColor colorWithWhite:1 alpha:0.7];
-    NSInteger sectionKind = [self zs_assetExplorerSectionKindForSection:section];
-    label.text = sectionKind == 0 ? @"BOOKMARKED" : (sectionKind == 1 ? @"MODDED" : @"STOCK");
-    [header addSubview:label];
-    UILayoutGuide *safeArea = header.safeAreaLayoutGuide;
-    [NSLayoutConstraint activateConstraints:@[
-        [label.leadingAnchor constraintEqualToAnchor:safeArea.leadingAnchor constant:kPanelPadding],
-        [label.trailingAnchor constraintLessThanOrEqualToAnchor:safeArea.trailingAnchor constant:-kPanelPadding],
-        [label.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
-    ]];
-    return header;
+    return zs_ae_section_header(zs_ae_section_title([self zs_assetExplorerSectionKindForSection:section]));
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -20639,9 +20908,13 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     if (!self.assetExplorerSelectedBundle) {
         NSInteger bundleIndex = [self zs_assetExplorerBundleIndexForIndexPath:indexPath];
         ZSAssetExplorerBundle *bundle = bundleIndex >= 0 && bundleIndex < (NSInteger)self.assetExplorerDisplayedBundles.count ? self.assetExplorerDisplayedBundles[(NSUInteger)bundleIndex] : nil;
-        cell.textLabel.text = bundle.displayName ?: @"CAB-???????";
+        NSString *bundleRemark = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBundle:bundle]];
+        cell.textLabel.text = bundleRemark ?: (bundle.displayName ?: @"CAB-???????");
         NSNumber *bundleSize = bundle.filePath ? self.assetExplorerBundleSizes[bundle.filePath] : nil;
         NSString *cabText = bundle.cabIdentifier ?: @"";
+        if (bundleRemark && bundle.displayName.length > 0 && ![bundle.displayName isEqualToString:cabText]) {
+            cabText = cabText.length > 0 ? [NSString stringWithFormat:@"%@  •  %@", bundle.displayName, cabText] : bundle.displayName;
+        }
         NSString *detail = bundleSize ? [NSString stringWithFormat:@"%@  •  %@", cabText, [NSByteCountFormatter stringFromByteCount:bundleSize.longLongValue countStyle:NSByteCountFormatterCountStyleFile]] : cabText;
         NSNumber *bundleDate = nil;
         if (bundle.filePath) {
@@ -20659,22 +20932,16 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             detail = [NSString stringWithFormat:@"%@  •  %@", detail, [dateFormatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:bundleDate.doubleValue]]];
         }
         BOOL recent = bundle && self.assetExplorerRecentKey.length > 0 && [zs_asset_explorer_bundle_key(bundle) isEqualToString:self.assetExplorerRecentKey];
-        if (recent) {
-            NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:[detail stringByAppendingString:@"  •  "]
-                                                                                           attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.38], NSFontAttributeName: zs_mono_font(9, UIFontWeightRegular)}];
-            [attributed appendAttributedString:[[NSAttributedString alloc] initWithString:@"RECENTLY INSPECTED"
-                                                                               attributes:@{NSForegroundColorAttributeName: zs_accent_green_color(), NSFontAttributeName: zs_mono_font(9, UIFontWeightSemibold)}]];
-            cell.detailTextLabel.attributedText = attributed;
-        } else {
-            cell.detailTextLabel.attributedText = nil;
-            cell.detailTextLabel.text = detail;
-        }
+        zs_ae_set_detail(cell.detailTextLabel, detail, recent);
     } else {
         cell.detailTextLabel.attributedText = nil;
         ZSAssetExplorerAsset *asset = indexPath.row < self.assetExplorerDisplayedAssets.count ? self.assetExplorerDisplayedAssets[(NSUInteger)indexPath.row] : nil;
         NSString *display = asset.assetName.length > 0 ? asset.assetName : asset.typeName;
-        cell.textLabel.text = display.length > 0 ? display : @"Unnamed asset";
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
+        NSString *assetRemark = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForAsset:asset]];
+        cell.textLabel.text = assetRemark ?: (display.length > 0 ? display : @"Unnamed asset");
+        NSString *assetDetail = [NSString stringWithFormat:@"%@  •  PathID %lld  •  %u bytes", asset.typeName ?: @"Unknown", (long long)asset.pathID, asset.objectSize];
+        if (assetRemark && asset.assetName.length > 0) assetDetail = [NSString stringWithFormat:@"%@  •  %@", asset.assetName, assetDetail];
+        cell.detailTextLabel.text = assetDetail;
         BOOL previewable = [ZSAssetExplorer hasVisualPreviewForClassID:asset.classID];
         cell.accessoryType = previewable ? UITableViewCellAccessoryDisclosureIndicator : UITableViewCellAccessoryNone;
         if (!previewable) {
@@ -20694,17 +20961,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         NSInteger bundleIndex = [self zs_assetExplorerBundleIndexForIndexPath:indexPath];
         if (bundleIndex < 0 || bundleIndex >= (NSInteger)self.assetExplorerDisplayedBundles.count) return nil;
         ZSAssetExplorerBundle *bundle = self.assetExplorerDisplayedBundles[(NSUInteger)bundleIndex];
-        BOOL bookmarked = [self zs_assetExplorerIsBookmarked:bundle];
-        __weak typeof(self) bookmarkWeakSelf = self;
-        return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
-            UIAction *bookmarkAction = [UIAction actionWithTitle:(bookmarked ? @"Remove Bookmark" : @"Bookmark")
-                                                           image:[UIImage systemImageNamed:(bookmarked ? @"bookmark.slash" : @"bookmark")]
-                                                      identifier:nil
-                                                         handler:^(__kindof UIAction *action) {
-                [bookmarkWeakSelf zs_assetExplorerToggleBookmark:bundle];
-            }];
-            return [UIMenu menuWithTitle:@"" children:@[bookmarkAction]];
-        }];
+        return [self zs_assetExplorerMenuWithRemarkKey:[self zs_assetExplorerRemarkKeyForBundle:bundle]
+                                            bookmarkKey:zs_asset_explorer_bundle_key(bundle)
+                                            bookmarkSet:[self zs_assetExplorerBookmarks]
+                                             extraItems:nil];
     }
     if (tableView != self.assetExplorerTableView || !self.assetExplorerSelectedBundle || self.assetExplorerTextureOpen) return nil;
     if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerDisplayedAssets.count) return nil;
@@ -20721,34 +20981,31 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             [weakSelf zs_assetExplorerExportAsset:asset full:YES jsonOnly:NO];
         }];
         UIMenu *fullExportMenu = [UIMenu menuWithTitle:@"Full Export" image:[UIImage systemImageNamed:@"doc.zipper"] identifier:nil options:0 children:@[fullJSONAction, fullRawAction]];
-        return [UIMenu menuWithTitle:@"" children:@[exportAction, fullExportMenu]];
+        return [UIMenu menuWithTitle:@"" children:@[[weakSelf zs_assetExplorerRemarkActionForKey:[weakSelf zs_assetExplorerRemarkKeyForAsset:asset]], exportAction, fullExportMenu]];
     }];
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
-    if (tableView != self.assetExplorerTableView || self.assetExplorerSelectedBundle || self.assetExplorerHubVisible) return nil;
+    if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODSwipeForIndexPath:indexPath];
+    if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeSwipeForIndexPath:indexPath];
+    if (tableView != self.assetExplorerTableView || self.assetExplorerHubVisible) return nil;
+    if (self.assetExplorerSelectedBundle) {
+        if (self.assetExplorerTextureOpen || indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerDisplayedAssets.count) return nil;
+        ZSAssetExplorerAsset *asset = self.assetExplorerDisplayedAssets[(NSUInteger)indexPath.row];
+        return [self zs_assetExplorerSwipeWithRemarkKey:[self zs_assetExplorerRemarkKeyForAsset:asset] bookmarkKey:nil bookmarkSet:nil];
+    }
     NSInteger bundleIndex = [self zs_assetExplorerBundleIndexForIndexPath:indexPath];
     if (bundleIndex < 0 || bundleIndex >= (NSInteger)self.assetExplorerDisplayedBundles.count) return nil;
     ZSAssetExplorerBundle *bundle = self.assetExplorerDisplayedBundles[(NSUInteger)bundleIndex];
-    BOOL bookmarked = [self zs_assetExplorerIsBookmarked:bundle];
-    __weak typeof(self) weakSelf = self;
-    UIContextualAction *action = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleNormal
-                                                                         title:(bookmarked ? @"Unpin" : @"Bookmark")
-                                                                       handler:^(UIContextualAction *contextualAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
-        [weakSelf zs_assetExplorerToggleBookmark:bundle];
-        completionHandler(YES);
-    }];
-    action.image = [UIImage systemImageNamed:(bookmarked ? @"bookmark.slash.fill" : @"bookmark.fill")];
-    action.backgroundColor = bookmarked ? [UIColor colorWithWhite:0.35 alpha:1] : zs_accent_green_color();
-    UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:@[action]];
-    configuration.performsFirstActionWithFullSwipe = NO;
-    return configuration;
+    return [self zs_assetExplorerSwipeWithRemarkKey:[self zs_assetExplorerRemarkKeyForBundle:bundle]
+                                         bookmarkKey:zs_asset_explorer_bundle_key(bundle)
+                                         bookmarkSet:[self zs_assetExplorerBookmarks]];
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (tableView == self.assetExplorerLocalizeTableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        [self zs_assetExplorerLocalizeSelectRow:indexPath.row];
+        [self zs_assetExplorerLocalizeSelectRow:[self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView]];
         return;
     }
     if (tableView == self.assetExplorerLocalizeJSONTableView) {
@@ -20762,8 +21019,11 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             if (indexPath.row >= 0 && indexPath.row < (NSInteger)self.assetExplorerFMODDisplayedStreams.count) {
                 [self zs_assetExplorerFMODOpenStream:self.assetExplorerFMODDisplayedStreams[(NSUInteger)indexPath.row]];
             }
-        } else if (indexPath.row >= 0 && indexPath.row < (NSInteger)self.assetExplorerFMODDisplayedBanks.count) {
-            [self zs_assetExplorerFMODOpenBankFile:self.assetExplorerFMODDisplayedBanks[(NSUInteger)indexPath.row]];
+        } else {
+            NSInteger bankIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView];
+            if (bankIndex >= 0 && bankIndex < (NSInteger)self.assetExplorerFMODDisplayedBanks.count) {
+                [self zs_assetExplorerFMODOpenBankFile:self.assetExplorerFMODDisplayedBanks[(NSUInteger)bankIndex]];
+            }
         }
         return;
     }
@@ -20992,7 +21252,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerTextureExportButton.hidden = !detail;
     self.assetExplorerTextureExportButton.enabled = detail;
     self.assetExplorerTextureExportButton.alpha = detail ? 1 : 0.35;
-    self.assetExplorerTitleLabel.text = hub ? @"Asset Explorer" : (inBank ? self.assetExplorerFMODBankFile.fileName : @"FMOD Audio Banks");
+    self.assetExplorerTitleLabel.text = hub ? @"Asset Explorer" : (inBank ? ([self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBankFile:self.assetExplorerFMODBankFile]] ?: self.assetExplorerFMODBankFile.fileName) : @"FMOD Audio Banks");
     [self zs_assetExplorerSyncControls];
 }
 
@@ -21081,6 +21341,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerFMODOpenBankFile:(ZSFMODBankFile *)file {
     if (!file || self.assetExplorerFMODBankFile) return;
+    [self zs_assetExplorerBookmarks];
+    self.assetExplorerFMODRecentKey = file.fileName;
+    [self zs_assetExplorerPersistState];
     [self.assetExplorerSearchField resignFirstResponder];
     self.assetExplorerFMODGeneration += 1;
     NSUInteger generation = self.assetExplorerFMODGeneration;
@@ -21165,10 +21428,12 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     if (!self.assetExplorerFMODBankFile) {
         NSMutableArray<ZSFMODBankFile *> *matches = [NSMutableArray array];
         for (ZSFMODBankFile *file in self.assetExplorerFMODBankFiles) {
-            if (query.length > 0 && ![file.fileName localizedCaseInsensitiveContainsString:query]) continue;
+            if (query.length > 0 &&
+                ![file.fileName localizedCaseInsensitiveContainsString:query] &&
+                ![[self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBankFile:file]] localizedCaseInsensitiveContainsString:query]) continue;
             [matches addObject:file];
         }
-        self.assetExplorerFMODDisplayedBanks = [matches sortedArrayUsingComparator:^NSComparisonResult(ZSFMODBankFile *a, ZSFMODBankFile *b) {
+        NSArray<ZSFMODBankFile *> *sortedBanks = [matches sortedArrayUsingComparator:^NSComparisonResult(ZSFMODBankFile *a, ZSFMODBankFile *b) {
             if (mode == 2 || mode == 3) {
                 if (a.fileSize != b.fileSize) {
                     BOOL aLarger = a.fileSize > b.fileSize;
@@ -21182,6 +21447,24 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             }
             return result;
         }];
+        NSMutableOrderedSet<NSString *> *fmodBookmarks = [self zs_assetExplorerFMODBookmarks];
+        NSMutableArray<ZSFMODBankFile *> *bookmarkedBanks = [NSMutableArray array];
+        NSMutableArray<ZSFMODBankFile *> *moddedBanks = [NSMutableArray array];
+        NSMutableArray<ZSFMODBankFile *> *stockBanks = [NSMutableArray array];
+        for (ZSFMODBankFile *file in sortedBanks) {
+            if (file.fileName.length > 0 && [fmodBookmarks containsObject:file.fileName]) {
+                [bookmarkedBanks addObject:file];
+            } else if (file.fileName.length > 0 && [self.assetExplorerFMODModdedNames containsObject:file.fileName]) {
+                [moddedBanks addObject:file];
+            } else {
+                [stockBanks addObject:file];
+            }
+        }
+        self.assetExplorerFMODDisplayedBookmarkedCount = bookmarkedBanks.count;
+        self.assetExplorerFMODDisplayedModdedCount = moddedBanks.count;
+        [bookmarkedBanks addObjectsFromArray:moddedBanks];
+        [bookmarkedBanks addObjectsFromArray:stockBanks];
+        self.assetExplorerFMODDisplayedBanks = bookmarkedBanks;
         self.assetExplorerFMODDisplayedStreams = @[];
         shown = self.assetExplorerFMODDisplayedBanks.count;
         total = self.assetExplorerFMODBankFiles.count;
@@ -21192,6 +21475,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         for (ZSFMODStream *stream in all) {
             if (query.length > 0) {
                 BOOL hit = [stream.name localizedCaseInsensitiveContainsString:query] ||
+                           [[self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForStream:stream]] localizedCaseInsensitiveContainsString:query] ||
                            [stream.codecName localizedCaseInsensitiveContainsString:query] ||
                            [[NSString stringWithFormat:@"%ld", (long)stream.index] containsString:query];
                 if (!hit) continue;
@@ -21254,9 +21538,12 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     cell.selectedBackgroundView = selected;
 
     if (!self.assetExplorerFMODBankFile) {
-        ZSFMODBankFile *file = indexPath.row < (NSInteger)self.assetExplorerFMODDisplayedBanks.count ? self.assetExplorerFMODDisplayedBanks[(NSUInteger)indexPath.row] : nil;
-        cell.textLabel.text = file.fileName ?: @"";
+        NSInteger bankIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView];
+        ZSFMODBankFile *file = bankIndex >= 0 && bankIndex < (NSInteger)self.assetExplorerFMODDisplayedBanks.count ? self.assetExplorerFMODDisplayedBanks[(NSUInteger)bankIndex] : nil;
+        NSString *bankRemark = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForBankFile:file]];
+        cell.textLabel.text = bankRemark ?: (file.fileName ?: @"");
         NSMutableArray<NSString *> *parts = [NSMutableArray array];
+        if (bankRemark && file.fileName.length > 0) [parts addObject:file.fileName];
         if (file.streamCount > 0) {
             [parts addObject:[NSString stringWithFormat:@"%ld stream%@", (long)file.streamCount, file.streamCount == 1 ? @"" : @"s"]];
             if (file.codecName.length > 0) [parts addObject:file.codecName];
@@ -21265,14 +21552,18 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         }
         [parts addObject:[NSByteCountFormatter stringFromByteCount:(long long)file.fileSize countStyle:NSByteCountFormatterCountStyleFile]];
         if (file.fileName && [self.assetExplorerFMODModdedNames containsObject:file.fileName]) [parts addObject:@"modded"];
-        cell.detailTextLabel.text = [parts componentsJoinedByString:@"  •  "];
+        BOOL bankRecent = file.fileName.length > 0 && [file.fileName isEqualToString:self.assetExplorerFMODRecentKey];
+        zs_ae_set_detail(cell.detailTextLabel, [parts componentsJoinedByString:@"  •  "], bankRecent);
     } else {
         ZSFMODStream *stream = indexPath.row < (NSInteger)self.assetExplorerFMODDisplayedStreams.count ? self.assetExplorerFMODDisplayedStreams[(NSUInteger)indexPath.row] : nil;
-        cell.textLabel.text = stream.name ?: @"";
+        NSString *streamRemark = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForStream:stream]];
+        cell.textLabel.text = streamRemark ?: (stream.name ?: @"");
         NSTimeInterval duration = stream.duration;
         NSString *length = duration >= 60 ? [NSString stringWithFormat:@"%d:%04.1f", (int)(duration / 60), duration - 60 * (int)(duration / 60)] : [NSString stringWithFormat:@"%.2f s", duration];
         NSString *channels = stream.channels == 1 ? @"mono" : (stream.channels == 2 ? @"stereo" : [NSString stringWithFormat:@"%ldch", (long)stream.channels]);
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"%@  •  %@  •  %.1f kHz  •  %@  •  %@", stream.codecName, channels, stream.frequency / 1000.0, length, [NSByteCountFormatter stringFromByteCount:(long long)stream.dataSize countStyle:NSByteCountFormatterCountStyleFile]];
+        NSString *streamDetail = [NSString stringWithFormat:@"%@  •  %@  •  %.1f kHz  •  %@  •  %@", stream.codecName, channels, stream.frequency / 1000.0, length, [NSByteCountFormatter stringFromByteCount:(long long)stream.dataSize countStyle:NSByteCountFormatterCountStyleFile]];
+        if (streamRemark && stream.name.length > 0) streamDetail = [NSString stringWithFormat:@"%@  •  %@", stream.name, streamDetail];
+        zs_ae_set_detail(cell.detailTextLabel, streamDetail, NO);
     }
     return cell;
 }
@@ -21282,18 +21573,35 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     if (self.assetExplorerFMODBankFile) {
         if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerFMODDisplayedStreams.count) return nil;
         ZSFMODStream *stream = self.assetExplorerFMODDisplayedStreams[(NSUInteger)indexPath.row];
-        return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
-            return [weakSelf zs_assetExplorerFMODExportMenuForStream:stream];
-        }];
+        return [self zs_assetExplorerMenuWithRemarkKey:[self zs_assetExplorerRemarkKeyForStream:stream]
+                                            bookmarkKey:nil
+                                            bookmarkSet:nil
+                                             extraItems:[self zs_assetExplorerFMODExportMenuForStream:stream].children];
     }
-    if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerFMODDisplayedBanks.count) return nil;
-    ZSFMODBankFile *file = self.assetExplorerFMODDisplayedBanks[(NSUInteger)indexPath.row];
-    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
-        UIAction *exportAction = [UIAction actionWithTitle:@"Export" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
-            [weakSelf zs_assetExplorerFMODExportBankFile:file];
-        }];
-        return [UIMenu menuWithTitle:@"" children:@[exportAction]];
+    NSInteger bankIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:self.assetExplorerFMODTableView];
+    if (bankIndex < 0 || bankIndex >= (NSInteger)self.assetExplorerFMODDisplayedBanks.count) return nil;
+    ZSFMODBankFile *file = self.assetExplorerFMODDisplayedBanks[(NSUInteger)bankIndex];
+    UIAction *exportAction = [UIAction actionWithTitle:@"Export" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
+        [weakSelf zs_assetExplorerFMODExportBankFile:file];
     }];
+    return [self zs_assetExplorerMenuWithRemarkKey:[self zs_assetExplorerRemarkKeyForBankFile:file]
+                                        bookmarkKey:file.fileName
+                                        bookmarkSet:[self zs_assetExplorerFMODBookmarks]
+                                         extraItems:@[exportAction]];
+}
+
+- (UISwipeActionsConfiguration *)zs_assetExplorerFMODSwipeForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
+    if (self.assetExplorerFMODBankFile) {
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerFMODDisplayedStreams.count) return nil;
+        ZSFMODStream *stream = self.assetExplorerFMODDisplayedStreams[(NSUInteger)indexPath.row];
+        return [self zs_assetExplorerSwipeWithRemarkKey:[self zs_assetExplorerRemarkKeyForStream:stream] bookmarkKey:nil bookmarkSet:nil];
+    }
+    NSInteger bankIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:self.assetExplorerFMODTableView];
+    if (bankIndex < 0 || bankIndex >= (NSInteger)self.assetExplorerFMODDisplayedBanks.count) return nil;
+    ZSFMODBankFile *file = self.assetExplorerFMODDisplayedBanks[(NSUInteger)bankIndex];
+    return [self zs_assetExplorerSwipeWithRemarkKey:[self zs_assetExplorerRemarkKeyForBankFile:file]
+                                         bookmarkKey:file.fileName
+                                         bookmarkSet:[self zs_assetExplorerFMODBookmarks]];
 }
 
 - (UIMenu *)zs_assetExplorerFMODExportMenuForStream:(ZSFMODStream *)stream {
@@ -21452,6 +21760,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerLocalizeRootNode = nil;
     self.assetExplorerLocalizeVisibleRows = nil;
     self.assetExplorerLocalizeSortMode = 0;
+    self.assetExplorerLocalizeModdedPaths = nil;
+    self.assetExplorerLocalizeDisplayedBookmarkedCount = 0;
+    self.assetExplorerLocalizeDisplayedModdedCount = 0;
     [self.assetExplorerLocalizeTableView reloadData];
     [self.assetExplorerLocalizeJSONTableView reloadData];
     self.assetExplorerLocalizeTableView.hidden = YES;
@@ -21590,11 +21901,21 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
     __weak typeof(self) weakSelf = self;
     NSString *directory = [path copy] ?: @"";
+    NSSet<NSString *> *knownModdedPaths = self.assetExplorerLocalizeModdedPaths;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSFileManager *fileManager = NSFileManager.defaultManager;
         BOOL isDirectory = NO;
         NSString *message = nil;
         NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
+        NSSet<NSString *> *moddedPaths = knownModdedPaths;
+        if (!moddedPaths) {
+            NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+            NSMutableSet<NSString *> *swapped = [NSMutableSet set];
+            for (NSString *relative in [LocalizationTransplant documentsRelativePathsOfSwappedFiles] ?: @[]) {
+                if (documents.length > 0) [swapped addObject:[documents stringByAppendingPathComponent:relative]];
+            }
+            moddedPaths = swapped;
+        }
         if (directory.length == 0 || ![fileManager fileExistsAtPath:directory isDirectory:&isDirectory] || !isDirectory) {
             message = @"Localize folder not found";
         } else {
@@ -21606,7 +21927,19 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 if (stat(full.fileSystemRepresentation, &fileStat) != 0) continue;
                 BOOL entryIsDirectory = S_ISDIR(fileStat.st_mode);
                 NSInteger count = entryIsDirectory ? (NSInteger)[[fileManager contentsOfDirectoryAtPath:full error:nil] count] : 0;
-                [entries addObject:@{@"name": name, @"path": full, @"dir": @(entryIsDirectory), @"size": @((long long)fileStat.st_size), @"count": @(count)}];
+                BOOL entryModded = NO;
+                if (entryIsDirectory) {
+                    NSString *prefix = [full stringByAppendingString:@"/"];
+                    for (NSString *moddedPath in moddedPaths) {
+                        if ([moddedPath hasPrefix:prefix]) {
+                            entryModded = YES;
+                            break;
+                        }
+                    }
+                } else {
+                    entryModded = [moddedPaths containsObject:full];
+                }
+                [entries addObject:@{@"name": name, @"path": full, @"dir": @(entryIsDirectory), @"size": @((long long)fileStat.st_size), @"count": @(count), @"modded": @(entryModded)}];
             }
             if (entries.count == 0) message = @"Empty folder";
         }
@@ -21614,6 +21947,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             typeof(self) strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerLocalizeMode || strongSelf.assetExplorerLocalizeGeneration != generation) return;
             strongSelf.assetExplorerLocalizeEntries = entries;
+            strongSelf.assetExplorerLocalizeModdedPaths = moddedPaths;
             strongSelf.assetExplorerStatusMessage = message;
             NSNumber *pending = strongSelf.assetExplorerLocalizePendingOffset;
             strongSelf.assetExplorerLocalizePendingOffset = nil;
@@ -21633,10 +21967,12 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     NSInteger mode = self.assetExplorerLocalizeSortMode;
     NSMutableArray<NSDictionary *> *matches = [NSMutableArray array];
     for (NSDictionary *entry in self.assetExplorerLocalizeEntries) {
-        if (query.length > 0 && ![entry[@"name"] localizedCaseInsensitiveContainsString:query]) continue;
+        if (query.length > 0 &&
+            ![entry[@"name"] localizedCaseInsensitiveContainsString:query] &&
+            ![[self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForLocalizePath:entry[@"path"]]] localizedCaseInsensitiveContainsString:query]) continue;
         [matches addObject:entry];
     }
-    self.assetExplorerLocalizeDisplayedEntries = [matches sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+    NSArray<NSDictionary *> *sortedEntries = [matches sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         BOOL aDirectory = [a[@"dir"] boolValue];
         BOOL bDirectory = [b[@"dir"] boolValue];
         if (aDirectory != bDirectory) return aDirectory ? NSOrderedAscending : NSOrderedDescending;
@@ -21655,6 +21991,24 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         }
         return result;
     }];
+    NSMutableOrderedSet<NSString *> *localizeBookmarks = [self zs_assetExplorerLocalizeBookmarks];
+    NSMutableArray<NSDictionary *> *bookmarkedEntries = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *moddedEntries = [NSMutableArray array];
+    NSMutableArray<NSDictionary *> *stockEntries = [NSMutableArray array];
+    for (NSDictionary *entry in sortedEntries) {
+        if ([localizeBookmarks containsObject:[self zs_assetExplorerLocalizeKeyForPath:entry[@"path"]]]) {
+            [bookmarkedEntries addObject:entry];
+        } else if ([entry[@"modded"] boolValue]) {
+            [moddedEntries addObject:entry];
+        } else {
+            [stockEntries addObject:entry];
+        }
+    }
+    self.assetExplorerLocalizeDisplayedBookmarkedCount = bookmarkedEntries.count;
+    self.assetExplorerLocalizeDisplayedModdedCount = moddedEntries.count;
+    [bookmarkedEntries addObjectsFromArray:moddedEntries];
+    [bookmarkedEntries addObjectsFromArray:stockEntries];
+    self.assetExplorerLocalizeDisplayedEntries = bookmarkedEntries;
 
     NSUInteger shown = self.assetExplorerLocalizeDisplayedEntries.count;
     NSUInteger total = self.assetExplorerLocalizeEntries.count;
@@ -21694,18 +22048,29 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
     cell.selectedBackgroundView = selected;
 
-    NSDictionary *entry = indexPath.row < (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count ? self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)indexPath.row] : nil;
+    NSInteger entryIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView];
+    NSDictionary *entry = entryIndex >= 0 && entryIndex < (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count ? self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)entryIndex] : nil;
     BOOL isDirectory = [entry[@"dir"] boolValue];
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightRegular];
     cell.imageView.image = [UIImage systemImageNamed:(isDirectory ? @"folder" : @"doc.text") withConfiguration:symbolConfig];
     cell.imageView.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
-    cell.textLabel.text = entry[@"name"] ?: @"";
+    NSString *entryPath = entry[@"path"];
+    NSString *entryRemark = [self zs_assetExplorerRemarkForKey:[self zs_assetExplorerRemarkKeyForLocalizePath:entryPath]];
+    cell.textLabel.text = entryRemark ?: (entry[@"name"] ?: @"");
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    if (entryRemark && [entry[@"name"] length] > 0) [parts addObject:entry[@"name"]];
     if (isDirectory) {
         NSInteger count = [entry[@"count"] integerValue];
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld item%@", (long)count, count == 1 ? @"" : @"s"];
+        [parts addObject:[NSString stringWithFormat:@"%ld item%@", (long)count, count == 1 ? @"" : @"s"]];
     } else {
-        cell.detailTextLabel.text = [NSByteCountFormatter stringFromByteCount:[entry[@"size"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+        [parts addObject:[NSByteCountFormatter stringFromByteCount:[entry[@"size"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile]];
     }
+    if ([entry[@"modded"] boolValue]) [parts addObject:@"modded"];
+    NSString *entryKey = [self zs_assetExplorerLocalizeKeyForPath:entryPath];
+    NSString *recentKey = self.assetExplorerLocalizeRecentKey;
+    BOOL entryRecent = recentKey.length > 0 && entryKey.length > 0 &&
+        ([recentKey isEqualToString:entryKey] || (isDirectory && [recentKey hasPrefix:[entryKey stringByAppendingString:@"/"]]));
+    zs_ae_set_detail(cell.detailTextLabel, [parts componentsJoinedByString:@"  •  "], entryRecent);
     return cell;
 }
 
@@ -21727,6 +22092,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 - (void)zs_assetExplorerLocalizeOpenFile:(NSDictionary *)entry {
     NSString *path = [entry[@"path"] copy];
     if (path.length == 0) return;
+    [self zs_assetExplorerBookmarks];
+    self.assetExplorerLocalizeRecentKey = [self zs_assetExplorerLocalizeKeyForPath:path];
+    [self zs_assetExplorerPersistState];
     [self.assetExplorerSearchField resignFirstResponder];
     self.assetExplorerLocalizeGeneration += 1;
     NSUInteger generation = self.assetExplorerLocalizeGeneration;
@@ -21836,21 +22204,35 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIContextMenuConfiguration *)zs_assetExplorerLocalizeContextMenuForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(13.0)) {
-    if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count) return nil;
-    NSDictionary *entry = self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)indexPath.row];
-    if ([entry[@"dir"] boolValue]) return nil;
+    NSInteger entryIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:self.assetExplorerLocalizeTableView];
+    if (entryIndex < 0 || entryIndex >= (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count) return nil;
+    NSDictionary *entry = self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)entryIndex];
     NSString *sourcePath = [entry[@"path"] copy];
     NSString *name = [entry[@"name"] copy];
     __weak typeof(self) weakSelf = self;
-    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+    NSArray<UIMenuElement *> *extraItems = nil;
+    if (![entry[@"dir"] boolValue]) {
         UIAction *exportAction = [UIAction actionWithTitle:@"Export" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
             [weakSelf zs_assetExplorerFMODPerformExportWithSourceView:nil writer:^NSString *(NSString *directory, NSError **error) {
                 NSString *destination = [directory stringByAppendingPathComponent:name];
                 return [NSFileManager.defaultManager copyItemAtPath:sourcePath toPath:destination error:error] ? destination : nil;
             }];
         }];
-        return [UIMenu menuWithTitle:@"" children:@[exportAction]];
-    }];
+        extraItems = @[exportAction];
+    }
+    return [self zs_assetExplorerMenuWithRemarkKey:[self zs_assetExplorerRemarkKeyForLocalizePath:sourcePath]
+                                        bookmarkKey:[self zs_assetExplorerLocalizeKeyForPath:sourcePath]
+                                        bookmarkSet:[self zs_assetExplorerLocalizeBookmarks]
+                                         extraItems:extraItems];
+}
+
+- (UISwipeActionsConfiguration *)zs_assetExplorerLocalizeSwipeForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
+    NSInteger entryIndex = [self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:self.assetExplorerLocalizeTableView];
+    if (entryIndex < 0 || entryIndex >= (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count) return nil;
+    NSString *path = self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)entryIndex][@"path"];
+    return [self zs_assetExplorerSwipeWithRemarkKey:[self zs_assetExplorerRemarkKeyForLocalizePath:path]
+                                         bookmarkKey:[self zs_assetExplorerLocalizeKeyForPath:path]
+                                         bookmarkSet:[self zs_assetExplorerLocalizeBookmarks]];
 }
 
 - (UITableViewCell *)zs_assetExplorerLocalizeJSONCellForTableView:(UITableView *)tableView indexPath:(NSIndexPath *)indexPath {
