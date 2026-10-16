@@ -6144,8 +6144,10 @@ static NSString *zs_asset_explorer_bundle_key(ZSAssetExplorerBundle *bundle) {
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.contentView.backgroundColor = [UIColor colorWithPatternImage:zs_asset_checkerboard_tile()];
+        self.contentView.backgroundColor = [[UIColor colorWithPatternImage:zs_asset_checkerboard_tile()] colorWithAlphaComponent:0.5];
         self.contentView.clipsToBounds = YES;
+        self.contentView.layer.borderWidth = 1.0 / MAX(UIScreen.mainScreen.scale, 1);
+        self.contentView.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.3].CGColor;
 
         _imageView = [[UIImageView alloc] init];
         _imageView.contentMode = UIViewContentModeScaleAspectFill;
@@ -6317,8 +6319,10 @@ static NSString *zs_asset_explorer_bundle_key(ZSAssetExplorerBundle *bundle) {
 - (CGSize)collectionView:(UICollectionView *)collectionView layout:(UICollectionViewLayout *)collectionViewLayout sizeForItemAtIndexPath:(NSIndexPath *)indexPath {
     UICollectionViewFlowLayout *layout = (UICollectionViewFlowLayout *)collectionViewLayout;
     CGFloat scale = MAX(collectionView.traitCollection.displayScale, 1);
-    CGFloat width = floor((collectionView.bounds.size.width - layout.sectionInset.left - layout.sectionInset.right) * scale) / scale;
-    NSInteger columns = MAX(3, (NSInteger)floor(width / 96.0));
+    CGFloat spacing = layout.minimumInteritemSpacing;
+    CGFloat available = floor((collectionView.bounds.size.width - layout.sectionInset.left - layout.sectionInset.right) * scale) / scale;
+    NSInteger columns = MAX(3, (NSInteger)floor((available + spacing) / (96.0 + spacing)));
+    CGFloat width = available - spacing * (columns - 1);
     NSInteger column = indexPath.item % columns;
     CGFloat left = floor(width * column / columns * scale) / scale;
     CGFloat right = column == columns - 1 ? width : floor(width * (column + 1) / columns * scale) / scale;
@@ -17978,9 +17982,9 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         [thumbWeakSelf zs_assetExplorerOpenTextureForAsset:asset];
     };
     UICollectionViewFlowLayout *thumbLayout = [[UICollectionViewFlowLayout alloc] init];
-    thumbLayout.minimumInteritemSpacing = 0;
-    thumbLayout.minimumLineSpacing = 0;
-    thumbLayout.sectionInset = UIEdgeInsetsZero;
+    thumbLayout.minimumInteritemSpacing = 2;
+    thumbLayout.minimumLineSpacing = 2;
+    thumbLayout.sectionInset = UIEdgeInsetsMake(2, 2, 2, 2);
     UICollectionView *thumbCollection = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:thumbLayout];
     thumbCollection.translatesAutoresizingMaskIntoConstraints = NO;
     thumbCollection.backgroundColor = UIColor.clearColor;
