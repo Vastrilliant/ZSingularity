@@ -7673,6 +7673,10 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
 }
 
 + (ZSAssetExplorerTexture *)textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path error:(NSError **)error {
+    return [self zs_textureForPathID:pathID inBundleAtPath:path maxDimension:0 error:error];
+}
+
++ (ZSAssetExplorerTexture *)zs_textureForPathID:(int64_t)pathID inBundleAtPath:(NSString *)path maxDimension:(CGFloat)maxDimension error:(NSError **)error {
     ZSAEBundle *bundle = nil;
     if (!ZSAEOpenBundle(path, &bundle, error)) return nil;
 
@@ -7705,6 +7709,28 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
     if (serializedPath.length > 0) [NSFileManager.defaultManager removeItemAtPath:serializedPath error:nil];
     if (!parsed || !record) return nil;
 
+    int32_t fullWidth = record.width;
+    int32_t fullHeight = record.height;
+    uint64_t mipOffset = 0;
+    uint64_t mipLength = 0;
+    BOOL useMip = NO;
+    if (maxDimension > 0 && record.mipCount > 1 && fullWidth > 0 && fullHeight > 0 && ZSAEFormatLayout(record.format, NULL, NULL, NULL)) {
+        int32_t longest = MAX(fullWidth, fullHeight);
+        int32_t level = 0;
+        while (level + 1 < record.mipCount && level + 1 < 24 && (longest >> (level + 1)) >= (int32_t)maxDimension) level++;
+        if (level > 0) {
+            int32_t levelWidth = MAX(fullWidth >> level, 1);
+            int32_t levelHeight = MAX(fullHeight >> level, 1);
+            mipOffset = ZSAEDataSize(record.format, fullWidth, fullHeight, 1, level, NO);
+            mipLength = ZSAEDataSize(record.format, levelWidth, levelHeight, 1, 1, NO);
+            if (mipLength > 0) {
+                record.width = levelWidth;
+                record.height = levelHeight;
+                useMip = YES;
+            }
+        }
+    }
+
     NSData *pixels = record.inlineData;
     if (pixels.length == 0) {
         if (record.streamSize == 0) {
@@ -7731,8 +7757,25 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
             if (error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"The texture's streamed data wasn't found in the bundle.");
             return nil;
         }
-        pixels = ZSAEReadBundleRange(bundle, streamNode.offset + record.streamOffset, record.streamSize, error);
+        if (useMip && mipOffset + mipLength <= record.streamSize) {
+            pixels = ZSAEReadBundleRange(bundle, streamNode.offset + record.streamOffset + mipOffset, mipLength, error);
+            useMip = NO;
+        } else {
+            pixels = ZSAEReadBundleRange(bundle, streamNode.offset + record.streamOffset, record.streamSize, error);
+        }
         if (!pixels) return nil;
+    }
+
+    if (useMip) {
+        if (mipOffset + mipLength <= pixels.length) {
+            pixels = [pixels subdataWithRange:NSMakeRange((NSUInteger)mipOffset, (NSUInteger)mipLength)];
+        } else {
+            record.width = fullWidth;
+            record.height = fullHeight;
+        }
+    } else if (maxDimension > 0 && (record.width != fullWidth || record.height != fullHeight) && pixels.length != mipLength) {
+        record.width = fullWidth;
+        record.height = fullHeight;
     }
 
     NSMutableData *rgba = nil;
@@ -7747,8 +7790,8 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
     ZSAssetExplorerTexture *texture = [ZSAssetExplorerTexture new];
     texture.image = image;
     texture.name = record.name;
-    texture.width = record.width;
-    texture.height = record.height;
+    texture.width = fullWidth;
+    texture.height = fullHeight;
     texture.format = record.format;
     texture.formatName = ZSAETextureFormatName(record.format);
     return texture;
@@ -7772,9 +7815,15 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
 }
 
 + (UIImage *)thumbnailForPathID:(int64_t)pathID classID:(int32_t)classID inBundleAtPath:(NSString *)path maxDimension:(CGFloat)maxDimension error:(NSError **)error {
-    ZSAssetExplorerVisual *visual = [self visualForPathID:pathID classID:classID inBundleAtPath:path error:error];
-    if (!visual || visual.text.length > 0) return nil;
-    UIImage *image = [visual imageAtPage:0 error:error];
+    UIImage *image = nil;
+    if (classID == 28) {
+        ZSAssetExplorerTexture *texture = [self zs_textureForPathID:pathID inBundleAtPath:path maxDimension:maxDimension error:error];
+        image = texture.image;
+    } else {
+        ZSAssetExplorerVisual *visual = [self visualForPathID:pathID classID:classID inBundleAtPath:path error:error];
+        if (!visual || visual.text.length > 0) return nil;
+        image = [visual imageAtPage:0 error:error];
+    }
     if (!image) return nil;
     CGFloat longest = MAX(image.size.width, image.size.height);
     if (maxDimension <= 0 || longest <= maxDimension || longest <= 0) return image;
