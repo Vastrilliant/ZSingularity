@@ -3163,3 +3163,388 @@ static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
 
 @end
 
+@interface ZTLiveItem : NSObject
+@property (nonatomic, copy) NSString *name;
+@property (nonatomic, assign) uint32_t width;
+@property (nonatomic, assign) uint32_t height;
+@property (nonatomic, assign) int32_t format;
+@property (nonatomic, assign) int32_t mipCount;
+@property (nonatomic, strong) NSData *payload;
+@end
+
+@implementation ZTLiveItem
+@end
+
+@interface ZTLiveJob : NSObject
+@property (nonatomic, copy) NSString *cab;
+@property (nonatomic, copy) NSString *path;
+@property (nonatomic, strong) UnityBundleArchive *archive;
+@property (nonatomic, strong) ZTSerializedDocument *document;
+@property (nonatomic, copy) NSArray<ZTLiveItem *> *items;
+@property (nonatomic, assign) NSUInteger skipped;
+@end
+
+@implementation ZTLiveJob
+@end
+
+typedef struct {
+    void *texture2D;
+    const void *getName;
+    const void *getWidth;
+    const void *getHeight;
+    const void *getMips;
+    const void *getFormat;
+    const void *getGraphicsFormat;
+    const void *ctor;
+    const void *loadRaw;
+    const void *apply;
+    const void *copy;
+    const void *destroy;
+} ZTLiveApi;
+
+static const void *zt_live_find_method(void *klass, const char *name, uint32_t argc, void *const *paramClasses) {
+    if (!klass) return NULL;
+    void *iter = NULL;
+    const void *method = NULL;
+    while ((method = [IL2CppBridge nextMethodOnClass:klass iterator:&iter])) {
+        const char *methodName = [IL2CppBridge nameOfMethod:method];
+        if (!methodName || strcmp(methodName, name) != 0) continue;
+        if ([IL2CppBridge paramCountOfMethod:method] != argc) continue;
+        BOOL match = YES;
+        for (uint32_t i = 0; i < argc && match; i++) {
+            if (!paramClasses[i]) continue;
+            const void *type = [IL2CppBridge paramTypeForMethod:method index:i];
+            match = type && [IL2CppBridge classFromType:type] == paramClasses[i];
+        }
+        if (match) return method;
+    }
+    return NULL;
+}
+
+static BOOL zt_live_resolve_api(ZTLiveApi *api) {
+    memset(api, 0, sizeof(*api));
+    api->texture2D = mt_class("UnityEngine", "Texture2D", "CoreModule");
+    void *textureClass = mt_class("UnityEngine", "Texture", "CoreModule");
+    void *objectClass = mt_class("UnityEngine", "Object", "CoreModule");
+    void *graphicsClass = mt_class("UnityEngine", "Graphics", "CoreModule");
+    void *formatClass = mt_class("UnityEngine", "TextureFormat", "CoreModule");
+    void *intClass = mt_class("System", "Int32", "mscorlib");
+    void *boolClass = mt_class("System", "Boolean", "mscorlib");
+    if (!api->texture2D || !textureClass || !objectClass || !graphicsClass || !formatClass || !intClass || !boolClass) {
+        ZLog(@"[ZTLiveReload] missing IL2CPP classes tex2D=%p tex=%p obj=%p gfx=%p fmt=%p int=%p bool=%p", api->texture2D, textureClass, objectClass, graphicsClass, formatClass, intClass, boolClass);
+        return NO;
+    }
+    api->getName = mt_method(api->texture2D, "get_name", 0);
+    api->getWidth = mt_method(api->texture2D, "get_width", 0);
+    api->getHeight = mt_method(api->texture2D, "get_height", 0);
+    api->getMips = mt_method(api->texture2D, "get_mipmapCount", 0);
+    api->getFormat = mt_method(api->texture2D, "get_format", 0);
+    api->getGraphicsFormat = mt_method(api->texture2D, "get_graphicsFormat", 0);
+    void *ctorParams[5] = { intClass, intClass, formatClass, intClass, boolClass };
+    api->ctor = zt_live_find_method(api->texture2D, ".ctor", 5, ctorParams);
+    void *rawParams[2] = { NULL, intClass };
+    api->loadRaw = zt_live_find_method(api->texture2D, "LoadRawTextureData", 2, rawParams);
+    api->apply = mt_method(api->texture2D, "Apply", 2);
+    void *copyParams[2] = { textureClass, textureClass };
+    api->copy = zt_live_find_method(graphicsClass, "CopyTexture", 2, copyParams);
+    void *destroyParams[1] = { objectClass };
+    api->destroy = zt_live_find_method(objectClass, "DestroyImmediate", 1, destroyParams);
+    BOOL ok = api->getName && api->getWidth && api->getHeight && api->getMips && api->getFormat && api->getGraphicsFormat && api->ctor && api->loadRaw && api->apply && api->copy && api->destroy;
+    if (!ok) {
+        ZLog(@"[ZTLiveReload] missing IL2CPP methods name=%p w=%p h=%p mips=%p fmt=%p gfx=%p ctor=%p raw=%p apply=%p copy=%p destroy=%p", api->getName, api->getWidth, api->getHeight, api->getMips, api->getFormat, api->getGraphicsFormat, api->ctor, api->loadRaw, api->apply, api->copy, api->destroy);
+    }
+    return ok;
+}
+
+static BOOL zt_live_get_int(void *obj, const void *method, int32_t *outValue) {
+    void *exc = NULL;
+    void *boxed = [IL2CppBridge invokeMethod:method onInstance:obj args:NULL outException:&exc];
+    if (exc || !boxed) return NO;
+    *outValue = *(int32_t *)((uint8_t *)boxed + 0x10);
+    return YES;
+}
+
+static NSString *zt_live_get_name(void *obj, const void *method) {
+    void *exc = NULL;
+    void *str = [IL2CppBridge invokeMethod:method onInstance:obj args:NULL outException:&exc];
+    if (exc || !str) return nil;
+    return [IL2CppBridge nsStringFromIl2CppString:str];
+}
+
+static void *zt_live_make_temp(ZTLiveApi *api, ZTLiveItem *item, BOOL linear) {
+    void *object = [IL2CppBridge newObjectForClass:api->texture2D];
+    if (!object) return NULL;
+    int32_t width = (int32_t)item.width;
+    int32_t height = (int32_t)item.height;
+    int32_t format = item.format;
+    int32_t mips = item.mipCount;
+    uint8_t linearFlag = linear ? 1 : 0;
+    void *args[5] = { &width, &height, &format, &mips, &linearFlag };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:api->ctor onInstance:object args:args outException:&exc];
+    return exc ? NULL : object;
+}
+
+static void zt_live_destroy(ZTLiveApi *api, void *object) {
+    if (!object) return;
+    void *args[1] = { object };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:api->destroy onInstance:NULL args:args outException:&exc];
+}
+
+static BOOL zt_live_patch(ZTLiveApi *api, void *live, ZTLiveItem *item, NSString **outReason) {
+    int32_t liveGraphics = 0;
+    if (!zt_live_get_int(live, api->getGraphicsFormat, &liveGraphics)) {
+        if (outReason) *outReason = @"couldn't read the live graphics format";
+        return NO;
+    }
+    void *temp = zt_live_make_temp(api, item, NO);
+    int32_t tempGraphics = 0;
+    if (temp && zt_live_get_int(temp, api->getGraphicsFormat, &tempGraphics) && tempGraphics != liveGraphics) {
+        zt_live_destroy(api, temp);
+        temp = zt_live_make_temp(api, item, YES);
+        tempGraphics = 0;
+        if (temp) zt_live_get_int(temp, api->getGraphicsFormat, &tempGraphics);
+    }
+    if (!temp) {
+        if (outReason) *outReason = @"couldn't create the staging texture";
+        return NO;
+    }
+    if (tempGraphics != liveGraphics) {
+        zt_live_destroy(api, temp);
+        if (outReason) *outReason = [NSString stringWithFormat:@"graphics format mismatch live=%d staged=%d", liveGraphics, tempGraphics];
+        return NO;
+    }
+    void *exc = NULL;
+    void *dataPointer = (void *)item.payload.bytes;
+    int32_t dataSize = (int32_t)item.payload.length;
+    void *loadArgs[2] = { &dataPointer, &dataSize };
+    [IL2CppBridge invokeMethod:api->loadRaw onInstance:temp args:loadArgs outException:&exc];
+    if (exc) {
+        zt_live_destroy(api, temp);
+        if (outReason) *outReason = @"LoadRawTextureData threw";
+        return NO;
+    }
+    uint8_t updateMips = 0;
+    uint8_t makeUnreadable = 1;
+    void *applyArgs[2] = { &updateMips, &makeUnreadable };
+    [IL2CppBridge invokeMethod:api->apply onInstance:temp args:applyArgs outException:&exc];
+    if (exc) {
+        zt_live_destroy(api, temp);
+        if (outReason) *outReason = @"Apply threw";
+        return NO;
+    }
+    void *copyArgs[2] = { temp, live };
+    [IL2CppBridge invokeMethod:api->copy onInstance:NULL args:copyArgs outException:&exc];
+    zt_live_destroy(api, temp);
+    if (exc) {
+        if (outReason) *outReason = @"Graphics.CopyTexture threw";
+        return NO;
+    }
+    return YES;
+}
+
+static NSString *zt_live_resolve_cab(NSString *input, NSString **outPath, NSString **outError) {
+    NSString *trimmed = [input stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) {
+        if (outError) *outError = @"Usage: /reload CAB-XXXXX";
+        return nil;
+    }
+    NSString *needle = trimmed.lowercaseString;
+    if (![needle hasPrefix:@"cab-"]) needle = [@"cab-" stringByAppendingString:needle];
+    NSDictionary<NSString *, NSArray<NSString *> *> *map = [ZSFileIndex persistedCABMap];
+    NSMutableArray<NSString *> *hits = [NSMutableArray array];
+    for (NSString *cab in map) {
+        if ([cab isKindOfClass:[NSString class]] && [cab.lowercaseString hasPrefix:needle]) [hits addObject:cab];
+    }
+    if (hits.count > 1) {
+        NSArray<NSString *> *exact = [hits filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *cab, NSDictionary *bindings) {
+            return [cab.lowercaseString isEqualToString:needle];
+        }]];
+        if (exact.count == 1) hits = [exact mutableCopy];
+    }
+    if (hits.count > 1) {
+        if (outError) *outError = [NSString stringWithFormat:@"%lu bundles match %@, add more characters", (unsigned long)hits.count, trimmed];
+        return nil;
+    }
+    NSString *cab = hits.firstObject;
+    NSString *path = cab ? [ZSFileIndex persistedPathsForCAB:cab].firstObject : nil;
+    if (path.length == 0) {
+        NSError *locateError = nil;
+        NSString *located = [UnityCacheLocator locateBundlePathForCAB:trimmed error:&locateError];
+        if (located.length > 0) {
+            cab = trimmed;
+            path = located;
+        }
+    }
+    if (path.length == 0 || cab.length == 0) {
+        if (outError) *outError = [NSString stringWithFormat:@"No bundle found for %@", trimmed];
+        return nil;
+    }
+    if (outPath) *outPath = path;
+    return cab;
+}
+
+static ZTLiveJob *zt_live_build_job(NSString *input, NSString **outError) {
+    NSString *path = nil;
+    NSString *resolveError = nil;
+    NSString *cab = zt_live_resolve_cab(input, &path, &resolveError);
+    if (!cab) {
+        if (outError) *outError = resolveError;
+        return nil;
+    }
+    ZLog(@"[ZTLiveReload] resolved %@ -> %@", input, path);
+    NSError *error = nil;
+    UnityBundleArchive *archive = [UnityBundleCAB decompressedArchiveAtPath:path error:&error];
+    if (!archive) {
+        ZLog(@"[ZTLiveReload] couldn't open %@: %@", path, error.localizedDescription);
+        if (outError) *outError = @"Couldn't read the bundle";
+        return nil;
+    }
+    UnityBundleNode *cabNode = nil;
+    for (UnityBundleNode *node in archive.nodes) if (node.flags & 4u) cabNode = node;
+    if (!cabNode) {
+        if (outError) *outError = @"Bundle has no SerializedFile";
+        return nil;
+    }
+    NSData *serialized = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)archive.data.bytes + cabNode.offset) length:(NSUInteger)cabNode.size freeWhenDone:NO];
+    ZTSerializedDocument *document = zt_parse_serialized(serialized, &error);
+    if (!document) {
+        ZLog(@"[ZTLiveReload] couldn't parse SerializedFile: %@", error.localizedDescription);
+        if (outError) *outError = @"Couldn't parse the bundle";
+        return nil;
+    }
+    NSMutableArray<ZTLiveItem *> *items = [NSMutableArray array];
+    NSUInteger skipped = 0;
+    for (ZTTextureRecord *texture in document.textures) {
+        if (texture.name.length == 0 || !zt_texture_has_pixel_data(texture) || zt_format_is_crunched(texture.format) || texture.width == 0 || texture.height == 0 || texture.mipCount <= 0) {
+            ZLog(@"[ZTLiveReload] skip '%@' format=%d size=%ux%u mips=%d", texture.name, texture.format, texture.width, texture.height, texture.mipCount);
+            skipped++;
+            continue;
+        }
+        NSData *payload = nil;
+        NSError *payloadError = nil;
+        if (!zt_texture_payload(texture, archive, serialized, &payload, &payloadError) || payload.length == 0) {
+            ZLog(@"[ZTLiveReload] no payload for '%@': %@", texture.name, payloadError.localizedDescription);
+            skipped++;
+            continue;
+        }
+        if (texture.completeImageSize > 0 && payload.length != texture.completeImageSize) {
+            ZLog(@"[ZTLiveReload] payload size mismatch for '%@' payload=%lu expected=%u", texture.name, (unsigned long)payload.length, texture.completeImageSize);
+            skipped++;
+            continue;
+        }
+        ZTLiveItem *item = [ZTLiveItem new];
+        item.name = texture.name;
+        item.width = texture.width;
+        item.height = texture.height;
+        item.format = texture.format;
+        item.mipCount = texture.mipCount;
+        item.payload = payload;
+        [items addObject:item];
+    }
+    ZLog(@"[ZTLiveReload] %@ has %lu Texture2D, %lu usable, %lu skipped", cab, (unsigned long)document.textures.count, (unsigned long)items.count, (unsigned long)skipped);
+    if (items.count == 0) {
+        if (outError) *outError = [NSString stringWithFormat:@"%@ has no reloadable textures", cab];
+        return nil;
+    }
+    ZTLiveJob *job = [ZTLiveJob new];
+    job.cab = cab;
+    job.path = path;
+    job.archive = archive;
+    job.document = document;
+    job.items = items;
+    job.skipped = skipped;
+    return job;
+}
+
+static BOOL zt_live_apply_job(ZTLiveJob *job, NSString **outSummary) {
+    ZTLiveApi api;
+    if (!zt_live_resolve_api(&api)) {
+        if (outSummary) *outSummary = @"Reload failed: IL2CPP texture API unavailable";
+        return NO;
+    }
+    NSMutableDictionary<NSString *, NSMutableArray<ZTLiveItem *> *> *byName = [NSMutableDictionary dictionary];
+    for (ZTLiveItem *item in job.items) {
+        NSMutableArray<ZTLiveItem *> *bucket = byName[item.name];
+        if (!bucket) {
+            bucket = [NSMutableArray array];
+            byName[item.name] = bucket;
+        }
+        [bucket addObject:item];
+    }
+    NSUInteger liveCount = 0;
+    void *array = zs_resources_find_all_for_class(api.texture2D, &liveCount);
+    if (!array) {
+        if (outSummary) *outSummary = @"Reload failed: couldn't enumerate live textures";
+        return NO;
+    }
+    NSMutableSet<NSString *> *patchedNames = [NSMutableSet set];
+    NSUInteger patched = 0;
+    NSUInteger mismatched = 0;
+    NSUInteger failed = 0;
+    for (NSUInteger i = 0; i < liveCount; i++) {
+        void *live = zs_array_object_at(array, i);
+        if (!live) continue;
+        NSString *name = zt_live_get_name(live, api.getName);
+        NSArray<ZTLiveItem *> *bucket = name.length > 0 ? byName[name] : nil;
+        if (!bucket) continue;
+        int32_t width = 0, height = 0, mips = 0, format = 0;
+        if (!zt_live_get_int(live, api.getWidth, &width) || !zt_live_get_int(live, api.getHeight, &height) || !zt_live_get_int(live, api.getMips, &mips) || !zt_live_get_int(live, api.getFormat, &format)) {
+            failed++;
+            continue;
+        }
+        ZTLiveItem *match = nil;
+        for (ZTLiveItem *candidate in bucket) {
+            if ((int32_t)candidate.width == width && (int32_t)candidate.height == height && candidate.format == format && candidate.mipCount == mips) {
+                match = candidate;
+                break;
+            }
+        }
+        if (!match) {
+            ZTLiveItem *first = bucket.firstObject;
+            ZLog(@"[ZTLiveReload] '%@' live=%dx%d fmt=%d mips=%d bundle=%ux%u fmt=%d mips=%d - skipped", name, width, height, format, mips, first.width, first.height, first.format, first.mipCount);
+            mismatched++;
+            continue;
+        }
+        NSString *reason = nil;
+        if (zt_live_patch(&api, live, match, &reason)) {
+            patched++;
+            [patchedNames addObject:name];
+            ZLog(@"[ZTLiveReload] patched '%@' %dx%d fmt=%d mips=%d bytes=%lu", name, width, height, format, mips, (unsigned long)match.payload.length);
+        } else {
+            failed++;
+            ZLog(@"[ZTLiveReload] failed '%@': %@", name, reason);
+        }
+    }
+    NSUInteger notLoaded = byName.count > patchedNames.count ? byName.count - patchedNames.count : 0;
+    ZLog(@"[ZTLiveReload] %@ done: live=%lu patched=%lu notLoaded=%lu mismatched=%lu failed=%lu", job.cab, (unsigned long)liveCount, (unsigned long)patched, (unsigned long)notLoaded, (unsigned long)mismatched, (unsigned long)failed);
+    NSMutableString *summary = [NSMutableString stringWithFormat:@"Reloaded %lu texture%@ from %@", (unsigned long)patched, patched == 1 ? @"" : @"s", [job.cab substringToIndex:MIN(job.cab.length, (NSUInteger)9)]];
+    if (notLoaded > 0) [summary appendFormat:@", %lu not loaded", (unsigned long)notLoaded];
+    if (mismatched > 0) [summary appendFormat:@", %lu mismatched", (unsigned long)mismatched];
+    if (failed > 0) [summary appendFormat:@", %lu failed", (unsigned long)failed];
+    if (outSummary) *outSummary = summary;
+    return patched > 0;
+}
+
+@implementation ZTLiveReloader
+
++ (void)reloadBundleForCABInput:(NSString *)input completion:(void (^)(BOOL, NSString *))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *buildError = nil;
+        ZTLiveJob *job = zt_live_build_job(input, &buildError);
+        if (!job) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(NO, buildError ?: @"Reload failed");
+            });
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *summary = nil;
+            BOOL success = zt_live_apply_job(job, &summary);
+            if (completion) completion(success, summary);
+        });
+    });
+}
+
+@end

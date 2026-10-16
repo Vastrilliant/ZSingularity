@@ -17625,7 +17625,12 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
         @{@"name": @"/createlogos", @"desc": @"Pack a logo folder or zip into a .zs"},
         @{@"name": @"/keepalive", @"desc": @"Toggle Keep Alive"},
         @{@"name": @"/memlog", @"desc": @"Start the RamBypass allocation profiler"},
+        @{@"name": @"/reload", @"desc": @"Reload a bundle's textures: /reload CAB-XXXXX"},
     ];
+}
+
+static BOOL zs_syslog_command_takes_arguments(NSString *name) {
+    return [name isEqualToString:@"/reload"];
 }
 
 - (NSString *)zs_syslogCommandToken {
@@ -17656,7 +17661,8 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
 
     NSArray<NSDictionary<NSString *, NSString *> *> *matches = (self.syslogSearchField.isFirstResponder || self.syslogCommandBrowseActive) ? [self zs_syslogMatchingCommands] : @[];
     NSString *trimmed = [[self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-    if (matches.count == 0 || (matches.count == 1 && [trimmed isEqualToString:matches.firstObject[@"name"]])) {
+    BOOL hasArguments = [trimmed rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound;
+    if (matches.count == 0 || hasArguments || (matches.count == 1 && [trimmed isEqualToString:matches.firstObject[@"name"]])) {
         dropdown.hidden = YES;
         return;
     }
@@ -17697,6 +17703,15 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     if (name.length == 0) return;
 
     BOOL browsing = self.syslogCommandBrowseActive && !self.syslogSearchField.isFirstResponder;
+    if (zs_syslog_command_takes_arguments(name)) {
+        self.syslogCommandBrowseActive = NO;
+        self.syslogSearchField.text = [name stringByAppendingString:@" "];
+        [self.syslogSearchField becomeFirstResponder];
+        [self zs_syslogSearchFieldChanged:self.syslogSearchField];
+        UIImpactFeedbackGenerator *argumentHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [argumentHaptic impactOccurred];
+        return;
+    }
     self.syslogSearchField.text = name;
     if (browsing) {
         self.syslogCommandBrowseActive = NO;
@@ -17745,17 +17760,21 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     if (!name && matches.count == 1) name = matches.firstObject[@"name"];
     if (!name) return;
 
+    NSString *fullText = [self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSRange tokenEnd = [fullText rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *arguments = tokenEnd.location == NSNotFound ? @"" : [[fullText substringFromIndex:NSMaxRange(tokenEnd)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+
     self.syslogSearchField.text = @"";
     [self zs_syslogSearchFieldChanged:self.syslogSearchField];
-    ZLog(@"[UserInterface] command executed: %@", name);
+    ZLog(@"[UserInterface] command executed: %@ %@", name, arguments);
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [weakSelf zs_runSyslogCommand:name];
+        [weakSelf zs_runSyslogCommand:name arguments:arguments];
     });
 }
 
-- (void)zs_runSyslogCommand:(NSString *)name {
+- (void)zs_runSyslogCommand:(NSString *)name arguments:(NSString *)arguments {
     if ([name isEqualToString:@"/dump"]) {
         [self dumpIL2CPPMethodsTapped];
     } else if ([name isEqualToString:@"/sigkill"]) {
@@ -17772,6 +17791,16 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     } else if ([name isEqualToString:@"/memlog"]) {
         zs_ram_bypass_memlog();
         [self zs_showSyslogToastWithText:@"Memlog running"];
+    } else if ([name isEqualToString:@"/reload"]) {
+        if (arguments.length == 0) {
+            [self zs_showSyslogToastWithText:@"Usage: /reload CAB-XXXXX"];
+            return;
+        }
+        [self zs_showSyslogToastWithText:@"Reloading bundle..."];
+        __weak typeof(self) weakSelf = self;
+        [ZTLiveReloader reloadBundleForCABInput:arguments completion:^(BOOL success, NSString *summary) {
+            [weakSelf zs_showSyslogToastWithText:summary];
+        }];
     }
 }
 

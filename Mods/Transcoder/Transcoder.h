@@ -75,4 +75,9 @@ typedef NS_ENUM(NSInteger, ZTranscoderInstallerErrorCode) {
 @end
 
 
+@interface ZTLiveReloader : NSObject
++ (void)reloadBundleForCABInput:(NSString *)input
+                     completion:(void (^)(BOOL success, NSString *summary))completion;
+@end
+
 NS_ASSUME_NONNULL_END
