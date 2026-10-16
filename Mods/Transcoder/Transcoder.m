@@ -3385,6 +3385,17 @@ static NSString *zt_live_resolve_cab(NSString *input, NSString **outPath, NSStri
     return cab;
 }
 
+static NSString *zt_live_texture_name(ZTTextureRecord *texture, NSData *serialized) {
+    if (texture.name.length > 0) return texture.name;
+    uint64_t start = texture.object.objectStart;
+    uint64_t limit = start + texture.object.byteSize;
+    if (limit > serialized.length || limit - start < 4) return nil;
+    const uint8_t *buf = serialized.bytes;
+    uint32_t length = zt_le32(buf + start);
+    if (length == 0 || length > 255 || length > limit - start - 4) return nil;
+    return [[NSString alloc] initWithBytes:buf + start + 4 length:length encoding:NSUTF8StringEncoding];
+}
+
 static ZTLiveJob *zt_live_build_job(NSString *input, NSString **outError) {
     NSString *path = nil;
     NSString *resolveError = nil;
@@ -3417,25 +3428,26 @@ static ZTLiveJob *zt_live_build_job(NSString *input, NSString **outError) {
     NSMutableArray<ZTLiveItem *> *items = [NSMutableArray array];
     NSUInteger skipped = 0;
     for (ZTTextureRecord *texture in document.textures) {
-        if (texture.name.length == 0 || !zt_texture_has_pixel_data(texture) || zt_format_is_crunched(texture.format) || texture.width == 0 || texture.height == 0 || texture.mipCount <= 0) {
-            ZLog(@"[ZTLiveReload] skip '%@' format=%d size=%ux%u mips=%d", texture.name, texture.format, texture.width, texture.height, texture.mipCount);
+        NSString *textureName = zt_live_texture_name(texture, serialized);
+        if (textureName.length == 0 || !zt_texture_has_pixel_data(texture) || zt_format_is_crunched(texture.format) || texture.width == 0 || texture.height == 0 || texture.mipCount <= 0) {
+            ZLog(@"[ZTLiveReload] skip pathID=%lld name='%@' format=%d size=%ux%u mips=%d", (long long)texture.object.pathID, textureName, texture.format, texture.width, texture.height, texture.mipCount);
             skipped++;
             continue;
         }
         NSData *payload = nil;
         NSError *payloadError = nil;
         if (!zt_texture_payload(texture, archive, serialized, &payload, &payloadError) || payload.length == 0) {
-            ZLog(@"[ZTLiveReload] no payload for '%@': %@", texture.name, payloadError.localizedDescription);
+            ZLog(@"[ZTLiveReload] no payload for '%@': %@", textureName, payloadError.localizedDescription);
             skipped++;
             continue;
         }
         if (texture.completeImageSize > 0 && payload.length != texture.completeImageSize) {
-            ZLog(@"[ZTLiveReload] payload size mismatch for '%@' payload=%lu expected=%u", texture.name, (unsigned long)payload.length, texture.completeImageSize);
+            ZLog(@"[ZTLiveReload] payload size mismatch for '%@' payload=%lu expected=%u", textureName, (unsigned long)payload.length, texture.completeImageSize);
             skipped++;
             continue;
         }
         ZTLiveItem *item = [ZTLiveItem new];
-        item.name = texture.name;
+        item.name = textureName;
         item.width = texture.width;
         item.height = texture.height;
         item.format = texture.format;
