@@ -3245,8 +3245,8 @@ static BOOL zt_live_resolve_api(ZTLiveApi *api) {
     void *rawParams[2] = { NULL, intClass };
     api->loadRaw = zt_live_find_method(api->texture2D, "LoadRawTextureData", 2, rawParams);
     api->apply = mt_method(api->texture2D, "Apply", 2);
-    void *copyParams[2] = { textureClass, textureClass };
-    api->copy = zt_live_find_method(graphicsClass, "CopyTexture", 2, copyParams);
+    void *copyParams[6] = { textureClass, intClass, intClass, textureClass, intClass, intClass };
+    api->copy = zt_live_find_method(graphicsClass, "CopyTexture", 6, copyParams);
     void *destroyParams[1] = { objectClass };
     api->destroy = zt_live_find_method(objectClass, "DestroyImmediate", 1, destroyParams);
     BOOL ok = api->getName && api->getWidth && api->getHeight && api->getMips && api->getFormat && api->getGraphicsFormat && api->ctor && api->loadRaw && api->apply && api->copy && api->destroy;
@@ -3334,10 +3334,16 @@ static BOOL zt_live_patch(ZTLiveApi *api, void *live, ZTLiveItem *item, NSString
         if (outReason) *outReason = @"Apply threw";
         return NO;
     }
-    void *copyArgs[2] = { temp, live };
-    [IL2CppBridge invokeMethod:api->copy onInstance:NULL args:copyArgs outException:&exc];
+    BOOL copied = YES;
+    for (int32_t mip = 0; mip < item.mipCount && copied; mip++) {
+        int32_t element = 0;
+        int32_t level = mip;
+        void *copyArgs[6] = { temp, &element, &level, live, &element, &level };
+        [IL2CppBridge invokeMethod:api->copy onInstance:NULL args:copyArgs outException:&exc];
+        if (exc) copied = NO;
+    }
     zt_live_destroy(api, temp);
-    if (exc) {
+    if (!copied) {
         if (outReason) *outReason = @"Graphics.CopyTexture threw";
         return NO;
     }
