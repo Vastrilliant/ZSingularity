@@ -94,8 +94,6 @@ extern NSString * const UnityBundleCABLZMAPropertiesErrorKey;
 
 + (nullable NSArray<NSString *> *)allNodePathsForBundleAtPath:(NSString *)path error:(NSError **)error;
 
-+ (nullable NSData *)serializedFileHeadForBundleAtPath:(NSString *)path error:(NSError **)error;
-
 + (BOOL)targetPlatform:(int32_t *)outPlatform forBundleAtPath:(NSString *)path error:(NSError **)error;
 
 + (NSString *)nameForTargetPlatform:(int32_t)platform;

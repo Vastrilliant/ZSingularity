@@ -428,6 +428,7 @@ static NSString *zt_format_name(int32_t format) {
 
 @interface ZTCarra2Item : NSObject
 @property (nonatomic, assign) int64_t pathID;
+@property (nonatomic, assign) int32_t typeHint;
 @property (nonatomic, copy) NSString *name;
 @property (nonatomic, strong) NSData *data;
 @end
@@ -611,7 +612,7 @@ static BOOL zt_parse_texture(const uint8_t *buf, ZTSerializedObject *object, con
     return YES;
 }
 
-static ZTSerializedDocument *zt_parse_serialized_mode(NSData *data, BOOL scanOnly, NSError **error) {
+static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) {
     if (!data || data.length < 64) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"SerializedFile is too small.");
         return nil;
@@ -742,9 +743,9 @@ static ZTSerializedDocument *zt_parse_serialized_mode(NSData *data, BOOL scanOnl
         object.typeIndex = (int32_t)zt_le32(buf + pos + 20);
         if (object.typeIndex >= 0 && object.typeIndex < typeCount) object.classID = classIDs[object.typeIndex];
         object.objectStart = dataOffset + object.byteStart;
-        if (!scanOnly && (object.objectStart > data.length || object.byteSize > data.length - object.objectStart)) failures++;
+        if (object.objectStart > data.length || object.byteSize > data.length - object.objectStart) failures++;
         [objects addObject:object];
-        if (!scanOnly && object.classID == 28 && object.typeIndex >= 0 && object.typeIndex < typeCount && trees[object.typeIndex].active && object.objectStart <= data.length && object.byteSize <= data.length - object.objectStart) {
+        if (object.classID == 28 && object.typeIndex >= 0 && object.typeIndex < typeCount && trees[object.typeIndex].active && object.objectStart <= data.length && object.byteSize <= data.length - object.objectStart) {
             ZTTextureRecord *texture = nil;
             if (zt_parse_texture(buf, object, trees[object.typeIndex].nodes, trees[object.typeIndex].count, trees[object.typeIndex].strings, trees[object.typeIndex].stringSize, &texture)) {
                 [textures addObject:texture];
@@ -791,10 +792,6 @@ static ZTSerializedDocument *zt_parse_serialized_mode(NSData *data, BOOL scanOnl
     for (int32_t i = 0; i < typeCount; i++) free(trees[i].nodes);
     free(trees); free(classIDs);
     return document;
-}
-
-static ZTSerializedDocument *zt_parse_serialized(NSData *data, NSError **error) {
-    return zt_parse_serialized_mode(data, NO, error);
 }
 
 static UnityBundleNode *zt_resS_node(UnityBundleArchive *archive, NSError **error) {
@@ -1950,32 +1947,55 @@ static BOOL zt_verify_target(NSString *moddedPath, ZTranscoderConfig *config, NS
     return YES;
 }
 
-static ZTSerializedDocument *zt_build_carra2_document(NSArray<ZTCarra2Item *> *items, ZTSerializedDocument *targetDoc, NSMutableArray<ZTCarra2Item *> *missingItems, NSError **error) {
+static ZTSerializedDocument *zt_build_carra2_document(NSArray<ZTCarra2Item *> *items, ZTSerializedDocument *targetDoc, NSUInteger *outSkipped, NSError **error) {
     NSMutableDictionary<NSNumber *, ZTSerializedObject *> *targetByPath = [NSMutableDictionary dictionaryWithCapacity:targetDoc.objects.count];
     for (ZTSerializedObject *object in targetDoc.objects) targetByPath[@(object.pathID)] = object;
+    NSUInteger hintsChecked = 0;
+    NSUInteger hintsMatched = 0;
+    for (ZTCarra2Item *item in items) {
+        ZTSerializedObject *existing = targetByPath[@(item.pathID)];
+        if (!existing || item.typeHint < 0) continue;
+        hintsChecked++;
+        if (item.typeHint == existing.typeIndex) hintsMatched++;
+    }
+    BOOL hintsTrusted = hintsChecked > 0 && hintsChecked == hintsMatched;
+    NSUInteger skipped = 0;
+    ZLog(@"[ZTranscoder] Carra2 type tags %@ the game's type table (%lu of %lu existing object(s) agree)", hintsTrusted ? @"match" : @"do not match", (unsigned long)hintsMatched, (unsigned long)hintsChecked);
     NSMutableData *blob = [NSMutableData data];
     NSMutableArray<ZTSerializedObject *> *objects = [NSMutableArray array];
     for (ZTCarra2Item *item in items) {
         ZTSerializedObject *target = targetByPath[@(item.pathID)];
-        if (!target) {
-            ZLog(@"[ZTranscoder] Carra2 object PathID=%lld (%@) does not exist in this game bundle; it will be looked up in the game's other bundles", (long long)item.pathID, item.name);
-            [missingItems addObject:item];
-            continue;
+        int32_t objectClassID = 0;
+        int32_t objectTypeIndex = 0;
+        if (target) {
+            objectClassID = target.classID;
+            objectTypeIndex = target.typeIndex;
+        } else {
+            BOOL usableHint = hintsTrusted && item.typeHint >= 0 && (NSUInteger)item.typeHint < targetDoc.typeKeys.count;
+            if (!usableHint) {
+                skipped++;
+                ZLog(@"[ZTranscoder] Carra2 object PathID=%lld (%@) is new, but its type couldn't be matched to the game's bundle; skipping", (long long)item.pathID, item.name);
+                continue;
+            }
+            objectTypeIndex = item.typeHint;
+            objectClassID = (int32_t)[[targetDoc.typeKeys[(NSUInteger)objectTypeIndex] componentsSeparatedByString:@":"].firstObject intValue];
+            ZLog(@"[ZTranscoder] Carra2 object PathID=%lld (%@) is new; adding it to the game's bundle as class=%d", (long long)item.pathID, item.name, objectClassID);
         }
         while (blob.length % 8u) { uint8_t zero = 0; [blob appendBytes:&zero length:1]; }
         ZTSerializedObject *object = [ZTSerializedObject new];
-        object.classID = target.classID;
-        object.typeIndex = target.typeIndex;
-        object.pathID = target.pathID;
+        object.classID = objectClassID;
+        object.typeIndex = objectTypeIndex;
+        object.pathID = item.pathID;
         object.byteStart = blob.length;
         object.objectStart = blob.length;
         object.byteSize = (uint32_t)item.data.length;
         [blob appendData:item.data];
         [objects addObject:object];
-        ZLog(@"[ZTranscoder] Carra2 object PathID=%lld (%@) maps to class=%d in the game's bundle, %lu bytes", (long long)item.pathID, item.name, target.classID, (unsigned long)item.data.length);
+        ZLog(@"[ZTranscoder] Carra2 object PathID=%lld (%@) is class=%d, %lu bytes", (long long)item.pathID, item.name, objectClassID, (unsigned long)item.data.length);
     }
+    if (outSkipped) *outSkipped = skipped;
     if (objects.count == 0) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the Carra2 mod's objects exist in the game's bundle.");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"None of the Carra2 mod's objects could be applied to the game's bundle.");
         return nil;
     }
     NSData *data = [blob copy];
@@ -2249,12 +2269,12 @@ static BOOL zt_process_modded_bundle(NSURL *moddedURL, ZTranscoderConfig *config
     return ok;
 }
 
-static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, NSArray<ZTCarra2Item *> *carra2Items, void (^progress)(double, NSString *), NSURL **outputURL, NSArray<ZTCarra2Item *> **outMissingItems, NSError **error) {
+static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, NSArray<ZTCarra2Item *> *carra2Items, void (^progress)(double, NSString *), NSURL **outputURL, NSUInteger *outSkippedObjects, NSError **error) {
     BOOL carra2Mode = carra2Items != nil;
     if (!config) config = [ZTranscoderConfig new];
     if (!carra2Mode) return zt_process_modded_bundle(moddedURL, config, progress, outputURL, error);
-    NSMutableArray<ZTCarra2Item *> *missingItems = [NSMutableArray array];
     NSString *inputPath = moddedURL.path;
+    NSUInteger buildSkipped = 0;
     ZLog(@"[ZTranscoder] starting local visual-mod transcode for %@", inputPath);
     NSString *targetPath = nil;
     NSString *cab = nil;
@@ -2295,8 +2315,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     ZTSerializedDocument *sourceDoc = nil;
     if (targetDoc) {
         if (carra2Mode) {
-            sourceDoc = zt_build_carra2_document(carra2Items, targetDoc, missingItems, &archiveError);
-            if (outMissingItems) *outMissingItems = [missingItems copy];
+            sourceDoc = zt_build_carra2_document(carra2Items, targetDoc, &buildSkipped, &archiveError);
         } else {
             NSData *sourceSerializedView = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)sourceArchive.data.bytes + sourceCABNode.offset) length:(NSUInteger)sourceCABNode.size freeWhenDone:NO];
             sourceDoc = zt_parse_serialized(sourceSerializedView, &archiveError);
@@ -2323,7 +2342,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     ZLog(@"[ZTranscoder] SerializedFile externals/script tables %@ between the mod and the original; %@", layoutShared ? @"match" : @"differ", layoutShared ? @"transplanting every changed object" : @"transplanting only texture/sprite/text classes");
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL present = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (zt_class_is_transplantable(sourceObject.classID, layoutShared) || (!present && zt_class_is_transplantable(sourceObject.classID, YES))) assetCount++;
+        if (zt_class_is_transplantable(sourceObject.classID, layoutShared) || (!present && (carra2Mode || zt_class_is_transplantable(sourceObject.classID, YES)))) assetCount++;
     }
     NSUInteger processedAssets = 0;
     NSUInteger skippedAssets = 0;
@@ -2332,7 +2351,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     NSDictionary *sourceTexturesByPath = zt_texture_map(sourceDoc.textures);
     for (ZTSerializedObject *sourceObject in sourceDoc.objects) {
         BOOL presentInTarget = zt_find_object(targetObjectMap, sourceObject.pathID, sourceObject.classID) != nil;
-        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared) && !(!presentInTarget && zt_class_is_transplantable(sourceObject.classID, YES))) continue;
+        if (!zt_class_is_transplantable(sourceObject.classID, layoutShared) && !(!presentInTarget && (carra2Mode || zt_class_is_transplantable(sourceObject.classID, YES)))) continue;
         BOOL legacyClass = zt_class_is_transcoded(sourceObject.classID);
         BOOL wholesaleClass = sourceObject.classID == kZTClassTexture2D || sourceObject.classID == kZTClassSprite || sourceObject.classID == kZTClassSpriteAtlas;
         NSString *sourceTypeKey = (sourceObject.typeIndex >= 0 && (NSUInteger)sourceObject.typeIndex < sourceDoc.typeKeys.count) ? sourceDoc.typeKeys[(NSUInteger)sourceObject.typeIndex] : nil;
@@ -2527,6 +2546,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         ZLog(@"[ZTranscoder] built transcoded bundle for the Carra2 mod at %@", finalPath);
         if (progress) progress(1.0, @"Local ASTC 6x6 bundle transcode complete");
         if (outputURL) *outputURL = [NSURL fileURLWithPath:finalPath];
+        if (outSkippedObjects) *outSkippedObjects = buildSkipped + skippedAssets;
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
         (void)config;
         return YES;
@@ -2713,6 +2733,9 @@ static BOOL zt_load_carra2(NSURL *archiveURL, NSString **outBundlePath, NSArray<
         }
         ZTCarra2Item *item = [ZTCarra2Item new];
         item.pathID = pathID;
+        NSString *typeExtension = relative.lastPathComponent.pathExtension;
+        BOOL numericExtension = typeExtension.length > 0 && [typeExtension rangeOfCharacterFromSet:NSCharacterSet.decimalDigitCharacterSet.invertedSet].location == NSNotFound;
+        item.typeHint = numericExtension ? (int32_t)typeExtension.integerValue : -1;
         item.name = relative.lastPathComponent;
         item.data = decoded;
         if (itemsByPath[@(pathID)]) ZLog(@"[ZTranscoder] Carra2 entry %@ repeats PathID=%lld; the later file wins", relative, (long long)pathID);
@@ -2729,171 +2752,6 @@ static BOOL zt_load_carra2(NSURL *archiveURL, NSString **outBundlePath, NSArray<
     if (outItems) *outItems = itemsByPath.allValues;
     [fm removeItemAtPath:stageDir error:nil];
     return YES;
-}
-
-static NSMutableDictionary<NSString *, NSDictionary *> *s_ztPathIDIndex = nil;
-static BOOL s_ztPathIDIndexDirty = NO;
-
-static NSString *zt_path_id_index_file(void) {
-    NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
-    return caches.length ? [caches stringByAppendingPathComponent:@"ZTPathIDIndex.plist"] : nil;
-}
-
-static NSMutableDictionary<NSString *, NSDictionary *> *zt_path_id_index(void) {
-    if (!s_ztPathIDIndex) {
-        NSString *file = zt_path_id_index_file();
-        NSDictionary *stored = file ? [NSDictionary dictionaryWithContentsOfFile:file] : nil;
-        s_ztPathIDIndex = [stored isKindOfClass:NSDictionary.class] ? [stored mutableCopy] : [NSMutableDictionary dictionary];
-    }
-    return s_ztPathIDIndex;
-}
-
-static void zt_save_path_id_index(void) {
-    @synchronized([ZTCarra2Item class]) {
-        if (!s_ztPathIDIndexDirty) return;
-        NSString *file = zt_path_id_index_file();
-        if (file && [zt_path_id_index() writeToFile:file atomically:YES]) s_ztPathIDIndexDirty = NO;
-    }
-}
-
-static int zt_compare_int64(const void *a, const void *b) {
-    int64_t x = *(const int64_t *)a;
-    int64_t y = *(const int64_t *)b;
-    return x < y ? -1 : (x > y ? 1 : 0);
-}
-
-static NSData *zt_scan_bundle_path_ids(NSString *path, NSString **failure) {
-    NSError *headError = nil;
-    NSData *head = [UnityBundleCAB serializedFileHeadForBundleAtPath:path error:&headError];
-    if (!head) {
-        if (failure) *failure = headError.userInfo[NSLocalizedDescriptionKey] ?: [NSString stringWithFormat:@"bundle read error %ld", (long)headError.code];
-        return nil;
-    }
-    NSError *parseError = nil;
-    ZTSerializedDocument *document = zt_parse_serialized_mode(head, YES, &parseError);
-    if (!document || document.objects.count == 0) {
-        if (failure) *failure = parseError.userInfo[NSLocalizedDescriptionKey] ?: @"SerializedFile has no objects";
-        return nil;
-    }
-    NSMutableData *ids = [NSMutableData dataWithLength:document.objects.count * sizeof(int64_t)];
-    int64_t *values = ids.mutableBytes;
-    NSUInteger count = 0;
-    for (ZTSerializedObject *object in document.objects) values[count++] = object.pathID;
-    qsort(values, count, sizeof(int64_t), zt_compare_int64);
-    return ids;
-}
-
-static NSData *zt_bundle_path_ids(NSString *path, NSString **failure) {
-    NSDictionary<NSFileAttributeKey, id> *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
-    if (!attributes) {
-        if (failure) *failure = @"file attributes unreadable";
-        return nil;
-    }
-    NSString *signature = [NSString stringWithFormat:@"%llu:%lld", [attributes[NSFileSize] unsignedLongLongValue], (long long)[attributes[NSFileModificationDate] timeIntervalSince1970]];
-    @synchronized([ZTCarra2Item class]) {
-        NSDictionary *stored = zt_path_id_index()[path];
-        NSData *storedIDs = stored[@"ids"];
-        if ([stored[@"sig"] isEqualToString:signature] && [storedIDs isKindOfClass:NSData.class] && storedIDs.length > 0) return storedIDs;
-    }
-    NSData *ids = zt_scan_bundle_path_ids(path, failure);
-    if (ids.length > 0) {
-        @synchronized([ZTCarra2Item class]) {
-            zt_path_id_index()[path] = @{@"sig": signature, @"ids": ids};
-            s_ztPathIDIndexDirty = YES;
-        }
-    }
-    return ids;
-}
-
-static NSArray<NSString *> *zt_candidate_bundle_paths(void) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
-    NSDictionary<NSString *, NSArray<NSString *> *> *cabMap = [ZSFileIndex persistedCABMap];
-    if (cabMap.count == 0) {
-        [ZSFileIndex ensureIndexUpToDate];
-        cabMap = [ZSFileIndex persistedCABMap];
-    }
-    for (NSString *cab in cabMap) {
-        for (NSString *candidate in cabMap[cab]) {
-            if ([candidate isKindOfClass:NSString.class] && [fm fileExistsAtPath:candidate]) [paths addObject:candidate];
-        }
-    }
-    NSUInteger indexed = paths.count;
-    NSArray<NSString *> *roots = [UnityCacheLocator unityCacheSharedDirectories];
-    for (NSString *root in roots) {
-        NSDirectoryEnumerator<NSString *> *walker = [fm enumeratorAtPath:root];
-        for (NSString *relative in walker) {
-            if ([relative.lastPathComponent isEqualToString:@"__data"]) [paths addObject:[root stringByAppendingPathComponent:relative]];
-        }
-    }
-    ZLog(@"[ZTranscoder] bundle candidates: %lu from the file index, %lu total after scanning %lu cache root(s)", (unsigned long)indexed, (unsigned long)paths.count, (unsigned long)roots.count);
-    return paths.array;
-}
-
-static NSDictionary<NSString *, NSArray<ZTCarra2Item *> *> *zt_locate_carra2_items_in_game_bundles(NSArray<ZTCarra2Item *> *items) {
-    NSMutableDictionary<NSString *, NSMutableArray<ZTCarra2Item *> *> *byBundle = [NSMutableDictionary dictionary];
-    NSArray<NSString *> *candidates = zt_candidate_bundle_paths();
-    NSMutableDictionary<NSString *, NSNumber *> *failures = [NSMutableDictionary dictionary];
-    NSUInteger readable = 0;
-    NSUInteger objectTotal = 0;
-    ZLog(@"[ZTranscoder] looking for %lu Carra2 object(s) across %lu game bundle(s)", (unsigned long)items.count, (unsigned long)candidates.count);
-    for (NSString *candidate in candidates) {
-        @autoreleasepool {
-            NSString *failure = nil;
-            NSData *ids = zt_bundle_path_ids(candidate, &failure);
-            if (ids.length < sizeof(int64_t)) {
-                NSString *reason = failure ?: @"unreadable";
-                failures[reason] = @(failures[reason].unsignedIntegerValue + 1);
-                continue;
-            }
-            readable++;
-            const int64_t *sorted = ids.bytes;
-            size_t count = ids.length / sizeof(int64_t);
-            objectTotal += count;
-            for (ZTCarra2Item *item in items) {
-                int64_t pathID = item.pathID;
-                if (!bsearch(&pathID, sorted, count, sizeof(int64_t), zt_compare_int64)) continue;
-                NSMutableArray<ZTCarra2Item *> *group = byBundle[candidate];
-                if (!group) { group = [NSMutableArray array]; byBundle[candidate] = group; }
-                [group addObject:item];
-            }
-        }
-    }
-    zt_save_path_id_index();
-    ZLog(@"[ZTranscoder] bundle scan: %lu readable (%lu objects indexed), %lu skipped; skip reasons: %@", (unsigned long)readable, (unsigned long)objectTotal, (unsigned long)(candidates.count - readable), failures.count ? (id)failures : (id)@"none");
-    return byBundle;
-}
-
-static void zt_apply_carra2_to_other_bundles(NSArray<ZTCarra2Item *> *missingItems) {
-    NSDictionary<NSString *, NSArray<ZTCarra2Item *> *> *byBundle = zt_locate_carra2_items_in_game_bundles(missingItems);
-    NSMutableSet<NSNumber *> *resolved = [NSMutableSet set];
-    for (NSString *bundlePath in [byBundle.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
-        @autoreleasepool {
-            NSArray<ZTCarra2Item *> *group = byBundle[bundlePath];
-            ZTranscoderConfig *bundleConfig = [ZTranscoderConfig new];
-            bundleConfig.targetBundlePath = bundlePath;
-            NSURL *output = nil;
-            NSError *bundleError = nil;
-            ZLog(@"[ZTranscoder] Carra2 additional bundle %@ holds %lu of the mod's object(s)", bundlePath, (unsigned long)group.count);
-            BOOL built = zt_process_bundle_full([NSURL fileURLWithPath:bundlePath], bundleConfig, group, nil, &output, NULL, &bundleError);
-            if (!built || !output) {
-                ZLog(@"[ZTranscoder] Carra2 additional bundle %@ could not be transcoded: %@", bundlePath, bundleError.localizedDescription ?: @"unknown error");
-                continue;
-            }
-            NSError *installError = nil;
-            BOOL installed = [ZTranscoderInstaller installDoctoredBundleAtURL:output toStockBundleURL:[NSURL fileURLWithPath:bundlePath] error:&installError];
-            [NSFileManager.defaultManager removeItemAtPath:output.path.stringByDeletingLastPathComponent error:nil];
-            if (!installed) {
-                ZLog(@"[ZTranscoder] Carra2 additional bundle %@ could not be installed: %@", bundlePath, installError.localizedDescription ?: @"unknown error");
-                continue;
-            }
-            for (ZTCarra2Item *item in group) [resolved addObject:@(item.pathID)];
-            ZLog(@"[ZTranscoder] Carra2 additional bundle %@ installed", bundlePath);
-        }
-    }
-    NSUInteger unresolved = 0;
-    for (ZTCarra2Item *item in missingItems) if (![resolved containsObject:@(item.pathID)]) unresolved++;
-    ZLog(@"[ZTranscoder] Carra2 objects outside the first bundle: %lu total, %lu applied to %lu other bundle(s), %lu not applied", (unsigned long)missingItems.count, (unsigned long)(missingItems.count - unresolved), (unsigned long)byBundle.count, (unsigned long)unresolved);
 }
 
 @implementation ZTranscoderService
@@ -2966,17 +2824,17 @@ static void zt_apply_carra2_to_other_bundles(NSArray<ZTCarra2Item *> *missingIte
                 dispatch_async(dispatch_get_main_queue(), ^{ uploadProgress((int64_t)((double)total * fraction), (int64_t)total); });
             };
             mainProgress(0.0, @"Verifying the mod and locating the stock target");
-            NSArray<ZTCarra2Item *> *missingItems = nil;
-            BOOL ok = zt_process_bundle_full(workURL, workConfig, carra2Items, mainProgress, &output, &missingItems, &error);
+            NSUInteger skippedObjects = 0;
+            BOOL ok = zt_process_bundle_full(workURL, workConfig, carra2Items, mainProgress, &output, &skippedObjects, &error);
             if (!ok || !output) {
                 dispatch_async(dispatch_get_main_queue(), ^{ completion(nil, error); });
                 return;
             }
-            if (missingItems.count > 0) zt_apply_carra2_to_other_bundles(missingItems);
             ZTranscoderHandle *handle = [ZTranscoderHandle new];
             handle.scratchBranch = output.path;
             handle.alreadyComplete = YES;
             handle.compressedByteSize = zt_file_size(output.path);
+            if (skippedObjects > 0) handle.warningMessage = [NSString stringWithFormat:@"%lu of this mod's %lu objects couldn't be applied and were skipped. The mod may not display correctly.", (unsigned long)skippedObjects, (unsigned long)carra2Items.count];
             dispatch_async(dispatch_get_main_queue(), ^{ completion(handle, nil); });
         }
     }];

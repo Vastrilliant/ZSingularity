@@ -14999,6 +14999,13 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     [self zs_doctorInstallUsingKnownTargetForDoctoredURL:[NSURL fileURLWithPath:handle.scratchBranch]
                                                entryPath:entryPath
                                                 inFolder:folderName];
+    NSString *warningMessage = handle.warningMessage;
+    if (warningMessage.length > 0) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf zs_presentModsAlertWithTitle:@"Some Objects Were Skipped" message:warningMessage];
+        });
+    }
 }
 
 - (void)zs_doctorFailEntryAtPath:(NSString *)entryPath inFolder:(NSString *)folderName error:(NSError *)error {
