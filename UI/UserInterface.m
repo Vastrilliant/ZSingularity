@@ -569,95 +569,28 @@ static void zs_clear_button_configuration(UIButton *button) {
 }
 
 static const CGFloat kZSGlassButtonCornerRadius = 8;
-static const void *kZSButtonGlassViewKey = &kZSButtonGlassViewKey;
 
-@interface ZSGlassTouchProxy : UIControl
-@property (nonatomic, weak) UIButton *host;
-@end
+static void zs_apply_slash_glass_background(UIButton *button, UIColor *glassTint, NSString *title, UIFont *font, UIImage *image, UIColor *foreground) {
+    UIVisualEffect *effect = glassTint ? zs_make_glass_effect_style(0, YES, glassTint) : zs_make_glass_effect(YES);
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+    zs_configure_glass_corners(glass, kZSGlassButtonCornerRadius, NO);
+    zs_register_suspendable_glass(glass);
 
-@implementation ZSGlassTouchProxy
-- (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    UIButton *host = self.host;
-    if (!host || !host.enabled) return NO;
-    host.highlighted = YES;
-    [host sendActionsForControlEvents:UIControlEventTouchDown];
-    return YES;
-}
+    UIBackgroundConfiguration *background = [UIBackgroundConfiguration clearConfiguration];
+    background.customView = glass;
 
-- (BOOL)continueTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    return YES;
-}
-
-- (void)endTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
-    UIButton *host = self.host;
-    if (!host) return;
-    host.highlighted = NO;
-    CGPoint point = touch ? [touch locationInView:self] : CGPointZero;
-    BOOL inside = touch ? CGRectContainsPoint(CGRectInset(self.bounds, -20, -20), point) : YES;
-    [host sendActionsForControlEvents:inside ? UIControlEventTouchUpInside : UIControlEventTouchUpOutside];
-}
-
-- (void)cancelTrackingWithEvent:(UIEvent *)event {
-    UIButton *host = self.host;
-    if (!host) return;
-    host.highlighted = NO;
-    [host sendActionsForControlEvents:UIControlEventTouchCancel];
-}
-@end
-
-@interface ZSGlassHostButton : UIButton
-@end
-
-@implementation ZSGlassHostButton
-- (void)layoutSubviews {
-    [super layoutSubviews];
-    UIVisualEffectView *glass = objc_getAssociatedObject(self, kZSButtonGlassViewKey);
-    if (!glass) return;
-    if (glass.superview == self && [self.subviews firstObject] != glass) [self sendSubviewToBack:glass];
-    if (self.imageView.superview == self) [self bringSubviewToFront:self.imageView];
-    if (self.titleLabel.superview == self) [self bringSubviewToFront:self.titleLabel];
-}
-@end
-
-static void zs_install_slash_glass_on_button(UIButton *button, UIColor *tintColor) {
-    if (!button) return;
-    zs_clear_button_configuration(button);
-    button.backgroundColor = UIColor.clearColor;
-    button.layer.cornerRadius = 0;
-    button.layer.borderWidth = 0;
-    button.clipsToBounds = NO;
-    UIVisualEffectView *glass = objc_getAssociatedObject(button, kZSButtonGlassViewKey);
-    if (!glass) {
-        UIVisualEffect *effect = tintColor ? zs_make_glass_effect_style(0, YES, tintColor) : zs_make_glass_effect(YES);
-        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
-        glass.translatesAutoresizingMaskIntoConstraints = NO;
-        zs_configure_glass_corners(glass, kZSGlassButtonCornerRadius, NO);
-        zs_register_suspendable_glass(glass);
-        [button insertSubview:glass atIndex:0];
-        ZSGlassTouchProxy *proxy = [[ZSGlassTouchProxy alloc] init];
-        proxy.translatesAutoresizingMaskIntoConstraints = NO;
-        proxy.host = button;
-        [glass.contentView addSubview:proxy];
-        [NSLayoutConstraint activateConstraints:@[
-            [proxy.leadingAnchor constraintEqualToAnchor:glass.contentView.leadingAnchor],
-            [proxy.trailingAnchor constraintEqualToAnchor:glass.contentView.trailingAnchor],
-            [proxy.topAnchor constraintEqualToAnchor:glass.contentView.topAnchor],
-            [proxy.bottomAnchor constraintEqualToAnchor:glass.contentView.bottomAnchor],
-        ]];
-        [NSLayoutConstraint activateConstraints:@[
-            [glass.leadingAnchor constraintEqualToAnchor:button.leadingAnchor],
-            [glass.trailingAnchor constraintEqualToAnchor:button.trailingAnchor],
-            [glass.topAnchor constraintEqualToAnchor:button.topAnchor],
-            [glass.bottomAnchor constraintEqualToAnchor:button.bottomAnchor],
-        ]];
-        objc_setAssociatedObject(button, kZSButtonGlassViewKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    } else {
-        [button sendSubviewToBack:glass];
+    UIButtonConfiguration *configuration = [UIButtonConfiguration plainButtonConfiguration];
+    configuration.background = background;
+    configuration.baseForegroundColor = foreground;
+    if (image) configuration.image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    if (title) {
+        if (font) {
+            configuration.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:@{NSFontAttributeName: font}];
+        } else {
+            configuration.title = title;
+        }
     }
-    if (object_getClass(button) == [UIButton class]) {
-        object_setClass(button, [ZSGlassHostButton class]);
-    }
-    [button setNeedsLayout];
+    button.configuration = configuration;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
@@ -701,13 +634,7 @@ static void zs_apply_flat_button_chrome(UIButton *button, CGFloat cornerRadius) 
 
 static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
-        zs_install_slash_glass_on_button(button, nil);
-        [button setAttributedTitle:nil forState:UIControlStateNormal];
-        [button setTitle:title forState:UIControlStateNormal];
-        UIColor *foreground = tintColor ?: UIColor.whiteColor;
-        [button setTitleColor:foreground forState:UIControlStateNormal];
-        button.tintColor = foreground;
-        if (font) button.titleLabel.font = font;
+        zs_apply_slash_glass_background(button, nil, title, font, nil, tintColor ?: UIColor.whiteColor);
         return;
     }
 
@@ -770,12 +697,7 @@ static UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSS
 
 static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
     if (zs_has_liquid_glass()) {
-        zs_install_slash_glass_on_button(button, tintColor);
-        [button setAttributedTitle:nil forState:UIControlStateNormal];
-        [button setTitle:title forState:UIControlStateNormal];
-        [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        button.tintColor = UIColor.whiteColor;
-        if (font) button.titleLabel.font = font;
+        zs_apply_slash_glass_background(button, tintColor, title, font, nil, UIColor.whiteColor);
         return;
     }
 
@@ -797,9 +719,7 @@ static void zs_set_install_option_greyed_out(UIButton *button, BOOL greyedOut) {
 
 static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage *image, UIColor *tintColor) {
     if (zs_has_liquid_glass()) {
-        zs_install_slash_glass_on_button(button, nil);
-        [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-        button.tintColor = tintColor ?: UIColor.whiteColor;
+        zs_apply_slash_glass_background(button, nil, nil, nil, image, tintColor ?: UIColor.whiteColor);
         return;
     }
 
@@ -836,10 +756,39 @@ static UIImage *zs_mods_doctor_button_icon(NSString *sfSymbolName, CGFloat point
 
 static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *image, UIColor *tintColor) {
     if (zs_has_liquid_glass()) {
-        zs_install_slash_glass_on_button(button, nil);
-        [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
-        button.tintColor = tintColor ?: UIColor.whiteColor;
+        zs_apply_slash_glass_background(button, nil, nil, nil, image, tintColor ?: UIColor.whiteColor);
         return;
+    }
+
+    zs_apply_flat_button_chrome(button, 9);
+    [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
+    button.tintColor = tintColor ?: UIColor.whiteColor;
+    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+}
+
+static void zs_style_options_button_as_original_native_glass(UIButton *button, UIImage *image, UIColor *tintColor) {
+    if (zs_has_liquid_glass()) {
+        Class configClass = NSClassFromString(@"UIButtonConfiguration");
+        SEL glassSel = NSSelectorFromString(@"glassButtonConfiguration");
+        if (configClass && [configClass respondsToSelector:glassSel]) {
+            id configuration = ((id (*)(id, SEL))objc_msgSend)(configClass, glassSel);
+            if (configuration) {
+                SEL setImage = NSSelectorFromString(@"setImage:");
+                if ([configuration respondsToSelector:setImage]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setImage, image);
+                }
+                SEL setBaseForeground = NSSelectorFromString(@"setBaseForegroundColor:");
+                if (tintColor && [configuration respondsToSelector:setBaseForeground]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(configuration, setBaseForeground, tintColor);
+                }
+                SEL setConfig = NSSelectorFromString(@"setConfiguration:");
+                if ([button respondsToSelector:setConfig]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(button, setConfig, configuration);
+                    button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+                    return;
+                }
+            }
+        }
     }
 
     zs_apply_flat_button_chrome(button, 9);
@@ -4988,7 +4937,7 @@ static UIView *zs_make_mods_folder_row(NSString *folderName, NSString *displayNa
         optionsButton.translatesAutoresizingMaskIntoConstraints = NO;
         UIImageSymbolConfiguration *dotsSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightSemibold];
         UIImage *dotsImage = [UIImage systemImageNamed:@"ellipsis" withConfiguration:dotsSymbolConfig];
-        zs_style_icon_button_as_native_glass(optionsButton, dotsImage, [UIColor colorWithWhite:1 alpha:0.6]);
+        zs_style_options_button_as_original_native_glass(optionsButton, dotsImage, [UIColor colorWithWhite:1 alpha:0.6]);
         objc_setAssociatedObject(optionsButton, "zs_modsFolderName", folderName, OBJC_ASSOCIATION_COPY);
         [optionsButton addTarget:target action:optionsAction forControlEvents:UIControlEventTouchUpInside];
         [row addSubview:optionsButton];
@@ -5183,7 +5132,7 @@ static UIView *zs_make_mods_entry_row(ModAssetLibraryEntry *entry, id target, SE
         optionsButton.translatesAutoresizingMaskIntoConstraints = NO;
         UIImageSymbolConfiguration *dotsSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightSemibold];
         UIImage *dotsImage = [UIImage systemImageNamed:@"ellipsis" withConfiguration:dotsSymbolConfig];
-        zs_style_icon_button_as_native_glass(optionsButton, dotsImage, [UIColor colorWithWhite:1 alpha:0.6]);
+        zs_style_options_button_as_original_native_glass(optionsButton, dotsImage, [UIColor colorWithWhite:1 alpha:0.6]);
         objc_setAssociatedObject(optionsButton, "zs_modsEntry", entry, OBJC_ASSOCIATION_RETAIN);
         [optionsButton addTarget:target action:optionsAction forControlEvents:UIControlEventTouchUpInside];
         [row addSubview:optionsButton];
