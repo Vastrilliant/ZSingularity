@@ -6049,6 +6049,418 @@ static UIImage *zs_asset_checkerboard_tile(void) {
 
 @end
 
+typedef NS_ENUM(NSInteger, ZSLocJSONKind) {
+    ZSLocJSONKindObject,
+    ZSLocJSONKindArray,
+    ZSLocJSONKindString,
+    ZSLocJSONKindNumber,
+    ZSLocJSONKindBool,
+    ZSLocJSONKindNull,
+};
+
+@interface ZSLocJSONNode : NSObject
+@property (nonatomic, copy) NSString *key;
+@property (nonatomic, copy) NSString *text;
+@property (nonatomic, assign) ZSLocJSONKind kind;
+@property (nonatomic, assign) NSInteger depth;
+@property (nonatomic, assign) BOOL expanded;
+@property (nonatomic, strong) NSMutableArray<ZSLocJSONNode *> *children;
+- (BOOL)isContainer;
+@end
+
+@implementation ZSLocJSONNode
+- (BOOL)isContainer {
+    return self.kind == ZSLocJSONKindObject || self.kind == ZSLocJSONKindArray;
+}
+@end
+
+typedef struct {
+    const uint8_t *p;
+    const uint8_t *end;
+    BOOL failed;
+} ZSLocJSONCursor;
+
+static void zs_loc_json_skip(ZSLocJSONCursor *c) {
+    while (c->p < c->end && (*c->p == ' ' || *c->p == '\t' || *c->p == '\n' || *c->p == '\r')) c->p++;
+}
+
+static int zs_loc_json_hex(unichar ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static NSString *zs_loc_json_unescape(NSString *raw) {
+    NSUInteger length = raw.length;
+    unichar *chars = malloc(length * sizeof(unichar));
+    unichar *result = malloc(length * sizeof(unichar));
+    if (!chars || !result) {
+        free(chars);
+        free(result);
+        return raw;
+    }
+    [raw getCharacters:chars range:NSMakeRange(0, length)];
+    NSUInteger count = 0;
+    for (NSUInteger i = 0; i < length; i++) {
+        unichar ch = chars[i];
+        if (ch != '\\' || i + 1 >= length) {
+            result[count++] = ch;
+            continue;
+        }
+        unichar next = chars[++i];
+        switch (next) {
+            case 'n': result[count++] = '\n'; break;
+            case 't': result[count++] = '\t'; break;
+            case 'r': result[count++] = '\r'; break;
+            case 'b': result[count++] = '\b'; break;
+            case 'f': result[count++] = '\f'; break;
+            case 'u': {
+                BOOL ok = i + 4 < length;
+                unsigned int value = 0;
+                for (NSUInteger k = 1; ok && k <= 4; k++) {
+                    int digit = zs_loc_json_hex(chars[i + k]);
+                    if (digit < 0) ok = NO;
+                    else value = value * 16 + (unsigned int)digit;
+                }
+                if (ok) {
+                    result[count++] = (unichar)value;
+                    i += 4;
+                } else {
+                    result[count++] = 'u';
+                }
+                break;
+            }
+            default: result[count++] = next; break;
+        }
+    }
+    NSString *string = [NSString stringWithCharacters:result length:count];
+    free(chars);
+    free(result);
+    return string;
+}
+
+static NSString *zs_loc_json_string(ZSLocJSONCursor *c) {
+    c->p++;
+    const uint8_t *start = c->p;
+    BOOL escaped = NO;
+    while (c->p < c->end) {
+        uint8_t ch = *c->p;
+        if (ch == '\\') {
+            escaped = YES;
+            c->p += 2;
+            continue;
+        }
+        if (ch == '"') break;
+        c->p++;
+    }
+    if (c->p >= c->end) {
+        c->failed = YES;
+        return nil;
+    }
+    const uint8_t *stop = c->p;
+    c->p++;
+    NSString *raw = [[NSString alloc] initWithBytes:start length:(NSUInteger)(stop - start) encoding:NSUTF8StringEncoding];
+    if (!raw) {
+        c->failed = YES;
+        return nil;
+    }
+    return escaped ? zs_loc_json_unescape(raw) : raw;
+}
+
+static BOOL zs_loc_json_literal(ZSLocJSONCursor *c, const char *word) {
+    size_t length = strlen(word);
+    if ((size_t)(c->end - c->p) < length || memcmp(c->p, word, length) != 0) return NO;
+    c->p += length;
+    return YES;
+}
+
+static ZSLocJSONNode *zs_loc_json_value(ZSLocJSONCursor *c, NSString *key, NSInteger depth) {
+    if (depth > 256) {
+        c->failed = YES;
+        return nil;
+    }
+    zs_loc_json_skip(c);
+    if (c->p >= c->end) {
+        c->failed = YES;
+        return nil;
+    }
+    ZSLocJSONNode *node = [[ZSLocJSONNode alloc] init];
+    node.key = key;
+    node.depth = depth;
+    uint8_t ch = *c->p;
+    if (ch == '{') {
+        node.kind = ZSLocJSONKindObject;
+        node.children = [NSMutableArray array];
+        c->p++;
+        zs_loc_json_skip(c);
+        if (c->p < c->end && *c->p == '}') {
+            c->p++;
+            return node;
+        }
+        while (!c->failed) {
+            zs_loc_json_skip(c);
+            if (c->p >= c->end || *c->p != '"') break;
+            NSString *childKey = zs_loc_json_string(c);
+            if (c->failed) return nil;
+            zs_loc_json_skip(c);
+            if (c->p >= c->end || *c->p != ':') break;
+            c->p++;
+            ZSLocJSONNode *child = zs_loc_json_value(c, childKey, depth + 1);
+            if (!child) return nil;
+            [node.children addObject:child];
+            zs_loc_json_skip(c);
+            if (c->p >= c->end) break;
+            if (*c->p == ',') {
+                c->p++;
+                continue;
+            }
+            if (*c->p == '}') {
+                c->p++;
+                return node;
+            }
+            break;
+        }
+        c->failed = YES;
+        return nil;
+    }
+    if (ch == '[') {
+        node.kind = ZSLocJSONKindArray;
+        node.children = [NSMutableArray array];
+        c->p++;
+        zs_loc_json_skip(c);
+        if (c->p < c->end && *c->p == ']') {
+            c->p++;
+            return node;
+        }
+        while (!c->failed) {
+            NSString *childKey = [NSString stringWithFormat:@"[%lu]", (unsigned long)node.children.count];
+            ZSLocJSONNode *child = zs_loc_json_value(c, childKey, depth + 1);
+            if (!child) return nil;
+            [node.children addObject:child];
+            zs_loc_json_skip(c);
+            if (c->p >= c->end) break;
+            if (*c->p == ',') {
+                c->p++;
+                continue;
+            }
+            if (*c->p == ']') {
+                c->p++;
+                return node;
+            }
+            break;
+        }
+        c->failed = YES;
+        return nil;
+    }
+    if (ch == '"') {
+        node.kind = ZSLocJSONKindString;
+        node.text = zs_loc_json_string(c);
+        if (c->failed) return nil;
+        return node;
+    }
+    if (zs_loc_json_literal(c, "true")) {
+        node.kind = ZSLocJSONKindBool;
+        node.text = @"true";
+        return node;
+    }
+    if (zs_loc_json_literal(c, "false")) {
+        node.kind = ZSLocJSONKindBool;
+        node.text = @"false";
+        return node;
+    }
+    if (zs_loc_json_literal(c, "null")) {
+        node.kind = ZSLocJSONKindNull;
+        node.text = @"null";
+        return node;
+    }
+    const uint8_t *start = c->p;
+    while (c->p < c->end) {
+        uint8_t d = *c->p;
+        if ((d >= '0' && d <= '9') || d == '-' || d == '+' || d == '.' || d == 'e' || d == 'E') c->p++;
+        else break;
+    }
+    if (c->p == start) {
+        c->failed = YES;
+        return nil;
+    }
+    node.kind = ZSLocJSONKindNumber;
+    node.text = [[NSString alloc] initWithBytes:start length:(NSUInteger)(c->p - start) encoding:NSASCIIStringEncoding];
+    return node;
+}
+
+static NSData *zs_loc_json_strip_bom(NSData *data) {
+    const uint8_t *bytes = data.bytes;
+    if (data.length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+        return [data subdataWithRange:NSMakeRange(3, data.length - 3)];
+    }
+    return data;
+}
+
+static ZSLocJSONNode *zs_loc_json_parse(NSData *data) {
+    if (data.length == 0) return nil;
+    ZSLocJSONCursor cursor = { data.bytes, (const uint8_t *)data.bytes + data.length, NO };
+    ZSLocJSONNode *root = zs_loc_json_value(&cursor, @"", -1);
+    if (!root || cursor.failed) return nil;
+    zs_loc_json_skip(&cursor);
+    if (cursor.p != cursor.end) return nil;
+    return root;
+}
+
+static void zs_loc_json_flatten(NSArray<ZSLocJSONNode *> *nodes, NSMutableArray<ZSLocJSONNode *> *out) {
+    for (ZSLocJSONNode *node in nodes) {
+        [out addObject:node];
+        if (node.expanded && node.isContainer) zs_loc_json_flatten(node.children, out);
+    }
+}
+
+static NSString *zs_loc_json_clip(NSString *text, NSUInteger limit) {
+    if (text.length <= limit) return text;
+    return [[text substringToIndex:limit] stringByAppendingString:@"…"];
+}
+
+static NSString *zs_loc_json_display_escape(NSString *text) {
+    text = [text stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    text = [text stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    return [text stringByReplacingOccurrencesOfString:@"\t" withString:@"\\t"];
+}
+
+static NSString *zs_loc_json_scalar_text(ZSLocJSONNode *node, NSUInteger limit) {
+    if (node.kind == ZSLocJSONKindString) {
+        return [NSString stringWithFormat:@"\"%@\"", zs_loc_json_clip(zs_loc_json_display_escape(node.text ?: @""), limit)];
+    }
+    return node.text ?: @"";
+}
+
+static NSString *zs_loc_json_preview(ZSLocJSONNode *node) {
+    if (node.kind != ZSLocJSONKindObject) return @"";
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (ZSLocJSONNode *child in node.children) {
+        if (child.isContainer) continue;
+        [parts addObject:[NSString stringWithFormat:@"%@: %@", child.key, zs_loc_json_scalar_text(child, 36)]];
+        if (parts.count == 2) break;
+    }
+    return [parts componentsJoinedByString:@"  "];
+}
+
+static NSAttributedString *zs_loc_json_attributed(ZSLocJSONNode *node) {
+    UIFont *font = zs_mono_font(10, UIFontWeightRegular);
+    UIColor *keyColor = [UIColor colorWithWhite:1 alpha:0.6];
+    UIColor *dimColor = [UIColor colorWithWhite:1 alpha:0.38];
+    NSMutableAttributedString *out = [[NSMutableAttributedString alloc] init];
+    void (^append)(NSString *, UIColor *) = ^(NSString *string, UIColor *color) {
+        [out appendAttributedString:[[NSAttributedString alloc] initWithString:string attributes:@{NSFontAttributeName: font, NSForegroundColorAttributeName: color}]];
+    };
+    append(node.isContainer ? (node.expanded ? @"▾ " : @"▸ ") : @"  ", dimColor);
+    if (node.depth >= 0) append([NSString stringWithFormat:@"%@: ", node.key ?: @""], keyColor);
+    switch (node.kind) {
+        case ZSLocJSONKindObject:
+        case ZSLocJSONKindArray: {
+            NSString *count = [NSString stringWithFormat:@"%lu", (unsigned long)node.children.count];
+            append(node.kind == ZSLocJSONKindObject ? [NSString stringWithFormat:@"{%@}", count] : [NSString stringWithFormat:@"[%@]", count], dimColor);
+            if (!node.expanded) {
+                NSString *preview = zs_loc_json_preview(node);
+                if (preview.length > 0) append([@"  " stringByAppendingString:preview], dimColor);
+            }
+            break;
+        }
+        case ZSLocJSONKindString:
+            append(zs_loc_json_scalar_text(node, 3000), zs_accent_green_color());
+            break;
+        case ZSLocJSONKindNumber:
+            append(node.text ?: @"", [UIColor colorWithRed:0.45 green:0.72 blue:1 alpha:1]);
+            break;
+        default:
+            append(node.text ?: @"", [UIColor colorWithRed:1 green:0.62 blue:0.35 alpha:1]);
+            break;
+    }
+    return out;
+}
+
+static NSString *zs_loc_json_quote(NSString *text) {
+    NSMutableString *out = [NSMutableString stringWithCapacity:text.length + 2];
+    [out appendString:@"\""];
+    for (NSUInteger i = 0; i < text.length; i++) {
+        unichar ch = [text characterAtIndex:i];
+        switch (ch) {
+            case '"': [out appendString:@"\\\""]; break;
+            case '\\': [out appendString:@"\\\\"]; break;
+            case '\n': [out appendString:@"\\n"]; break;
+            case '\r': [out appendString:@"\\r"]; break;
+            case '\t': [out appendString:@"\\t"]; break;
+            default:
+                if (ch < 0x20) [out appendFormat:@"\\u%04x", ch];
+                else [out appendFormat:@"%C", ch];
+                break;
+        }
+    }
+    [out appendString:@"\""];
+    return out;
+}
+
+static void zs_loc_json_write(ZSLocJSONNode *node, NSInteger indent, NSMutableString *out) {
+    if (node.kind == ZSLocJSONKindString) {
+        [out appendString:zs_loc_json_quote(node.text ?: @"")];
+        return;
+    }
+    if (!node.isContainer) {
+        [out appendString:node.text ?: @"null"];
+        return;
+    }
+    BOOL object = node.kind == ZSLocJSONKindObject;
+    if (node.children.count == 0) {
+        [out appendString:object ? @"{}" : @"[]"];
+        return;
+    }
+    NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)((indent + 1) * 2) withString:@" " startingAtIndex:0];
+    NSString *closePad = [@"" stringByPaddingToLength:(NSUInteger)(indent * 2) withString:@" " startingAtIndex:0];
+    [out appendString:object ? @"{\n" : @"[\n"];
+    for (NSUInteger i = 0; i < node.children.count; i++) {
+        ZSLocJSONNode *child = node.children[i];
+        [out appendString:pad];
+        if (object) [out appendFormat:@"%@: ", zs_loc_json_quote(child.key ?: @"")];
+        zs_loc_json_write(child, indent + 1, out);
+        [out appendString:i + 1 < node.children.count ? @",\n" : @"\n"];
+    }
+    [out appendString:closePad];
+    [out appendString:object ? @"}" : @"]"];
+}
+
+@interface ZSLocJSONCell : UITableViewCell
+@property (nonatomic, strong) UILabel *line;
+@property (nonatomic, strong) NSLayoutConstraint *leadingConstraint;
+@end
+
+@implementation ZSLocJSONCell
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.backgroundColor = UIColor.clearColor;
+        self.contentView.backgroundColor = UIColor.clearColor;
+        self.selectionStyle = UITableViewCellSelectionStyleDefault;
+        UIView *selected = [[UIView alloc] init];
+        selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+        self.selectedBackgroundView = selected;
+
+        _line = [[UILabel alloc] init];
+        _line.translatesAutoresizingMaskIntoConstraints = NO;
+        _line.numberOfLines = 0;
+        _line.lineBreakMode = NSLineBreakByWordWrapping;
+        [self.contentView addSubview:_line];
+        _leadingConstraint = [_line.leadingAnchor constraintEqualToAnchor:self.contentView.leadingAnchor constant:16];
+        [NSLayoutConstraint activateConstraints:@[
+            _leadingConstraint,
+            [_line.trailingAnchor constraintEqualToAnchor:self.contentView.trailingAnchor constant:-16],
+            [_line.topAnchor constraintEqualToAnchor:self.contentView.topAnchor constant:6],
+            [_line.bottomAnchor constraintEqualToAnchor:self.contentView.bottomAnchor constant:-6],
+        ]];
+    }
+    return self;
+}
+
+@end
+
 static NSString *zs_asset_explorer_bundle_key(ZSAssetExplorerBundle *bundle) {
     if (bundle.cabIdentifier.length > 0) return bundle.cabIdentifier;
     return bundle.filePath.lastPathComponent ?: @"";
@@ -6731,6 +7143,23 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, strong) NSArray<ZSFMODStream *> *assetExplorerFMODDisplayedStreams;
 @property (nonatomic, strong) ZSFMODStream *assetExplorerFMODStream;
 @property (nonatomic, strong) NSSet<NSString *> *assetExplorerFMODModdedNames;
+@property (nonatomic, assign) BOOL assetExplorerLocalizeMode;
+@property (nonatomic, assign) NSUInteger assetExplorerLocalizeGeneration;
+@property (nonatomic, assign) NSInteger assetExplorerLocalizeSortMode;
+@property (nonatomic, assign) BOOL assetExplorerLocalizeRawMode;
+@property (nonatomic, copy) NSString *assetExplorerLocalizeRoot;
+@property (nonatomic, copy) NSString *assetExplorerLocalizeDirectory;
+@property (nonatomic, copy) NSString *assetExplorerLocalizeFilePath;
+@property (nonatomic, copy) NSString *assetExplorerLocalizeRawText;
+@property (nonatomic, strong) NSArray<NSDictionary *> *assetExplorerLocalizeEntries;
+@property (nonatomic, strong) NSArray<NSDictionary *> *assetExplorerLocalizeDisplayedEntries;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *assetExplorerLocalizeOffsets;
+@property (nonatomic, strong) NSNumber *assetExplorerLocalizePendingOffset;
+@property (nonatomic, strong) NSData *assetExplorerLocalizeFileData;
+@property (nonatomic, strong) ZSLocJSONNode *assetExplorerLocalizeRootNode;
+@property (nonatomic, strong) NSMutableArray<ZSLocJSONNode *> *assetExplorerLocalizeVisibleRows;
+@property (nonatomic, strong) UITableView *assetExplorerLocalizeTableView;
+@property (nonatomic, strong) UITableView *assetExplorerLocalizeJSONTableView;
 @property (nonatomic, strong) UIView *memoryFullScreenOverlay;
 @property (nonatomic, strong) UIScrollView *memoryFullScreenScrollView;
 @property (nonatomic, strong) UIView *memoryFullScreenContentView;
@@ -9550,8 +9979,11 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
     self.browseFieldsContainer = nil;
 
     self.memoryUsageAnalyzeButton = nil;
+    [self zs_assetExplorerLocalizeReset];
     [self.assetExplorerFullScreenOverlay removeFromSuperview];
     self.assetExplorerFullScreenOverlay = nil;
+    self.assetExplorerLocalizeTableView = nil;
+    self.assetExplorerLocalizeJSONTableView = nil;
     self.assetExplorerTableView = nil;
     [self.assetExplorerThumbSource reset];
     self.assetExplorerThumbSource = nil;
@@ -18392,7 +18824,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
 - (void)zs_assetExplorerUpdateThumbnailGrid {
     UICollectionView *grid = self.assetExplorerThumbCollectionView;
     if (!grid) return;
-    BOOL available = !self.assetExplorerFMODMode && !self.assetExplorerHubVisible && [self zs_assetExplorerFilterIsImageKind];
+    BOOL available = !self.assetExplorerFMODMode && !self.assetExplorerLocalizeMode && !self.assetExplorerHubVisible && [self zs_assetExplorerFilterIsImageKind];
     BOOL enabled = available && self.assetExplorerThumbnailMode;
     BOOL show = enabled && !self.assetExplorerTextureOpen && !self.assetExplorerTableView.hidden;
 
@@ -18540,6 +18972,7 @@ static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void)
     self.assetExplorerFMODGeneration += 1;
     [ZSAssetExplorer unloadAllBundles];
     [self.assetExplorerThumbSource reset];
+    [self zs_assetExplorerLocalizeReset];
     self.assetExplorerHubVisible = NO;
     self.assetExplorerFMODMode = NO;
     self.assetExplorerFMODBankFile = nil;
@@ -18850,6 +19283,10 @@ static void zs_preview_axis_range(CGFloat clipLen, CGFloat winMin, CGFloat winMa
 }
 
 - (void)zs_assetExplorerModeChanged:(ZSModeSlider *)control {
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeModeChanged:control];
+        return;
+    }
     BOOL dataMode = control.selectedIndex == 1;
     if (dataMode == self.assetExplorerDataMode) return;
     self.assetExplorerDataMode = dataMode;
@@ -19123,6 +19560,10 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerTextureExportTapped {
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeExportTapped];
+        return;
+    }
     if (self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODExportStreamTapped];
         return;
@@ -19200,6 +19641,10 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerTextureBackTapped {
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeCloseFile];
+        return;
+    }
     if (self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODCloseStream];
         return;
@@ -19227,6 +19672,10 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerBackTapped {
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeBackTapped];
+        return;
+    }
     if (self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODBackTapped];
         return;
@@ -19557,6 +20006,10 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerSearchChanged:(UITextField *)field {
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeRefreshListResettingScroll:YES];
+        return;
+    }
     if (self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODRefreshListResettingScroll:YES];
         return;
@@ -19759,6 +20212,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerSyncControls {
     [self zs_assetExplorerUpdateThumbnailGrid];
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeSyncControls];
+        return;
+    }
     if (self.assetExplorerHubVisible || self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODSyncControls];
         return;
@@ -19782,6 +20239,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerRebuildMenus {
     if (!self.assetExplorerSortButton) return;
+    if (self.assetExplorerLocalizeMode) {
+        [self zs_assetExplorerLocalizeRebuildMenus];
+        return;
+    }
     if (self.assetExplorerFMODMode) {
         [self zs_assetExplorerFMODRebuildMenus];
         return;
@@ -20111,6 +20572,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (tableView == self.assetExplorerLocalizeTableView) return (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count;
+    if (tableView == self.assetExplorerLocalizeJSONTableView) return (NSInteger)self.assetExplorerLocalizeVisibleRows.count;
     if (tableView == self.assetExplorerFMODTableView) {
         return (NSInteger)(self.assetExplorerFMODBankFile ? self.assetExplorerFMODDisplayedStreams.count : self.assetExplorerFMODDisplayedBanks.count);
     }
@@ -20147,6 +20610,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeCellForTableView:tableView indexPath:indexPath];
+    if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODCellForTableView:tableView indexPath:indexPath];
     static NSString * const identifier = @"zs.asset.explorer.cell";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
@@ -20222,6 +20687,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point API_AVAILABLE(ios(13.0)) {
+    if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeContextMenuForIndexPath:indexPath];
+    if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerTableView && !self.assetExplorerSelectedBundle && !self.assetExplorerHubVisible) {
         NSInteger bundleIndex = [self zs_assetExplorerBundleIndexForIndexPath:indexPath];
@@ -20279,6 +20746,16 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView == self.assetExplorerLocalizeTableView) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        [self zs_assetExplorerLocalizeSelectRow:indexPath.row];
+        return;
+    }
+    if (tableView == self.assetExplorerLocalizeJSONTableView) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        [self zs_assetExplorerLocalizeToggleRow:indexPath.row];
+        return;
+    }
     if (tableView == self.assetExplorerFMODTableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         if (self.assetExplorerFMODBankFile) {
@@ -20384,6 +20861,28 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     [overlay addSubview:fmodTable];
     self.assetExplorerFMODTableView = fmodTable;
 
+    UITableView *localizeTable = [self zs_assetExplorerMakeLocalizeTableWithRowHeight:48];
+    [overlay addSubview:localizeTable];
+    self.assetExplorerLocalizeTableView = localizeTable;
+
+    UITableView *localizeJSONTable = [self zs_assetExplorerMakeLocalizeTableWithRowHeight:0];
+    [localizeJSONTable registerClass:[ZSLocJSONCell class] forCellReuseIdentifier:@"zs.asset.explorer.localize.json.cell"];
+    [overlay addSubview:localizeJSONTable];
+    self.assetExplorerLocalizeJSONTableView = localizeJSONTable;
+
+    UIView *localizeJSONBottom = self.assetExplorerTextureCaptionLabel;
+    [NSLayoutConstraint activateConstraints:@[
+        [localizeTable.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [localizeTable.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [localizeTable.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [localizeTable.bottomAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor],
+
+        [localizeJSONTable.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
+        [localizeJSONTable.leadingAnchor constraintEqualToAnchor:overlay.leadingAnchor],
+        [localizeJSONTable.trailingAnchor constraintEqualToAnchor:overlay.trailingAnchor],
+        [localizeJSONTable.bottomAnchor constraintEqualToAnchor:(localizeJSONBottom ? localizeJSONBottom.topAnchor : overlay.safeAreaLayoutGuide.bottomAnchor) constant:(localizeJSONBottom ? -8 : 0)],
+    ]];
+
     UIView *hub = [[UIView alloc] init];
     hub.translatesAutoresizingMaskIntoConstraints = NO;
     hub.backgroundColor = UIColor.clearColor;
@@ -20393,8 +20892,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
     UIButton *unityTile = [self zs_assetExplorerMakeHubTileWithSymbol:@"shippingbox.fill" title:@"Unity Asset Bundles" action:@selector(zs_assetExplorerHubUnityTapped)];
     UIButton *fmodTile = [self zs_assetExplorerMakeHubTileWithSymbol:@"waveform" title:@"FMOD Audio Banks" action:@selector(zs_assetExplorerHubFMODTapped)];
+    UIButton *localizeTile = [self zs_assetExplorerMakeHubTileWithSymbol:@"globe" title:@"Localizations" action:@selector(zs_assetExplorerHubLocalizeTapped)];
 
-    UIStackView *tiles = [[UIStackView alloc] initWithArrangedSubviews:@[unityTile, fmodTile]];
+    UIStackView *tiles = [[UIStackView alloc] initWithArrangedSubviews:@[unityTile, fmodTile, localizeTile]];
     tiles.translatesAutoresizingMaskIntoConstraints = NO;
     tiles.axis = UILayoutConstraintAxisHorizontal;
     tiles.alignment = UIStackViewAlignmentCenter;
@@ -20421,8 +20921,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         [unityTile.widthAnchor constraintEqualToAnchor:unityTile.heightAnchor],
         [fmodTile.widthAnchor constraintEqualToAnchor:fmodTile.heightAnchor],
         [fmodTile.heightAnchor constraintEqualToAnchor:unityTile.heightAnchor],
+        [localizeTile.widthAnchor constraintEqualToAnchor:localizeTile.heightAnchor],
+        [localizeTile.heightAnchor constraintEqualToAnchor:unityTile.heightAnchor],
         [unityTile.heightAnchor constraintLessThanOrEqualToAnchor:hub.heightAnchor multiplier:0.92],
-        [unityTile.widthAnchor constraintLessThanOrEqualToAnchor:hub.widthAnchor multiplier:0.5 constant:-14],
+        [unityTile.widthAnchor constraintLessThanOrEqualToAnchor:hub.widthAnchor multiplier:0.3333 constant:-11],
         preferredSize,
     ]];
 }
@@ -20444,6 +20946,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerFMODMode = NO;
     self.assetExplorerHubVisible = YES;
     self.assetExplorerStatusMessage = nil;
+    [self zs_assetExplorerLocalizeReset];
     [self zs_assetExplorerResetViewState];
     [self zs_assetExplorerSetTextureModeVisible:NO];
     [self.assetExplorerFMODTableView reloadData];
@@ -20478,6 +20981,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerHubView.hidden = !hub;
     self.assetExplorerTableView.hidden = YES;
     self.assetExplorerFMODTableView.hidden = hub || detail;
+    self.assetExplorerLocalizeTableView.hidden = YES;
+    self.assetExplorerLocalizeJSONTableView.hidden = YES;
     self.assetExplorerTextView.hidden = !detail;
     self.assetExplorerTitleLabel.hidden = detail;
     self.assetExplorerStatusLabel.hidden = hub || detail;
@@ -20895,6 +21400,544 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             [haptic impactOccurred];
         });
     });
+}
+
+#pragma mark Asset explorer localizations
+
+- (UITableView *)zs_assetExplorerMakeLocalizeTableWithRowHeight:(CGFloat)rowHeight {
+    UITableView *table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    table.translatesAutoresizingMaskIntoConstraints = NO;
+    table.backgroundColor = UIColor.clearColor;
+    table.separatorColor = [UIColor colorWithWhite:1 alpha:0.08];
+    table.separatorInset = UIEdgeInsetsMake(0, kPanelPadding, 0, kPanelPadding);
+    table.showsVerticalScrollIndicator = NO;
+    table.showsHorizontalScrollIndicator = NO;
+    if (@available(iOS 15.0, *)) table.sectionHeaderTopPadding = 0;
+    table.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    table.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    if (rowHeight > 0) {
+        table.rowHeight = rowHeight;
+        table.estimatedRowHeight = rowHeight;
+    } else {
+        table.rowHeight = UITableViewAutomaticDimension;
+        table.estimatedRowHeight = 30;
+    }
+    table.dataSource = self;
+    table.delegate = self;
+    table.hidden = YES;
+    return table;
+}
+
+- (void)zs_assetExplorerLocalizeRestoreModeControl {
+    ZSModeSlider *control = self.assetExplorerModeControl;
+    if (!control) return;
+    if (![control.labels.firstObject isEqualToString:@"Preview"]) control.labels = @[@"Preview", @"Data"];
+    control.selectedIndex = 0;
+    control.hidden = YES;
+}
+
+- (void)zs_assetExplorerLocalizeReset {
+    self.assetExplorerLocalizeGeneration += 1;
+    self.assetExplorerLocalizeMode = NO;
+    self.assetExplorerLocalizeRoot = nil;
+    self.assetExplorerLocalizeDirectory = nil;
+    self.assetExplorerLocalizeFilePath = nil;
+    self.assetExplorerLocalizeRawText = nil;
+    self.assetExplorerLocalizeRawMode = NO;
+    self.assetExplorerLocalizeEntries = @[];
+    self.assetExplorerLocalizeDisplayedEntries = @[];
+    self.assetExplorerLocalizeOffsets = nil;
+    self.assetExplorerLocalizePendingOffset = nil;
+    self.assetExplorerLocalizeFileData = nil;
+    self.assetExplorerLocalizeRootNode = nil;
+    self.assetExplorerLocalizeVisibleRows = nil;
+    self.assetExplorerLocalizeSortMode = 0;
+    [self.assetExplorerLocalizeTableView reloadData];
+    [self.assetExplorerLocalizeJSONTableView reloadData];
+    self.assetExplorerLocalizeTableView.hidden = YES;
+    self.assetExplorerLocalizeJSONTableView.hidden = YES;
+    [self zs_assetExplorerLocalizeRestoreModeControl];
+}
+
+- (NSString *)zs_assetExplorerLocalizeRawString {
+    if (self.assetExplorerLocalizeRawText) return self.assetExplorerLocalizeRawText;
+    NSData *data = self.assetExplorerLocalizeFileData;
+    if (!data) return @"";
+    NSData *body = zs_loc_json_strip_bom(data);
+    NSString *text = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: [[NSString alloc] initWithData:body encoding:NSISOLatin1StringEncoding] ?: @"";
+    self.assetExplorerLocalizeRawText = text;
+    return text;
+}
+
+- (void)zs_assetExplorerLocalizeApplyLevel {
+    BOOL inFile = self.assetExplorerLocalizeFilePath.length > 0;
+    BOOL hasData = self.assetExplorerLocalizeFileData != nil;
+    BOOL parsed = self.assetExplorerLocalizeRootNode != nil;
+    BOOL showJSON = inFile && hasData && parsed && !self.assetExplorerLocalizeRawMode;
+    BOOL showRaw = inFile && hasData && !showJSON;
+    BOOL jsonWasHidden = self.assetExplorerLocalizeJSONTableView.hidden;
+    BOOL rawWasHidden = self.assetExplorerTextView.hidden;
+
+    self.assetExplorerHubView.hidden = YES;
+    self.assetExplorerTableView.hidden = YES;
+    self.assetExplorerFMODTableView.hidden = YES;
+    self.assetExplorerLocalizeTableView.hidden = inFile;
+    self.assetExplorerLocalizeJSONTableView.hidden = !showJSON;
+    self.assetExplorerTextView.hidden = !showRaw;
+    self.assetExplorerTextureImageView.hidden = YES;
+    self.assetExplorerBackdropView.hidden = YES;
+    self.assetExplorerTitleLabel.hidden = inFile;
+    self.assetExplorerStatusLabel.hidden = inFile;
+    self.assetExplorerCloseButton.hidden = !inFile;
+    self.assetExplorerBackButton.hidden = inFile;
+    self.assetExplorerTextureBackButton.hidden = !inFile;
+    self.assetExplorerTextureExportButton.hidden = !inFile;
+    self.assetExplorerTextureExportButton.enabled = inFile && hasData;
+    self.assetExplorerTextureExportButton.alpha = (inFile && hasData) ? 1 : 0.35;
+    self.assetExplorerTextureCaptionLabel.hidden = !inFile;
+    self.assetExplorerModeControl.hidden = !(inFile && hasData && parsed);
+    [self.assetExplorerModeControl setGlassEnabled:(inFile && hasData && parsed)];
+    [self.assetExplorerModeControl setSelectedIndex:self.assetExplorerLocalizeRawMode ? 1 : 0 animated:NO];
+
+    if (showRaw && rawWasHidden) {
+        self.assetExplorerTextView.text = [self zs_assetExplorerLocalizeRawString];
+        [self.assetExplorerTextView setContentOffset:CGPointZero animated:NO];
+    }
+    if (showJSON && jsonWasHidden) {
+        [self.assetExplorerLocalizeJSONTableView reloadData];
+        [self.assetExplorerLocalizeJSONTableView setContentOffset:CGPointZero animated:NO];
+    }
+
+    NSString *title = @"Localizations";
+    NSString *root = self.assetExplorerLocalizeRoot;
+    NSString *directory = self.assetExplorerLocalizeDirectory;
+    if (root.length > 0 && directory.length > root.length) {
+        NSString *relative = [directory substringFromIndex:root.length];
+        while ([relative hasPrefix:@"/"]) relative = [relative substringFromIndex:1];
+        if (relative.length > 0) title = relative;
+    }
+    self.assetExplorerTitleLabel.text = title;
+    [self zs_assetExplorerSyncControls];
+}
+
+- (void)zs_assetExplorerLocalizeSyncControls {
+    BOOL inFile = self.assetExplorerLocalizeFilePath.length > 0;
+    self.assetExplorerSearchContainer.hidden = inFile;
+    self.assetExplorerControlsStack.hidden = inFile;
+    self.assetExplorerFilterButton.hidden = YES;
+    self.assetExplorerSortButton.hidden = NO;
+    self.assetExplorerShareButton.hidden = YES;
+    self.assetExplorerSearchField.attributedPlaceholder =
+        [[NSAttributedString alloc] initWithString:@"Search files"
+                                         attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
+    if (!inFile) [self zs_assetExplorerLocalizeRebuildMenus];
+}
+
+- (void)zs_assetExplorerLocalizeRebuildMenus {
+    if (!self.assetExplorerSortButton) return;
+    __weak typeof(self) weakSelf = self;
+    NSArray<NSString *> *titles = @[@"Name · A–Z", @"Name · Z–A", @"Size · Largest first", @"Size · Smallest first"];
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
+        UIAction *action = [UIAction actionWithTitle:titles[(NSUInteger)i] image:nil identifier:nil handler:^(__kindof UIAction *selected) {
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.assetExplorerLocalizeSortMode = i;
+            [strongSelf zs_assetExplorerLocalizeRefreshListResettingScroll:YES];
+            [strongSelf zs_assetExplorerLocalizeRebuildMenus];
+        }];
+        action.state = self.assetExplorerLocalizeSortMode == i ? UIMenuElementStateOn : UIMenuElementStateOff;
+        [items addObject:action];
+    }
+    NSInteger desiredSortStyle = self.assetExplorerLocalizeSortMode != 0 ? 1 : 0;
+    if (self.assetExplorerSortButton.tag != desiredSortStyle) {
+        UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+        UIColor *tint = desiredSortStyle ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.9];
+        zs_style_pill_icon_button_as_native_glass(self.assetExplorerSortButton, [UIImage systemImageNamed:@"arrow.up.arrow.down" withConfiguration:symbolConfig], tint);
+        self.assetExplorerSortButton.tag = desiredSortStyle;
+    }
+    self.assetExplorerSortButton.menu = [UIMenu menuWithTitle:@"Sort" children:items];
+    self.assetExplorerSortButton.showsMenuAsPrimaryAction = YES;
+}
+
+- (void)zs_assetExplorerHubLocalizeTapped {
+    if (!self.assetExplorerHubVisible) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    self.assetExplorerHubVisible = NO;
+    self.assetExplorerFMODMode = NO;
+    self.assetExplorerLocalizeMode = YES;
+    NSString *root = [LocalizationTransplant localizeDirectory] ?: @"";
+    self.assetExplorerLocalizeRoot = root;
+    self.assetExplorerLocalizeOffsets = [NSMutableArray array];
+    self.assetExplorerLocalizePendingOffset = nil;
+    [self zs_assetExplorerLocalizeOpenDirectory:root];
+}
+
+- (void)zs_assetExplorerLocalizeOpenDirectory:(NSString *)path {
+    [self.assetExplorerSearchField resignFirstResponder];
+    self.assetExplorerLocalizeGeneration += 1;
+    NSUInteger generation = self.assetExplorerLocalizeGeneration;
+    self.assetExplorerLocalizeDirectory = path ?: @"";
+    self.assetExplorerLocalizeFilePath = nil;
+    self.assetExplorerLocalizeEntries = @[];
+    self.assetExplorerLocalizeDisplayedEntries = @[];
+    self.assetExplorerLocalizeSortMode = 0;
+    self.assetExplorerSearchField.text = @"";
+    self.assetExplorerStatusMessage = @"Loading…";
+    [self zs_assetExplorerLocalizeApplyLevel];
+    [self zs_assetExplorerLocalizeRefreshListResettingScroll:YES];
+
+    __weak typeof(self) weakSelf = self;
+    NSString *directory = [path copy] ?: @"";
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSFileManager *fileManager = NSFileManager.defaultManager;
+        BOOL isDirectory = NO;
+        NSString *message = nil;
+        NSMutableArray<NSDictionary *> *entries = [NSMutableArray array];
+        if (directory.length == 0 || ![fileManager fileExistsAtPath:directory isDirectory:&isDirectory] || !isDirectory) {
+            message = @"Localize folder not found";
+        } else {
+            NSArray<NSString *> *names = [fileManager contentsOfDirectoryAtPath:directory error:nil] ?: @[];
+            for (NSString *name in names) {
+                if ([name hasPrefix:@"."]) continue;
+                NSString *full = [directory stringByAppendingPathComponent:name];
+                struct stat fileStat;
+                if (stat(full.fileSystemRepresentation, &fileStat) != 0) continue;
+                BOOL entryIsDirectory = S_ISDIR(fileStat.st_mode);
+                NSInteger count = entryIsDirectory ? (NSInteger)[[fileManager contentsOfDirectoryAtPath:full error:nil] count] : 0;
+                [entries addObject:@{@"name": name, @"path": full, @"dir": @(entryIsDirectory), @"size": @((long long)fileStat.st_size), @"count": @(count)}];
+            }
+            if (entries.count == 0) message = @"Empty folder";
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerLocalizeMode || strongSelf.assetExplorerLocalizeGeneration != generation) return;
+            strongSelf.assetExplorerLocalizeEntries = entries;
+            strongSelf.assetExplorerStatusMessage = message;
+            NSNumber *pending = strongSelf.assetExplorerLocalizePendingOffset;
+            strongSelf.assetExplorerLocalizePendingOffset = nil;
+            [strongSelf zs_assetExplorerLocalizeRefreshListResettingScroll:pending == nil];
+            if (pending) {
+                UITableView *table = strongSelf.assetExplorerLocalizeTableView;
+                [table layoutIfNeeded];
+                CGFloat maxOffset = MAX(0, table.contentSize.height - table.bounds.size.height);
+                [table setContentOffset:CGPointMake(0, MIN(pending.doubleValue, maxOffset)) animated:NO];
+            }
+        });
+    });
+}
+
+- (void)zs_assetExplorerLocalizeRefreshListResettingScroll:(BOOL)resetScroll {
+    NSString *query = [self.assetExplorerSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    NSInteger mode = self.assetExplorerLocalizeSortMode;
+    NSMutableArray<NSDictionary *> *matches = [NSMutableArray array];
+    for (NSDictionary *entry in self.assetExplorerLocalizeEntries) {
+        if (query.length > 0 && ![entry[@"name"] localizedCaseInsensitiveContainsString:query]) continue;
+        [matches addObject:entry];
+    }
+    self.assetExplorerLocalizeDisplayedEntries = [matches sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        BOOL aDirectory = [a[@"dir"] boolValue];
+        BOOL bDirectory = [b[@"dir"] boolValue];
+        if (aDirectory != bDirectory) return aDirectory ? NSOrderedAscending : NSOrderedDescending;
+        if (!aDirectory && (mode == 2 || mode == 3)) {
+            long long sizeA = [a[@"size"] longLongValue];
+            long long sizeB = [b[@"size"] longLongValue];
+            if (sizeA != sizeB) {
+                BOOL aLarger = sizeA > sizeB;
+                return (aLarger == (mode == 2)) ? NSOrderedAscending : NSOrderedDescending;
+            }
+        }
+        NSComparisonResult result = [a[@"name"] compare:b[@"name"] options:NSCaseInsensitiveSearch | NSNumericSearch];
+        if (mode == 1) {
+            if (result == NSOrderedAscending) return NSOrderedDescending;
+            if (result == NSOrderedDescending) return NSOrderedAscending;
+        }
+        return result;
+    }];
+
+    NSUInteger shown = self.assetExplorerLocalizeDisplayedEntries.count;
+    NSUInteger total = self.assetExplorerLocalizeEntries.count;
+    NSString *message = self.assetExplorerStatusMessage;
+    if (message.length == 0) {
+        NSString *plural = total == 1 ? @"" : @"s";
+        message = shown == total
+            ? [NSString stringWithFormat:@"%lu item%@", (unsigned long)total, plural]
+            : [NSString stringWithFormat:@"%lu of %lu item%@", (unsigned long)shown, (unsigned long)total, plural];
+    }
+    self.assetExplorerStatusLabel.text = message;
+    [self.assetExplorerLocalizeTableView reloadData];
+    if (resetScroll) [self.assetExplorerLocalizeTableView setContentOffset:CGPointZero animated:NO];
+}
+
+- (UITableViewCell *)zs_assetExplorerLocalizeCellForTableView:(UITableView *)tableView indexPath:(NSIndexPath *)indexPath {
+    static NSString * const identifier = @"zs.asset.explorer.localize.cell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:identifier];
+
+    cell.backgroundColor = UIColor.clearColor;
+    cell.contentView.backgroundColor = UIColor.clearColor;
+    cell.textLabel.font = zs_mono_font(11, UIFontWeightRegular);
+    cell.textLabel.textColor = [UIColor colorWithWhite:0.94 alpha:1];
+    cell.textLabel.numberOfLines = 1;
+    cell.textLabel.adjustsFontSizeToFitWidth = YES;
+    cell.textLabel.minimumScaleFactor = 0.65;
+    cell.detailTextLabel.font = zs_mono_font(9, UIFontWeightRegular);
+    cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.38];
+    cell.detailTextLabel.numberOfLines = 1;
+    cell.detailTextLabel.adjustsFontSizeToFitWidth = YES;
+    cell.detailTextLabel.minimumScaleFactor = 0.5;
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    cell.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
+    UIView *selected = [[UIView alloc] init];
+    selected.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+    cell.selectedBackgroundView = selected;
+
+    NSDictionary *entry = indexPath.row < (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count ? self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)indexPath.row] : nil;
+    BOOL isDirectory = [entry[@"dir"] boolValue];
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightRegular];
+    cell.imageView.image = [UIImage systemImageNamed:(isDirectory ? @"folder" : @"doc.text") withConfiguration:symbolConfig];
+    cell.imageView.tintColor = [UIColor colorWithWhite:1 alpha:0.5];
+    cell.textLabel.text = entry[@"name"] ?: @"";
+    if (isDirectory) {
+        NSInteger count = [entry[@"count"] integerValue];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld item%@", (long)count, count == 1 ? @"" : @"s"];
+    } else {
+        cell.detailTextLabel.text = [NSByteCountFormatter stringFromByteCount:[entry[@"size"] longLongValue] countStyle:NSByteCountFormatterCountStyleFile];
+    }
+    return cell;
+}
+
+- (void)zs_assetExplorerLocalizeSelectRow:(NSInteger)row {
+    if (row < 0 || row >= (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count) return;
+    NSDictionary *entry = self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)row];
+    if ([entry[@"dir"] boolValue]) {
+        NSString *query = [self.assetExplorerSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+        CGFloat offset = query.length == 0 ? self.assetExplorerLocalizeTableView.contentOffset.y : 0;
+        if (!self.assetExplorerLocalizeOffsets) self.assetExplorerLocalizeOffsets = [NSMutableArray array];
+        [self.assetExplorerLocalizeOffsets addObject:@(offset)];
+        self.assetExplorerLocalizePendingOffset = nil;
+        [self zs_assetExplorerLocalizeOpenDirectory:entry[@"path"]];
+        return;
+    }
+    [self zs_assetExplorerLocalizeOpenFile:entry];
+}
+
+- (void)zs_assetExplorerLocalizeOpenFile:(NSDictionary *)entry {
+    NSString *path = [entry[@"path"] copy];
+    if (path.length == 0) return;
+    [self.assetExplorerSearchField resignFirstResponder];
+    self.assetExplorerLocalizeGeneration += 1;
+    NSUInteger generation = self.assetExplorerLocalizeGeneration;
+    self.assetExplorerLocalizeFilePath = path;
+    self.assetExplorerLocalizeFileData = nil;
+    self.assetExplorerLocalizeRawText = nil;
+    self.assetExplorerLocalizeRootNode = nil;
+    self.assetExplorerLocalizeVisibleRows = [NSMutableArray array];
+    self.assetExplorerLocalizeRawMode = NO;
+    self.assetExplorerTextView.text = @"";
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    self.assetExplorerTextureMessageLabel.text = nil;
+    ZSModeSlider *control = self.assetExplorerModeControl;
+    if (![control.labels.firstObject isEqualToString:@".json"]) control.labels = @[@".json", @"raw"];
+    control.selectedIndex = 0;
+    self.assetExplorerTextureCaptionLabel.text = path.lastPathComponent;
+    [self.assetExplorerTextureSpinner startAnimating];
+    [self zs_assetExplorerLocalizeApplyLevel];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:&error];
+        ZSLocJSONNode *root = data ? zs_loc_json_parse(zs_loc_json_strip_bom(data)) : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || !strongSelf.assetExplorerLocalizeMode || strongSelf.assetExplorerLocalizeGeneration != generation) return;
+            [strongSelf.assetExplorerTextureSpinner stopAnimating];
+            if (!data) {
+                strongSelf.assetExplorerTextureMessageLabel.text = error.localizedDescription ?: @"Couldn't read this file.";
+                strongSelf.assetExplorerTextureMessageLabel.hidden = NO;
+                return;
+            }
+            strongSelf.assetExplorerLocalizeFileData = data;
+            strongSelf.assetExplorerLocalizeRootNode = root;
+            NSMutableArray<ZSLocJSONNode *> *rows = [NSMutableArray array];
+            if (root) {
+                NSArray<ZSLocJSONNode *> *top = root.isContainer ? root.children : @[root];
+                if (top.count == 1 && top[0].isContainer && top[0].children.count > 0) top[0].expanded = YES;
+                zs_loc_json_flatten(top, rows);
+            } else {
+                strongSelf.assetExplorerLocalizeRawMode = YES;
+            }
+            strongSelf.assetExplorerLocalizeVisibleRows = rows;
+            NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)data.length countStyle:NSByteCountFormatterCountStyleFile];
+            strongSelf.assetExplorerTextureCaptionLabel.text = root
+                ? [NSString stringWithFormat:@"%@  •  %@", path.lastPathComponent, size]
+                : [NSString stringWithFormat:@"%@  •  %@  •  not valid JSON, showing raw", path.lastPathComponent, size];
+            [strongSelf zs_assetExplorerLocalizeApplyLevel];
+        });
+    });
+}
+
+- (void)zs_assetExplorerLocalizeCloseFile {
+    if (self.assetExplorerLocalizeFilePath.length == 0) return;
+    self.assetExplorerLocalizeGeneration += 1;
+    [self.assetExplorerTextureSpinner stopAnimating];
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    self.assetExplorerTextureMessageLabel.text = nil;
+    self.assetExplorerLocalizeFilePath = nil;
+    self.assetExplorerLocalizeFileData = nil;
+    self.assetExplorerLocalizeRawText = nil;
+    self.assetExplorerLocalizeRootNode = nil;
+    self.assetExplorerLocalizeVisibleRows = nil;
+    self.assetExplorerLocalizeRawMode = NO;
+    self.assetExplorerTextView.text = @"";
+    [self zs_assetExplorerLocalizeRestoreModeControl];
+    [self zs_assetExplorerLocalizeApplyLevel];
+    [self zs_assetExplorerLocalizeRefreshListResettingScroll:NO];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_assetExplorerLocalizeModeChanged:(ZSModeSlider *)control {
+    BOOL raw = control.selectedIndex == 1;
+    if (raw == self.assetExplorerLocalizeRawMode) return;
+    self.assetExplorerLocalizeRawMode = raw;
+    [self zs_assetExplorerLocalizeApplyLevel];
+}
+
+- (void)zs_assetExplorerLocalizeBackTapped {
+    [self.assetExplorerSearchField resignFirstResponder];
+    NSString *root = self.assetExplorerLocalizeRoot ?: @"";
+    NSString *directory = self.assetExplorerLocalizeDirectory ?: @"";
+    if (directory.length == 0 || [directory isEqualToString:root]) {
+        [self zs_assetExplorerShowHub];
+        UIImpactFeedbackGenerator *hubHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [hubHaptic impactOccurred];
+        return;
+    }
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    NSNumber *offset = self.assetExplorerLocalizeOffsets.lastObject;
+    if (offset) [self.assetExplorerLocalizeOffsets removeLastObject];
+    self.assetExplorerLocalizePendingOffset = offset;
+    [self zs_assetExplorerLocalizeOpenDirectory:[directory stringByDeletingLastPathComponent]];
+}
+
+- (void)zs_assetExplorerLocalizeExportTapped {
+    NSData *data = self.assetExplorerLocalizeFileData;
+    NSString *name = [self.assetExplorerLocalizeFilePath.lastPathComponent copy];
+    if (!data || name.length == 0) return;
+    [self zs_assetExplorerFMODPerformExportWithSourceView:self.assetExplorerTextureExportButton writer:^NSString *(NSString *directory, NSError **error) {
+        NSString *destination = [directory stringByAppendingPathComponent:name];
+        return [data writeToFile:destination options:NSDataWritingAtomic error:error] ? destination : nil;
+    }];
+}
+
+- (UIContextMenuConfiguration *)zs_assetExplorerLocalizeContextMenuForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(13.0)) {
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.assetExplorerLocalizeDisplayedEntries.count) return nil;
+    NSDictionary *entry = self.assetExplorerLocalizeDisplayedEntries[(NSUInteger)indexPath.row];
+    if ([entry[@"dir"] boolValue]) return nil;
+    NSString *sourcePath = [entry[@"path"] copy];
+    NSString *name = [entry[@"name"] copy];
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+        UIAction *exportAction = [UIAction actionWithTitle:@"Export" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
+            [weakSelf zs_assetExplorerFMODPerformExportWithSourceView:nil writer:^NSString *(NSString *directory, NSError **error) {
+                NSString *destination = [directory stringByAppendingPathComponent:name];
+                return [NSFileManager.defaultManager copyItemAtPath:sourcePath toPath:destination error:error] ? destination : nil;
+            }];
+        }];
+        return [UIMenu menuWithTitle:@"" children:@[exportAction]];
+    }];
+}
+
+- (UITableViewCell *)zs_assetExplorerLocalizeJSONCellForTableView:(UITableView *)tableView indexPath:(NSIndexPath *)indexPath {
+    static NSString * const identifier = @"zs.asset.explorer.localize.json.cell";
+    ZSLocJSONCell *cell = [tableView dequeueReusableCellWithIdentifier:identifier];
+    if (!cell) cell = [[ZSLocJSONCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:identifier];
+    NSArray<ZSLocJSONNode *> *rows = self.assetExplorerLocalizeVisibleRows;
+    ZSLocJSONNode *node = indexPath.row < (NSInteger)rows.count ? rows[(NSUInteger)indexPath.row] : nil;
+    if (!node) {
+        cell.line.attributedText = nil;
+        return cell;
+    }
+    cell.leadingConstraint.constant = 16 + MAX(node.depth, 0) * 12;
+    cell.line.attributedText = zs_loc_json_attributed(node);
+    return cell;
+}
+
+- (void)zs_assetExplorerLocalizeToggleRow:(NSInteger)row {
+    NSMutableArray<ZSLocJSONNode *> *rows = self.assetExplorerLocalizeVisibleRows;
+    UITableView *table = self.assetExplorerLocalizeJSONTableView;
+    if (!rows || !table || row < 0 || row >= (NSInteger)rows.count) return;
+    ZSLocJSONNode *node = rows[(NSUInteger)row];
+    if (!node.isContainer || node.children.count == 0) return;
+
+    NSIndexPath *rowPath = [NSIndexPath indexPathForRow:row inSection:0];
+    if (node.expanded) {
+        NSInteger end = row + 1;
+        while (end < (NSInteger)rows.count && rows[(NSUInteger)end].depth > node.depth) end++;
+        NSRange range = NSMakeRange((NSUInteger)(row + 1), (NSUInteger)(end - row - 1));
+        node.expanded = NO;
+        [rows removeObjectsInRange:range];
+        if (range.length == 0) {
+            [table reloadRowsAtIndexPaths:@[rowPath] withRowAnimation:UITableViewRowAnimationNone];
+        } else if (range.length > 300) {
+            [table reloadData];
+        } else {
+            NSMutableArray<NSIndexPath *> *removed = [NSMutableArray arrayWithCapacity:range.length];
+            for (NSUInteger i = 0; i < range.length; i++) [removed addObject:[NSIndexPath indexPathForRow:(NSInteger)(range.location + i) inSection:0]];
+            [table performBatchUpdates:^{
+                [table deleteRowsAtIndexPaths:removed withRowAnimation:UITableViewRowAnimationFade];
+            } completion:nil];
+            UITableViewCell *cell = [table cellForRowAtIndexPath:rowPath];
+            if ([cell isKindOfClass:[ZSLocJSONCell class]]) ((ZSLocJSONCell *)cell).line.attributedText = zs_loc_json_attributed(node);
+        }
+        return;
+    }
+
+    node.expanded = YES;
+    NSMutableArray<ZSLocJSONNode *> *added = [NSMutableArray array];
+    zs_loc_json_flatten(node.children, added);
+    NSIndexSet *positions = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange((NSUInteger)(row + 1), added.count)];
+    [rows insertObjects:added atIndexes:positions];
+    if (added.count > 300) {
+        [table reloadData];
+        return;
+    }
+    NSMutableArray<NSIndexPath *> *inserted = [NSMutableArray arrayWithCapacity:added.count];
+    for (NSUInteger i = 0; i < added.count; i++) [inserted addObject:[NSIndexPath indexPathForRow:row + 1 + (NSInteger)i inSection:0]];
+    [table performBatchUpdates:^{
+        [table insertRowsAtIndexPaths:inserted withRowAnimation:UITableViewRowAnimationFade];
+    } completion:nil];
+    UITableViewCell *cell = [table cellForRowAtIndexPath:rowPath];
+    if ([cell isKindOfClass:[ZSLocJSONCell class]]) ((ZSLocJSONCell *)cell).line.attributedText = zs_loc_json_attributed(node);
+}
+
+- (UIContextMenuConfiguration *)zs_assetExplorerLocalizeJSONContextMenuForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(13.0)) {
+    NSArray<ZSLocJSONNode *> *rows = self.assetExplorerLocalizeVisibleRows;
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)rows.count) return nil;
+    ZSLocJSONNode *node = rows[(NSUInteger)indexPath.row];
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+        NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+        if (node.depth >= 0 && node.key.length > 0) {
+            [items addObject:[UIAction actionWithTitle:@"Copy Key" image:[UIImage systemImageNamed:@"key"] identifier:nil handler:^(__kindof UIAction *action) {
+                UIPasteboard.generalPasteboard.string = node.key;
+            }]];
+        }
+        [items addObject:[UIAction actionWithTitle:@"Copy Value" image:[UIImage systemImageNamed:@"doc.on.doc"] identifier:nil handler:^(__kindof UIAction *action) {
+            if (node.isContainer) {
+                NSMutableString *text = [NSMutableString string];
+                zs_loc_json_write(node, 0, text);
+                UIPasteboard.generalPasteboard.string = text;
+            } else {
+                UIPasteboard.generalPasteboard.string = node.text ?: @"";
+            }
+        }]];
+        return [UIMenu menuWithTitle:@"" children:items];
+    }];
 }
 
 #pragma mark Memory full-screen viewer
