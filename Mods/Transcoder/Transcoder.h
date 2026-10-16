@@ -29,6 +29,7 @@ typedef NS_ENUM(NSInteger, ZTranscoderServiceErrorCode) {
 @property (nonatomic, copy, nullable) NSString *runURL;
 @property (nonatomic, assign, readonly) BOOL alreadyComplete;
 @property (nonatomic, assign) unsigned long long compressedByteSize;
+@property (nonatomic, copy, nullable) NSString *warningMessage;
 - (NSDictionary<NSString *, NSString *> *)dictionaryRepresentation;
 + (nullable instancetype)handleFromDictionaryRepresentation:(NSDictionary<NSString *, NSString *> *)dict;
 @end
