@@ -571,6 +571,20 @@ static void zs_clear_button_configuration(UIButton *button) {
 static const CGFloat kZSGlassButtonCornerRadius = 8;
 static const void *kZSButtonGlassViewKey = &kZSButtonGlassViewKey;
 
+@interface ZSGlassHostButton : UIButton
+@end
+
+@implementation ZSGlassHostButton
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    UIVisualEffectView *glass = objc_getAssociatedObject(self, kZSButtonGlassViewKey);
+    if (!glass) return;
+    if (glass.superview == self && [self.subviews firstObject] != glass) [self sendSubviewToBack:glass];
+    if (self.imageView.superview == self) [self bringSubviewToFront:self.imageView];
+    if (self.titleLabel.superview == self) [self bringSubviewToFront:self.titleLabel];
+}
+@end
+
 static void zs_install_slash_glass_on_button(UIButton *button, UIColor *tintColor) {
     if (!button) return;
     zs_clear_button_configuration(button);
@@ -596,6 +610,10 @@ static void zs_install_slash_glass_on_button(UIButton *button, UIColor *tintColo
     } else {
         [button sendSubviewToBack:glass];
     }
+    if (object_getClass(button) == [UIButton class]) {
+        object_setClass(button, [ZSGlassHostButton class]);
+    }
+    [button setNeedsLayout];
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
 
