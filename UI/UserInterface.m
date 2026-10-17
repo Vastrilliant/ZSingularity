@@ -5143,13 +5143,14 @@ static BOOL zs_mods_entry_is_re_placeable(ModAssetLibraryEntry *entry) {
 }
 
 static NSArray<NSDictionary<NSString *, id> *> *zs_mods_file_options(ModAssetLibraryEntry *entry) {
-    BOOL rePlaceable = zs_mods_entry_is_re_placeable(entry);
-    return @[
-        @{@"title": @"Cache bundle", @"symbol": @"archivebox",              @"destructive": @NO},
-        @{@"title": @"Add remark",   @"symbol": @"quote.bubble",            @"destructive": @NO},
-        @{@"title": @"Re-place",     @"symbol": @"arrow.triangle.2.circlepath", @"destructive": @NO, @"disabled": @(!rePlaceable)},
-        @{@"title": @"Delete",       @"symbol": @"trash",                   @"destructive": @YES},
-    ];
+    NSMutableArray<NSDictionary<NSString *, id> *> *options = [NSMutableArray array];
+    [options addObject:@{@"title": @"Cache bundle", @"symbol": @"archivebox", @"destructive": @NO}];
+    [options addObject:@{@"title": @"Add remark", @"symbol": @"quote.bubble", @"destructive": @NO}];
+    if ([ZSModsPaths fontKindForFileName:entry.fileName] == ZSFontKindUnknown) {
+        [options addObject:@{@"title": @"Re-place", @"symbol": @"arrow.triangle.2.circlepath", @"destructive": @NO, @"disabled": @(!zs_mods_entry_is_re_placeable(entry))}];
+    }
+    [options addObject:@{@"title": @"Delete", @"symbol": @"trash", @"destructive": @YES}];
+    return options;
 }
 
 static NSArray<NSDictionary<NSString *, id> *> *zs_mods_stored_bundle_file_options(void) {
@@ -16601,10 +16602,6 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         return [BankTransplant transplantAndSwapModdedBankAtURL:[NSURL fileURLWithPath:entry.path] error:outError];
     }
 
-    if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) {
-        return [ModAssetLibrary activateFontForEntry:entry error:outError];
-    }
-
     if (!entry.isAssetBundle) {
         if (outError) *outError = [NSError errorWithDomain:@"ZSModsRePlace" code:1
                                                     userInfo:@{NSLocalizedDescriptionKey: @"This file type can't be re-placed."}];
@@ -16638,18 +16635,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         [self zs_presentModsAlertWithTitle:@"Re-place Failed" message:error.localizedDescription ?: @"Unknown error."];
         return;
     }
-    [self zs_persistFontLivePathIfNeededForEntry:entry inFolder:folderName];
     [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
     ZLog(@"[Mods Library] re-placed %@ into the game's files", entry.fileName);
     [self zs_rebuildModsLibrary];
-}
-
-- (void)zs_persistFontLivePathIfNeededForEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName {
-    if ([ZSModsPaths fontKindForFileName:entry.fileName] == ZSFontKindUnknown) return;
-    NSString *livePath = entry.livePathDescription;
-    [ModAssetLibrary updateDoctorStateForEntry:entry inFolder:folderName applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-        entryToMutate.livePathDescription = livePath;
-    } error:nil];
 }
 
 - (void)zs_rePlaceModFolder:(NSString *)folderName {
@@ -16658,10 +16646,10 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
 
     NSInteger succeeded = 0, failed = 0;
     for (ModAssetLibraryEntry *entry in entries) {
+        if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
         NSError *entryErr = nil;
         if ([self zs_rePlaceModEntryCore:entry error:&entryErr]) {
             succeeded++;
-            [self zs_persistFontLivePathIfNeededForEntry:entry inFolder:folderName];
         } else {
             failed++;
             ZLog(@"[Mods Library] re-place \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
@@ -16683,10 +16671,10 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         if (zs_mods_folder_is_or_within_stored_bundles(folderName)) continue;
         NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
         for (ModAssetLibraryEntry *entry in entries) {
+            if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
             NSError *entryErr = nil;
             if ([self zs_rePlaceModEntryCore:entry error:&entryErr]) {
                 succeeded++;
-                [self zs_persistFontLivePathIfNeededForEntry:entry inFolder:folderName];
             } else {
                 failed++;
                 ZLog(@"[Mods Library] reload \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
