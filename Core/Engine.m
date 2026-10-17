@@ -1834,6 +1834,9 @@ void zs_particles_reset_defaults(void) {
 #undef PARTICLE_RESET
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wliteral-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-conversion-floating-point-to-bool"
 void zs_particles_load_from_dictionary(NSDictionary *particles) {
     NSDictionary *d = [particles isKindOfClass:NSDictionary.class] ? particles : nil;
 #define PARTICLE_LOAD(type, name, def, persist) do { \
@@ -1845,6 +1848,7 @@ void zs_particles_load_from_dictionary(NSDictionary *particles) {
     PARTICLE_DEFAULTS(PARTICLE_LOAD)
 #undef PARTICLE_LOAD
 }
+#pragma clang diagnostic pop
 
 NSDictionary *zs_particles_settings_dictionary(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];
@@ -1884,6 +1888,9 @@ void zs_exp_reset_defaults(void) {
 #undef RESET
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wliteral-conversion"
+#pragma clang diagnostic ignored "-Wimplicit-conversion-floating-point-to-bool"
 void zs_exp_load_from_dictionary(NSDictionary *experimental) {
     NSDictionary *d = [experimental isKindOfClass:NSDictionary.class] ? experimental : nil;
 #define LOAD(type, name, def, persist) do { \
@@ -1895,6 +1902,7 @@ void zs_exp_load_from_dictionary(NSDictionary *experimental) {
     EXP_DEFAULTS(LOAD)
 #undef LOAD
 }
+#pragma clang diagnostic pop
 
 NSDictionary *zs_exp_settings_dictionary(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionary];

@@ -1822,7 +1822,9 @@ static void zs_logo_transcode_geometry(CGSize intrinsic, NSInteger scale, size_t
 
     WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
     configuration.defaultWebpagePreferences.allowsContentJavaScript = NO;
-    configuration.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
+    if (@available(iOS 17.0, *)) {
+        configuration.preferences.inactiveSchedulingPolicy = WKInactiveSchedulingPolicyNone;
+    }
     _web = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 256, 256) configuration:configuration];
     _web.navigationDelegate = self;
     _web.opaque = YES;

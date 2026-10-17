@@ -26,9 +26,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (uint32_t)paramCountOfMethod:(const void *)method;
 
 + (void *)invokeMethod:(const void *)method
-             onInstance:(void *)obj
-                   args:(void **)args
-          outException:(void **)outException;
+             onInstance:(nullable void *)obj
+                   args:(nullable void **)args
+          outException:(nullable void **)outException;
 
 + (int32_t)fieldOffsetOnClass:(void *)klass name:(const char *)fieldName;
 + (BOOL)copyStaticFieldOnClass:(void *)klass name:(const char *)fieldName toBuffer:(void *)buffer;

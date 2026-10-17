@@ -199,6 +199,10 @@ jobs:
             -O3 \
             -fobjc-arc \
             -fmodules \
+            -Wno-nullability-completeness \
+            -Wno-deprecated-declarations \
+            -Wno-protocol \
+            -Wno-objc-protocol-method-implementation \
             -isysroot "${{ steps.sdk.outputs.path }}" \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
