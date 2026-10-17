@@ -712,6 +712,7 @@ static void zs_wrap_button_in_glass(UIButton *button) {
 @interface ZSGlassControlRow : UIView
 @property (nonatomic, copy) NSArray<UIButton *> *buttons;
 @property (nonatomic, assign) CGFloat itemSize;
+@property (nonatomic, copy) NSArray<NSNumber *> *itemWidths;
 @property (nonatomic, assign) CGFloat itemSpacing;
 @end
 
@@ -731,9 +732,11 @@ static void zs_wrap_button_in_glass(UIButton *button) {
     for (UIButton *button in [self.buttons reverseObjectEnumerator]) {
         if (button.hidden) continue;
         UIView *item = zs_button_wrapping_glass(button) ?: button;
-        x -= size;
+        NSUInteger index = [self.buttons indexOfObject:button];
+        CGFloat width = index < self.itemWidths.count ? self.itemWidths[index].doubleValue : size;
+        x -= width;
         item.translatesAutoresizingMaskIntoConstraints = YES;
-        item.frame = CGRectMake(x, y, size, size);
+        item.frame = CGRectMake(x, y, width, size);
         x -= self.itemSpacing;
     }
 }
@@ -19073,7 +19076,8 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     viewModeButton.translatesAutoresizingMaskIntoConstraints = NO;
     zs_style_pill_icon_button_as_native_glass(viewModeButton, [UIImage systemImageNamed:@"square.grid.2x2" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.9]);
     [viewModeButton addTarget:self action:@selector(zs_assetExplorerViewModeTapped) forControlEvents:UIControlEventTouchUpInside];
-    viewModeButton.hidden = YES;
+    viewModeButton.enabled = NO;
+    viewModeButton.alpha = 0.35;
     viewModeButton.tag = 0;
     self.assetExplorerViewModeButton = viewModeButton;
 
@@ -19081,6 +19085,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     controlsStack.translatesAutoresizingMaskIntoConstraints = NO;
     controlsStack.itemSize = 30;
     controlsStack.itemSpacing = 8;
+    controlsStack.itemWidths = @[@39, @30, @30, @30];
     [overlay addSubview:controlsStack];
     controlsStack.buttons = @[viewModeButton, shareButton, filterButton, sortButton];
     self.assetExplorerControlsStack = controlsStack;
@@ -19187,9 +19192,9 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
         [filterButton.heightAnchor constraintEqualToConstant:30],
         [sortButton.widthAnchor constraintEqualToConstant:30],
         [sortButton.heightAnchor constraintEqualToConstant:30],
-        [viewModeButton.widthAnchor constraintEqualToConstant:30],
+        [viewModeButton.widthAnchor constraintEqualToConstant:39],
         [viewModeButton.heightAnchor constraintEqualToConstant:30],
-        [controlsStack.widthAnchor constraintEqualToConstant:126],
+        [controlsStack.widthAnchor constraintEqualToConstant:153],
         [controlsStack.heightAnchor constraintEqualToConstant:30],
         [controlsStack.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [controlsStack.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
@@ -19304,7 +19309,8 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     BOOL enabled = available && self.assetExplorerThumbnailMode;
     BOOL show = enabled && !self.assetExplorerTextureOpen && !self.assetExplorerTableView.hidden;
 
-    self.assetExplorerViewModeButton.hidden = !available;
+    self.assetExplorerViewModeButton.enabled = available;
+    self.assetExplorerViewModeButton.alpha = available ? 1 : 0.35;
     NSInteger desiredStyle = enabled ? 1 : 0;
     if (self.assetExplorerViewModeButton.tag != desiredStyle) {
         UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
