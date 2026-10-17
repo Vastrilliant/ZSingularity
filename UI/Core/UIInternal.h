@@ -33,6 +33,8 @@
 
 static const CGFloat kZSSubtitleFontSize = 10;
 
+static const float kDefaultValueEpsilon = 0.0005f;
+
 static const NSInteger kZSCrashMessageTextViewTag = 0x5A435248;
 
 static const NSInteger kZSDeveloperUnlockTapCount = 10;

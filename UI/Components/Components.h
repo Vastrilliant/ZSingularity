@@ -15,6 +15,7 @@
 @property (nonatomic, copy) NSString *(^titleForItem)(id item);
 @property (nonatomic, copy) void (^onSelect)(id item);
 @property (nonatomic, strong) UISearchController *searchController;
+- (instancetype)initWithTitle:(NSString *)title items:(NSArray *)items titleForItem:(NSString *(^)(id item))titleForItem;
 @end
 
 @interface ZSAssetPreviewClipView : UIView

@@ -396,7 +396,6 @@ static const CGFloat kZSPillarSegmentGap = 2.0;
     [self updateFillForCurrentValue];
 }
 
-static const float kDefaultValueEpsilon = 0.0005f;
 
 - (void)updateFillForCurrentValue {
     CGFloat range = self.maximumValue - self.minimumValue;
