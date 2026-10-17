@@ -673,6 +673,15 @@ static void zs_wrap_button_in_glass(UIButton *button) {
 @implementation ZSGlassWrappedButton
 - (void)didMoveToSuperview {
     [super didMoveToSuperview];
+    UIView *parent = self.superview;
+    if ([parent isKindOfClass:[UIStackView class]] && ![((UIStackView *)parent).arrangedSubviews containsObject:self]) {
+        __weak ZSGlassWrappedButton *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ZSGlassWrappedButton *strongSelf = weakSelf;
+            if (strongSelf) zs_wrap_button_in_glass(strongSelf);
+        });
+        return;
+    }
     zs_wrap_button_in_glass(self);
 }
 
