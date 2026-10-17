@@ -674,7 +674,7 @@ static void zs_wrap_button_in_glass(UIButton *button) {
 - (void)didMoveToSuperview {
     [super didMoveToSuperview];
     UIView *parent = self.superview;
-    if ([parent isKindOfClass:[UIStackView class]] && ![((UIStackView *)parent).arrangedSubviews containsObject:self]) {
+    if ([parent isKindOfClass:[UIStackView class]]) {
         __weak ZSGlassWrappedButton *weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
             ZSGlassWrappedButton *strongSelf = weakSelf;
@@ -687,7 +687,9 @@ static void zs_wrap_button_in_glass(UIButton *button) {
 
 - (void)setHidden:(BOOL)hidden {
     [super setHidden:hidden];
-    zs_button_wrapping_glass(self).hidden = hidden;
+    UIVisualEffectView *glass = zs_button_wrapping_glass(self);
+    glass.hidden = hidden;
+    [(glass ? glass.superview : self.superview) setNeedsLayout];
 }
 
 - (CGFloat)alpha {
@@ -705,6 +707,42 @@ static void zs_wrap_button_in_glass(UIButton *button) {
     glass.alpha = alpha;
     [super setAlpha:1];
 }
+@end
+
+@interface ZSGlassControlRow : UIView
+@property (nonatomic, copy) NSArray<UIButton *> *buttons;
+@property (nonatomic, assign) CGFloat itemSize;
+@property (nonatomic, assign) CGFloat itemSpacing;
+@end
+
+@implementation ZSGlassControlRow
+
+- (void)setButtons:(NSArray<UIButton *> *)buttons {
+    _buttons = [buttons copy];
+    for (UIButton *button in _buttons) [self addSubview:button];
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat size = self.itemSize > 0 ? self.itemSize : 30;
+    CGFloat x = CGRectGetWidth(self.bounds);
+    CGFloat y = (CGRectGetHeight(self.bounds) - size) / 2.0;
+    for (UIButton *button in [self.buttons reverseObjectEnumerator]) {
+        if (button.hidden) continue;
+        UIView *item = zs_button_wrapping_glass(button) ?: button;
+        x -= size;
+        item.translatesAutoresizingMaskIntoConstraints = YES;
+        item.frame = CGRectMake(x, y, size, size);
+        x -= self.itemSpacing;
+    }
+}
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return hit == self ? nil : hit;
+}
+
 @end
 
 static void zs_apply_slash_glass_background(UIButton *button, UIColor *glassTint, NSString *title, UIFont *font, UIImage *image, UIColor *foreground) {
@@ -7282,7 +7320,7 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, strong) UIView *assetExplorerBackdropView;
 @property (nonatomic, strong) UIView *assetExplorerSearchContainer;
 @property (nonatomic, strong) UITextField *assetExplorerSearchField;
-@property (nonatomic, strong) UIStackView *assetExplorerControlsStack;
+@property (nonatomic, strong) ZSGlassControlRow *assetExplorerControlsStack;
 @property (nonatomic, strong) UIButton *assetExplorerFilterButton;
 @property (nonatomic, strong) UIButton *assetExplorerSortButton;
 @property (nonatomic, strong) UIButton *assetExplorerShareButton;
@@ -19039,12 +19077,12 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     viewModeButton.tag = 0;
     self.assetExplorerViewModeButton = viewModeButton;
 
-    UIStackView *controlsStack = [[UIStackView alloc] initWithArrangedSubviews:@[viewModeButton, shareButton, filterButton, sortButton]];
+    ZSGlassControlRow *controlsStack = [[ZSGlassControlRow alloc] init];
     controlsStack.translatesAutoresizingMaskIntoConstraints = NO;
-    controlsStack.axis = UILayoutConstraintAxisHorizontal;
-    controlsStack.alignment = UIStackViewAlignmentCenter;
-    controlsStack.spacing = 8;
+    controlsStack.itemSize = 30;
+    controlsStack.itemSpacing = 8;
     [overlay addSubview:controlsStack];
+    controlsStack.buttons = @[viewModeButton, shareButton, filterButton, sortButton];
     self.assetExplorerControlsStack = controlsStack;
 
     UIImage *nextImage = [UIImage systemImageNamed:@"chevron.right" withConfiguration:symbolConfig];
@@ -19149,6 +19187,10 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
         [filterButton.heightAnchor constraintEqualToConstant:30],
         [sortButton.widthAnchor constraintEqualToConstant:30],
         [sortButton.heightAnchor constraintEqualToConstant:30],
+        [viewModeButton.widthAnchor constraintEqualToConstant:30],
+        [viewModeButton.heightAnchor constraintEqualToConstant:30],
+        [controlsStack.widthAnchor constraintEqualToConstant:126],
+        [controlsStack.heightAnchor constraintEqualToConstant:30],
         [controlsStack.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [controlsStack.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
     ]];
