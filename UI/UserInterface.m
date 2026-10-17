@@ -7094,6 +7094,7 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, strong) NSLayoutConstraint *selectModePanelLeading;
 @property (nonatomic, strong) NSLayoutConstraint *selectModePanelTop;
 @property (nonatomic, assign) BOOL selectModeMeshMode;
+@property (nonatomic, assign) NSInteger selectModeCorner;
 @property (nonatomic, assign) BOOL selectModeIncludeInvisible;
 @property (nonatomic, strong) UIView *selectModePanel;
 @property (nonatomic, strong) UITableView *selectModeTable;
@@ -18357,6 +18358,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
         tableHeight,
     ]];
 
+    [self zs_selectModeApplyCorner:self.selectModeCorner];
     [self zs_startSelectModeIndexing];
 }
 
@@ -18478,6 +18480,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     [table layoutIfNeeded];
     CGFloat height = table.hidden ? 0 : table.contentSize.height + table.contentInset.bottom;
     self.selectModeTableHeight.constant = height;
+    [self zs_selectModeReanchorIfIdle];
     if (animated) {
         [UIView animateWithDuration:0.2 animations:^{
             [overlay layoutIfNeeded];
@@ -18508,23 +18511,82 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     [self zs_selectModeClearSelection];
 }
 
+- (CGRect)zs_selectModeConstantRangeForHeight:(CGFloat)height {
+    UIView *overlay = self.selectModeOverlay;
+    UIView *panel = self.selectModePanel;
+    UIEdgeInsets insets = overlay.safeAreaInsets;
+    CGFloat margin = 12;
+    CGFloat width = panel.bounds.size.width > 0 ? panel.bounds.size.width : MIN(300, overlay.bounds.size.width * 0.9);
+    CGFloat availableHeight = MAX(overlay.bounds.size.height - insets.top - insets.bottom - margin * 2, 0);
+    CGFloat clampedHeight = MIN(height, availableHeight);
+    CGFloat minLeading = margin;
+    CGFloat maxLeading = MAX(minLeading, overlay.bounds.size.width - insets.left - insets.right - margin - width);
+    CGFloat minTop = margin;
+    CGFloat maxTop = MAX(minTop, overlay.bounds.size.height - insets.top - insets.bottom - margin - clampedHeight);
+    return CGRectMake(minLeading, minTop, maxLeading - minLeading, maxTop - minTop);
+}
+
+- (CGFloat)zs_selectModeExpectedHeight {
+    CGFloat headerHeight = self.selectModeHeader.bounds.size.height > 0 ? self.selectModeHeader.bounds.size.height : 100;
+    return headerHeight + self.selectModeTableHeight.constant;
+}
+
+- (void)zs_selectModeApplyCorner:(NSInteger)corner {
+    if (!self.selectModeOverlay || !self.selectModePanelLeading || !self.selectModePanelTop) return;
+    CGRect range = [self zs_selectModeConstantRangeForHeight:[self zs_selectModeExpectedHeight]];
+    self.selectModePanelLeading.constant = (corner & 1) ? CGRectGetMaxX(range) : CGRectGetMinX(range);
+    self.selectModePanelTop.constant = (corner & 2) ? CGRectGetMaxY(range) : CGRectGetMinY(range);
+}
+
+- (void)zs_selectModeReanchorIfIdle {
+    UIGestureRecognizerState state = self.selectModeDragPan.state;
+    if (state == UIGestureRecognizerStateBegan || state == UIGestureRecognizerStateChanged) return;
+    [self zs_selectModeApplyCorner:self.selectModeCorner];
+}
+
 - (void)zs_selectModeDragged:(UIPanGestureRecognizer *)pan {
     UIView *overlay = self.selectModeOverlay;
     UIView *panel = self.selectModePanel;
     if (!overlay || !panel || !self.selectModePanelLeading || !self.selectModePanelTop) return;
-    CGPoint translation = [pan translationInView:overlay];
-    [pan setTranslation:CGPointZero inView:overlay];
 
-    UIEdgeInsets insets = overlay.safeAreaInsets;
-    CGFloat headerHeight = MAX(self.selectModeHeader.bounds.size.height, 60);
-    CGFloat minLeading = 4 - insets.left;
-    CGFloat maxLeading = MAX(minLeading, overlay.bounds.size.width - panel.bounds.size.width - 4 - insets.left);
-    CGFloat minTop = 0;
-    CGFloat maxTop = MAX(minTop, overlay.bounds.size.height - insets.top - insets.bottom - 10 - headerHeight);
+    if (pan.state == UIGestureRecognizerStateBegan) {
+        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+            panel.transform = CGAffineTransformMakeScale(1.025, 1.025);
+        } completion:nil];
+    }
 
-    self.selectModePanelLeading.constant = MIN(MAX(self.selectModePanelLeading.constant + translation.x, minLeading), maxLeading);
-    self.selectModePanelTop.constant = MIN(MAX(self.selectModePanelTop.constant + translation.y, minTop), maxTop);
-    [overlay layoutIfNeeded];
+    if (pan.state == UIGestureRecognizerStateBegan || pan.state == UIGestureRecognizerStateChanged) {
+        CGPoint translation = [pan translationInView:overlay];
+        [pan setTranslation:CGPointZero inView:overlay];
+        CGRect range = [self zs_selectModeConstantRangeForHeight:panel.bounds.size.height];
+        self.selectModePanelLeading.constant = MIN(MAX(self.selectModePanelLeading.constant + translation.x, CGRectGetMinX(range)), CGRectGetMaxX(range));
+        self.selectModePanelTop.constant = MIN(MAX(self.selectModePanelTop.constant + translation.y, CGRectGetMinY(range)), CGRectGetMaxY(range));
+        [overlay layoutIfNeeded];
+        return;
+    }
+
+    if (pan.state != UIGestureRecognizerStateEnded && pan.state != UIGestureRecognizerStateCancelled && pan.state != UIGestureRecognizerStateFailed) return;
+
+    CGPoint velocity = [pan velocityInView:overlay];
+    CGRect frame = panel.frame;
+    CGPoint projected = CGPointMake(CGRectGetMidX(frame) + velocity.x * 0.18, CGRectGetMidY(frame) + velocity.y * 0.18);
+    CGPoint center = CGPointMake(overlay.bounds.size.width * 0.5, overlay.bounds.size.height * 0.5);
+    NSInteger corner = (projected.x > center.x ? 1 : 0) | (projected.y > center.y ? 2 : 0);
+    self.selectModeCorner = corner;
+
+    CGRect range = [self zs_selectModeConstantRangeForHeight:[self zs_selectModeExpectedHeight]];
+    CGFloat targetLeading = (corner & 1) ? CGRectGetMaxX(range) : CGRectGetMinX(range);
+    CGFloat targetTop = (corner & 2) ? CGRectGetMaxY(range) : CGRectGetMinY(range);
+    CGFloat distance = hypot(targetLeading - self.selectModePanelLeading.constant, targetTop - self.selectModePanelTop.constant);
+    CGFloat speed = hypot(velocity.x, velocity.y);
+    CGFloat initialVelocity = distance > 1 ? MIN(speed / distance, 8) : 0;
+
+    self.selectModePanelLeading.constant = targetLeading;
+    self.selectModePanelTop.constant = targetTop;
+    [UIView animateWithDuration:0.5 delay:0 usingSpringWithDamping:0.78 initialSpringVelocity:initialVelocity options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:^{
+        panel.transform = CGAffineTransformIdentity;
+        [overlay layoutIfNeeded];
+    } completion:nil];
 }
 
 - (void)zs_selectModeClearSelection {
@@ -18535,6 +18597,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     [self.selectModeTable reloadData];
     self.selectModeTable.hidden = YES;
     self.selectModeTableHeight.constant = 0;
+    [self zs_selectModeReanchorIfIdle];
     UIView *overlay = self.selectModeOverlay;
     [UIView animateWithDuration:0.2 animations:^{
         [overlay layoutIfNeeded];
