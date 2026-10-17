@@ -7087,7 +7087,14 @@ static BOOL zs_mod_library_has_zeroable_assets(void) {
 @property (nonatomic, assign) BOOL assetExplorerFullScreenOpen;
 @property (nonatomic, strong) UIView *assetExplorerFullScreenOverlay;
 @property (nonatomic, strong) UIView *selectModeOverlay;
-@property (nonatomic, strong) UILabel *selectModeBannerLabel;
+@property (nonatomic, strong) UIView *selectModeHeader;
+@property (nonatomic, strong) UISegmentedControl *selectModeKindControl;
+@property (nonatomic, strong) UISwitch *selectModeVisibleSwitch;
+@property (nonatomic, strong) UIPanGestureRecognizer *selectModeDragPan;
+@property (nonatomic, strong) NSLayoutConstraint *selectModePanelLeading;
+@property (nonatomic, strong) NSLayoutConstraint *selectModePanelTop;
+@property (nonatomic, assign) BOOL selectModeMeshMode;
+@property (nonatomic, assign) BOOL selectModeIncludeInvisible;
 @property (nonatomic, strong) UIView *selectModePanel;
 @property (nonatomic, strong) UITableView *selectModeTable;
 @property (nonatomic, strong) ZSSelectModeList *selectModeList;
@@ -8830,7 +8837,6 @@ static void zs_mt_hud_request_refresh(void) {
 - (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {}
 @end
 
-static NSString * const kZSSelectModeReadyText = @"Tap a sprite or image to find its bundle";
 static NSString * const kZSSelectModeCellID = @"ZSSelectModeCell";
 
 typedef NS_ENUM(NSInteger, ZSSelectModeRowKind) {
@@ -8864,7 +8870,14 @@ static NSDictionary *zs_select_mode_row(ZSSelectModeRowKind kind, NSAttributedSt
     return row;
 }
 
-static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<ZSAssetLocation *> *spriteLocations, NSArray<ZSAssetLocation *> *textureLocations, BOOL loading, BOOL indexing) {
+static NSArray<NSDictionary *> *zs_select_mode_message_rows(NSString *text, BOOL warning) {
+    UIFont *medium = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    UIColor *color = warning ? [UIColor colorWithRed:1.0 green:0.62 blue:0.25 alpha:1.0] : [UIColor colorWithWhite:1 alpha:0.55];
+    NSAttributedString *attributed = [[NSAttributedString alloc] initWithString:text attributes:@{NSFontAttributeName: medium, NSForegroundColorAttributeName: color}];
+    return @[zs_select_mode_row(ZSSelectModeRowKindMessage, attributed, nil)];
+}
+
+static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<ZSAssetLocation *> *spriteLocations, NSArray<ZSAssetLocation *> *textureLocations, NSArray<ZSAssetLocation *> *meshLocations, NSUInteger position, NSUInteger total, BOOL loading, BOOL indexing) {
     UIFont *bold = [UIFont systemFontOfSize:14 weight:UIFontWeightBold];
     UIFont *small = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
     UIFont *medium = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
@@ -8873,8 +8886,9 @@ static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<Z
 
     NSString *spriteName = hit[@"spriteName"];
     NSString *textureName = hit[@"textureName"];
+    NSString *meshName = hit[@"meshName"];
     NSMutableAttributedString *info = [[NSMutableAttributedString alloc] init];
-    NSString *title = spriteName.length > 0 ? spriteName : (textureName.length > 0 ? textureName : @"(unnamed)");
+    NSString *title = meshName.length > 0 ? meshName : (spriteName.length > 0 ? spriteName : (textureName.length > 0 ? textureName : @"(unnamed)"));
     [info appendAttributedString:[[NSAttributedString alloc] initWithString:title attributes:@{NSFontAttributeName: bold, NSForegroundColorAttributeName: UIColor.whiteColor}]];
 
     NSMutableArray<NSString *> *details = [NSMutableArray array];
@@ -8883,6 +8897,7 @@ static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<Z
     if (hit[@"width"] && hit[@"height"]) [details addObject:[NSString stringWithFormat:@"%@×%@", hit[@"width"], hit[@"height"]]];
     if ([hit[@"packed"] boolValue]) [details addObject:@"atlas-packed"];
     if (textureName.length > 0 && spriteName.length > 0) [details addObject:[@"texture " stringByAppendingString:textureName]];
+    if (total > 1) [details addObject:[NSString stringWithFormat:@"%lu of %lu here", (unsigned long)(position + 1), (unsigned long)total]];
     if (details.count > 0) {
         [info appendAttributedString:[[NSAttributedString alloc] initWithString:[@"\n" stringByAppendingString:[details componentsJoinedByString:@" · "]] attributes:@{NSFontAttributeName: small, NSForegroundColorAttributeName: dim}]];
     }
@@ -8897,6 +8912,7 @@ static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<Z
 
     NSArray<ZSAssetLocation *> *sprites = zs_select_mode_unique_locations(spriteLocations);
     NSArray<ZSAssetLocation *> *textures = zs_select_mode_unique_locations(textureLocations);
+    NSArray<ZSAssetLocation *> *meshes = zs_select_mode_unique_locations(meshLocations);
 
     void (^appendGroup)(NSString *, NSArray<ZSAssetLocation *> *) = ^(NSString *label, NSArray<ZSAssetLocation *> *locations) {
         if (locations.count == 0) return;
@@ -8910,8 +8926,9 @@ static NSArray<NSDictionary *> *zs_select_mode_rows(NSDictionary *hit, NSArray<Z
     };
     appendGroup(@"Sprite", sprites);
     appendGroup(@"Texture", textures);
+    appendGroup(@"Mesh", meshes);
 
-    if (sprites.count == 0 && textures.count == 0) {
+    if (sprites.count == 0 && textures.count == 0 && meshes.count == 0) {
         NSString *message = indexing ? @"Not found yet. Indexing is still running, tap the same spot again in a moment." : @"Not found in indexed bundles";
         [rows addObject:zs_select_mode_row(ZSSelectModeRowKindMessage, [[NSAttributedString alloc] initWithString:message attributes:@{NSFontAttributeName: medium, NSForegroundColorAttributeName: [UIColor colorWithRed:1.0 green:0.62 blue:0.25 alpha:1.0]}], nil)];
     }
@@ -10182,6 +10199,15 @@ static void zs_install_unity_touch_filter(UIView *hostView) {
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
     if ([gestureRecognizer isKindOfClass:[UIPinchGestureRecognizer class]]) return YES;
 
+    if (gestureRecognizer == self.selectModeDragPan) {
+        UIView *touched = touch.view;
+        while (touched && touched != gestureRecognizer.view) {
+            if ([touched isKindOfClass:[UIControl class]]) return NO;
+            touched = touched.superview;
+        }
+        return YES;
+    }
+
     if ([touch.view isKindOfClass:[ZSCapsuleSlider class]]) return NO;
     if ([touch.view isKindOfClass:[ZSModeSlider class]]) return NO;
     if ([touch.view isKindOfClass:[ZSWheelPicker class]]) return NO;
@@ -11134,7 +11160,7 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *assetExplorerButton = zs_make_grouped_action_button(@"Asset Explorer", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [assetExplorerButton addTarget:self action:@selector(assetExplorerTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    UIButton *selectModeButton = zs_make_grouped_action_button(@"Toggle Select Mode", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    UIButton *selectModeButton = zs_make_grouped_action_button(@"Toggle Select Asset Mode", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [selectModeButton addTarget:self action:@selector(zs_selectModeTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *miscCard = zs_make_grouped_action_card(@[
@@ -18143,7 +18169,12 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     self.selectModeSelection = nil;
     [self.selectModeOverlay removeFromSuperview];
     self.selectModeOverlay = nil;
-    self.selectModeBannerLabel = nil;
+    self.selectModeHeader = nil;
+    self.selectModeKindControl = nil;
+    self.selectModeVisibleSwitch = nil;
+    self.selectModeDragPan = nil;
+    self.selectModePanelLeading = nil;
+    self.selectModePanelTop = nil;
     self.selectModePanel = nil;
     self.selectModeTable = nil;
     self.selectModeList = nil;
@@ -18211,15 +18242,26 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     header.translatesAutoresizingMaskIntoConstraints = NO;
     header.backgroundColor = UIColor.clearColor;
     [panelHost addSubview:header];
+    self.selectModeHeader = header;
 
-    UILabel *label = [[UILabel alloc] init];
-    label.translatesAutoresizingMaskIntoConstraints = NO;
-    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    label.textColor = UIColor.whiteColor;
-    label.numberOfLines = 0;
-    label.text = @"Indexing bundles...";
-    [header addSubview:label];
-    self.selectModeBannerLabel = label;
+    UIView *grabber = [[UIView alloc] init];
+    grabber.translatesAutoresizingMaskIntoConstraints = NO;
+    grabber.backgroundColor = [UIColor colorWithWhite:1 alpha:0.28];
+    grabber.layer.cornerRadius = 2;
+    grabber.userInteractionEnabled = NO;
+    [header addSubview:grabber];
+
+    UISegmentedControl *kindControl = [[UISegmentedControl alloc] initWithItems:@[@"Textures", @"Mesh"]];
+    kindControl.translatesAutoresizingMaskIntoConstraints = NO;
+    kindControl.selectedSegmentIndex = self.selectModeMeshMode ? 1 : 0;
+    kindControl.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    kindControl.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    kindControl.selectedSegmentTintColor = [UIColor colorWithWhite:1 alpha:0.22];
+    [kindControl setTitleTextAttributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold], NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.6]} forState:UIControlStateNormal];
+    [kindControl setTitleTextAttributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold], NSForegroundColorAttributeName: UIColor.whiteColor} forState:UIControlStateSelected];
+    [kindControl addTarget:self action:@selector(zs_selectModeKindChanged:) forControlEvents:UIControlEventValueChanged];
+    [header addSubview:kindControl];
+    self.selectModeKindControl = kindControl;
 
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -18227,6 +18269,27 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     zs_style_pill_icon_button_as_native_glass(closeButton, [UIImage systemImageNamed:@"xmark" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.85]);
     [closeButton addTarget:self action:@selector(zs_exitSelectModeTapped) forControlEvents:UIControlEventTouchUpInside];
     [header addSubview:closeButton];
+
+    UILabel *filterLabel = [[UILabel alloc] init];
+    filterLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    filterLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    filterLabel.textColor = UIColor.whiteColor;
+    filterLabel.text = @"Filter invis";
+    [header addSubview:filterLabel];
+
+    UISwitch *visibleSwitch = [[UISwitch alloc] init];
+    visibleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    visibleSwitch.on = !self.selectModeIncludeInvisible;
+    visibleSwitch.onTintColor = zs_accent_green_color();
+    [visibleSwitch addTarget:self action:@selector(zs_selectModeVisibleToggled:) forControlEvents:UIControlEventValueChanged];
+    [header addSubview:visibleSwitch];
+    self.selectModeVisibleSwitch = visibleSwitch;
+
+    UIPanGestureRecognizer *drag = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(zs_selectModeDragged:)];
+    drag.maximumNumberOfTouches = 1;
+    drag.delegate = self;
+    [header addGestureRecognizer:drag];
+    self.selectModeDragPan = drag;
 
     ZSSelectModeList *list = [[ZSSelectModeList alloc] init];
     list.rows = @[];
@@ -18256,24 +18319,37 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     NSLayoutConstraint *tableHeight = [table.heightAnchor constraintEqualToConstant:0];
     tableHeight.priority = UILayoutPriorityDefaultHigh;
     self.selectModeTableHeight = tableHeight;
+    NSLayoutConstraint *panelLeading = [panel.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:12];
+    NSLayoutConstraint *panelTop = [panel.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:10];
+    self.selectModePanelLeading = panelLeading;
+    self.selectModePanelTop = panelTop;
 
     [NSLayoutConstraint activateConstraints:@[
-        [panel.leadingAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.leadingAnchor constant:12],
-        [panel.topAnchor constraintEqualToAnchor:overlay.safeAreaLayoutGuide.topAnchor constant:10],
+        panelLeading,
+        panelTop,
         [panel.bottomAnchor constraintLessThanOrEqualToAnchor:overlay.safeAreaLayoutGuide.bottomAnchor constant:-10],
         [panel.widthAnchor constraintLessThanOrEqualToAnchor:overlay.widthAnchor multiplier:0.9],
         panelWidth,
         [header.topAnchor constraintEqualToAnchor:panelHost.topAnchor],
         [header.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor],
         [header.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor],
-        [label.topAnchor constraintEqualToAnchor:header.topAnchor constant:14],
-        [label.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-14],
-        [label.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:18],
-        [label.trailingAnchor constraintEqualToAnchor:closeButton.leadingAnchor constant:-8],
+        [grabber.topAnchor constraintEqualToAnchor:header.topAnchor constant:6],
+        [grabber.centerXAnchor constraintEqualToAnchor:header.centerXAnchor],
+        [grabber.widthAnchor constraintEqualToConstant:36],
+        [grabber.heightAnchor constraintEqualToConstant:4],
+        [kindControl.topAnchor constraintEqualToAnchor:header.topAnchor constant:18],
+        [kindControl.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:14],
+        [kindControl.trailingAnchor constraintEqualToAnchor:closeButton.leadingAnchor constant:-10],
+        [kindControl.heightAnchor constraintEqualToConstant:32],
         [closeButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-10],
-        [closeButton.centerYAnchor constraintEqualToAnchor:header.centerYAnchor],
+        [closeButton.centerYAnchor constraintEqualToAnchor:kindControl.centerYAnchor],
         [closeButton.widthAnchor constraintEqualToConstant:32],
         [closeButton.heightAnchor constraintEqualToConstant:32],
+        [visibleSwitch.topAnchor constraintEqualToAnchor:kindControl.bottomAnchor constant:8],
+        [visibleSwitch.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-14],
+        [visibleSwitch.bottomAnchor constraintEqualToAnchor:header.bottomAnchor constant:-10],
+        [filterLabel.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:18],
+        [filterLabel.centerYAnchor constraintEqualToAnchor:visibleSwitch.centerYAnchor],
         [table.topAnchor constraintEqualToAnchor:header.bottomAnchor],
         [table.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor],
         [table.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor],
@@ -18286,24 +18362,11 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
 
 - (void)zs_startSelectModeIndexing {
     __weak typeof(self) weakSelf = self;
-    self.selectModeBannerLabel.text = @"Indexing bundles...";
-    [ZSAssetExplorer buildNameIndexWithProgress:^(NSUInteger done, NSUInteger total) {
-        UserInterface *strongSelf = weakSelf;
-        if (!strongSelf.selectModeOverlay || strongSelf.selectModeSelection) return;
-        strongSelf.selectModeBannerLabel.text = [NSString stringWithFormat:@"Indexing bundles %lu/%lu", (unsigned long)done, (unsigned long)total];
-    } completion:^(BOOL success) {
+    [ZSAssetExplorer buildNameIndexWithProgress:nil completion:^(BOOL success) {
         UserInterface *strongSelf = weakSelf;
         if (!strongSelf.selectModeOverlay) return;
-        if (strongSelf.selectModeSelection) {
-            [strongSelf zs_selectModeLoadLocationsForSelection];
-            return;
-        }
-        BOOL usable = success || [ZSAssetExplorer indexedBundleCount] > 0;
-        strongSelf.selectModeBannerLabel.text = usable ? kZSSelectModeReadyText : @"No bundles found to index";
+        if (strongSelf.selectModeSelection) [strongSelf zs_selectModeLoadLocationsForSelection];
     }];
-    if ([ZSAssetExplorer isNameIndexBuilding] && [ZSAssetExplorer indexedBundleCount] > 0 && !self.selectModeSelection) {
-        self.selectModeBannerLabel.text = kZSSelectModeReadyText;
-    }
 }
 
 - (void)zs_selectModeTapRecognized:(UITapGestureRecognizer *)tap {
@@ -18319,11 +18382,11 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
 
-    NSArray<NSDictionary *> *hits = zs_pick_assets_at_screen_point(x, y);
+    NSArray<NSDictionary *> *hits = zs_pick_assets_at_screen_point(x, y, self.selectModeMeshMode, !self.selectModeIncludeInvisible);
     if (hits.count == 0) {
         self.selectModeLastPoint = point;
         [self zs_selectModeClearSelection];
-        self.selectModeBannerLabel.text = @"No sprite or image found there. Try another spot.";
+        [self zs_selectModeShowRows:zs_select_mode_message_rows(self.selectModeMeshMode ? @"No mesh found there. Try another spot." : @"No texture found there. Try another spot.", YES)];
         return;
     }
 
@@ -18377,12 +18440,8 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     NSUInteger position = [selection[@"position"] unsignedIntegerValue];
     NSUInteger total = [selection[@"total"] unsignedIntegerValue];
 
-    self.selectModeBannerLabel.text = total > 1
-        ? [NSString stringWithFormat:@"Selected %lu of %lu here. Tap the same spot again to select what's behind it.", (unsigned long)(position + 1), (unsigned long)total]
-        : @"Only one asset here. Tap a row to open its bundle.";
-
     NSUInteger token = ++self.selectModeLookupToken;
-    [self zs_selectModeShowRows:zs_select_mode_rows(hit, nil, nil, YES, NO)];
+    [self zs_selectModeShowRows:zs_select_mode_rows(hit, nil, nil, nil, position, total, YES, NO)];
 
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -18392,10 +18451,12 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
         NSArray<ZSAssetLocation *> *spriteLocations = spriteName.length > 0 ? [ZSAssetExplorer locationsForAssetName:spriteName classIDs:@[@213]] : @[];
         BOOL skipTexture = packed && spriteName.length > 0;
         NSArray<ZSAssetLocation *> *textureLocations = (textureName.length > 0 && !skipTexture) ? [ZSAssetExplorer locationsForAssetName:textureName classIDs:@[@28]] : @[];
+        NSString *meshName = hit[@"meshName"];
+        NSArray<ZSAssetLocation *> *meshLocations = meshName.length > 0 ? [ZSAssetExplorer locationsForAssetName:meshName classIDs:@[@43]] : @[];
         dispatch_async(dispatch_get_main_queue(), ^{
             UserInterface *strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.selectModeOverlay || token != strongSelf.selectModeLookupToken) return;
-            [strongSelf zs_selectModeShowRows:zs_select_mode_rows(hit, spriteLocations, textureLocations, NO, [ZSAssetExplorer isNameIndexBuilding])];
+            [strongSelf zs_selectModeShowRows:zs_select_mode_rows(hit, spriteLocations, textureLocations, meshLocations, position, total, NO, [ZSAssetExplorer isNameIndexBuilding])];
         });
     });
 }
@@ -18429,6 +18490,41 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [weakSelf zs_selectModeFitTableAnimated:NO retry:NO];
     });
+}
+
+- (void)zs_selectModeKindChanged:(UISegmentedControl *)control {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    self.selectModeMeshMode = control.selectedSegmentIndex == 1;
+    self.selectModeLastPoint = CGPointMake(-1000, -1000);
+    [self zs_selectModeClearSelection];
+}
+
+- (void)zs_selectModeVisibleToggled:(UISwitch *)toggle {
+    UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [tapHaptic impactOccurred];
+    self.selectModeIncludeInvisible = !toggle.isOn;
+    self.selectModeLastPoint = CGPointMake(-1000, -1000);
+    [self zs_selectModeClearSelection];
+}
+
+- (void)zs_selectModeDragged:(UIPanGestureRecognizer *)pan {
+    UIView *overlay = self.selectModeOverlay;
+    UIView *panel = self.selectModePanel;
+    if (!overlay || !panel || !self.selectModePanelLeading || !self.selectModePanelTop) return;
+    CGPoint translation = [pan translationInView:overlay];
+    [pan setTranslation:CGPointZero inView:overlay];
+
+    UIEdgeInsets insets = overlay.safeAreaInsets;
+    CGFloat headerHeight = MAX(self.selectModeHeader.bounds.size.height, 60);
+    CGFloat minLeading = 4 - insets.left;
+    CGFloat maxLeading = MAX(minLeading, overlay.bounds.size.width - panel.bounds.size.width - 4 - insets.left);
+    CGFloat minTop = 0;
+    CGFloat maxTop = MAX(minTop, overlay.bounds.size.height - insets.top - insets.bottom - 10 - headerHeight);
+
+    self.selectModePanelLeading.constant = MIN(MAX(self.selectModePanelLeading.constant + translation.x, minLeading), maxLeading);
+    self.selectModePanelTop.constant = MIN(MAX(self.selectModePanelTop.constant + translation.y, minTop), maxTop);
+    [overlay layoutIfNeeded];
 }
 
 - (void)zs_selectModeClearSelection {
@@ -19818,6 +19914,30 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerOpenBundle:(ZSAssetExplorerBundle *)bundle {
+    [self zs_assetExplorerOpenBundle:bundle focusLocation:nil];
+}
+
+- (void)zs_assetExplorerFocusLocation:(ZSAssetLocation *)location {
+    if (!location || !self.assetExplorerSelectedBundle) return;
+    ZSAssetExplorerAsset *target = nil;
+    for (ZSAssetExplorerAsset *candidate in self.assetExplorerAssets) {
+        if (candidate.pathID == location.pathID && candidate.classID == location.classID) { target = candidate; break; }
+    }
+    if (!target) {
+        for (ZSAssetExplorerAsset *candidate in self.assetExplorerAssets) {
+            if (candidate.pathID == location.pathID) { target = candidate; break; }
+        }
+    }
+    if (!target) return;
+
+    NSUInteger row = [self.assetExplorerDisplayedAssets indexOfObjectIdenticalTo:target];
+    if (row != NSNotFound && (NSInteger)row < [self.assetExplorerTableView numberOfRowsInSection:0]) {
+        [self.assetExplorerTableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:(NSInteger)row inSection:0] atScrollPosition:UITableViewScrollPositionMiddle animated:NO];
+    }
+    [self zs_assetExplorerOpenTextureForAsset:target];
+}
+
+- (void)zs_assetExplorerOpenBundle:(ZSAssetExplorerBundle *)bundle focusLocation:(ZSAssetLocation *)focusLocation {
     if (!bundle || self.assetExplorerSelectedBundle) return;
     [self zs_assetExplorerCaptureListPosition];
     [self zs_assetExplorerBookmarks];
@@ -19851,6 +19971,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
             strongSelf.assetExplorerStatusMessage = error ? error.localizedDescription : nil;
             [strongSelf zs_assetExplorerRefreshListResettingScroll:NO];
             [strongSelf zs_assetExplorerSyncControls];
+            if (focusLocation) [strongSelf zs_assetExplorerFocusLocation:focusLocation];
         });
     });
 }
@@ -24301,6 +24422,9 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     NSString *path = [location.filePath copy];
     NSString *cab = [location.cabIdentifier copy];
     NSString *name = [location.bundleName copy];
+    ZSAssetLocation *focus = [ZSAssetLocation new];
+    focus.pathID = location.pathID;
+    focus.classID = location.classID;
     __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *error = nil;
@@ -24324,7 +24448,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
             UserInterface *strongSelf = weakSelf;
             if (!strongSelf || !strongSelf.assetExplorerFullScreenOpen || strongSelf.assetExplorerSelectedBundle) return;
             if (bundles.count > 0 && strongSelf.assetExplorerBundles.count == 0) strongSelf.assetExplorerBundles = bundles;
-            [strongSelf zs_assetExplorerOpenBundle:match];
+            [strongSelf zs_assetExplorerOpenBundle:match focusLocation:focus];
         });
     });
 }

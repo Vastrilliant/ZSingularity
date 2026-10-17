@@ -7460,6 +7460,8 @@ static NSMutableDictionary<NSString *, NSDictionary *> *ZSAEIndexStore(void) {
     return store;
 }
 
+static const NSInteger kZSAEIndexVersion = 2;
+
 static BOOL gZSAEIndexBuilding = NO;
 
 static void ZSAESaveIndex(void) {
@@ -7474,7 +7476,7 @@ static void ZSAESaveIndex(void) {
 }
 
 static BOOL ZSAEIsIndexedClass(int32_t classID) {
-    return classID == 28 || classID == 213 || classID == 687078895;
+    return classID == 28 || classID == 43 || classID == 213 || classID == 687078895;
 }
 
 static NSData *ZSAEScanIndexRecords(NSString *path) {
@@ -8142,7 +8144,7 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
                 @synchronized (ZSAEIndexLock()) {
                     existing = ZSAEIndexStore()[bundle.cabIdentifier];
                 }
-                BOOL fresh = signature && [existing[@"sig"] isEqualToString:signature];
+                BOOL fresh = signature && [existing[@"sig"] isEqualToString:signature] && [existing[@"v"] integerValue] >= kZSAEIndexVersion;
                 if (!fresh && signature) {
                     NSData *records = ZSAEScanIndexRecords(bundle.filePath);
                     if (records) {
@@ -8152,6 +8154,7 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
                         }
                         NSDictionary *entry = @{
                             @"sig": signature,
+                            @"v": @(kZSAEIndexVersion),
                             @"path": bundle.filePath ?: @"",
                             @"b": name.length > 0 ? name : bundle.displayName,
                             @"r": records,

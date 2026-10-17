@@ -5284,7 +5284,7 @@ static double zs_pick_hierarchy_depth(void *component) {
     return (double)depth;
 }
 
-static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen, void *component, void *sprite, void *texture, NSString *source, double rank, double area, const float *screenRect, void *identityOverride) {
+static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen, void *component, void *sprite, void *texture, NSString *source, double rank, double area, const float *screenRect, void *identityOverride, void *mesh) {
     void *identity = identityOverride ?: (sprite ?: texture);
     if (!identity) return;
     NSNumber *key = @((uintptr_t)identity);
@@ -5295,6 +5295,14 @@ static void zs_pick_add_hit(NSMutableArray<NSMutableDictionary *> *hits, NSMutab
     hit[@"source"] = source;
     NSString *owner = zs_pick_clean_name(component);
     if (owner) hit[@"owner"] = owner;
+
+    if (mesh) {
+        NSString *meshName = zs_pick_clean_name(mesh);
+        if (meshName) hit[@"meshName"] = meshName;
+        hit[@"kind"] = @"mesh";
+    } else {
+        hit[@"kind"] = @"texture";
+    }
 
     if (sprite) {
         NSString *spriteName = zs_pick_clean_name(sprite);
@@ -5333,7 +5341,7 @@ static NSArray<NSValue *> *zs_pick_active_cameras(void) {
     return cameras;
 }
 
-static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
+static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, BOOL visibleOnly, float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
     if (!graphicClass) return;
     void *rectUtility = mt_class("UnityEngine", "RectTransformUtility", "UnityEngine");
     NSUInteger count = 0;
@@ -5355,11 +5363,23 @@ static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, float x, 
         }
 
         float color[4] = {1, 1, 1, 1};
-        if (zs_pick_unbox_floats(zs_pick_invoke(graphic, "get_color", 0, NULL), color, 4) && color[3] < 0.02f) continue;
+        BOOL hasColor = zs_pick_unbox_floats(zs_pick_invoke(graphic, "get_color", 0, NULL), color, 4);
+        if (visibleOnly && hasColor && color[3] < 0.02f) continue;
 
         void *rectTransform = zs_pick_invoke(graphic, "get_rectTransform", 0, NULL);
         void *canvas = zs_pick_invoke(graphic, "get_canvas", 0, NULL);
         if (!rectTransform || !canvas) continue;
+
+        if (visibleOnly) {
+            if (!zs_pick_component_live(canvas)) continue;
+            void *canvasRenderer = zs_pick_invoke(graphic, "get_canvasRenderer", 0, NULL);
+            if (canvasRenderer) {
+                BOOL culled = NO;
+                if (zs_pick_unbox_bool(zs_pick_invoke(canvasRenderer, "get_cull", 0, NULL), &culled) && culled) continue;
+                float inherited = 1.0f;
+                if (zs_pick_unbox_floats(zs_pick_invoke(canvasRenderer, "GetInheritedAlpha", 0, NULL), &inherited, 1) && inherited * color[3] < 0.02f) continue;
+            }
+        }
         void *rootCanvas = zs_pick_invoke(canvas, "get_rootCanvas", 0, NULL) ?: canvas;
 
         int32_t renderMode = 0;
@@ -5380,6 +5400,7 @@ static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, float x, 
 
         float rect[4] = {0, 0, 0, 0};
         zs_pick_unbox_floats(zs_pick_invoke(rectTransform, "get_rect", 0, NULL), rect, 4);
+        if (visibleOnly && (fabsf(rect[2]) < 0.5f || fabsf(rect[3]) < 0.5f)) continue;
         double area = fabs((double)rect[2] * (double)rect[3]);
 
         double rank = 1.0e9 + (double)sortingOrder * 1000.0 + zs_pick_hierarchy_depth(graphic);
@@ -5416,17 +5437,18 @@ static void zs_pick_collect_graphics(void *graphicClass, BOOL isImage, float x, 
             rMinY = MIN(rMinY, cornerY);
             rMaxY = MAX(rMaxY, cornerY);
         }
+        if (visibleOnly && hasScreenRect && (rMaxX - rMinX < 1.0f || rMaxY - rMinY < 1.0f)) continue;
         if (hasScreenRect) {
             screenRect[0] = rMinX;
             screenRect[1] = rMinY;
             screenRect[2] = rMaxX;
             screenRect[3] = rMaxY;
         }
-        zs_pick_add_hit(hits, seen, graphic, sprite, texture, isImage ? @"UI Image" : @"UI RawImage", rank, area, hasScreenRect ? screenRect : NULL, NULL);
+        zs_pick_add_hit(hits, seen, graphic, sprite, texture, isImage ? @"UI Image" : @"UI RawImage", rank, area, hasScreenRect ? screenRect : NULL, NULL, NULL);
     }
 }
 
-static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
+static void zs_pick_collect_sprite_renderers(BOOL visibleOnly, float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
     void *rendererClass = mt_class("UnityEngine", "SpriteRenderer", "UnityEngine");
     if (!rendererClass) return;
     NSArray<NSValue *> *cameras = zs_pick_active_cameras();
@@ -5443,8 +5465,12 @@ static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NS
         void *sprite = zs_pick_invoke(renderer, "get_sprite", 0, NULL);
         if (!sprite) continue;
 
-        float color[4] = {1, 1, 1, 1};
-        if (zs_pick_unbox_floats(zs_pick_invoke(renderer, "get_color", 0, NULL), color, 4) && color[3] < 0.02f) continue;
+        if (visibleOnly) {
+            float color[4] = {1, 1, 1, 1};
+            if (zs_pick_unbox_floats(zs_pick_invoke(renderer, "get_color", 0, NULL), color, 4) && color[3] < 0.02f) continue;
+            BOOL visible = YES;
+            if (zs_pick_unbox_bool(zs_pick_invoke(renderer, "get_isVisible", 0, NULL), &visible) && !visible) continue;
+        }
 
         float bounds[6] = {0};
         if (!zs_pick_unbox_floats(zs_pick_invoke(renderer, "get_bounds", 0, NULL), bounds, 6)) continue;
@@ -5500,7 +5526,7 @@ static void zs_pick_collect_sprite_renderers(float x, float y, NSMutableArray<NS
         zs_pick_unbox_int(zs_pick_invoke_static(sortingLayerClass, "GetLayerValueFromID", 1, layerArgs), &layerValue);
 
         double rank = (double)layerValue * 10000.0 + (double)sortingOrder;
-        zs_pick_add_hit(hits, seen, renderer, sprite, NULL, @"SpriteRenderer", rank, area, matchedRect, NULL);
+        zs_pick_add_hit(hits, seen, renderer, sprite, NULL, @"SpriteRenderer", rank, area, matchedRect, NULL, NULL);
     }
 }
 
@@ -5520,13 +5546,23 @@ static void *zs_pick_renderer_texture(void *renderer) {
     return NULL;
 }
 
-static void zs_pick_collect_mesh_renderers(const char *className, float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
+static void *zs_pick_renderer_mesh(void *renderer, void *filterType) {
+    void *mesh = zs_pick_invoke(renderer, "get_sharedMesh", 0, NULL);
+    if (mesh) return mesh;
+    if (!filterType) return NULL;
+    void *args[1] = { filterType };
+    void *filter = zs_pick_invoke(renderer, "GetComponent", 1, args);
+    return filter ? zs_pick_invoke(filter, "get_sharedMesh", 0, NULL) : NULL;
+}
+
+static void zs_pick_collect_mesh_renderers(const char *className, BOOL meshMode, BOOL visibleOnly, float x, float y, NSMutableArray<NSMutableDictionary *> *hits, NSMutableSet<NSNumber *> *seen) {
     void *rendererClass = mt_class("UnityEngine", className, "UnityEngine");
     if (!rendererClass) return;
     NSArray<NSValue *> *cameras = zs_pick_active_cameras();
     if (cameras.count == 0) return;
     void *sortingLayerClass = mt_class("UnityEngine", "SortingLayer", "UnityEngine");
     NSString *sourceName = [NSString stringWithUTF8String:className];
+    void *filterType = meshMode ? zs_type_object(mt_class("UnityEngine", "MeshFilter", "UnityEngine")) : NULL;
 
     NSUInteger count = 0;
     void *array = zs_resources_find_all_for_class(rendererClass, &count);
@@ -5536,11 +5572,20 @@ static void zs_pick_collect_mesh_renderers(const char *className, float x, float
         void *renderer = zs_array_object_at(array, i);
         if (!renderer || !zs_pick_component_live(renderer)) continue;
 
-        BOOL visible = YES;
-        if (zs_pick_unbox_bool(zs_pick_invoke(renderer, "get_isVisible", 0, NULL), &visible) && !visible) continue;
+        if (visibleOnly) {
+            BOOL visible = YES;
+            if (zs_pick_unbox_bool(zs_pick_invoke(renderer, "get_isVisible", 0, NULL), &visible) && !visible) continue;
+        }
 
-        void *texture = zs_pick_renderer_texture(renderer);
-        if (!texture) continue;
+        void *texture = NULL;
+        void *mesh = NULL;
+        if (meshMode) {
+            mesh = zs_pick_renderer_mesh(renderer, filterType);
+            if (!mesh) continue;
+        } else {
+            texture = zs_pick_renderer_texture(renderer);
+            if (!texture) continue;
+        }
 
         float bounds[6] = {0};
         if (!zs_pick_unbox_floats(zs_pick_invoke(renderer, "get_bounds", 0, NULL), bounds, 6)) continue;
@@ -5599,19 +5644,21 @@ static void zs_pick_collect_mesh_renderers(const char *className, float x, float
         zs_pick_unbox_int(zs_pick_invoke_static(sortingLayerClass, "GetLayerValueFromID", 1, layerArgs), &layerValue);
 
         double rank = (double)layerValue * 10000.0 + (double)sortingOrder + 1.0 / (1.0 + MAX(depth, 0.0));
-        zs_pick_add_hit(hits, seen, renderer, NULL, texture, sourceName, rank, area, matchedRect, renderer);
+        zs_pick_add_hit(hits, seen, renderer, NULL, texture, sourceName, rank, area, matchedRect, renderer, mesh);
     }
 }
 
-NSArray<NSDictionary *> *zs_pick_assets_at_screen_point(float x, float y) {
+NSArray<NSDictionary *> *zs_pick_assets_at_screen_point(float x, float y, BOOL meshMode, BOOL visibleOnly) {
     NSMutableArray<NSMutableDictionary *> *hits = [NSMutableArray array];
     NSMutableSet<NSNumber *> *seen = [NSMutableSet set];
 
-    zs_pick_collect_graphics(mt_class("UnityEngine.UI", "Image", "UnityEngine.UI"), YES, x, y, hits, seen);
-    zs_pick_collect_graphics(mt_class("UnityEngine.UI", "RawImage", "UnityEngine.UI"), NO, x, y, hits, seen);
-    zs_pick_collect_sprite_renderers(x, y, hits, seen);
-    zs_pick_collect_mesh_renderers("MeshRenderer", x, y, hits, seen);
-    zs_pick_collect_mesh_renderers("SkinnedMeshRenderer", x, y, hits, seen);
+    if (!meshMode) {
+        zs_pick_collect_graphics(mt_class("UnityEngine.UI", "Image", "UnityEngine.UI"), YES, visibleOnly, x, y, hits, seen);
+        zs_pick_collect_graphics(mt_class("UnityEngine.UI", "RawImage", "UnityEngine.UI"), NO, visibleOnly, x, y, hits, seen);
+        zs_pick_collect_sprite_renderers(visibleOnly, x, y, hits, seen);
+    }
+    zs_pick_collect_mesh_renderers("MeshRenderer", meshMode, visibleOnly, x, y, hits, seen);
+    zs_pick_collect_mesh_renderers("SkinnedMeshRenderer", meshMode, visibleOnly, x, y, hits, seen);
 
     [hits sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         double rankA = [a[@"rank"] doubleValue], rankB = [b[@"rank"] doubleValue];
