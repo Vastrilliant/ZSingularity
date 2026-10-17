@@ -4,8 +4,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreText/CoreText.h>
 #import <objc/runtime.h>
-#import <mach-o/getsect.h>
-#import <dlfcn.h>
 #import <sys/mman.h>
 #import <sys/stat.h>
 #import <fcntl.h>
@@ -15,16 +13,6 @@
 static const CGFloat kZSGifContentY0 = 0.44, kZSGifContentY1 = 0.60;
 static const CGFloat kZSGifContentX0 = 0.05, kZSGifContentX1 = 0.95;
 static const CGFloat kZSGifPanWindowWidth = 0.45;
-
-static NSData *zs_embedded_gif_data(void) {
-    Dl_info info;
-    if (dladdr((const void *)&zs_embedded_gif_data, &info) == 0 || !info.dli_fbase) return nil;
-    const struct mach_header_64 *header = (const struct mach_header_64 *)info.dli_fbase;
-    unsigned long size = 0;
-    uint8_t *bytes = getsectiondata(header, "__DATA", "__enkephalin", &size);
-    if (!bytes || size == 0) return nil;
-    return [NSData dataWithBytesNoCopy:bytes length:size freeWhenDone:NO];
-}
 
 static CATextLayerAlignmentMode zs_ca_alignment_for(NSTextAlignment alignment) {
     switch (alignment) {
@@ -93,6 +81,12 @@ static void zs_set_switch_texture_driven(UISwitch *sw, BOOL textureDriven);
     BOOL _paused;
     BOOL _disabled;
     BOOL _decodeStarted;
+    BOOL _fetchInFlight;
+    CFTimeInterval _lastFetchFailure;
+    NSUInteger _buildGeneration;
+    uint64_t _activeGifLength;
+    uint64_t _activeGifHash;
+    dispatch_queue_t _buildQueue;
 
     NSHashTable<ZSGifWindow *> *_windows;
 }
@@ -109,12 +103,13 @@ static void zs_set_switch_texture_driven(UISwitch *sw, BOOL textureDriven);
     if (self) {
         _lastFrameIndex = -1;
         _windows = [NSHashTable weakObjectsHashTable];
-        [self decodeFramesIfNeeded];
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+        _buildQueue = dispatch_queue_create("zs.gifTint.build", attr);
     }
     return self;
 }
 
-#pragma mark Decoding (source: full-resolution Enkephalin.gif, embedded at link time)
+#pragma mark Decoding (source: full-resolution Enkephalin.gif, fetched from the repo)
 
 static const CGFloat kZSGifPlaybackRate = 0.5;
 static const NSInteger kZSGifCrossfadeSteps = 8;
@@ -122,6 +117,13 @@ static const uint32_t kZSGifCacheMagic = 0x5A474946;
 static const uint32_t kZSGifCacheVersion = 1;
 static const size_t kZSGifCacheHeaderBytes = 16384;
 static const size_t kZSGifCacheRowAlignment = 64;
+
+static NSString * const kZSGifRepoOwner = @"vastrilliant";
+static NSString * const kZSGifRepoName = @"ZSingularity";
+static NSString * const kZSGifRepoBranch = @"main";
+static NSString * const kZSGifRepoPath = @"Resources/Enkephalin.gif";
+static const NSTimeInterval kZSGifFetchTimeout = 120.0;
+static const CFTimeInterval kZSGifFetchRetryInterval = 60.0;
 
 typedef struct {
     uint32_t magic;
@@ -149,12 +151,113 @@ static uint64_t zs_gif_fingerprint(NSData *data) {
     return hash;
 }
 
-static NSString *zs_gif_cache_path(void) {
+static NSString *zs_gif_directory(void) {
     NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
     if (!caches) return nil;
     NSString *dir = [caches stringByAppendingPathComponent:@"ZSGifTint"];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
-    return [dir stringByAppendingPathComponent:@"enkephalin.frames"];
+    return dir;
+}
+
+static NSString *zs_gif_cache_path(void) {
+    return [zs_gif_directory() stringByAppendingPathComponent:@"enkephalin.frames"];
+}
+
+static NSString *zs_gif_source_path(void) {
+    return [zs_gif_directory() stringByAppendingPathComponent:@"Enkephalin.gif"];
+}
+
+static NSString *zs_gif_etag_path(void) {
+    return [zs_gif_directory() stringByAppendingPathComponent:@"Enkephalin.gif.etag"];
+}
+
+static NSURL *zs_gif_remote_url(void) {
+    NSString *urlString = [NSString stringWithFormat:@"https://raw.githubusercontent.com/%@/%@/%@/%@",
+                           kZSGifRepoOwner, kZSGifRepoName, kZSGifRepoBranch, kZSGifRepoPath];
+    return [NSURL URLWithString:urlString];
+}
+
+static NSData *zs_local_gif_data(void) {
+    NSString *path = zs_gif_source_path();
+    if (!path) return nil;
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    return data.length > 0 ? data : nil;
+}
+
+static void zs_gif_discard_local_source(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *source = zs_gif_source_path();
+    NSString *etag = zs_gif_etag_path();
+    if (source) [fm removeItemAtPath:source error:nil];
+    if (etag) [fm removeItemAtPath:etag error:nil];
+}
+
+typedef NS_ENUM(NSInteger, ZSGifFetchResult) {
+    ZSGifFetchResultFailed,
+    ZSGifFetchResultNotModified,
+    ZSGifFetchResultUpdated,
+};
+
+static void zs_gif_fetch_remote(void (^completion)(ZSGifFetchResult result)) {
+    NSString *sourcePath = zs_gif_source_path();
+    NSString *etagPath = zs_gif_etag_path();
+    NSURL *url = zs_gif_remote_url();
+    if (!sourcePath || !etagPath || !url) {
+        completion(ZSGifFetchResultFailed);
+        return;
+    }
+
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.cachePolicy = NSURLRequestReloadIgnoringLocalAndRemoteCacheData;
+    request.timeoutInterval = kZSGifFetchTimeout;
+    if ([[NSFileManager defaultManager] fileExistsAtPath:sourcePath]) {
+        NSString *etag = [NSString stringWithContentsOfFile:etagPath encoding:NSUTF8StringEncoding error:nil];
+        if (etag.length > 0) [request setValue:etag forHTTPHeaderField:@"If-None-Match"];
+    }
+
+    NSURLSessionDownloadTask *task = [[NSURLSession sharedSession] downloadTaskWithRequest:request
+        completionHandler:^(NSURL * _Nullable location, NSURLResponse * _Nullable response, NSError * _Nullable error) {
+            NSHTTPURLResponse *http = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
+            if (!error && http.statusCode == 304) {
+                completion(ZSGifFetchResultNotModified);
+                return;
+            }
+            if (error || http.statusCode != 200 || !location) {
+                ZLog(@"[ZSGifTint] download failed (%ld): %@", (long)http.statusCode, error.localizedDescription ?: url.absoluteString);
+                completion(ZSGifFetchResultFailed);
+                return;
+            }
+
+            NSFileHandle *handle = [NSFileHandle fileHandleForReadingFromURL:location error:nil];
+            NSData *head = [handle readDataOfLength:4];
+            [handle closeFile];
+            if (head.length < 4 || memcmp(head.bytes, "GIF8", 4) != 0) {
+                ZLog(@"[ZSGifTint] downloaded file is not a GIF - ignoring");
+                completion(ZSGifFetchResultFailed);
+                return;
+            }
+
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSString *tempPath = [sourcePath stringByAppendingString:@".tmp"];
+            [fm removeItemAtPath:tempPath error:nil];
+            NSError *moveError = nil;
+            if (![fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:tempPath] error:&moveError]
+                || rename(tempPath.fileSystemRepresentation, sourcePath.fileSystemRepresentation) != 0) {
+                ZLog(@"[ZSGifTint] couldn't store downloaded GIF: %@", moveError.localizedDescription ?: @"rename failed");
+                [fm removeItemAtPath:tempPath error:nil];
+                completion(ZSGifFetchResultFailed);
+                return;
+            }
+
+            NSString *etag = [http valueForHTTPHeaderField:@"ETag"];
+            if (etag.length > 0) {
+                [etag writeToFile:etagPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            } else {
+                [fm removeItemAtPath:etagPath error:nil];
+            }
+            completion(ZSGifFetchResultUpdated);
+        }];
+    [task resume];
 }
 
 static BOOL zs_gif_write_all(int fd, const void *bytes, size_t length, off_t offset) {
@@ -385,40 +488,85 @@ static BOOL zs_gif_load_cache(NSData *gifData, NSString *path, NSArray<UIImage *
     [self startOrStopDisplayLinkAsNeeded];
 }
 
+- (void)zs_applyLoadedFrames:(NSArray<UIImage *> *)frames durations:(NSArray<NSNumber *> *)durations fromGifData:(NSData *)gifData {
+    _activeGifLength = gifData.length;
+    _activeGifHash = zs_gif_fingerprint(gifData);
+    [self zs_applyLoadedFrames:frames durations:durations];
+}
+
+- (void)zs_buildFramesFromGifData:(NSData *)data cachePath:(NSString *)cachePath {
+    NSUInteger generation = ++_buildGeneration;
+    dispatch_async(_buildQueue, ^{
+        NSArray<UIImage *> *builtFrames = nil;
+        NSArray<NSNumber *> *builtDurations = nil;
+        BOOL ok = zs_gif_load_cache(data, cachePath, &builtFrames, &builtDurations)
+            || (zs_gif_build_cache(data, cachePath) && zs_gif_load_cache(data, cachePath, &builtFrames, &builtDurations));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self->_buildGeneration) return;
+            if (!ok) {
+                ZLog(@"[ZSGifTint] failed to build the full-resolution frame cache - accent tint disabled");
+                zs_gif_discard_local_source();
+                return;
+            }
+            [self zs_applyLoadedFrames:builtFrames durations:builtDurations fromGifData:data];
+        });
+    });
+}
+
+- (void)zs_refreshRemoteGifWithCachePath:(NSString *)cachePath {
+    if (_fetchInFlight) return;
+    _fetchInFlight = YES;
+    zs_gif_fetch_remote(^(ZSGifFetchResult result) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_fetchInFlight = NO;
+            if (result == ZSGifFetchResultFailed) {
+                if (self->_frames.count == 0 && self->_buildGeneration == 0) {
+                    self->_decodeStarted = NO;
+                    self->_lastFetchFailure = CACurrentMediaTime();
+                }
+                return;
+            }
+            self->_lastFetchFailure = 0;
+            if (result == ZSGifFetchResultNotModified) return;
+
+            NSData *data = zs_local_gif_data();
+            if (!data) return;
+            if (self->_frames.count > 0
+                && data.length == self->_activeGifLength
+                && zs_gif_fingerprint(data) == self->_activeGifHash) return;
+            [self zs_buildFramesFromGifData:data cachePath:cachePath];
+        });
+    });
+}
+
 - (void)decodeFramesIfNeeded {
-    if (_frames.count > 0 || _decodeStarted) return;
+    if (_disabled || _decodeStarted || _frames.count > 0) return;
+    if (_lastFetchFailure > 0 && CACurrentMediaTime() - _lastFetchFailure < kZSGifFetchRetryInterval) return;
     _decodeStarted = YES;
 
-    NSData *data = zs_embedded_gif_data();
     NSString *cachePath = zs_gif_cache_path();
-    if (!data || !cachePath) {
-        ZLog(@"[ZSGifTint] couldn't find __DATA,__enkephalin section or cache directory - accent tint disabled");
+    if (!cachePath) {
+        ZLog(@"[ZSGifTint] couldn't find a cache directory - accent tint disabled");
         _frames = @[];
         _frameDurations = @[];
         return;
     }
 
-    NSArray<UIImage *> *frames = nil;
-    NSArray<NSNumber *> *durations = nil;
-    if (zs_gif_load_cache(data, cachePath, &frames, &durations)) {
-        [self zs_applyLoadedFrames:frames durations:durations];
-        return;
-    }
-
     _frames = @[];
     _frameDurations = @[];
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSArray<UIImage *> *builtFrames = nil;
-        NSArray<NSNumber *> *builtDurations = nil;
-        BOOL ok = zs_gif_build_cache(data, cachePath) && zs_gif_load_cache(data, cachePath, &builtFrames, &builtDurations);
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!ok) {
-                ZLog(@"[ZSGifTint] failed to build the full-resolution frame cache - accent tint disabled");
-                return;
-            }
-            [self zs_applyLoadedFrames:builtFrames durations:builtDurations];
-        });
-    });
+
+    NSData *data = zs_local_gif_data();
+    if (data) {
+        NSArray<UIImage *> *frames = nil;
+        NSArray<NSNumber *> *durations = nil;
+        if (zs_gif_load_cache(data, cachePath, &frames, &durations)) {
+            [self zs_applyLoadedFrames:frames durations:durations fromGifData:data];
+        } else {
+            [self zs_buildFramesFromGifData:data cachePath:cachePath];
+        }
+    }
+
+    [self zs_refreshRemoteGifWithCachePath:cachePath];
 }
 
 - (nullable UIImage *)currentOrFirstFrame {
@@ -448,6 +596,7 @@ static BOOL zs_gif_load_cache(NSData *gifData, NSString *path, NSArray<UIImage *
 }
 
 - (void)reconstructAllWindows {
+    [self decodeFramesIfNeeded];
     if (_disabled) return;
     for (ZSGifWindow *w in _windows) {
         zs_reapply_window(w);
@@ -455,16 +604,18 @@ static BOOL zs_gif_load_cache(NSData *gifData, NSString *path, NSArray<UIImage *
 }
 
 - (void)setDisabled:(BOOL)disabled {
-    if (_disabled == disabled) return;
-    _disabled = disabled;
-    if (disabled) {
-        [self teardownAllWindows];
-        for (ZSGifWindow *w in _windows) {
-            zs_restore_switch_native_tint(w);
+    if (_disabled != disabled) {
+        _disabled = disabled;
+        if (disabled) {
+            [self teardownAllWindows];
+            for (ZSGifWindow *w in _windows) {
+                zs_restore_switch_native_tint(w);
+            }
+        } else if (!_paused) {
+            [self reconstructAllWindows];
         }
-    } else if (!_paused) {
-        [self reconstructAllWindows];
     }
+    if (!_disabled) [self decodeFramesIfNeeded];
 }
 
 - (BOOL)isDisabled {

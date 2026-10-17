@@ -224,11 +224,10 @@ jobs:
             -stdlib=libc++ \
             -install_name "@rpath/ZSingularity.dylib" \
             -Wl,-ld_classic \
-            -Wl,-sectcreate,__DATA,__enkephalin,Resources/Enkephalin.gif \
             -Wl,-sectcreate,__DATA,__zstips,Resources/tips.json \
             -Wl,-sectcreate,__DATA,__zsastcmetal,Astc.metallib \
             -I. \
-            -ICore -ICore/RamBypass -IUI -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
+            -ICore -ICore/RamBypass -IUI/Core -IUI/Sections -IUI/Components -IUI/Misc -IUI/Docs -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
             Mods/BundleTools/UnityBundleTools.m \
             Mods/BundleTools/AssetExplorer.m \
             Core/IL2CppIntrospection.m \
@@ -246,9 +245,7 @@ jobs:
             astcenc-obj/*.o \
             Network/PatchManifestNetwork.m \
             Network/Updater.m \
-            UI/UserInterface.m \
-            UI/GifTint.m \
-            UI/Logo.m \
+            UI/*/*.m \
             lz4.c \
             lz4hc.c \
             -o ZSingularity.dylib
