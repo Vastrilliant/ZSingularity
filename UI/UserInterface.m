@@ -490,7 +490,7 @@ static CGFloat zs_screen_corner_radius(UIView *view, CGFloat fallback) {
     return radius > 0 ? radius : fallback;
 }
 
-static void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft) {
+static void zs_configure_main_panel_glass_corners_split(UIView *view, CGFloat radius, BOOL roundTopLeft, BOOL roundBottomLeft) {
     if (!view || !zs_has_liquid_glass()) return;
 
     Class radiusClass = NSClassFromString(@"UICornerRadius");
@@ -499,13 +499,14 @@ static void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, 
     SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
     SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
     SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
+    BOOL fallbackRoundLeft = roundTopLeft && roundBottomLeft;
 
     if (!radiusClass || !configClass ||
         ![radiusClass respondsToSelector:concentricSelector] ||
         ![radiusClass respondsToSelector:fixedSelector] ||
         ![configClass respondsToSelector:fourCornerSelector] ||
         ![view respondsToSelector:setConfiguration]) {
-        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        zs_configure_glass_corners_sides(view, radius, YES, fallbackRoundLeft, YES);
         return;
     }
 
@@ -514,17 +515,22 @@ static void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, 
     id flatRadius = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, 0);
     id rightFixed = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, rightRadius);
     if (!roundLeftRadius || !flatRadius || !rightFixed) {
-        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        zs_configure_glass_corners_sides(view, radius, YES, fallbackRoundLeft, YES);
         return;
     }
 
-    id left = roundLeft ? roundLeftRadius : flatRadius;
-    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, left, rightFixed, left, rightFixed);
+    id topLeft = roundTopLeft ? roundLeftRadius : flatRadius;
+    id bottomLeft = roundBottomLeft ? roundLeftRadius : flatRadius;
+    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, topLeft, rightFixed, bottomLeft, rightFixed);
     if (!configuration) {
-        zs_configure_glass_corners_sides(view, radius, YES, roundLeft, YES);
+        zs_configure_glass_corners_sides(view, radius, YES, fallbackRoundLeft, YES);
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
+}
+
+static void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft) {
+    zs_configure_main_panel_glass_corners_split(view, radius, roundLeft, roundLeft);
 }
 
 static NSHashTable<UIVisualEffectView *> *zs_suspendable_glass_registry(void) {
@@ -570,17 +576,146 @@ static void zs_clear_button_configuration(UIButton *button) {
 
 static const CGFloat kZSGlassButtonCornerRadius = 8;
 
+static void * const kZSButtonGlassViewKey = (void *)&kZSButtonGlassViewKey;
+static void * const kZSButtonGlassAlphaKey = (void *)&kZSButtonGlassAlphaKey;
+
+@interface ZSWeakGlassBox : NSObject
+@property (nonatomic, weak) UIVisualEffectView *glass;
+@end
+
+@implementation ZSWeakGlassBox
+@end
+
+static UIVisualEffectView *zs_button_glass_view(UIButton *button) {
+    id stored = objc_getAssociatedObject(button, kZSButtonGlassViewKey);
+    if ([stored isKindOfClass:[ZSWeakGlassBox class]]) return ((ZSWeakGlassBox *)stored).glass;
+    return stored;
+}
+
+static UIVisualEffectView *zs_button_wrapping_glass(UIButton *button) {
+    UIVisualEffectView *glass = zs_button_glass_view(button);
+    if (glass && button.superview == glass.contentView) return glass;
+    return nil;
+}
+
+static void zs_wrap_button_in_glass(UIButton *button) {
+    UIVisualEffectView *glass = zs_button_glass_view(button);
+    UIView *parent = button.superview;
+    if (!glass || !parent || parent == glass.contentView || glass.superview) return;
+
+    NSMutableArray<NSLayoutConstraint *> *external = [NSMutableArray array];
+    for (UIView *ancestor = parent; ancestor; ancestor = ancestor.superview) {
+        for (NSLayoutConstraint *constraint in ancestor.constraints) {
+            if (constraint.firstItem == button || constraint.secondItem == button) [external addObject:constraint];
+        }
+    }
+
+    BOOL frameBased = button.translatesAutoresizingMaskIntoConstraints;
+    glass.translatesAutoresizingMaskIntoConstraints = frameBased;
+    if (frameBased) {
+        glass.frame = button.frame;
+        glass.autoresizingMask = button.autoresizingMask;
+    }
+    glass.hidden = button.hidden;
+    glass.alpha = button.alpha;
+
+    UIStackView *stack = [parent isKindOfClass:[UIStackView class]] ? (UIStackView *)parent : nil;
+    NSUInteger arrangedIndex = stack ? [stack.arrangedSubviews indexOfObject:button] : NSNotFound;
+    NSUInteger subviewIndex = [parent.subviews indexOfObject:button];
+
+    for (NSLayoutConstraint *constraint in external) constraint.active = NO;
+
+    [button removeFromSuperview];
+    if (arrangedIndex != NSNotFound) {
+        [stack insertArrangedSubview:glass atIndex:arrangedIndex];
+    } else {
+        [parent insertSubview:glass atIndex:MIN(subviewIndex, parent.subviews.count)];
+    }
+
+    button.translatesAutoresizingMaskIntoConstraints = NO;
+    [glass.contentView addSubview:button];
+    [NSLayoutConstraint activateConstraints:@[
+        [button.leadingAnchor constraintEqualToAnchor:glass.contentView.leadingAnchor],
+        [button.trailingAnchor constraintEqualToAnchor:glass.contentView.trailingAnchor],
+        [button.topAnchor constraintEqualToAnchor:glass.contentView.topAnchor],
+        [button.bottomAnchor constraintEqualToAnchor:glass.contentView.bottomAnchor],
+    ]];
+
+    for (NSLayoutConstraint *old in external) {
+        id first = old.firstItem == button ? (id)glass : old.firstItem;
+        id second = old.secondItem == button ? (id)glass : old.secondItem;
+        NSLayoutConstraint *replacement = [NSLayoutConstraint constraintWithItem:first
+                                                                       attribute:old.firstAttribute
+                                                                       relatedBy:old.relation
+                                                                          toItem:second
+                                                                       attribute:old.secondAttribute
+                                                                      multiplier:old.multiplier
+                                                                        constant:old.constant];
+        replacement.priority = old.priority;
+        replacement.identifier = old.identifier;
+        replacement.active = YES;
+    }
+
+    NSNumber *pendingAlpha = objc_getAssociatedObject(button, kZSButtonGlassAlphaKey);
+    if (!pendingAlpha && button.alpha != 1) {
+        objc_setAssociatedObject(button, kZSButtonGlassAlphaKey, @(button.alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [button setAlpha:1];
+    }
+
+    ZSWeakGlassBox *box = [ZSWeakGlassBox new];
+    box.glass = glass;
+    objc_setAssociatedObject(button, kZSButtonGlassViewKey, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+@interface ZSGlassWrappedButton : UIButton
+@end
+
+@implementation ZSGlassWrappedButton
+- (void)didMoveToSuperview {
+    [super didMoveToSuperview];
+    zs_wrap_button_in_glass(self);
+}
+
+- (void)setHidden:(BOOL)hidden {
+    [super setHidden:hidden];
+    zs_button_wrapping_glass(self).hidden = hidden;
+}
+
+- (CGFloat)alpha {
+    NSNumber *stored = objc_getAssociatedObject(self, kZSButtonGlassAlphaKey);
+    return stored ? stored.doubleValue : [super alpha];
+}
+
+- (void)setAlpha:(CGFloat)alpha {
+    UIVisualEffectView *glass = zs_button_wrapping_glass(self);
+    if (!glass) {
+        [super setAlpha:alpha];
+        return;
+    }
+    objc_setAssociatedObject(self, kZSButtonGlassAlphaKey, @(alpha), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    glass.alpha = alpha;
+    [super setAlpha:1];
+}
+@end
+
 static void zs_apply_slash_glass_background(UIButton *button, UIColor *glassTint, NSString *title, UIFont *font, UIImage *image, UIColor *foreground) {
     UIVisualEffect *effect = glassTint ? zs_make_glass_effect_style(0, YES, glassTint) : zs_make_glass_effect(YES);
-    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+    UIVisualEffectView *glass = zs_button_glass_view(button);
+    if (glass) {
+        glass.effect = effect;
+    } else {
+        glass = [[UIVisualEffectView alloc] initWithEffect:effect];
+        glass.userInteractionEnabled = YES;
+        zs_register_suspendable_glass(glass);
+        objc_setAssociatedObject(button, kZSButtonGlassViewKey, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (object_getClass(button) == [UIButton class]) {
+            object_setClass(button, [ZSGlassWrappedButton class]);
+        }
+    }
     zs_configure_glass_corners(glass, kZSGlassButtonCornerRadius, NO);
-    zs_register_suspendable_glass(glass);
-
-    UIBackgroundConfiguration *background = [UIBackgroundConfiguration clearConfiguration];
-    background.customView = glass;
 
     UIButtonConfiguration *configuration = [UIButtonConfiguration plainButtonConfiguration];
-    configuration.background = background;
+    configuration.background = [UIBackgroundConfiguration clearConfiguration];
     configuration.baseForegroundColor = foreground;
     if (image) configuration.image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     if (title) {
@@ -592,6 +727,8 @@ static void zs_apply_slash_glass_background(UIButton *button, UIColor *glassTint
     }
     button.configuration = configuration;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+
+    zs_wrap_button_in_glass(button);
 }
 
 
@@ -611,21 +748,19 @@ static void * const kZSFlatButtonRadiusKey = (void *)&kZSFlatButtonRadiusKey;
 }
 @end
 
-static void zs_apply_flat_button_chrome(UIButton *button, CGFloat cornerRadius) {
+static void zs_apply_flat_button_chrome(UIButton *button) {
     if (!button) return;
     zs_clear_button_configuration(button);
     button.hidden = NO;
     button.opaque = NO;
-    button.backgroundColor = [UIColor colorWithWhite:0.2 alpha:1.0];
-    button.layer.borderWidth = 1;
-    button.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
-    button.layer.cornerCurve = kCACornerCurveCircular;
+    button.backgroundColor = [UIColor colorWithWhite:1 alpha:0.08];
+    button.layer.borderWidth = 0;
+    button.layer.cornerCurve = kCACornerCurveContinuous;
     button.layer.masksToBounds = YES;
     button.clipsToBounds = YES;
     CGFloat limit = MIN(CGRectGetWidth(button.bounds), CGRectGetHeight(button.bounds)) / 2.0;
-    BOOL pill = cornerRadius >= 100;
-    objc_setAssociatedObject(button, kZSFlatButtonRadiusKey, pill ? nil : @(cornerRadius), OBJC_ASSOCIATION_RETAIN);
-    button.layer.cornerRadius = limit > 0 ? (pill ? limit : MIN(cornerRadius, limit)) : (pill ? 15 : cornerRadius);
+    objc_setAssociatedObject(button, kZSFlatButtonRadiusKey, @(kZSGlassButtonCornerRadius), OBJC_ASSOCIATION_RETAIN);
+    button.layer.cornerRadius = limit > 0 ? MIN(kZSGlassButtonCornerRadius, limit) : kZSGlassButtonCornerRadius;
     if (object_getClass(button) == [UIButton class]) {
         object_setClass(button, [ZSFlatChromeButton class]);
     }
@@ -638,7 +773,7 @@ static void zs_style_button_as_native_glass_with_font(UIButton *button, NSString
         return;
     }
 
-    zs_apply_flat_button_chrome(button, 200);
+    zs_apply_flat_button_chrome(button);
     [button setTitle:title forState:UIControlStateNormal];
     if (tintColor) {
         [button setTitleColor:tintColor forState:UIControlStateNormal];
@@ -653,7 +788,7 @@ static void zs_style_button_as_native_glass(UIButton *button, NSString *title, U
 }
 
 static void zs_style_button_as_liquid_glass_fallback_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font) {
-    zs_apply_flat_button_chrome(button, 200);
+    zs_apply_flat_button_chrome(button);
     NSMutableParagraphStyle *paragraphStyle = [NSMutableParagraphStyle new];
     paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
     NSDictionary *titleAttributes = @{
@@ -707,7 +842,7 @@ static void zs_style_button_as_solid_glass_with_font(UIButton *button, NSString 
     if (font) button.titleLabel.font = font;
     button.backgroundColor = tintColor;
     button.layer.cornerCurve = kCACornerCurveContinuous;
-    button.layer.cornerRadius = 14;
+    button.layer.cornerRadius = kZSGlassButtonCornerRadius;
     button.clipsToBounds = YES;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
 }
@@ -723,7 +858,7 @@ static void zs_style_pill_icon_button_as_native_glass(UIButton *button, UIImage 
         return;
     }
 
-    zs_apply_flat_button_chrome(button, 200);
+    zs_apply_flat_button_chrome(button);
     [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
     button.tintColor = tintColor ?: UIColor.whiteColor;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
@@ -760,7 +895,7 @@ static void zs_style_icon_button_as_native_glass(UIButton *button, UIImage *imag
         return;
     }
 
-    zs_apply_flat_button_chrome(button, 9);
+    zs_apply_flat_button_chrome(button);
     [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
     button.tintColor = tintColor ?: UIColor.whiteColor;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
@@ -791,7 +926,7 @@ static void zs_style_options_button_as_original_native_glass(UIButton *button, U
         }
     }
 
-    zs_apply_flat_button_chrome(button, 9);
+    zs_apply_flat_button_chrome(button);
     [button setImage:[image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate] forState:UIControlStateNormal];
     button.tintColor = tintColor ?: UIColor.whiteColor;
     button.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
@@ -11029,7 +11164,11 @@ static const CGFloat kContentFadeHeight = 22;
     UIButton *loadModsButton = zs_make_grouped_action_button(@"Load Mods", [UIColor colorWithRed:0.55 green:0.42 blue:1.0 alpha:1.0]);
     [loadModsButton addTarget:self action:@selector(loadModsTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    UIView *modsActionsCard = zs_make_grouped_action_card(@[loadModsButton]);
+    UIButton *reloadModsButton = zs_make_grouped_action_button(@"Reload Mods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [reloadModsButton addTarget:self action:@selector(reloadModsTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIView *loadReloadModsRow = zs_make_grouped_action_pair_row(loadModsButton, reloadModsButton);
+
+    UIView *modsActionsCard = zs_make_grouped_action_card(@[loadReloadModsRow]);
     modsActionsCard.layer.borderWidth = 1;
     modsActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
     [self.stack addArrangedSubview:modsActionsCard];
@@ -16533,6 +16672,32 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     [haptic notificationOccurred:(failed == 0 && succeeded > 0) ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
     ZLog(@"[Mods Library] re-placed folder \"%@\": %ld succeeded, %ld skipped or failed", folderName, (long)succeeded, (long)failed);
     [self zs_presentModsAlertWithTitle:@"Re-place Folder"
+                                message:[NSString stringWithFormat:@"%ld re-placed, %ld skipped or failed. See syslog for details.",
+                                         (long)succeeded, (long)failed]];
+    [self zs_rebuildModsLibrary];
+}
+
+- (void)reloadModsTapped {
+    NSInteger succeeded = 0, failed = 0;
+    for (NSString *folderName in [ModAssetLibrary folderNames]) {
+        if (zs_mods_folder_is_or_within_stored_bundles(folderName)) continue;
+        NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
+        for (ModAssetLibraryEntry *entry in entries) {
+            NSError *entryErr = nil;
+            if ([self zs_rePlaceModEntryCore:entry error:&entryErr]) {
+                succeeded++;
+                [self zs_persistFontLivePathIfNeededForEntry:entry inFolder:folderName];
+            } else {
+                failed++;
+                ZLog(@"[Mods Library] reload \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
+            }
+        }
+    }
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:(failed == 0 && succeeded > 0) ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
+    ZLog(@"[Mods Library] reloaded mods: %ld succeeded, %ld skipped or failed", (long)succeeded, (long)failed);
+    [self zs_presentModsAlertWithTitle:@"Reload Mods"
                                 message:[NSString stringWithFormat:@"%ld re-placed, %ld skipped or failed. See syslog for details.",
                                          (long)succeeded, (long)failed]];
     [self zs_rebuildModsLibrary];
@@ -24749,6 +24914,15 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         weakSelf.pinMenuTransitioning = NO;
     }];
 
+    if (glass && self.panelGlass) {
+        [UIView animateWithDuration:0.3
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            zs_configure_main_panel_glass_corners_split(weakSelf.panelGlass, kPanelCornerRadiusMinimum, NO, YES);
+        } completion:nil];
+    }
+
     [UIView animateWithDuration:0.24
                           delay:0.16
                         options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
@@ -24789,6 +24963,22 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         }
     };
 
+    void (^restorePanelCorner)(BOOL) = ^(BOOL withAnimation) {
+        if (!glass || !weakSelf.panelGlass || weakSelf.docsPanelOpen || weakSelf.pinMenuOpen) return;
+        void (^apply)(void) = ^{
+            zs_configure_main_panel_glass_corners(weakSelf.panelGlass, kPanelCornerRadiusMinimum, YES);
+        };
+        if (!withAnimation) {
+            [UIView performWithoutAnimation:apply];
+            return;
+        }
+        [UIView animateWithDuration:0.3
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:apply
+                         completion:nil];
+    };
+
     void (^finish)(void) = ^{
         [UIView performWithoutAnimation:^{
             handleElement.frame = CGRectMake(extra, CGRectGetMinY(handleElement.frame) + (CGRectGetHeight(handleElement.frame) - kHandleHeight) * 0.5, kHandleWidth, kHandleHeight);
@@ -24809,6 +24999,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
             [weakSelf zs_layoutPinnedTabsWithHandleY:collapsed.origin.y localX:extra visible:YES];
         }];
         finish();
+        restorePanelCorner(NO);
         if (weakSelf.pinRecenterPending) {
             weakSelf.pinRecenterPending = NO;
             weakSelf.pinRecenterToken = weakSelf.pinRecenterToken + 1;
@@ -24842,6 +25033,9 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
         [weakSelf zs_layoutPinnedTabsWithHandleY:collapsed.origin.y localX:extra visible:YES];
     } completion:^(BOOL finished) {
         finish();
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            restorePanelCorner(YES);
+        });
     }];
 }
 
