@@ -34,9 +34,13 @@ const FINGERPRINT_HEX =
   "910003ffd65f03c05280010094000000f9400288f90000089000000191000021" +
   "d280000294000000d4200020aa0003f494000000aa1403e09400000094000000";
 
-const SITE_INDEX = 103;
-const SITE_PRELUDE = 0xd2800001;
-const NOP = 0xd503201f;
+const IDX_TRACE = 103;
+const IDX_RESULT = 180;
+const IDX_MOV = 225;
+const IDX_CATCH = 227;
+const MOV_ORIGINAL = 0xaa1403e1;
+const MOV_PATCHED = 0xd2800001;
+const SKIP = new Set([IDX_TRACE, IDX_MOV, IDX_CATCH]);
 const PIECE = 1 << 22;
 const ARM64 = 0x0100000c;
 
@@ -44,6 +48,15 @@ function fingerprintWords() {
   const out = new Uint32Array(FINGERPRINT_HEX.length / 8);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(FINGERPRINT_HEX.slice(i * 8, i * 8 + 8), 16) >>> 0;
   return out;
+}
+
+function le(w) {
+  return new Uint8Array([w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff]);
+}
+
+function blImm(w) {
+  const v = w & 0x3ffffff;
+  return v & 0x2000000 ? v - 0x4000000 : v;
 }
 
 function maskWord(w) {
@@ -119,22 +132,42 @@ export async function findIapSite(read, onProgress) {
       if (maskWord(u[i]) !== fp[0]) continue;
       let ok = true;
       for (let k = 1; k < L; k++) {
-        if (k === SITE_INDEX) continue;
+        if (SKIP.has(k)) continue;
         if (maskWord(u[i + k]) !== fp[k]) { ok = false; break; }
       }
-      if (ok) hits.push({ offset: pos + (i + SITE_INDEX) * 4, original: u[i + SITE_INDEX] >>> 0, prelude: u[i + SITE_INDEX - 1] >>> 0 });
+      if (ok) {
+        hits.push({
+          mov: u[i + IDX_MOV] >>> 0,
+          catchCall: u[i + IDX_CATCH] >>> 0,
+          resultCall: u[i + IDX_RESULT] >>> 0,
+          movOffset: pos + (i + IDX_MOV) * 4,
+          catchOffset: pos + (i + IDX_CATCH) * 4,
+          resultOffset: pos + (i + IDX_RESULT) * 4,
+        });
+      }
     }
     if (onProgress) onProgress(Math.min(1, (pos - range.start + len) / range.size));
   }
   if (hits.length === 0) return { status: "missing" };
   if (hits.length > 1) return { status: "ambiguous", count: hits.length };
   const h = hits[0];
-  if (h.original === NOP) return { status: "already", offset: h.offset };
-  if (h.original >>> 26 !== 37 || h.prelude !== SITE_PRELUDE) return { status: "unexpected", offset: h.offset };
-  return { status: "patch", offset: h.offset };
+  if (h.catchCall >>> 26 !== 37 || h.resultCall >>> 26 !== 37) return { status: "unexpected", offset: h.movOffset };
+  const newImm = blImm(h.resultCall) + (h.resultOffset - h.catchOffset) / 4;
+  if (newImm < -0x2000000 || newImm >= 0x2000000) return { status: "unexpected", offset: h.movOffset };
+  const newCall = (0x94000000 | (newImm & 0x3ffffff)) >>> 0;
+  if (h.mov === MOV_PATCHED) {
+    return h.catchCall === newCall ? { status: "already", offset: h.movOffset } : { status: "unexpected", offset: h.movOffset };
+  }
+  if (h.mov !== MOV_ORIGINAL) return { status: "unexpected", offset: h.movOffset };
+  return {
+    status: "patch",
+    offset: h.movOffset,
+    patches: [
+      { offset: h.movOffset, bytes: le(MOV_PATCHED) },
+      { offset: h.catchOffset, bytes: le(newCall) },
+    ],
+  };
 }
-
-export const NOP_BYTES = new Uint8Array([0x1f, 0x20, 0x03, 0xd5]);
 
 export async function patchIapPopup(ipa, entry, { progress, log }) {
   const report = (f) => progress("Patching framework", f);
@@ -143,7 +176,14 @@ export async function patchIapPopup(ipa, entry, { progress, log }) {
     const src = ipa.slice(start, end);
     const result = await findIapSite(async (o, l) => new Uint8Array(await src.slice(o, o + l).arrayBuffer()), (f) => report(f * 0.6));
     if (result.status !== "patch") return { ...result, blob: null };
-    const blob = new Blob([src.slice(0, result.offset), NOP_BYTES, src.slice(result.offset + 4)]);
+    const parts = [];
+    let at = 0;
+    for (const p of result.patches) {
+      parts.push(src.slice(at, p.offset), p.bytes);
+      at = p.offset + p.bytes.length;
+    }
+    parts.push(src.slice(at));
+    const blob = new Blob(parts);
     const crc = await crc32OfBlob(blob, (f) => report(0.6 + f * 0.4));
     return { ...result, blob, crc };
   }
@@ -160,7 +200,7 @@ export async function patchIapPopup(ipa, entry, { progress, log }) {
     const buf = new ChunkedBuffer(chunks);
     const result = await findIapSite(async (o, l) => buf.read(o, l), (f) => report(0.3 + f * 0.4));
     if (result.status !== "patch") return { ...result, blob: null };
-    buf.write(result.offset, NOP_BYTES);
+    for (const p of result.patches) buf.write(p.offset, p.bytes);
     let crc = 0;
     let done = 0;
     for (const c of chunks) {

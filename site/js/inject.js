@@ -129,7 +129,7 @@ export async function inject(ipa, payload, opts = {}) {
       if (r.status === "patch") {
         iap = { entry: fwEntry, blob: r.blob, crc: r.crc };
         iapStatus = "patched";
-        log("Purchase popup patch applied @ offset " + r.offset + " (0x" + r.offset.toString(16) + "), framework rebuilt to " + r.blob.size + " bytes, crc32 " + (r.crc >>> 0).toString(16).padStart(8, "0"));
+        log("Purchase popup patch applied @ " + r.patches.map((p) => "0x" + p.offset.toString(16)).join(", ") + ", framework rebuilt to " + r.blob.size + " bytes, crc32 " + (r.crc >>> 0).toString(16).padStart(8, "0"));
       } else if (r.status === "already") log("Purchase popup patch already present, framework left untouched");
       else {
         log("Purchase popup patch not applied: " + r.status + (r.count ? " (" + r.count + " matches)" : ""));
