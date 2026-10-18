@@ -307,7 +307,7 @@ function reset() {
   $("progressCard").classList.remove("done");
 }
 
-const STAGE_SPAN = { "Reading IPA": [0, 0.05], "Patching Info.plist": [0.05, 0.08], "Patching executable": [0.08, 0.7], "Writing IPA": [0.7, 1], Done: [1, 1] };
+const STAGE_SPAN = { "Reading IPA": [0, 0.05], "Patching Info.plist": [0.05, 0.08], "Patching executable": [0.08, 0.4], "Patching framework": [0.4, 0.7], "Writing IPA": [0.7, 1], Done: [1, 1] };
 
 $("go").addEventListener("click", async () => {
   const m = current();
