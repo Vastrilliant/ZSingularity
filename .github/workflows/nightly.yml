@@ -10,6 +10,7 @@ on:
       - '.github/workflows/**'
       - 'demo/**'
       - 'site/**'
+      - '.gitattributes'
 
 env:
   LZ4_REF: v1.10.0
