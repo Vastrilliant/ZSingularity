@@ -182,8 +182,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) UIStackView *syslogBlacklistEntriesStack;
 @property (nonatomic, strong) NSMutableOrderedSet<NSString *> *syslogBlacklist;
 
-@property (nonatomic, strong) UIControl *customGreetingRow;
-
 @property (nonatomic, weak) UIButton *modsOptionsDropdownButton;
 @property (nonatomic, strong) UIView *modsOptionsDropdownOverlay;
 @property (nonatomic, strong) UIControl *modsOptionsDropdownScrim;

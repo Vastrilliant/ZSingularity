@@ -1066,25 +1066,16 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
     [self zs_presentModsAlertWithTitle:@"Library Symlink Created" message:@"The Library folder is now browsable at Documents/Library in the Files app, including its internal logs."];
 }
 
-- (void)zs_refreshCustomGreetingRow {
-    if (self.customGreetingRow) {
-        zs_disclosure_row_set_value(self.customGreetingRow, zs_custom_greeting_button_title(zs_custom_greeting_text()));
-    }
-}
-
 - (void)zs_customGreetingTextButtonTapped:(id)sender {
-    __weak typeof(self) weakSelf = self;
     [self zs_presentFloatingTextFieldWithInitialText:zs_custom_greeting_text()
                                           placeholder:@"Greeting text"
                                                secure:NO
                                              hintText:@"Note: Client side only, others won\u2019t see this."
                                          resetHandler:^{
         zs_set_custom_greeting_text(@"");
-        [weakSelf zs_refreshCustomGreetingRow];
     }
                                            completion:^(NSString * _Nullable trimmedText) {
         zs_set_custom_greeting_text(trimmedText ?: @"");
-        [weakSelf zs_refreshCustomGreetingRow];
     }];
 }
 

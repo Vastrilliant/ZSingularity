@@ -49,7 +49,6 @@
 - (void)zs_createLogosTapped;
 - (void)zs_handleCreateLogosPickedURL:(NSURL *)url;
 - (void)librarySymlinkTapped;
-- (void)zs_refreshCustomGreetingRow;
 - (void)zs_customGreetingTextButtonTapped:(id)sender;
 - (void)deleteSpecificAssetTapped;
 - (void)zs_searchAndConfirmDeleteAssetForQuery:(NSString *)query;

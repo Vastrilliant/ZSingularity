@@ -259,7 +259,7 @@ static void zt_parallel_run(NSUInteger count, BOOL parallel, ZTEstimateBlock est
     state.count = count;
     state.cap = parallel ? MIN(count, zt_slot_total()) : 1;
     state.threads = parallel ? (zt_slot_total() > 1 ? 1u : 0u) : 1u;
-    ZLog(@"[ZTranscoder] transcoding %lu texture(s) with up to %lu worker(s)%@", (unsigned long)count, (unsigned long)state.cap, parallel ? @"" : @" (parallel processing disabled)");
+    ZLog(@"[ZTranscoder] transcoding %lu texture(s) with up to %lu worker(s)%@", (unsigned long)count, (unsigned long)state.cap, parallel ? @"" : @" (parallel compute disabled)");
     dispatch_group_t group = dispatch_group_create();
     zt_run_worker(&state, group, estimate, work, slot);
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);

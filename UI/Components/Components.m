@@ -4,11 +4,6 @@
 
 #pragma mark - Miscellaneous UI
 
-NSString *zs_custom_greeting_button_title(NSString *text) {
-    if (text.length == 0) return @"Not Set";
-    return text;
-}
-
 static const CGFloat kRowHeight = 26;
 static const CGFloat kTitleColumnWidth = 92;
 static const CGFloat kSettingRowHeight = 24;
@@ -1111,7 +1106,16 @@ void zs_disclosure_row_install_menu(UIControl *row, NSArray<NSString *> *titles,
 - (NSString *)subtextForIndex:(NSUInteger)index {
     if (index >= self.subtexts.count) return nil;
     id entry = self.subtexts[index];
+    if ([entry isKindOfClass:[NSDictionary class]]) entry = entry[@"text"];
     return [entry isKindOfClass:[NSString class]] && [entry length] ? entry : nil;
+}
+
+- (UIColor *)subtextColorForIndex:(NSUInteger)index {
+    if (index >= self.subtexts.count) return nil;
+    id entry = self.subtexts[index];
+    if (![entry isKindOfClass:[NSDictionary class]]) return nil;
+    UIColor *color = entry[@"color"];
+    return [color isKindOfClass:[UIColor class]] ? color : nil;
 }
 
 - (UIView *)buildOptions {
@@ -1151,7 +1155,7 @@ void zs_disclosure_row_install_menu(UIControl *row, NSArray<NSString *> *titles,
             sub.translatesAutoresizingMaskIntoConstraints = NO;
             sub.userInteractionEnabled = NO;
             sub.font = zs_mono_font(8, UIFontWeightRegular);
-            sub.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+            sub.textColor = [self subtextColorForIndex:i] ?: [UIColor colorWithWhite:1 alpha:0.4];
             sub.text = subtext;
             sub.numberOfLines = 0;
             [sub setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];

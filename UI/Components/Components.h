@@ -118,7 +118,6 @@ extern NSLayoutConstraint *g_zsLowResCodecHeight;
 extern NSString * const kZSStoredBundlesFolderName;
 extern NSString * const kZSStoredBundlesFolderSubtext;
 
-NSString *zs_custom_greeting_button_title(NSString *text);
 ZSRow *zs_make_slider_row(NSString *title, float minV, float maxV, float val, NSString *(^format)(float));
 ZSRow *zs_make_mode_slider_row(NSString *title, NSArray<NSString *> *labels, NSInteger selectedIndex, NSInteger defaultIndex);
 ZSRow *zs_make_wheel_row(NSString *title, NSArray<NSString *> *labels, NSInteger selectedIndex, NSInteger defaultIndex);

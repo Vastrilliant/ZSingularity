@@ -922,8 +922,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.syslogRenderDeferred = NO;
     self.syslogCopyToastView = nil;
 
-    self.customGreetingRow = nil;
-
     self.modsOptionsDropdownOverlay = nil;
     self.modsOptionsDropdownScrim = nil;
     self.modsOptionsDropdownOpen = NO;
@@ -1851,6 +1849,20 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     particleCapRow.slider.defaultValue = 50; particleCapRow.slider.hasDefaultValue = YES;
     [particleCapRow.slider addTarget:self action:@selector(particleCapChanged:) forControlEvents:UIControlEventValueChanged];
     [self.stack addArrangedSubview:particleCapRow];
+
+    __weak ZSRow *weakParticleCapRow = particleCapRow;
+    void (^applyParticleCapState)(BOOL) = ^(BOOL capEnabled) {
+        ZSRow *capRow = weakParticleCapRow;
+        CGFloat alpha = capEnabled ? 1.0 : 0.35;
+        capRow.slider.userInteractionEnabled = capEnabled;
+        capRow.slider.alpha = alpha;
+        capRow.titleLabel.alpha = alpha;
+        capRow.valueLabel.alpha = alpha;
+    };
+    applyParticleCapState(g_expParticleMaxParticlesCapEnabled);
+    [particleCapEnabledRow.toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        applyParticleCapState(((UISwitch *)action.sender).isOn);
+    }] forControlEvents:UIControlEventValueChanged];
     }];
 
     [self.pendingSectionBuilders addObject:^{
@@ -1938,9 +1950,11 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     }] forControlEvents:UIControlEventValueChanged];
 
     UIView *transcoderCodecRow = zs_make_expanding_dropdown_row(@"Codec",
-        @[@"ASTC 6x6 (default)", @"ASTC 8x8", @"ASTC 10x10", @"RGBA32"],
         @[@"ASTC 6x6", @"ASTC 8x8", @"ASTC 10x10", @"RGBA32"],
-        @[[NSNull null], [NSNull null], [NSNull null], @"Using this codec may result in increased memory usage"],
+        @[@"ASTC 6x6", @"ASTC 8x8", @"ASTC 10x10", @"RGBA32"],
+        @[@"default codec", [NSNull null], [NSNull null],
+          @{@"text": @"Using this codec may result in increased memory usage",
+            @"color": [UIColor colorWithRed:1.0 green:0.6 blue:0.1 alpha:1.0]}],
         (NSInteger)zs_transcoder_codec(),
         ^(dispatch_block_t changes) { [weakModsSelf zs_lowResAnimateChanges:changes]; },
         ^(NSInteger index) {
@@ -1949,7 +1963,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
             [weakModsSelf zs_scheduleSave];
         });
 
-    ZSRow *parallelProcessingRow = zs_make_switch_row(@"Parallel processing", zs_transcoder_parallel_enabled());
+    ZSRow *parallelProcessingRow = zs_make_switch_row(@"Parallel compute", zs_transcoder_parallel_enabled());
     zs_add_unavailable_subtext(parallelProcessingRow, [NSString stringWithFormat:@"Assign up to %lu cores to process textures simultaneously.", (unsigned long)zs_transcoder_core_count()]);
     [parallelProcessingRow.toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
         zs_set_transcoder_parallel_enabled(((UISwitch *)action.sender).isOn);
@@ -2072,9 +2086,8 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     zs_add_section_header_with_docs(self.stack, @"Miscellaneous", self, @selector(docsInfoTapped:));
 
     UIControl *customGreetingRow = zs_make_disclosure_row(@"Custom Greeting Text",
-                                                           zs_custom_greeting_button_title(zs_custom_greeting_text()),
+                                                           @"",
                                                            self, @selector(zs_customGreetingTextButtonTapped:));
-    self.customGreetingRow = customGreetingRow;
 
     ZSRow *uidRedactorRow = zs_make_switch_row(@"Hide user ID", UIDRedactor.isEnabled);
     [uidRedactorRow.toggle addTarget:self action:@selector(uidRedactorChanged:) forControlEvents:UIControlEventValueChanged];
@@ -2111,14 +2124,21 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
 
     ZSRow *manifestZeroingRow = zs_make_switch_row(@"Manifest zeroing", PatchManifestNetwork.isZeroAllEnabled);
     [manifestZeroingRow.toggle addTarget:self action:@selector(manifestZeroingChanged:) forControlEvents:UIControlEventValueChanged];
+    zs_add_unavailable_subtext(manifestZeroingRow, @"Disables file integrity checksums. Required by mods.");
     self.manifestZeroingRow = manifestZeroingRow;
     [self zs_refreshManifestZeroingRow];
 
     UIButton *manualIndexButton = zs_make_grouped_action_button(@"Manually Index Files", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [manualIndexButton addTarget:self action:@selector(manuallyIndexFilesTapped) forControlEvents:UIControlEventTouchUpInside];
+    zs_attach_tap_to_confirm(manualIndexButton, self,
+        @"Manually Index Files?", @"This rebuilds the file index from scratch and can take a while depending on how many files the game has cached.", @"Index", NO, ^{
+        [weakSelf manuallyIndexFilesTapped];
+    });
 
     UIButton *resetButton = zs_make_grouped_action_button(@"Reset Settings", [UIColor colorWithRed:1.0 green:0.42 blue:0.42 alpha:1.0]);
-    [resetButton addTarget:self action:@selector(resetSettingsTapped) forControlEvents:UIControlEventTouchUpInside];
+    zs_attach_tap_to_confirm(resetButton, self,
+        @"Reset Settings?", @"This restores every setting to its default value. This can't be undone.", @"Reset", YES, ^{
+        [weakSelf resetSettingsTapped];
+    });
     UIButton *reapplyButton = zs_make_grouped_action_button(@"Reapply Settings", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [reapplyButton addTarget:self action:@selector(reapplySettingsTapped) forControlEvents:UIControlEventTouchUpInside];
     UIView *resetReapplyRow = zs_make_grouped_action_pair_row(resetButton, reapplyButton);
