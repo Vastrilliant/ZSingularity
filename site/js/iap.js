@@ -1,62 +1,49 @@
 import { ChunkedBuffer } from "./macho.js";
 import { crc32, crc32OfBlob, dataRange, rawBlob, inflateChunks } from "./zip.js";
 
-const FINGERPRINT_HEX =
-  "d10143ffa9015ff8a90257f6a9034ff4a9047bfd910003fdaa0003f390000014" +
-  "3940d28837000308900000009100000094000000900000009100000094000000" +
-  "9000000091000000940000009000000091000000940000009000000091000000" +
-  "9400000090000000910000009400000090000000910000009400000052800028" +
-  "3900d28890000016910002d6f90007ffb9400268340006489000000891000108" +
-  "f9401274f940010094000000aa0003f5900000173940d6e8370000c890000000" +
-  "9100000094000000528000283900d6e89000000891000108f9400101aa1503e0" +
-  "94000000b4001054f8010e95aa1403e0aa1503e194000000f9400280b40003c0" +
-  "90000015910002b5f94002a194000000b40004a0f94002a1f940000879425d09" +
-  "b4000129f940590a9100014af85f814beb01017f540006009100014af1000529" +
-  "54ffff61aa0003f45280002294000000aa0003e8aa1403e014000000f9401668" +
-  "f90007e8f900167f12800008b9000268140000009000000891000108f9400100" +
-  "b940e40835000048940000009000000891000108f9400100d280000194000000" +
-  "14000000f9400294b4000ab49000000891000108f9400101f940028879425d09" +
-  "b4000129f940590a9100014af85f814beb01017f540006209100014af1000529" +
-  "54ffff61aa1403e0528000029400000014000000b9400149110005298b29d108" +
-  "91000108a9400509d63f0120b4000740d280000194000000f90007e0910003e0" +
-  "d280000194000000360000a0910003e0d28000019400000014000000b900027f" +
-  "f94007e8aa1303e0f8028c08d280000194000000f94002c0b940e40835000048" +
-  "940000009000000891000108f940010391000260910003e1aa1303e294000000" +
-  "a9447bfda9434ff4a94257f6a9415ff8910003ffd65f03c0b98001498b091108" +
-  "91000100a9400408aa1403e0d63f010012800028b8008668f94002c0b940e408" +
-  "3500004894000000aa1303e0d280000194000000a9447bfda9434ff4a94257f6" +
-  "a9415ff8910003ffd65f03c09400000014000000940000001400000094000000" +
-  "1400000014000000140000001400000014000000140000001400000014000000" +
-  "14000000aa0003f47100043f54000541aa1403e094000000aa0003f490000000" +
-  "9100000094000000f9400288f940010194000000340002a0f940029494000000" +
-  "12800028b8008668900000009100000094000000b940e4083500004894000000" +
-  "aa1303e0aa1403e1d280000294000000a9447bfda9434ff4a94257f6a9415ff8" +
-  "910003ffd65f03c05280010094000000f9400288f90000089000000191000021" +
-  "d280000294000000d4200020aa0003f494000000aa1403e09400000094000000";
+const TARGET_HEX = [
+  "d10183ffa90167faa9025ff8a90357f6a9044ff4a9057bfd910003fdaa0203f3" +
+  "aa0103f49000001539549aa8370002a89000000891000108aa0003f6aa0803e0" +
+  "9400000090000000910000009400000090000000910000009400000090000000" +
+  "9100000094000000900000009100000094000000aa1603e05280002839149aa8" +
+  "b4000a40d280000194000000b40009e090000017910002f79000001891000318" +
+  "900000199100033990000016910002d6f9400008a95b8509d63f0120aa0003f5" +
+  "b9000ff4f94002e0910003e194000000aa0003e2f9400300aa1503e1aa1303e3" +
+  "d280000494000000f9400328b940e50934000389d280000194000000f94002c0" +
+  "b940e408340004089000001339786a6836000428f94002c0b940e408340004c8" +
+  "f9405c08f9400100b40005009000000891000108f9400101d2800002d2800003" +
+  "94000000a9457bfda9444ff4a94357f6a9425ff8a94167fa910003ffd65f03c0" +
+  "aa0003f3aa0803e094000000aa1303e0d280000194000000f94002c0b940e408" +
+  "35fffc48940000009000001339786a683707fc28900000009100000094000000" +
+  "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08" +
+  "f9400100b5fffb4094000000",
+  "d10183ffa90167faa9025ff8a90357f6a9044ff4a9057bfd910003fdaa0203f3" +
+  "aa0103f4900000153954bea8370002a89000000891000108aa0003f6aa0803e0" +
+  "9400000090000000910000009400000090000000910000009400000090000000" +
+  "9100000094000000900000009100000094000000aa1603e0528000283914bea8" +
+  "b4000a40d280000194000000b40009e090000017910002f79000001891000318" +
+  "900000199100033990000016910002d6f9400008a95b8509d63f0120aa0003f5" +
+  "b9000ff4f94002e0910003e194000000aa0003e2f9400300aa1503e1aa1303e3" +
+  "d280000494000000f9400328b940e50934000389d280000194000000f94002c0" +
+  "b940e408340004089000001339786a6836000428f94002c0b940e408340004c8" +
+  "f9405c08f9400100b40005009000000891000108f9400101d2800002d2800003" +
+  "94000000a9457bfda9444ff4a94357f6a9425ff8a94167fa910003ffd65f03c0" +
+  "aa0003f3aa0803e094000000aa1303e0d280000194000000f94002c0b940e408" +
+  "35fffc48940000009000001339786a683707fc28900000009100000094000000" +
+  "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08" +
+  "f9400100b5fffb4094000000",
+];
 
-const IDX_TRACE = 103;
-const IDX_RESULT = 180;
-const IDX_MOV = 225;
-const IDX_CATCH = 227;
-const MOV_ORIGINAL = 0xaa1403e1;
-const MOV_PATCHED = 0xd2800001;
-const SKIP = new Set([IDX_TRACE, IDX_MOV, IDX_CATCH]);
+const SITE_INDEX = 80;
+const NOP = 0xd503201f;
 const PIECE = 1 << 22;
 const ARM64 = 0x0100000c;
+const NOP_BYTES = new Uint8Array([0x1f, 0x20, 0x03, 0xd5]);
 
-function fingerprintWords() {
-  const out = new Uint32Array(FINGERPRINT_HEX.length / 8);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(FINGERPRINT_HEX.slice(i * 8, i * 8 + 8), 16) >>> 0;
+function hexWords(hex) {
+  const out = new Uint32Array(hex.length / 8);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 8, i * 8 + 8), 16) >>> 0;
   return out;
-}
-
-function le(w) {
-  return new Uint8Array([w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff]);
-}
-
-function blImm(w) {
-  const v = w & 0x3ffffff;
-  return v & 0x2000000 ? v - 0x4000000 : v;
 }
 
 function maskWord(w) {
@@ -119,54 +106,46 @@ export async function findIapSite(read, onProgress) {
   if (new Uint8Array(new Uint32Array([1]).buffer)[0] !== 1) return { status: "unsupported" };
   const range = await textRange(read);
   if (!range) return { status: "missing" };
-  const fp = fingerprintWords();
-  const L = fp.length;
+  const targets = TARGET_HEX.map(hexWords);
+  const L = targets[0].length;
   const end = range.start + (range.size - (range.size % 4));
-  const hits = [];
+  const hits = targets.map(() => []);
   for (let pos = range.start; pos + L * 4 <= end; pos += PIECE) {
     const len = Math.min(PIECE + L * 4, end - pos);
     const buf = await read(pos, len);
     const u = new Uint32Array(buf.buffer, buf.byteOffset, len >> 2);
     const last = Math.min(PIECE >> 2, (len >> 2) - L + 1);
     for (let i = 0; i < last; i++) {
-      if (maskWord(u[i]) !== fp[0]) continue;
-      let ok = true;
-      for (let k = 1; k < L; k++) {
-        if (SKIP.has(k)) continue;
-        if (maskWord(u[i + k]) !== fp[k]) { ok = false; break; }
-      }
-      if (ok) {
-        hits.push({
-          mov: u[i + IDX_MOV] >>> 0,
-          catchCall: u[i + IDX_CATCH] >>> 0,
-          resultCall: u[i + IDX_RESULT] >>> 0,
-          movOffset: pos + (i + IDX_MOV) * 4,
-          catchOffset: pos + (i + IDX_CATCH) * 4,
-          resultOffset: pos + (i + IDX_RESULT) * 4,
-        });
+      const m0 = maskWord(u[i]);
+      for (let t = 0; t < targets.length; t++) {
+        const fp = targets[t];
+        if (m0 !== fp[0]) continue;
+        let ok = true;
+        for (let k = 1; k < L; k++) {
+          if (k === SITE_INDEX) continue;
+          if (maskWord(u[i + k]) !== fp[k]) { ok = false; break; }
+        }
+        if (ok) hits[t].push({ offset: pos + (i + SITE_INDEX) * 4, word: u[i + SITE_INDEX] >>> 0 });
       }
     }
     if (onProgress) onProgress(Math.min(1, (pos - range.start + len) / range.size));
   }
-  if (hits.length === 0) return { status: "missing" };
-  if (hits.length > 1) return { status: "ambiguous", count: hits.length };
-  const h = hits[0];
-  if (h.catchCall >>> 26 !== 37 || h.resultCall >>> 26 !== 37) return { status: "unexpected", offset: h.movOffset };
-  const newImm = blImm(h.resultCall) + (h.resultOffset - h.catchOffset) / 4;
-  if (newImm < -0x2000000 || newImm >= 0x2000000) return { status: "unexpected", offset: h.movOffset };
-  const newCall = (0x94000000 | (newImm & 0x3ffffff)) >>> 0;
-  if (h.mov === MOV_PATCHED) {
-    return h.catchCall === newCall ? { status: "already", offset: h.movOffset } : { status: "unexpected", offset: h.movOffset };
+  const patches = [];
+  let already = 0;
+  let status = "missing";
+  let firstOffset = null;
+  for (const h of hits) {
+    if (h.length === 0) continue;
+    if (h.length > 1) { status = "ambiguous"; continue; }
+    const hit = h[0];
+    if (firstOffset === null) firstOffset = hit.offset;
+    if (hit.word === NOP) { already++; continue; }
+    if (hit.word >>> 26 !== 37) { status = "unexpected"; continue; }
+    patches.push({ offset: hit.offset, bytes: NOP_BYTES });
   }
-  if (h.mov !== MOV_ORIGINAL) return { status: "unexpected", offset: h.movOffset };
-  return {
-    status: "patch",
-    offset: h.movOffset,
-    patches: [
-      { offset: h.movOffset, bytes: le(MOV_PATCHED) },
-      { offset: h.catchOffset, bytes: le(newCall) },
-    ],
-  };
+  if (patches.length) return { status: "patch", offset: patches[0].offset, patches };
+  if (already) return { status: "already", offset: firstOffset };
+  return { status, offset: firstOffset };
 }
 
 export async function patchIapPopup(ipa, entry, { progress, log }) {
