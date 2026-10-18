@@ -229,6 +229,12 @@ jobs:
           print(f"Injected {dylib_ref} into {binary_path}")
           PYEOF
 
+      - name: Suppress UnityIAP launch popup
+        run: python3 scripts/patch_iap_popup.py "$APP_DIR/Frameworks/UnityFramework.framework/UnityFramework"
+
+      - name: Enable Custom Localize Manager
+        run: python3 scripts/patch_custom_localize.py "$APP_DIR/Frameworks/UnityFramework.framework/UnityFramework"
+
       - name: Re-sign app bundle (ad-hoc)
         run: |
           set -euo pipefail

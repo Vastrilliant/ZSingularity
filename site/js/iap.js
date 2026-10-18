@@ -1,6 +1,3 @@
-import { ChunkedBuffer } from "./macho.js";
-import { crc32, crc32OfBlob, dataRange, rawBlob, inflateChunks } from "./zip.js";
-
 const TARGET_HEX = [
   "d10183ffa90167faa9025ff8a90357f6a9044ff4a9057bfd910003fdaa0203f3" +
   "aa0103f49000001539549aa8370002a89000000891000108aa0003f6aa0803e0" +
@@ -54,7 +51,7 @@ function maskWord(w) {
   return w >>> 0;
 }
 
-async function textRange(read) {
+export async function textRange(read) {
   const head = await read(0, 8);
   const hdv = new DataView(head.buffer, head.byteOffset, head.byteLength);
   const magic = hdv.getUint32(0, false);
@@ -92,9 +89,10 @@ async function textRange(read) {
       let name = "";
       for (let k = 0; k < 16 && cmds[p + 8 + k] !== 0; k++) name += String.fromCharCode(cmds[p + 8 + k]);
       if (name === "__TEXT") {
+        const vmaddr = Number(cdv.getBigUint64(p + 24, true));
         const fileoff = Number(cdv.getBigUint64(p + 40, true));
         const filesize = Number(cdv.getBigUint64(p + 48, true));
-        return { start: base + fileoff, size: filesize };
+        return { start: base + fileoff, size: filesize, base, vmaddr, fileoff };
       }
     }
     p += size;
@@ -146,48 +144,4 @@ export async function findIapSite(read, onProgress) {
   if (patches.length) return { status: "patch", offset: patches[0].offset, patches };
   if (already) return { status: "already", offset: firstOffset };
   return { status, offset: firstOffset };
-}
-
-export async function patchIapPopup(ipa, entry, { progress, log }) {
-  const report = (f) => progress("Patching framework", f);
-  if (entry.method === 0) {
-    const { start, end } = await dataRange(ipa, entry);
-    const src = ipa.slice(start, end);
-    const result = await findIapSite(async (o, l) => new Uint8Array(await src.slice(o, o + l).arrayBuffer()), (f) => report(f * 0.6));
-    if (result.status !== "patch") return { ...result, blob: null };
-    const parts = [];
-    let at = 0;
-    for (const p of result.patches) {
-      parts.push(src.slice(at, p.offset), p.bytes);
-      at = p.offset + p.bytes.length;
-    }
-    parts.push(src.slice(at));
-    const blob = new Blob(parts);
-    const crc = await crc32OfBlob(blob, (f) => report(0.6 + f * 0.4));
-    return { ...result, blob, crc };
-  }
-  if (entry.method === 8) {
-    const raw = await rawBlob(ipa, entry);
-    const chunks = [];
-    let got = 0;
-    await inflateChunks(raw, (c) => {
-      chunks.push(c);
-      got += c.length;
-      report(Math.min(0.3, (got / Math.max(1, entry.usize)) * 0.3));
-    });
-    log("Inflated framework executable: " + chunks.length + " chunks, " + got + " bytes");
-    const buf = new ChunkedBuffer(chunks);
-    const result = await findIapSite(async (o, l) => buf.read(o, l), (f) => report(0.3 + f * 0.4));
-    if (result.status !== "patch") return { ...result, blob: null };
-    for (const p of result.patches) buf.write(p.offset, p.bytes);
-    let crc = 0;
-    let done = 0;
-    for (const c of chunks) {
-      crc = crc32(crc, c);
-      done += c.length;
-      report(0.7 + 0.3 * (done / Math.max(1, buf.length)));
-    }
-    return { ...result, blob: new Blob(chunks), crc };
-  }
-  throw new Error("Unsupported compression method " + entry.method + " on the framework executable.");
 }

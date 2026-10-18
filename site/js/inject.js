@@ -1,7 +1,9 @@
 import { parsePlist, serializePlist } from "./plist.js";
 import { readZip, dataRange, rawBlob, readEntryBytes, inflateChunks, crc32, crc32OfBlob, ZipWriter, unixAttr } from "./zip.js";
 import { patchMachO, ChunkedBuffer } from "./macho.js";
-import { patchIapPopup } from "./iap.js";
+import { findIapSite } from "./iap.js";
+import { findLocalizeSite } from "./localize.js";
+import { patchFramework } from "./framework.js";
 
 const TRUE_KEYS = [
   "CADisableMinimumFrameDuration",
@@ -113,27 +115,38 @@ export async function inject(ipa, payload, opts = {}) {
     } else log("No Mach-O patches needed, executable left untouched");
   } else throw new Error("Unsupported compression method " + exeEntry.method + " on the main executable.");
 
-  let iap = null;
+  let fw = null;
   let iapStatus = "skipped";
-  if (opts.patchIap !== false) {
+  let localizeStatus = "skipped";
+  const finders = [];
+  if (opts.patchIap !== false) finders.push({ id: "iap", find: findIapSite });
+  if (opts.patchLocalize !== false) finders.push({ id: "localize", find: findLocalizeSite });
+  if (finders.length) {
     const fwEntry = zip.entries.find((e) => e.name === appDir + UNITY_FRAMEWORK);
     if (!fwEntry) {
-      iapStatus = "no-framework";
-      log("UnityFramework not found in the app bundle, skipping the purchase popup patch");
-      warnings.push("UnityFramework was not found, so the launch purchase error popup was not suppressed.");
+      log("UnityFramework not found in the app bundle, skipping the framework patches");
+      if (opts.patchIap !== false) {
+        iapStatus = "no-framework";
+        warnings.push("UnityFramework was not found, so the launch purchase error popup was not suppressed.");
+      }
+      if (opts.patchLocalize !== false) {
+        localizeStatus = "no-framework";
+        warnings.push("UnityFramework was not found, so the Custom Localize Manager was not enabled.");
+      }
     } else {
       progress("Patching framework", 0);
       log("Framework: " + fwEntry.name + " \u00b7 method " + fwEntry.method + " \u00b7 " + fwEntry.csize + " compressed / " + fwEntry.usize + " uncompressed bytes");
-      const r = await patchIapPopup(ipa, fwEntry, { progress, log });
-      iapStatus = r.status;
-      if (r.status === "patch") {
-        iap = { entry: fwEntry, blob: r.blob, crc: r.crc };
-        iapStatus = "patched";
-        log("Purchase popup patch applied @ " + r.patches.map((p) => "0x" + p.offset.toString(16)).join(", ") + ", framework rebuilt to " + r.blob.size + " bytes, crc32 " + (r.crc >>> 0).toString(16).padStart(8, "0"));
-      } else if (r.status === "already") log("Purchase popup patch already present, framework left untouched");
-      else {
-        log("Purchase popup patch not applied: " + r.status + (r.count ? " (" + r.count + " matches)" : ""));
-        warnings.push("This game build's purchase code did not match the expected layout (" + r.status + "), so the launch purchase error popup was not suppressed.");
+      const r = await patchFramework(ipa, fwEntry, finders, { progress, log });
+      if (r.blob) {
+        fw = { entry: fwEntry, blob: r.blob, crc: r.crc };
+        log("Framework rebuilt to " + r.blob.size + " bytes, crc32 " + (r.crc >>> 0).toString(16).padStart(8, "0"));
+      } else log("No framework patches needed, framework left untouched");
+      for (const res of r.results) {
+        if (res.id === "iap") {
+          iapStatus = reportPatch(res, "Purchase popup", "This game build's purchase code did not match the expected layout (" + res.status + "), so the launch purchase error popup was not suppressed.", log, warnings);
+        } else {
+          localizeStatus = reportPatch(res, "Custom localize path", "This game build's localization path code did not match the expected layout (" + res.status + "), so the Custom Localize Manager was not enabled.", log, warnings);
+        }
       }
     }
   }
@@ -173,7 +186,7 @@ export async function inject(ipa, payload, opts = {}) {
     if (drop(e)) continue;
     if (e === plistEntry) { w.addStored(e.name, plistBytes, crc32(0, plistBytes), metaOf(e)); log("Wrote patched " + e.name); }
     else if (e === exeEntry && exeBlob) { w.addStored(e.name, exeBlob, exeCrc, metaOf(e)); log("Wrote patched " + e.name); }
-    else if (iap && e === iap.entry) { w.addStored(e.name, iap.blob, iap.crc, metaOf(e)); log("Wrote patched " + e.name); }
+    else if (fw && e === fw.entry) { w.addStored(e.name, fw.blob, fw.crc, metaOf(e)); log("Wrote patched " + e.name); }
     else { w.copyVerbatim(ipa, e); copied++; }
     if (i % 256 === 0) progress("Writing IPA", i / sorted.length);
   }
@@ -211,8 +224,23 @@ export async function inject(ipa, payload, opts = {}) {
     alreadyInjected: machInfo.slices.every((s) => s.already),
     embeddedAppex: !!appex,
     iapStatus,
+    localizeStatus,
     warnings,
   };
+}
+
+function reportPatch(res, label, warnText, log, warnings) {
+  if (res.status === "patch") {
+    log(label + " patch applied @ " + res.patches.map((p) => "0x" + p.offset.toString(16)).join(", "));
+    return "patched";
+  }
+  if (res.status === "already") {
+    log(label + " patch already present");
+    return "already";
+  }
+  log(label + " patch not applied: " + res.status + (res.count ? " (" + res.count + " matches)" : ""));
+  warnings.push(warnText);
+  return res.status;
 }
 
 function logMach(m, log) {
