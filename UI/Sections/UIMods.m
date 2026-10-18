@@ -2355,69 +2355,143 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
                                                        error:outError];
 }
 
+static dispatch_queue_t zs_mods_replace_queue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+        queue = dispatch_queue_create("com.zsingularity.mods.replace", attr);
+    });
+    return queue;
+}
+
+static BOOL g_zsModsReplaceInFlight = NO;
+
+static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, NSString *originalTitle) {
+    button.titleLabel.adjustsFontSizeToFitWidth = YES;
+    button.titleLabel.minimumScaleFactor = 0.7;
+    [UIView performWithoutAnimation:^{
+        [button setTitle:flashTitle forState:UIControlStateNormal];
+        [button layoutIfNeeded];
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView performWithoutAnimation:^{
+            [button setTitle:originalTitle forState:UIControlStateNormal];
+            [button layoutIfNeeded];
+        }];
+    });
+}
+
 - (void)zs_rePlaceModEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName {
-    NSError *error = nil;
-    BOOL ok = [self zs_rePlaceModEntryCore:entry error:&error];
-    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-    if (!ok) {
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        [self zs_presentModsAlertWithTitle:@"Re-place Failed" message:error.localizedDescription ?: @"Unknown error."];
-        return;
-    }
-    [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
-    ZLog(@"[Mods Library] re-placed %@ into the game's files", entry.fileName);
-    [self zs_rebuildModsLibrary];
+    if (g_zsModsReplaceInFlight) return;
+    g_zsModsReplaceInFlight = YES;
+
+    __strong typeof(self) strongSelf = self;
+    dispatch_async(zs_mods_replace_queue(), ^{
+        NSError *error = nil;
+        BOOL ok = NO;
+        @autoreleasepool {
+            ok = [strongSelf zs_rePlaceModEntryCore:entry error:&error];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsModsReplaceInFlight = NO;
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            if (!ok) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeError];
+                [strongSelf zs_presentModsAlertWithTitle:@"Re-place Failed" message:error.localizedDescription ?: @"Unknown error."];
+                return;
+            }
+            [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+            ZLog(@"[Mods Library] re-placed %@ into the game's files", entry.fileName);
+            [strongSelf zs_rebuildModsLibrary];
+        });
+    });
 }
 
 - (void)zs_rePlaceModFolder:(NSString *)folderName {
-    NSError *entriesErr = nil;
-    NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:&entriesErr] ?: @[];
+    if (g_zsModsReplaceInFlight) return;
+    g_zsModsReplaceInFlight = YES;
 
-    NSInteger succeeded = 0, failed = 0;
-    for (ModAssetLibraryEntry *entry in entries) {
-        if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
-        NSError *entryErr = nil;
-        if ([self zs_rePlaceModEntryCore:entry error:&entryErr]) {
-            succeeded++;
-        } else {
-            failed++;
-            ZLog(@"[Mods Library] re-place \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
-        }
-    }
-
-    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-    [haptic notificationOccurred:(failed == 0 && succeeded > 0) ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
-    ZLog(@"[Mods Library] re-placed folder \"%@\": %ld succeeded, %ld skipped or failed", folderName, (long)succeeded, (long)failed);
-    [self zs_presentModsAlertWithTitle:@"Re-place Folder"
-                                message:[NSString stringWithFormat:@"%ld re-placed, %ld skipped or failed. See syslog for details.",
-                                         (long)succeeded, (long)failed]];
-    [self zs_rebuildModsLibrary];
-}
-
-- (void)reloadModsTapped {
-    NSInteger succeeded = 0, failed = 0;
-    for (NSString *folderName in [ModAssetLibrary folderNames]) {
-        if (zs_mods_folder_is_or_within_stored_bundles(folderName)) continue;
+    __strong typeof(self) strongSelf = self;
+    dispatch_async(zs_mods_replace_queue(), ^{
         NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
+
+        NSInteger succeeded = 0, failed = 0;
         for (ModAssetLibraryEntry *entry in entries) {
-            if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
-            NSError *entryErr = nil;
-            if ([self zs_rePlaceModEntryCore:entry error:&entryErr]) {
-                succeeded++;
-            } else {
-                failed++;
-                ZLog(@"[Mods Library] reload \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
+            @autoreleasepool {
+                if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
+                NSError *entryErr = nil;
+                if ([strongSelf zs_rePlaceModEntryCore:entry error:&entryErr]) {
+                    succeeded++;
+                } else {
+                    failed++;
+                    ZLog(@"[Mods Library] re-place \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
+                }
             }
         }
-    }
 
-    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-    [haptic notificationOccurred:(failed == 0 && succeeded > 0) ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeWarning];
-    ZLog(@"[Mods Library] reloaded mods: %ld succeeded, %ld skipped or failed", (long)succeeded, (long)failed);
-    [self zs_presentModsAlertWithTitle:@"Reload Mods"
-                                message:[NSString stringWithFormat:@"%ld re-placed, %ld skipped or failed. See syslog for details.",
-                                         (long)succeeded, (long)failed]];
-    [self zs_rebuildModsLibrary];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsModsReplaceInFlight = NO;
+            ZLog(@"[Mods Library] re-placed folder \"%@\": %ld succeeded, %ld failed", folderName, (long)succeeded, (long)failed);
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            if (failed > 0) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+                [strongSelf zs_presentModsAlertWithTitle:@"Re-place Folder"
+                                                 message:[NSString stringWithFormat:@"%ld re-placed, %ld failed. See syslog for details.",
+                                                          (long)succeeded, (long)failed]];
+            } else {
+                [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+            }
+            [strongSelf zs_rebuildModsLibrary];
+        });
+    });
+}
+
+- (void)reloadModsTapped:(UIButton *)sender {
+    if (g_zsModsReplaceInFlight) return;
+    g_zsModsReplaceInFlight = YES;
+
+    NSString *originalTitle = [sender titleForState:UIControlStateNormal] ?: @"Reload Mods";
+    __weak UIButton *weakSender = sender;
+    __strong typeof(self) strongSelf = self;
+    dispatch_async(zs_mods_replace_queue(), ^{
+        NSInteger succeeded = 0, failed = 0;
+        for (NSString *folderName in [ModAssetLibrary folderNames]) {
+            if (zs_mods_folder_is_or_within_stored_bundles(folderName)) continue;
+            NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
+            for (ModAssetLibraryEntry *entry in entries) {
+                @autoreleasepool {
+                    if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
+                    NSError *entryErr = nil;
+                    if ([strongSelf zs_rePlaceModEntryCore:entry error:&entryErr]) {
+                        succeeded++;
+                    } else {
+                        failed++;
+                        ZLog(@"[Mods Library] reload \"%@\" in \"%@\" failed: %@", entry.fileName, folderName, entryErr.localizedDescription);
+                    }
+                }
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsModsReplaceInFlight = NO;
+            ZLog(@"[Mods Library] reloaded mods: %ld succeeded, %ld failed", (long)succeeded, (long)failed);
+            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+            UIButton *button = weakSender;
+            if (failed > 0) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+                [strongSelf zs_presentModsAlertWithTitle:@"Reload Mods"
+                                                 message:[NSString stringWithFormat:@"%ld re-placed, %ld failed. See syslog for details.",
+                                                          (long)succeeded, (long)failed]];
+            } else if (succeeded > 0) {
+                [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+                if (button) zs_mods_flash_button_title(button, @"Reload success", originalTitle);
+            } else if (button) {
+                zs_mods_flash_button_title(button, @"Nothing to reload", originalTitle);
+            }
+            [strongSelf zs_rebuildModsLibrary];
+        });
+    });
 }
 
 - (void)zs_confirmDeleteModEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName {

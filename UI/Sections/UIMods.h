@@ -77,7 +77,7 @@
 - (BOOL)zs_rePlaceModEntryCore:(ModAssetLibraryEntry *)entry error:(NSError **)outError;
 - (void)zs_rePlaceModEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName;
 - (void)zs_rePlaceModFolder:(NSString *)folderName;
-- (void)reloadModsTapped;
+- (void)reloadModsTapped:(UIButton *)sender;
 - (void)zs_confirmDeleteModEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName;
 - (void)zs_promptForModFolderRenameForFolder:(NSString *)folderName;
 - (void)zs_renameModFolder:(NSString *)folderName to:(NSString *)newName;

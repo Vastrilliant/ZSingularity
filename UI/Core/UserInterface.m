@@ -1931,7 +1931,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [loadModsButton addTarget:self action:@selector(loadModsTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *reloadModsButton = zs_make_grouped_action_button(@"Reload Mods", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
-    [reloadModsButton addTarget:self action:@selector(reloadModsTapped) forControlEvents:UIControlEventTouchUpInside];
+    [reloadModsButton addTarget:self action:@selector(reloadModsTapped:) forControlEvents:UIControlEventTouchUpInside];
     UIView *loadReloadModsRow = zs_make_grouped_action_pair_row(loadModsButton, reloadModsButton);
 
     __weak typeof(self) weakModsSelf = self;
