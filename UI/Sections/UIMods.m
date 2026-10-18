@@ -1585,46 +1585,9 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 }
 
 static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSString *description = entry.livePathDescription;
-    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
-
-    if (description.length > 0) {
-        if ([description hasPrefix:@"/"]) {
-            [candidates addObject:description];
-            NSRange markerRange = [description rangeOfString:@"/Containers/Data/Application/"];
-            if (markerRange.location != NSNotFound) {
-                NSString *afterMarker = [description substringFromIndex:NSMaxRange(markerRange)];
-                NSRange slash = [afterMarker rangeOfString:@"/"];
-                if (slash.location != NSNotFound) {
-                    [candidates addObject:[NSHomeDirectory() stringByAppendingPathComponent:[afterMarker substringFromIndex:slash.location + 1]]];
-                }
-            }
-        } else {
-            [candidates addObject:[NSHomeDirectory() stringByAppendingPathComponent:description]];
-        }
-    }
-
-    for (NSString *candidate in candidates) {
-        if ([fm fileExistsAtPath:candidate]) return [NSURL fileURLWithPath:candidate];
-    }
-
-    NSString *cab = entry.cabIdentifier;
-    if (cab.length == 0 && entry.path.length > 0 && [fm fileExistsAtPath:entry.path]) {
-        cab = [UnityBundleCAB primaryCABForBundleAtPath:entry.path error:nil];
-    }
-    if (cab.length > 0) {
-        [ZSFileIndex ensureIndexUpToDate];
-        NSArray<NSString *> *paths = [ZSFileIndex cachedPathsForCAB:cab];
-        if (paths.count == 0) paths = [ZSFileIndex persistedPathsForCAB:cab];
-        NSString *match = paths.firstObject;
-        if (match.length > 0) {
-            ZLog(@"[Mods Library] live location for %@ not found at %@ - relocated via %@ to %@", entry.fileName, candidates.lastObject ?: @"(none recorded)", cab, match);
-            return [NSURL fileURLWithPath:match];
-        }
-    }
-
-    return candidates.lastObject ? [NSURL fileURLWithPath:candidates.lastObject] : nil;
+    if (entry.livePathDescription.length == 0) return nil;
+    NSString *absolute = [NSHomeDirectory() stringByAppendingPathComponent:entry.livePathDescription];
+    return [NSURL fileURLWithPath:absolute];
 }
 
 - (BOOL)zs_cacheBundleEntryCore:(ModAssetLibraryEntry *)entry
@@ -2387,31 +2350,9 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         return NO;
     }
 
-    NSFileManager *fm = NSFileManager.defaultManager;
-    NSError *installError = nil;
-    BOOL installed = [ZTranscoderInstaller installDoctoredBundleAtURL:[NSURL fileURLWithPath:entry.path]
-                                                     toStockBundleURL:stockURL
-                                                                error:&installError];
-    if (!installed) {
-        ZLog(@"[Mods Library] re-place diagnostics for %@: library file=%@ exists=%d, live target=%@ exists=%d, live folder exists=%d, recorded live path=%@, error=%@",
-             entry.fileName, entry.path, [fm fileExistsAtPath:entry.path],
-             stockURL.path, [fm fileExistsAtPath:stockURL.path],
-             [fm fileExistsAtPath:stockURL.path.stringByDeletingLastPathComponent],
-             entry.livePathDescription ?: @"(none)", installError.localizedDescription ?: @"(none)");
-        if (outError) *outError = installError;
-        return NO;
-    }
-
-    NSString *resolvedDescription = [ModAssetLibrary liveGamePathDescriptionForInstalledURL:stockURL];
-    if (entry.currentFolder.length > 0 && resolvedDescription.length > 0 && ![resolvedDescription isEqualToString:entry.livePathDescription]) {
-        [ModAssetLibrary updateDoctorStateForEntry:entry
-                                          inFolder:entry.currentFolder
-                                        applyBlock:^(ModAssetLibraryEntry *entryToMutate) {
-            entryToMutate.livePathDescription = resolvedDescription;
-        }
-                                             error:nil];
-    }
-    return YES;
+    return [ZTranscoderInstaller installDoctoredBundleAtURL:[NSURL fileURLWithPath:entry.path]
+                                            toStockBundleURL:stockURL
+                                                       error:outError];
 }
 
 - (void)zs_rePlaceModEntry:(ModAssetLibraryEntry *)entry inFolder:(NSString *)folderName {

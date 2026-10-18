@@ -2078,19 +2078,38 @@ static ZSFontRole MALFontRoleFromValue(id value) {
     NSString *folderPath = [root stringByAppendingPathComponent:folderName];
 
     NSArray<NSString *> *folderNameComponents = folderName.pathComponents;
+    NSFileManager *fm = NSFileManager.defaultManager;
     BOOL didRepair = NO;
     for (ModAssetLibraryEntry *e in entries) {
-        if (e.path.length == 0 || ![e.path hasPrefix:rootPrefix]) continue;
+        if (e.path.length == 0) continue;
 
-        NSString *afterRoot = [e.path substringFromIndex:rootPrefix.length];
-        NSArray<NSString *> *afterRootComponents = afterRoot.pathComponents;
-        if (afterRootComponents.count <= folderNameComponents.count) continue;
+        NSString *expectedPath = nil;
+        if ([e.path hasPrefix:rootPrefix]) {
+            NSString *afterRoot = [e.path substringFromIndex:rootPrefix.length];
+            NSArray<NSString *> *afterRootComponents = afterRoot.pathComponents;
+            if (afterRootComponents.count <= folderNameComponents.count) continue;
 
-        NSArray<NSString *> *restComponents = [afterRootComponents subarrayWithRange:
-            NSMakeRange(folderNameComponents.count, afterRootComponents.count - folderNameComponents.count)];
-        NSString *rest = [@"/" stringByAppendingString:[restComponents componentsJoinedByString:@"/"]];
-        NSString *expectedPath = [folderPath stringByAppendingString:rest];
-        if (![expectedPath isEqualToString:e.path]) {
+            NSArray<NSString *> *restComponents = [afterRootComponents subarrayWithRange:
+                NSMakeRange(folderNameComponents.count, afterRootComponents.count - folderNameComponents.count)];
+            NSString *rest = [@"/" stringByAppendingString:[restComponents componentsJoinedByString:@"/"]];
+            expectedPath = [folderPath stringByAppendingString:rest];
+        } else if (![fm fileExistsAtPath:e.path] && folderNameComponents.count > 0) {
+            NSArray<NSString *> *pathComponents = e.path.pathComponents;
+            NSInteger span = (NSInteger)folderNameComponents.count;
+            for (NSInteger i = (NSInteger)pathComponents.count - span - 1; i >= 0; i--) {
+                NSArray<NSString *> *window = [pathComponents subarrayWithRange:NSMakeRange((NSUInteger)i, (NSUInteger)span)];
+                if (![window isEqualToArray:folderNameComponents]) continue;
+                NSUInteger restStart = (NSUInteger)(i + span);
+                NSArray<NSString *> *restComponents = [pathComponents subarrayWithRange:NSMakeRange(restStart, pathComponents.count - restStart)];
+                NSString *candidate = [folderPath stringByAppendingPathComponent:[restComponents componentsJoinedByString:@"/"]];
+                if ([fm fileExistsAtPath:candidate]) {
+                    expectedPath = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (expectedPath.length > 0 && ![expectedPath isEqualToString:e.path]) {
             e.path = expectedPath;
             didRepair = YES;
         }
