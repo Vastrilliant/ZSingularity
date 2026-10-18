@@ -2283,6 +2283,7 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
     for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
     for (NSString *folder in allFolders) {
+        if ([self mal_folderIsStored:folder]) continue;
         for (ModAssetLibraryEntry *entry in [self entriesInFolder:folder error:nil]) {
             if (entry.fontRole == role && [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) return entry;
         }

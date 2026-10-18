@@ -1854,6 +1854,13 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
     }
 
     if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) {
+        ModAssetLibraryEntry *roleOccupant = [ModAssetLibrary fontEntryOccupyingRole:entry.fontRole];
+        if (roleOccupant) {
+            [self zs_presentModsAlertWithTitle:@"Restore Failed"
+                                        message:[NSString stringWithFormat:@"%@ is already assigned to \u201C%@\u201D. Cache or delete that font first.",
+                                                 [ZSModsPaths displayNameForFontRole:entry.fontRole], [ModAssetLibrary displayNameForEntry:roleOccupant]]];
+            return;
+        }
         NSError *fontErr = nil;
         if (![ModAssetLibrary activateFontForEntry:entry error:&fontErr]) {
             [self zs_presentModsAlertWithTitle:@"Restore Failed"
@@ -1976,6 +1983,12 @@ static NSURL *zs_mods_live_stock_url_for_entry(ModAssetLibraryEntry *entry) {
         }
 
         if ([ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) {
+            ModAssetLibraryEntry *roleOccupant = [ModAssetLibrary fontEntryOccupyingRole:entry.fontRole];
+            if (roleOccupant) {
+                failureCount++;
+                ZLog(@"[Mods Library] restore folder \"%@\": %@'s %@ role is already assigned to %@", folderName, entry.fileName, [ZSModsPaths displayNameForFontRole:entry.fontRole], [ModAssetLibrary displayNameForEntry:roleOccupant]);
+                continue;
+            }
             NSError *fontErr = nil;
             if (![ModAssetLibrary activateFontForEntry:entry error:&fontErr]) {
                 failureCount++;

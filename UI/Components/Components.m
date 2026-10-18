@@ -1089,6 +1089,221 @@ void zs_disclosure_row_install_menu(UIControl *row, NSArray<NSString *> *titles,
     menuButton.showsMenuAsPrimaryAction = YES;
 }
 
+#pragma mark Expanding dropdown row
+
+@interface ZSExpandingDropdown : NSObject
+@property (nonatomic, weak) UIView *container;
+@property (nonatomic, weak) UIControl *row;
+@property (nonatomic, strong) NSLayoutConstraint *heightConstraint;
+@property (nonatomic, strong) UIView *options;
+@property (nonatomic, copy) NSArray<NSString *> *optionTitles;
+@property (nonatomic, copy) NSArray<NSString *> *valueTitles;
+@property (nonatomic, copy) NSArray *subtexts;
+@property (nonatomic, assign) NSInteger selectedIndex;
+@property (nonatomic, assign) BOOL expanded;
+@property (nonatomic, assign) NSUInteger generation;
+@property (nonatomic, copy) void (^animator)(dispatch_block_t changes);
+@property (nonatomic, copy) void (^onSelect)(NSInteger index);
+@end
+
+@implementation ZSExpandingDropdown
+
+- (NSString *)subtextForIndex:(NSUInteger)index {
+    if (index >= self.subtexts.count) return nil;
+    id entry = self.subtexts[index];
+    return [entry isKindOfClass:[NSString class]] && [entry length] ? entry : nil;
+}
+
+- (UIView *)buildOptions {
+    UIStackView *stack = [[UIStackView alloc] init];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    stack.spacing = 0;
+
+    UIColor *checkColor = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
+    UIImageSymbolConfiguration *checkConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightSemibold];
+    UIImage *checkImage = [[UIImage systemImageNamed:@"checkmark" withConfiguration:checkConfig]
+                           imageWithTintColor:checkColor
+                                renderingMode:UIImageRenderingModeAlwaysOriginal];
+    CGFloat band = kZSGroupedCardRowHeight;
+
+    for (NSUInteger i = 0; i < self.optionTitles.count; i++) {
+        UIControl *option = [[UIControl alloc] init];
+        option.translatesAutoresizingMaskIntoConstraints = NO;
+        option.tag = (NSInteger)i;
+        [option addTarget:self action:@selector(optionTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+        UILabel *label = [[UILabel alloc] init];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        label.userInteractionEnabled = NO;
+        label.text = self.optionTitles[i];
+        label.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+        label.font = zs_mono_font(11, UIFontWeightMedium);
+        [option addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.leadingAnchor constraintEqualToAnchor:option.leadingAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:option.topAnchor constant:band / 2.0],
+        ]];
+
+        NSString *subtext = [self subtextForIndex:i];
+        if (subtext) {
+            UILabel *sub = [[UILabel alloc] init];
+            sub.translatesAutoresizingMaskIntoConstraints = NO;
+            sub.userInteractionEnabled = NO;
+            sub.font = zs_mono_font(8, UIFontWeightRegular);
+            sub.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+            sub.text = subtext;
+            sub.numberOfLines = 0;
+            [sub setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+            [option addSubview:sub];
+            [NSLayoutConstraint activateConstraints:@[
+                [sub.topAnchor constraintEqualToAnchor:option.topAnchor constant:band - 4],
+                [sub.leadingAnchor constraintEqualToAnchor:option.leadingAnchor],
+                [sub.trailingAnchor constraintEqualToAnchor:option.trailingAnchor],
+                [sub.bottomAnchor constraintEqualToAnchor:option.bottomAnchor constant:-9],
+            ]];
+        } else {
+            [option.heightAnchor constraintEqualToConstant:band].active = YES;
+        }
+
+        if ((NSInteger)i == self.selectedIndex) {
+            UIImageView *check = [[UIImageView alloc] initWithImage:checkImage];
+            check.translatesAutoresizingMaskIntoConstraints = NO;
+            check.userInteractionEnabled = NO;
+            check.contentMode = UIViewContentModeCenter;
+            [option addSubview:check];
+            [NSLayoutConstraint activateConstraints:@[
+                [check.trailingAnchor constraintEqualToAnchor:option.trailingAnchor],
+                [check.centerYAnchor constraintEqualToAnchor:option.topAnchor constant:band / 2.0],
+                [label.trailingAnchor constraintLessThanOrEqualToAnchor:check.leadingAnchor constant:-8],
+            ]];
+        }
+
+        [stack addArrangedSubview:option];
+        if (i + 1 < self.optionTitles.count) [stack addArrangedSubview:zs_make_grouped_row_separator()];
+    }
+    return stack;
+}
+
+- (void)setExpanded:(BOOL)expanded {
+    UIView *container = self.container;
+    UIControl *row = self.row;
+    if (!container || !row || _expanded == expanded) return;
+    _expanded = expanded;
+    NSUInteger generation = ++self.generation;
+
+    CGFloat collapsedHeight = kZSGroupedCardRowHeight;
+    CGFloat expandedHeight = collapsedHeight;
+    UIView *options = self.options;
+    if (expanded) {
+        [options removeFromSuperview];
+        options = [self buildOptions];
+        options.alpha = 0;
+        [container addSubview:options];
+        [NSLayoutConstraint activateConstraints:@[
+            [options.topAnchor constraintEqualToAnchor:container.topAnchor],
+            [options.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+            [options.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        ]];
+        CGFloat width = container.bounds.size.width > 0 ? container.bounds.size.width : 260;
+        CGSize fitted = [options systemLayoutSizeFittingSize:CGSizeMake(width, UILayoutFittingCompressedSize.height)
+                               withHorizontalFittingPriority:UILayoutPriorityRequired
+                                     verticalFittingPriority:UILayoutPriorityFittingSizeLevel];
+        expandedHeight = MAX(collapsedHeight, ceil(fitted.height));
+        self.options = options;
+    }
+    options.userInteractionEnabled = expanded;
+    row.userInteractionEnabled = !expanded;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t changes = ^{
+        weakSelf.heightConstraint.constant = expanded ? expandedHeight : collapsedHeight;
+        row.alpha = expanded ? 0 : 1;
+        options.alpha = expanded ? 1 : 0;
+    };
+    if (self.animator) {
+        self.animator(changes);
+    } else {
+        [container.window layoutIfNeeded];
+        [UIView animateWithDuration:0.46
+                              delay:0
+             usingSpringWithDamping:0.88
+              initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            changes();
+            UIView *top = container;
+            while (top.superview) top = top.superview;
+            [top layoutIfNeeded];
+        } completion:nil];
+    }
+
+    if (!expanded) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.expanded || strongSelf.generation != generation) return;
+            [strongSelf.options removeFromSuperview];
+            strongSelf.options = nil;
+        });
+    }
+}
+
+- (void)rowTapped {
+    [self setExpanded:YES];
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+- (void)optionTapped:(UIControl *)sender {
+    NSInteger index = sender.tag;
+    if (index >= 0 && index < (NSInteger)self.optionTitles.count) {
+        self.selectedIndex = index;
+        NSArray<NSString *> *values = self.valueTitles.count == self.optionTitles.count ? self.valueTitles : self.optionTitles;
+        UIControl *row = self.row;
+        if (row) zs_disclosure_row_set_value(row, values[(NSUInteger)index]);
+        if (self.onSelect) self.onSelect(index);
+    }
+    [self setExpanded:NO];
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+@end
+
+UIView *zs_make_expanding_dropdown_row(NSString *title, NSArray<NSString *> *optionTitles, NSArray<NSString *> *valueTitles, NSArray *optionSubtexts, NSInteger selectedIndex, void (^animator)(dispatch_block_t changes), void (^onSelect)(NSInteger index)) {
+    NSInteger clamped = MAX((NSInteger)0, MIN((NSInteger)optionTitles.count - 1, selectedIndex));
+    ZSExpandingDropdown *dropdown = [[ZSExpandingDropdown alloc] init];
+    dropdown.optionTitles = optionTitles;
+    dropdown.valueTitles = valueTitles;
+    dropdown.subtexts = optionSubtexts;
+    dropdown.selectedIndex = clamped;
+    dropdown.animator = animator;
+    dropdown.onSelect = onSelect;
+
+    NSArray<NSString *> *values = valueTitles.count == optionTitles.count ? valueTitles : optionTitles;
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    container.clipsToBounds = YES;
+
+    UIControl *row = zs_make_disclosure_row(title, values[(NSUInteger)clamped], dropdown, @selector(rowTapped));
+    [container addSubview:row];
+    NSLayoutConstraint *height = [container.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight];
+    [NSLayoutConstraint activateConstraints:@[
+        height,
+        [row.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [row.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [row.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+    ]];
+
+    dropdown.container = container;
+    dropdown.row = row;
+    dropdown.heightConstraint = height;
+    objc_setAssociatedObject(container, "zs_expandingDropdown", dropdown, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(container, "zs_selfSizingRow", @YES, OBJC_ASSOCIATION_RETAIN);
+    return container;
+}
+
 static UIView *zs_enclosing_grouped_card(UIView *view) {
     for (UIView *candidate = view; candidate; candidate = candidate.superview) {
         if (objc_getAssociatedObject(candidate, "zs_innerStack")) return candidate;

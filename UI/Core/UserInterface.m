@@ -1878,11 +1878,14 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [ramHudRow.toggle addTarget:self action:@selector(ramHudChanged:) forControlEvents:UIControlEventValueChanged];
 
     __weak typeof(self) weakRedirectSelf = self;
-    UIControl *ramRedirectModeRow = zs_make_disclosure_row(@"Redirect minimum", @"", nil, NULL);
-    zs_disclosure_row_install_menu(ramRedirectModeRow, @[@"None", @"4 KB", @"8 KB", @"16 KB", @"32 KB", @"64 KB", @"128 KB", @"256 KB"], zs_ram_redirect_mode(), ^(NSInteger index) {
-        zs_set_ram_redirect_mode(index);
-        [weakRedirectSelf zs_scheduleSave];
-    });
+    UIView *ramRedirectModeRow = zs_make_expanding_dropdown_row(@"Redirect minimum",
+        @[@"None", @"4 KB", @"8 KB", @"16 KB", @"32 KB", @"64 KB", @"128 KB", @"256 KB"],
+        nil, nil, zs_ram_redirect_mode(),
+        ^(dispatch_block_t changes) { [weakRedirectSelf zs_lowResAnimateChanges:changes]; },
+        ^(NSInteger index) {
+            zs_set_ram_redirect_mode(index);
+            [weakRedirectSelf zs_scheduleSave];
+        });
 
     UIButton *memoryCleanupButton = zs_make_grouped_action_button(@"Memory cleanup", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [memoryCleanupButton addTarget:self action:@selector(memoryCleanupTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -1919,7 +1922,41 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [reloadModsButton addTarget:self action:@selector(reloadModsTapped) forControlEvents:UIControlEventTouchUpInside];
     UIView *loadReloadModsRow = zs_make_grouped_action_pair_row(loadModsButton, reloadModsButton);
 
-    UIView *modsActionsCard = zs_make_grouped_action_card(@[loadReloadModsRow]);
+    __weak typeof(self) weakModsSelf = self;
+    ZSRow *rgba32PassthroughRow = zs_make_switch_row(@"RGBA32 Passthrough", zs_transcoder_rgba32_passthrough());
+    __weak ZSRow *weakPassthroughRow = rgba32PassthroughRow;
+    void (^applyPassthroughState)(BOOL) = ^(BOOL rgba32Selected) {
+        ZSRow *passthroughRow = weakPassthroughRow;
+        passthroughRow.toggle.enabled = !rgba32Selected;
+        passthroughRow.titleLabel.alpha = rgba32Selected ? 0.35 : 1.0;
+        passthroughRow.toggle.alpha = rgba32Selected ? 0.35 : 1.0;
+    };
+    applyPassthroughState(zs_transcoder_codec() == ZSTranscoderCodecRGBA32);
+    [rgba32PassthroughRow.toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        zs_set_transcoder_rgba32_passthrough(((UISwitch *)action.sender).isOn);
+        [weakModsSelf zs_scheduleSave];
+    }] forControlEvents:UIControlEventValueChanged];
+
+    UIView *transcoderCodecRow = zs_make_expanding_dropdown_row(@"Codec",
+        @[@"ASTC 6x6 (default)", @"ASTC 8x8", @"ASTC 10x10", @"RGBA32"],
+        @[@"ASTC 6x6", @"ASTC 8x8", @"ASTC 10x10", @"RGBA32"],
+        @[[NSNull null], [NSNull null], [NSNull null], @"Using this codec may result in increased memory usage"],
+        (NSInteger)zs_transcoder_codec(),
+        ^(dispatch_block_t changes) { [weakModsSelf zs_lowResAnimateChanges:changes]; },
+        ^(NSInteger index) {
+            zs_set_transcoder_codec((ZSTranscoderCodec)index);
+            applyPassthroughState(index == (NSInteger)ZSTranscoderCodecRGBA32);
+            [weakModsSelf zs_scheduleSave];
+        });
+
+    ZSRow *parallelProcessingRow = zs_make_switch_row(@"Parallel processing", zs_transcoder_parallel_enabled());
+    zs_add_unavailable_subtext(parallelProcessingRow, [NSString stringWithFormat:@"Assign up to %lu cores to process textures simultaneously.", (unsigned long)zs_transcoder_core_count()]);
+    [parallelProcessingRow.toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        zs_set_transcoder_parallel_enabled(((UISwitch *)action.sender).isOn);
+        [weakModsSelf zs_scheduleSave];
+    }] forControlEvents:UIControlEventValueChanged];
+
+    UIView *modsActionsCard = zs_make_grouped_action_card(@[loadReloadModsRow, transcoderCodecRow, rgba32PassthroughRow, parallelProcessingRow]);
     modsActionsCard.layer.borderWidth = 1;
     modsActionsCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
     [self.stack addArrangedSubview:modsActionsCard];

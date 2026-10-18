@@ -18,6 +18,21 @@ typedef NS_ENUM(NSInteger, ZTranscoderServiceErrorCode) {
 };
 
 
+typedef NS_ENUM(NSInteger, ZSTranscoderCodec) {
+    ZSTranscoderCodecASTC6x6 = 0,
+    ZSTranscoderCodecASTC8x8,
+    ZSTranscoderCodecASTC10x10,
+    ZSTranscoderCodecRGBA32,
+};
+
+FOUNDATION_EXPORT ZSTranscoderCodec zs_transcoder_codec(void);
+FOUNDATION_EXPORT void zs_set_transcoder_codec(ZSTranscoderCodec codec);
+FOUNDATION_EXPORT BOOL zs_transcoder_rgba32_passthrough(void);
+FOUNDATION_EXPORT void zs_set_transcoder_rgba32_passthrough(BOOL enabled);
+FOUNDATION_EXPORT BOOL zs_transcoder_parallel_enabled(void);
+FOUNDATION_EXPORT void zs_set_transcoder_parallel_enabled(BOOL enabled);
+FOUNDATION_EXPORT NSUInteger zs_transcoder_core_count(void);
+
 @interface ZTranscoderConfig : NSObject
 @property (nonatomic, copy, nullable) NSString *targetBundlePath;
 - (ZTranscoderConfig *)normalizedConfig;

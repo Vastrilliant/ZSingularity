@@ -142,6 +142,7 @@ typedef struct {
     _Atomic(NSUInteger) live;
     NSUInteger count;
     NSUInteger cap;
+    uint32_t threads;
 } ZTRunState;
 
 static os_unfair_lock g_ztSlotLock = OS_UNFAIR_LOCK_INIT;
@@ -198,8 +199,8 @@ static NSOperationQueue *zt_job_queue(void) {
         queue = [NSOperationQueue new];
         queue.name = @"zs.transcoder.jobs";
         queue.qualityOfService = NSQualityOfServiceUserInitiated;
-        queue.maxConcurrentOperationCount = (NSInteger)zt_slot_total();
     });
+    queue.maxConcurrentOperationCount = zs_transcoder_parallel_enabled() ? (NSInteger)zt_slot_total() : 1;
     return queue;
 }
 
@@ -212,7 +213,7 @@ static void zt_run_spawn(ZTRunState *state, dispatch_group_t group, ZTEstimateBl
 }
 
 static void zt_run_worker(ZTRunState *state, dispatch_group_t group, ZTEstimateBlock estimate, ZTWorkBlock work, int slot) {
-    uint32_t threads = zt_slot_total() > 1 ? 1u : 0u;
+    uint32_t threads = state->threads;
     ZLog(@"[ZTranscoder] worker %d started", slot);
     NSUInteger handled = 0;
     for (;;) {
@@ -248,7 +249,7 @@ static void zt_run_worker(ZTRunState *state, dispatch_group_t group, ZTEstimateB
     zt_slot_give(slot);
 }
 
-static void zt_parallel_run(NSUInteger count, ZTEstimateBlock estimate, ZTWorkBlock work) {
+static void zt_parallel_run(NSUInteger count, BOOL parallel, ZTEstimateBlock estimate, ZTWorkBlock work) {
     if (count == 0) return;
     int slot = zt_slot_take(YES);
     ZTRunState state;
@@ -256,8 +257,9 @@ static void zt_parallel_run(NSUInteger count, ZTEstimateBlock estimate, ZTWorkBl
     atomic_init(&state.stop, 0);
     atomic_init(&state.live, 1);
     state.count = count;
-    state.cap = MIN(count, zt_slot_total());
-    ZLog(@"[ZTranscoder] transcoding %lu texture(s) with up to %lu worker(s)", (unsigned long)count, (unsigned long)state.cap);
+    state.cap = parallel ? MIN(count, zt_slot_total()) : 1;
+    state.threads = parallel ? (zt_slot_total() > 1 ? 1u : 0u) : 1u;
+    ZLog(@"[ZTranscoder] transcoding %lu texture(s) with up to %lu worker(s)%@", (unsigned long)count, (unsigned long)state.cap, parallel ? @"" : @" (parallel processing disabled)");
     dispatch_group_t group = dispatch_group_create();
     zt_run_worker(&state, group, estimate, work, slot);
     dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
@@ -327,10 +329,6 @@ static uint64_t zt_file_size(NSString *path) {
 
 static BOOL zt_format_is_crunched(int32_t format) {
     return format == 28 || format == 29 || format == 64 || format == 65;
-}
-
-static BOOL zt_format_is_astc(int32_t format) {
-    return (format >= 48 && format <= 59);
 }
 
 static NSString *zt_format_name(int32_t format) {
@@ -451,6 +449,78 @@ static NSString *zt_format_name(int32_t format) {
 
 @implementation ZTTextureReplacement
 @end
+
+static NSString * const kZSTranscoderSettingsSection = @"transcoder";
+static NSString * const kZSTranscoderCodecKey = @"codec";
+static NSString * const kZSTranscoderRGBA32PassthroughKey = @"rgba32Passthrough";
+static NSString * const kZSTranscoderParallelKey = @"parallel";
+
+ZSTranscoderCodec zs_transcoder_codec(void) {
+    id stored = zs_settings_section(kZSTranscoderSettingsSection)[kZSTranscoderCodecKey];
+    NSInteger value = [stored respondsToSelector:@selector(integerValue)] ? [stored integerValue] : ZSTranscoderCodecASTC6x6;
+    return (value >= ZSTranscoderCodecASTC6x6 && value <= ZSTranscoderCodecRGBA32) ? (ZSTranscoderCodec)value : ZSTranscoderCodecASTC6x6;
+}
+
+void zs_set_transcoder_codec(ZSTranscoderCodec codec) {
+    NSMutableDictionary *section = [zs_settings_section(kZSTranscoderSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSTranscoderCodecKey] = @(codec);
+    zs_write_settings_section(kZSTranscoderSettingsSection, section);
+}
+
+BOOL zs_transcoder_rgba32_passthrough(void) {
+    id stored = zs_settings_section(kZSTranscoderSettingsSection)[kZSTranscoderRGBA32PassthroughKey];
+    return [stored respondsToSelector:@selector(boolValue)] ? [stored boolValue] : NO;
+}
+
+void zs_set_transcoder_rgba32_passthrough(BOOL enabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSTranscoderSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSTranscoderRGBA32PassthroughKey] = @(enabled);
+    zs_write_settings_section(kZSTranscoderSettingsSection, section);
+}
+
+BOOL zs_transcoder_parallel_enabled(void) {
+    id stored = zs_settings_section(kZSTranscoderSettingsSection)[kZSTranscoderParallelKey];
+    return [stored respondsToSelector:@selector(boolValue)] ? [stored boolValue] : YES;
+}
+
+void zs_set_transcoder_parallel_enabled(BOOL enabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSTranscoderSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSTranscoderParallelKey] = @(enabled);
+    zs_write_settings_section(kZSTranscoderSettingsSection, section);
+}
+
+NSUInteger zs_transcoder_core_count(void) {
+    return zt_slot_total();
+}
+
+typedef struct {
+    int32_t format;
+    uint32_t block;
+    BOOL passthroughRGBA32;
+    BOOL parallel;
+} ZTTarget;
+
+static ZTTarget zt_current_target(void) {
+    ZTTarget target = {0};
+    switch (zs_transcoder_codec()) {
+        case ZSTranscoderCodecASTC8x8: target.block = 8u; break;
+        case ZSTranscoderCodecASTC10x10: target.block = 10u; break;
+        case ZSTranscoderCodecRGBA32: target.block = 0u; break;
+        default: target.block = 6u; break;
+    }
+    target.format = target.block ? ZSAstcUnityFormat(target.block) : 4;
+    target.passthroughRGBA32 = target.block != 0u && zs_transcoder_rgba32_passthrough();
+    target.parallel = zs_transcoder_parallel_enabled();
+    return target;
+}
+
+static NSString *zt_target_name(ZTTarget target) {
+    return target.block ? [NSString stringWithFormat:@"ASTC %ux%u", target.block, target.block] : @"RGBA32";
+}
+
+static BOOL zt_texture_is_untouched(ZTTextureRecord *texture, ZTTarget target) {
+    return texture.format == target.format || (target.passthroughRGBA32 && texture.format == 4);
+}
 
 static int zt_type_tree_subtree_end(const uint8_t *nodes, uint32_t count, uint32_t i) {
     uint8_t level = nodes[(size_t)i * 32u + 2u];
@@ -1258,7 +1328,7 @@ static NSMutableData *zt_resize_rgba(NSData *rgba, uint32_t srcWidth, uint32_t s
     return output;
 }
 
-static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *destination, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *), uint32_t worker, uint32_t threads) {
+static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *destination, NSData *payload, NSString *workDir, NSString **outPath, uint32_t *outSize, NSError **error, void (^progress)(double, NSString *), uint32_t worker, uint32_t threads, ZTTarget target) {
     if (source.mipCount <= 0) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Texture2D has an invalid mip count.");
         return NO;
@@ -1292,11 +1362,16 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *d
     }
     NSMutableData *rgba = nil;
     NSError *decodeError = nil;
-    BOOL ok = zt_decode_base_level(source, payload, &rgba, &decodeError);
-    if (!ok && error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
     uint32_t outWidth = destination.width;
     uint32_t outHeight = destination.height;
-    if (ok && (source.width != outWidth || source.height != outHeight)) {
+    BOOL copyBase = !zt_format_is_crunched(source.format) && zt_texture_is_untouched(source, target) && source.width == outWidth && source.height == outHeight;
+    NSData *baseCopy = copyBase ? [payload subdataWithRange:NSMakeRange(0, (NSUInteger)baseSize)] : nil;
+    BOOL ok = YES;
+    if (!copyBase) {
+        ok = zt_decode_base_level(source, payload, &rgba, &decodeError);
+        if (!ok && error) *error = decodeError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, [NSString stringWithFormat:@"Couldn't decode Texture2D %@.", source.name]);
+    }
+    if (ok && !copyBase && (source.width != outWidth || source.height != outHeight)) {
         NSMutableData *resized = zt_resize_rgba(rgba, source.width, source.height, outWidth, outHeight);
         if (resized) {
             ZLog(@"[ZTranscoder] Texture2D PathID=%lld resized %ux%u -> %ux%u to match the original", (long long)source.object.pathID, source.width, source.height, outWidth, outHeight);
@@ -1308,28 +1383,41 @@ static BOOL zt_make_astc_replacement(ZTTextureRecord *source, ZTTextureRecord *d
     }
     uint64_t totalOutput = 0;
     if (ok) {
-        ZSAstcJob astcJob = { outWidth, outHeight, 6u, destination.colorSpace != 0, ZSAstcQualityHigh, ZSAstcSourceRGBA8, worker, threads };
-        uint8_t *encodedBytes = NULL;
-        size_t encodedLength = 0;
+        NSData *astc = nil;
         char encodeWhy[256] = {0};
-        int encodeResult = ZSAstcEncode(&astcJob, (const uint8_t *)rgba.bytes, rgba.length, &encodedBytes, &encodedLength, NULL, encodeWhy, sizeof(encodeWhy));
+        NSString *targetName = zt_target_name(target);
+        if (copyBase) {
+            astc = baseCopy;
+        } else if (target.block == 0u) {
+            uint64_t expectedLength = (uint64_t)outWidth * (uint64_t)outHeight * 4u;
+            if ((uint64_t)rgba.length == expectedLength) {
+                astc = rgba;
+            } else {
+                snprintf(encodeWhy, sizeof(encodeWhy), "decoded pixel buffer is %lu bytes, expected %llu", (unsigned long)rgba.length, (unsigned long long)expectedLength);
+            }
+        } else {
+            ZSAstcJob astcJob = { outWidth, outHeight, target.block, destination.colorSpace != 0, ZSAstcQualityHigh, ZSAstcSourceRGBA8, worker, threads };
+            uint8_t *encodedBytes = NULL;
+            size_t encodedLength = 0;
+            int encodeResult = ZSAstcEncode(&astcJob, (const uint8_t *)rgba.bytes, rgba.length, &encodedBytes, &encodedLength, NULL, encodeWhy, sizeof(encodeWhy));
+            astc = (encodeResult == 0 && encodedBytes) ? [NSData dataWithBytesNoCopy:encodedBytes length:encodedLength freeWhenDone:YES] : nil;
+            if (astc) ZLog(@"[ASTC] %s", encodeWhy);
+        }
         rgba = nil;
-        NSData *astc = (encodeResult == 0 && encodedBytes) ? [NSData dataWithBytesNoCopy:encodedBytes length:encodedLength freeWhenDone:YES] : nil;
-        if (astc) ZLog(@"[ASTC] %s", encodeWhy);
         if (!astc) {
-            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, encodeWhy[0] ? [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6: %s", source.name, encodeWhy] : [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as ASTC 6x6.", source.name]);
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, encodeWhy[0] ? [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as %@: %s", source.name, targetName, encodeWhy] : [NSString stringWithFormat:@"Couldn't encode Texture2D %@ as %@.", source.name, targetName]);
             ok = NO;
         } else if (!zt_write_all(writer, astc.bytes, astc.length, error)) {
             ok = NO;
         } else {
             totalOutput = astc.length;
-            if (progress) progress(1.0, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", destination.name.length ? destination.name : (source.name.length ? source.name : @"<unnamed>")]);
+            if (progress) progress(1.0, [NSString stringWithFormat:@"%@ %@", copyBase ? @"Kept" : [NSString stringWithFormat:@"Encoded as %@:", targetName], destination.name.length ? destination.name : (source.name.length ? source.name : @"<unnamed>")]);
         }
     }
     @try { [writer closeFile]; } @catch (__unused NSException *exception) {}
     if (!ok) { [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil]; return NO; }
     if (totalOutput > UINT32_MAX) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"ASTC output exceeds Unity's 32-bit Texture2D image-size field.");
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Texture output exceeds Unity's 32-bit Texture2D image-size field.");
         [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
         return NO;
     }
@@ -2071,7 +2159,7 @@ static void zt_restore_shaders(ZTSerializedDocument *doc, ZTSerializedDocument *
     if (outRestored) *outRestored = restored;
 }
 
-static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *expected, NSUInteger *outTextureCount, NSError **error) {
+static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *expected, ZTTarget target, NSUInteger *outTextureCount, NSError **error) {
     NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
     NSError *parseError = nil;
     ZTSerializedDocument *rebuilt = data ? zt_parse_serialized(data, &parseError) : nil;
@@ -2089,7 +2177,7 @@ static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *e
     }
     NSUInteger remaining = 0;
     for (ZTTextureRecord *texture in rebuilt.textures) {
-        if (zt_texture_has_pixel_data(texture) && texture.format != 50 && !zt_format_is_astc(texture.format)) remaining++;
+        if (zt_texture_has_pixel_data(texture) && !zt_texture_is_untouched(texture, target)) remaining++;
     }
     if (remaining) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile still contains %lu texture(s) in a format that should have been converted.", (unsigned long)remaining]);
@@ -2100,6 +2188,8 @@ static BOOL zt_verify_rebuilt_serialized(NSString *path, ZTSerializedDocument *e
 }
 
 static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath, ZTranscoderConfig *config, void (^progress)(double, NSString *), NSError **error) {
+    ZTTarget target = zt_current_target();
+    ZLog(@"[ZTranscoder] target codec=%@ rgba32Passthrough=%d parallel=%d", zt_target_name(target), target.passthroughRGBA32, target.parallel);
     if (progress) progress(0.0, @"Reading the mod bundle");
     NSError *archiveError = nil;
     UnityBundleArchive *sourceArchive = [UnityBundleCAB decompressedArchiveAtPath:inputPath error:&archiveError];
@@ -2155,7 +2245,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
 
     NSMutableArray<ZTTextureRecord *> *pending = [NSMutableArray array];
     for (ZTTextureRecord *texture in doc.textures) {
-        if (zt_format_is_astc(texture.format)) continue;
+        if (zt_texture_is_untouched(texture, target)) continue;
         if (!zt_texture_has_pixel_data(texture)) {
             ZLog(@"[ZTranscoder] Texture2D PathID=%lld name=%@ has no pixel data; leaving it untouched", (long long)texture.object.pathID, texture.name.length ? texture.name : @"<unnamed>");
             continue;
@@ -2168,7 +2258,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
     __block NSError *failure = nil;
     os_unfair_lock resultLock = OS_UNFAIR_LOCK_INIT;
     os_unfair_lock *resultLockPtr = &resultLock;
-    zt_parallel_run(pending.count, ^uint64_t(NSUInteger index) {
+    zt_parallel_run(pending.count, target.parallel, ^uint64_t(NSUInteger index) {
         ZTTextureRecord *texture = pending[index];
         return (uint64_t)texture.width * (uint64_t)texture.height * 8u + texture.imageDataLength + texture.streamSize;
     }, ^BOOL(NSUInteger index, uint32_t worker, uint32_t threads) {
@@ -2191,7 +2281,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
         NSString *encodedPath = nil;
         uint32_t encodedSize = 0;
         NSError *transcodeError = nil;
-        BOOL transcoded = zt_make_astc_replacement(texture, texture, payload, workDir, &encodedPath, &encodedSize, &transcodeError, nil, worker, threads);
+        BOOL transcoded = zt_make_astc_replacement(texture, texture, payload, workDir, &encodedPath, &encodedSize, &transcodeError, nil, worker, threads, target);
         if (!transcoded) {
             os_unfair_lock_lock(resultLockPtr);
             if (!failed) { failed = YES; failure = transcodeError; }
@@ -2203,7 +2293,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
         replacement.target = texture;
         replacement.baseTexture = texture;
         replacement.baseObjectData = objectData;
-        replacement.outputFormat = 50;
+        replacement.outputFormat = target.format;
         replacement.outputMipCount = 1;
         replacement.encodedPath = encodedPath;
         replacement.encodedSize = encodedSize;
@@ -2212,8 +2302,8 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
         completed++;
         double fraction = (double)completed / (double)pending.count;
         os_unfair_lock_unlock(resultLockPtr);
-        ZLog(@"[ZTranscoder] worker %u: Texture2D '%@' PathID=%lld %ux%u: %@ (%d) -> ASTC 6x6 (50), %lu -> %u bytes", worker, texture.name.length ? texture.name : @"<unnamed>", (long long)texture.object.pathID, texture.width, texture.height, zt_format_name(texture.format), texture.format, (unsigned long)payload.length, encodedSize);
-        if (progress) progress(0.1 + 0.75 * fraction, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", texture.name.length ? texture.name : @"<unnamed>"]);
+        ZLog(@"[ZTranscoder] worker %u: Texture2D '%@' PathID=%lld %ux%u: %@ (%d) -> %@ (%d), %lu -> %u bytes", worker, texture.name.length ? texture.name : @"<unnamed>", (long long)texture.object.pathID, texture.width, texture.height, zt_format_name(texture.format), texture.format, zt_target_name(target), target.format, (unsigned long)payload.length, encodedSize);
+        if (progress) progress(0.1 + 0.75 * fraction, [NSString stringWithFormat:@"Encoded %@ as %@", texture.name.length ? texture.name : @"<unnamed>", zt_target_name(target)]);
         return YES;
     });
     if (failed) {
@@ -2225,7 +2315,7 @@ static BOOL zt_transcode_modded_bundle_in(NSString *workDir, NSString *inputPath
     NSString *serializedOutput = [workDir stringByAppendingPathComponent:@"target.cab"];
     if (!zt_rebuild_serialized_correctly(doc, replacements, serializedOutput, error)) return NO;
     NSUInteger verifiedTextures = 0;
-    if (!zt_verify_rebuilt_serialized(serializedOutput, doc, &verifiedTextures, error)) return NO;
+    if (!zt_verify_rebuilt_serialized(serializedOutput, doc, target, &verifiedTextures, error)) return NO;
     ZLog(@"[ZTranscoder] verify: Texture2D=%lu, TargetPlatform=%u, all converted-source formats removed", (unsigned long)verifiedTextures, kZTTargetPlatformIOS);
 
     if (progress) progress(0.9, @"Writing the UnityFS bundle");
@@ -2273,6 +2363,8 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
     BOOL carra2Mode = carra2Items != nil;
     if (!config) config = [ZTranscoderConfig new];
     if (!carra2Mode) return zt_process_modded_bundle(moddedURL, config, progress, outputURL, error);
+    ZTTarget target = zt_current_target();
+    ZLog(@"[ZTranscoder] target codec=%@ rgba32Passthrough=%d parallel=%d", zt_target_name(target), target.passthroughRGBA32, target.parallel);
     NSString *inputPath = moddedURL.path;
     NSUInteger buildSkipped = 0;
     ZLog(@"[ZTranscoder] starting local visual-mod transcode for %@", inputPath);
@@ -2437,9 +2529,9 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
                 return NO;
             }
             NSString *replacementKey = [NSString stringWithFormat:@"%lld", (long long)targetObject.pathID];
-            if (zt_format_is_astc(sourceTexture.format) && sourceTexture.isInline && sourceObjectData) {
+            if (zt_texture_is_untouched(sourceTexture, target) && sourceTexture.isInline && sourceObjectData) {
                 targetObject.replacementObject = sourceObjectData;
-                ZLog(@"[ZTranscoder] Texture2D PathID=%lld is already %@; copied from the mod without re-encoding", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
+                ZLog(@"[ZTranscoder] Texture2D PathID=%lld is %@; copied from the mod without re-encoding", (long long)sourceObject.pathID, zt_format_name(sourceTexture.format));
                 if (progress && assetCount) progress(0.1 + 0.1 * ((double)processedAssets / (double)assetCount), [NSString stringWithFormat:@"Compared asset %lu/%lu", (unsigned long)processedAssets, (unsigned long)assetCount]);
                 continue;
             }
@@ -2450,7 +2542,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             replacement.target = targetTexture;
             replacement.baseTexture = layoutTexture;
             replacement.baseObjectData = layoutObjectData;
-            replacement.outputFormat = 50;
+            replacement.outputFormat = zt_texture_is_untouched(sourceTexture, target) ? sourceTexture.format : target.format;
             replacement.outputMipCount = 1;
             [encodeTasks addObject:@{ @"replacement": replacement, @"source": sourceTexture, @"layout": layoutTexture, @"payload": sourcePayload, @"key": replacementKey }];
         } else {
@@ -2474,7 +2566,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         __block NSUInteger encodeDone = 0;
         os_unfair_lock encodeLock = OS_UNFAIR_LOCK_INIT;
         os_unfair_lock *encodeLockPtr = &encodeLock;
-        zt_parallel_run(encodeTotal, ^uint64_t(NSUInteger index) {
+        zt_parallel_run(encodeTotal, target.parallel, ^uint64_t(NSUInteger index) {
             ZTTextureRecord *layout = encodeTasks[index][@"layout"];
             NSData *payload = encodeTasks[index][@"payload"];
             return (uint64_t)layout.width * (uint64_t)layout.height * 8u + payload.length;
@@ -2487,7 +2579,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             NSString *encodedPath = nil;
             uint32_t encodedSize = 0;
             NSError *transcodeError = nil;
-            BOOL transcoded = zt_make_astc_replacement(taskSource, taskLayout, taskPayload, workDir, &encodedPath, &encodedSize, &transcodeError, nil, worker, threads);
+            BOOL transcoded = zt_make_astc_replacement(taskSource, taskLayout, taskPayload, workDir, &encodedPath, &encodedSize, &transcodeError, nil, worker, threads, target);
             if (!transcoded) {
                 os_unfair_lock_lock(encodeLockPtr);
                 if (!encodeFailed) { encodeFailed = YES; encodeFailure = transcodeError; }
@@ -2500,8 +2592,8 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             encodeDone++;
             double fraction = (double)encodeDone / (double)encodeTotal;
             os_unfair_lock_unlock(encodeLockPtr);
-            ZLog(@"[ZTranscoder] worker %u: Texture2D PathID=%lld pixel data written as ASTC 6x6 at %ux%u: %lu -> %u bytes", worker, (long long)taskSource.object.pathID, taskLayout.width, taskLayout.height, (unsigned long)taskPayload.length, encodedSize);
-            if (progress) progress(0.2 + 0.6 * fraction, [NSString stringWithFormat:@"Encoded %@ as ASTC 6x6", taskLayout.name.length ? taskLayout.name : (taskSource.name.length ? taskSource.name : @"<unnamed>")]);
+            ZLog(@"[ZTranscoder] worker %u: Texture2D PathID=%lld pixel data written as %@ at %ux%u: %lu -> %u bytes", worker, (long long)taskSource.object.pathID, zt_target_name(target), taskLayout.width, taskLayout.height, (unsigned long)taskPayload.length, encodedSize);
+            if (progress) progress(0.2 + 0.6 * fraction, [NSString stringWithFormat:@"Encoded %@ as %@", taskLayout.name.length ? taskLayout.name : (taskSource.name.length ? taskSource.name : @"<unnamed>"), zt_target_name(target)]);
             return YES;
         });
         if (encodeFailed) {
@@ -2544,7 +2636,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
             return NO;
         }
         ZLog(@"[ZTranscoder] built transcoded bundle for the Carra2 mod at %@", finalPath);
-        if (progress) progress(1.0, @"Local ASTC 6x6 bundle transcode complete");
+        if (progress) progress(1.0, @"Local bundle transcode complete");
         if (outputURL) *outputURL = [NSURL fileURLWithPath:finalPath];
         if (outSkippedObjects) *outSkippedObjects = buildSkipped + skippedAssets;
         [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
@@ -2562,7 +2654,7 @@ static BOOL zt_process_bundle_full(NSURL *moddedURL, ZTranscoderConfig *config, 
         return NO;
     }
     ZLog(@"[ZTranscoder] replaced input bundle with locally transcoded output %@", inputPath);
-    if (progress) progress(1.0, @"Local ASTC 6x6 bundle transcode complete");
+    if (progress) progress(1.0, @"Local bundle transcode complete");
     if (outputURL) *outputURL = [NSURL fileURLWithPath:inputPath];
     [[NSFileManager defaultManager] removeItemAtPath:workDir error:nil];
     (void)config;
