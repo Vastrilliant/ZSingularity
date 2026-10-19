@@ -7,6 +7,17 @@
 - (void)assetExplorerTapped {
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
+    self.modsLibraryBrowseMode = NO;
+    self.modsLibrarySelectedEntry = nil;
+    [self zs_openAssetExplorerFullScreenPanel];
+}
+
+- (void)zs_openModLibraryFullScreenPanel {
+    if (!self.panelOpen || self.assetExplorerFullScreenOpen) return;
+    self.modsLibraryBrowseMode = YES;
+    self.modsLibrarySelectedEntry = nil;
+    self.modsLibraryBrowseEntries = @[];
+    self.modsLibraryDisplayedEntries = @[];
     [self zs_openAssetExplorerFullScreenPanel];
 }
 
@@ -1087,7 +1098,11 @@
     self.assetExplorerFullScreenOpen = YES;
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:!self.extendedCoverEntering];
-    [self zs_assetExplorerShowHub];
+    if (self.modsLibraryBrowseMode) {
+        [self zs_assetExplorerShowModLibrary];
+    } else {
+        [self zs_assetExplorerShowHub];
+    }
 }
 
 - (void)zs_endAssetExplorerSession {
@@ -1101,6 +1116,10 @@
     self.assetExplorerCloseButton.hidden = NO;
     self.assetExplorerBackButton.hidden = YES;
     self.assetExplorerFullScreenOverlay.hidden = YES;
+    self.modsLibraryBrowseMode = NO;
+    self.modsLibraryBrowseEntries = @[];
+    self.modsLibraryDisplayedEntries = @[];
+    self.modsLibrarySelectedEntry = nil;
     self.assetExplorerFMODGeneration += 1;
     [ZSAssetExplorer unloadAllBundles];
     [self.assetExplorerThumbSource reset];
@@ -1804,6 +1823,23 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerBackTapped {
+    if (self.modsLibraryBrowseMode) {
+        if (!self.modsLibrarySelectedEntry) return;
+        self.modsLibrarySelectedEntry = nil;
+        self.assetExplorerTextView.hidden = YES;
+        self.assetExplorerTableView.hidden = NO;
+        self.assetExplorerCloseButton.hidden = NO;
+        self.assetExplorerBackButton.hidden = YES;
+        self.assetExplorerTitleLabel.hidden = NO;
+        self.assetExplorerTitleLabel.text = @"Mod Library";
+        self.assetExplorerStatusLabel.hidden = NO;
+        self.assetExplorerTextureCaptionLabel.hidden = YES;
+        [self zs_assetExplorerSyncControls];
+        [self zs_assetExplorerRefreshListResettingScroll:NO];
+        UIImpactFeedbackGenerator *libraryHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+        [libraryHaptic impactOccurred];
+        return;
+    }
     if (self.assetExplorerLocalizeMode) {
         [self zs_assetExplorerLocalizeBackTapped];
         return;
@@ -2207,6 +2243,35 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerRefreshListResettingScroll:(BOOL)resetScroll {
     NSString *query = [self.assetExplorerSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    if (self.modsLibraryBrowseMode) {
+        NSMutableArray<ModAssetLibraryEntry *> *matches = [NSMutableArray array];
+        for (ModAssetLibraryEntry *entry in self.modsLibraryBrowseEntries ?: @[]) {
+            NSString *folder = entry.currentFolder ?: @"";
+            NSString *remark = entry.remark ?: @"";
+            NSString *cab = entry.cabIdentifier ?: @"";
+            NSString *path = entry.path ?: @"";
+            NSString *language = entry.localizationLanguage ?: @"";
+            if (query.length > 0 &&
+                ![entry.fileName localizedCaseInsensitiveContainsString:query] &&
+                ![folder localizedCaseInsensitiveContainsString:query] &&
+                ![remark localizedCaseInsensitiveContainsString:query] &&
+                ![cab localizedCaseInsensitiveContainsString:query] &&
+                ![path localizedCaseInsensitiveContainsString:query] &&
+                ![language localizedCaseInsensitiveContainsString:query]) continue;
+            [matches addObject:entry];
+        }
+        self.modsLibraryDisplayedEntries = matches;
+        NSUInteger shownCount = matches.count;
+        NSUInteger totalCount = self.modsLibraryBrowseEntries.count;
+        NSString *plural = totalCount == 1 ? @"" : @"s";
+        self.assetExplorerStatusLabel.text = shownCount == totalCount
+            ? [NSString stringWithFormat:@"%lu asset%@", (unsigned long)totalCount, plural]
+            : [NSString stringWithFormat:@"%lu of %lu assets", (unsigned long)shownCount, (unsigned long)totalCount];
+        [self.assetExplorerTableView reloadData];
+        if (resetScroll) [self.assetExplorerTableView setContentOffset:CGPointZero animated:NO];
+        [self zs_assetExplorerUpdateThumbnailGrid];
+        return;
+    }
     NSUInteger shown = 0;
     NSUInteger total = 0;
     NSString *noun = nil;
@@ -2371,6 +2436,16 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerSyncControls {
     [self zs_assetExplorerUpdateThumbnailGrid];
+    if (self.modsLibraryBrowseMode) {
+        BOOL detail = self.modsLibrarySelectedEntry != nil;
+        self.assetExplorerSearchContainer.hidden = detail;
+        self.assetExplorerControlsStack.hidden = YES;
+        self.assetExplorerFilterButton.hidden = YES;
+        self.assetExplorerSortButton.hidden = YES;
+        self.assetExplorerShareButton.hidden = YES;
+        self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search mod library" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
+        return;
+    }
     if (self.assetExplorerLocalizeMode) {
         [self zs_assetExplorerLocalizeSyncControls];
         return;
@@ -2915,6 +2990,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return 1;
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return MAX((NSInteger)zs_ae_section_kinds(bookmarked, modded, total).count, 1);
@@ -2924,6 +3000,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        return self.modsLibrarySelectedEntry ? 0 : (NSInteger)self.modsLibraryDisplayedEntries.count;
+    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
@@ -2939,6 +3018,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return CGFLOAT_MIN;
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return total == 0 ? CGFLOAT_MIN : 26;
@@ -2948,6 +3028,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return nil;
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
@@ -2959,6 +3040,51 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        static NSString * const libraryIdentifier = @"zs.asset.explorer.mod-library.cell";
+        UITableViewCell *libraryCell = [tableView dequeueReusableCellWithIdentifier:libraryIdentifier];
+        if (!libraryCell) libraryCell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:libraryIdentifier];
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return libraryCell;
+        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        libraryCell.backgroundColor = UIColor.clearColor;
+        libraryCell.contentView.backgroundColor = UIColor.clearColor;
+        libraryCell.textLabel.font = zs_mono_font(11, UIFontWeightRegular);
+        libraryCell.textLabel.textColor = [UIColor colorWithWhite:0.94 alpha:1];
+        libraryCell.textLabel.numberOfLines = 1;
+        libraryCell.textLabel.adjustsFontSizeToFitWidth = YES;
+        libraryCell.textLabel.minimumScaleFactor = 0.65;
+        libraryCell.detailTextLabel.font = zs_mono_font(9, UIFontWeightRegular);
+        libraryCell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.42];
+        libraryCell.detailTextLabel.numberOfLines = 1;
+        libraryCell.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        libraryCell.textLabel.text = entry.fileName.length > 0 ? entry.fileName : @"Unnamed asset";
+        NSString *folder = entry.currentFolder.length > 0 ? entry.currentFolder : @"Unknown folder";
+        NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
+        NSString *kind = entry.isAssetBundle ? @"Asset Bundle" : (entry.localizationKind == ModAssetLibraryLocalizationKindJSON ? @"Localization JSON" : (entry.localizationKind == ModAssetLibraryLocalizationKindPack ? @"Localization Pack" : entry.fileName.pathExtension.uppercaseString));
+        NSString *status = nil;
+        switch (entry.doctorStatus) {
+            case ModAssetLibraryDoctorStatusUploading: status = @"Uploading"; break;
+            case ModAssetLibraryDoctorStatusProcessing: status = @"Processing"; break;
+            case ModAssetLibraryDoctorStatusReadyToDownload: status = @"Ready to download"; break;
+            case ModAssetLibraryDoctorStatusFailed: status = @"Failed"; break;
+            case ModAssetLibraryDoctorStatusInstalled: status = @"Installed"; break;
+            default: break;
+        }
+        libraryCell.detailTextLabel.text = status.length > 0
+            ? [NSString stringWithFormat:@"%@  •  %@  •  %@", folder, size, status]
+            : [NSString stringWithFormat:@"%@  •  %@  •  %@", folder, size, kind.length > 0 ? kind : @"File"];
+        NSString *symbol = @"doc.fill";
+        if ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) symbol = @"waveform";
+        else if (entry.isAssetBundle) symbol = @"archivebox.fill";
+        else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) symbol = @"text.bubble.fill";
+        else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) symbol = @"shippingbox.fill";
+        UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
+        libraryCell.imageView.image = [UIImage systemImageNamed:symbol withConfiguration:symbolConfig];
+        libraryCell.imageView.tintColor = zs_accent_green_color();
+        libraryCell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        libraryCell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        return libraryCell;
+    }
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODCellForTableView:tableView indexPath:indexPath];
@@ -3034,6 +3160,59 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point API_AVAILABLE(ios(13.0)) {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return nil;
+        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        NSString *folderName = entry.currentFolder ?: @"";
+        BOOL storedEntry = zs_mods_folder_is_or_within_stored_bundles(folderName);
+        __weak typeof(self) weakSelf = self;
+        return [UIContextMenuConfiguration configurationWithIdentifier:entry.path previewProvider:nil actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+            NSMutableArray<UIMenuElement *> *menuItems = [NSMutableArray array];
+            BOOL doctorEligible = !storedEntry && (entry.isAssetBundle || entry.zipCacheHash1.length > 0);
+            NSString *primaryTitle = nil;
+            SEL primaryAction = NULL;
+            if (doctorEligible) {
+                if (entry.doctorStatus == ModAssetLibraryDoctorStatusNotDispatched) {
+                    primaryTitle = @"Install / Transcode";
+                    primaryAction = @selector(zs_modsLibraryEntryDispatchTapped:);
+                } else if (entry.doctorStatus == ModAssetLibraryDoctorStatusReadyToDownload) {
+                    primaryTitle = @"Download";
+                    primaryAction = @selector(zs_modsLibraryEntryDownloadTapped:);
+                } else if (entry.doctorStatus == ModAssetLibraryDoctorStatusFailed) {
+                    primaryTitle = @"Retry";
+                    primaryAction = @selector(zs_modsLibraryEntryRetryTapped:);
+                }
+            }
+            if (primaryTitle.length > 0) {
+                UIAction *primary = [UIAction actionWithTitle:primaryTitle image:[UIImage systemImageNamed:@"arrow.down.circle"] identifier:nil handler:^(__kindof UIAction *action) {
+                    typeof(self) strongSelf = weakSelf;
+                    if (!strongSelf) return;
+                    UIButton *sender = [UIButton buttonWithType:UIButtonTypeCustom];
+                    objc_setAssociatedObject(sender, "zs_modsEntry", entry, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    ((void (*)(id, SEL, id))objc_msgSend)(strongSelf, primaryAction, sender);
+                }];
+                [menuItems addObject:primary];
+            }
+
+            NSArray<NSDictionary<NSString *, id> *> *options = storedEntry ? zs_mods_stored_bundle_file_options() : zs_mods_file_options(entry);
+            NSMutableArray<UIMenuElement *> *optionItems = [NSMutableArray arrayWithCapacity:options.count];
+            for (NSDictionary<NSString *, id> *option in options) {
+                NSString *title = option[@"title"] ?: @"Action";
+                NSString *symbol = option[@"symbol"];
+                UIMenuElementAttributes attributes = 0;
+                if ([option[@"destructive"] boolValue]) attributes |= UIMenuElementAttributesDestructive;
+                if ([option[@"disabled"] boolValue]) attributes |= UIMenuElementAttributesDisabled;
+                UIAction *item = [UIAction actionWithTitle:title image:(symbol.length > 0 ? [UIImage systemImageNamed:symbol] : nil) identifier:nil attributes:attributes handler:^(__kindof UIAction *action) {
+                    [weakSelf zs_modsLibraryPerformOptionNamed:title forEntry:entry folderName:folderName];
+                }];
+                [optionItems addObject:item];
+            }
+            if (optionItems.count > 0) {
+                [menuItems addObject:[UIMenu menuWithTitle:@"Library Options" children:optionItems]];
+            }
+            return [UIMenu menuWithTitle:entry.fileName ?: @"Asset" children:menuItems];
+        }];
+    }
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODContextMenuForIndexPath:indexPath];
@@ -3066,6 +3245,32 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
+        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return nil;
+        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        NSString *folderName = entry.currentFolder ?: @"";
+        BOOL storedEntry = zs_mods_folder_is_or_within_stored_bundles(folderName);
+        NSArray<NSDictionary<NSString *, id> *> *options = storedEntry ? zs_mods_stored_bundle_file_options() : zs_mods_file_options(entry);
+        NSMutableArray<UIContextualAction *> *actions = [NSMutableArray arrayWithCapacity:options.count];
+        __weak typeof(self) weakSelf = self;
+        for (NSDictionary<NSString *, id> *option in options) {
+            if ([option[@"disabled"] boolValue]) continue;
+            NSString *title = option[@"title"] ?: @"Action";
+            BOOL destructive = [option[@"destructive"] boolValue];
+            UIContextualAction *action = [UIContextualAction contextualActionWithStyle:(destructive ? UIContextualActionStyleDestructive : UIContextualActionStyleNormal) title:title handler:^BOOL(UIContextualAction *swipeAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
+                [weakSelf zs_modsLibraryPerformOptionNamed:title forEntry:entry folderName:folderName];
+                completionHandler(YES);
+                return YES;
+            }];
+            action.image = [UIImage systemImageNamed:option[@"symbol"] ?: @"ellipsis"];
+            if (!destructive) action.backgroundColor = [UIColor colorWithRed:0.20 green:0.30 blue:0.38 alpha:1.0];
+            [actions addObject:action];
+        }
+        if (actions.count == 0) return nil;
+        UISwipeActionsConfiguration *configuration = [UISwipeActionsConfiguration configurationWithActions:actions];
+        configuration.performsFirstActionWithFullSwipe = NO;
+        return configuration;
+    }
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODSwipeForIndexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeSwipeForIndexPath:indexPath];
     if (tableView != self.assetExplorerTableView || self.assetExplorerHubVisible) return nil;
@@ -3083,6 +3288,13 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        if (!self.modsLibrarySelectedEntry && indexPath.row >= 0 && indexPath.row < (NSInteger)self.modsLibraryDisplayedEntries.count) {
+            [self zs_assetExplorerShowModLibraryEntry:self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row]];
+        }
+        return;
+    }
     if (tableView == self.assetExplorerLocalizeTableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         [self zs_assetExplorerLocalizeSelectRow:[self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView]];
@@ -3267,6 +3479,181 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         [unityTile.widthAnchor constraintLessThanOrEqualToAnchor:hub.widthAnchor multiplier:0.3333 constant:-11],
         preferredSize,
     ]];
+}
+
+- (void)zs_assetExplorerRefreshModLibraryEntries {
+    NSMutableArray<NSString *> *pendingFolders = [[ModAssetLibrary folderNames] mutableCopy];
+    NSMutableSet<NSString *> *visitedFolders = [NSMutableSet set];
+    NSMutableDictionary<NSString *, ModAssetLibraryEntry *> *entriesByPath = [NSMutableDictionary dictionary];
+
+    while (pendingFolders.count > 0) {
+        NSString *folderName = pendingFolders.firstObject;
+        [pendingFolders removeObjectAtIndex:0];
+        if (folderName.length == 0 || [visitedFolders containsObject:folderName]) continue;
+        [visitedFolders addObject:folderName];
+
+        NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
+        for (ModAssetLibraryEntry *entry in entries) {
+            if (entry.path.length > 0) entriesByPath[entry.path] = entry;
+        }
+
+        for (NSString *subFolder in [ModAssetLibrary subFolderNamesInFolder:folderName]) {
+            if (![visitedFolders containsObject:subFolder]) [pendingFolders addObject:subFolder];
+        }
+    }
+
+    NSArray<ModAssetLibraryEntry *> *sortedEntries = [[entriesByPath allValues] sortedArrayUsingComparator:^NSComparisonResult(ModAssetLibraryEntry *a, ModAssetLibraryEntry *b) {
+        NSComparisonResult result = [a.fileName localizedStandardCompare:b.fileName];
+        if (result != NSOrderedSame) return result;
+        return [a.currentFolder localizedStandardCompare:b.currentFolder];
+    }];
+    self.modsLibraryBrowseEntries = sortedEntries;
+
+    NSString *selectedPath = self.modsLibrarySelectedEntry.path;
+    self.modsLibrarySelectedEntry = nil;
+    if (selectedPath.length > 0) {
+        for (ModAssetLibraryEntry *entry in sortedEntries) {
+            if ([entry.path isEqualToString:selectedPath]) {
+                self.modsLibrarySelectedEntry = entry;
+                break;
+            }
+        }
+    }
+}
+
+- (void)zs_assetExplorerShowModLibrary {
+    [self.assetExplorerSearchField resignFirstResponder];
+    self.assetExplorerSelectedBundle = nil;
+    self.assetExplorerAssets = @[];
+    self.assetExplorerDisplayedAssets = @[];
+    self.assetExplorerDisplayedBundles = @[];
+    self.assetExplorerHubVisible = NO;
+    self.assetExplorerFMODMode = NO;
+    self.assetExplorerFMODBankFile = nil;
+    self.assetExplorerFMODBank = nil;
+    self.assetExplorerFMODStream = nil;
+    self.assetExplorerLocalizeMode = NO;
+    self.assetExplorerTextureOpen = NO;
+    self.assetExplorerDataMode = NO;
+    self.modsLibrarySelectedEntry = nil;
+    self.assetExplorerStatusMessage = nil;
+    self.assetExplorerSearchField.text = @"";
+    [self zs_assetExplorerResetViewState];
+    [self zs_assetExplorerRefreshModLibraryEntries];
+
+    self.assetExplorerHubView.hidden = YES;
+    self.assetExplorerFMODTableView.hidden = YES;
+    self.assetExplorerLocalizeTableView.hidden = YES;
+    self.assetExplorerLocalizeJSONTableView.hidden = YES;
+    self.assetExplorerTableView.hidden = NO;
+    self.assetExplorerThumbCollectionView.hidden = YES;
+    self.assetExplorerTextView.hidden = YES;
+    self.assetExplorerTextureImageView.hidden = YES;
+    self.assetExplorerBackdropView.hidden = YES;
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    self.assetExplorerTextureCaptionLabel.hidden = YES;
+    self.assetExplorerDebugLabel.hidden = YES;
+    self.assetExplorerTexturePagerStack.hidden = YES;
+    self.assetExplorerPageStack.hidden = YES;
+    self.assetExplorerModeControl.hidden = YES;
+    self.assetExplorerTextureBackButton.hidden = YES;
+    self.assetExplorerTextureExportButton.hidden = YES;
+    [self.assetExplorerTextureSpinner stopAnimating];
+
+    self.assetExplorerCloseButton.hidden = NO;
+    self.assetExplorerBackButton.hidden = YES;
+    self.assetExplorerTitleLabel.hidden = NO;
+    self.assetExplorerTitleLabel.text = @"Mod Library";
+    self.assetExplorerStatusLabel.hidden = NO;
+    self.assetExplorerSearchContainer.hidden = NO;
+    self.assetExplorerControlsStack.hidden = YES;
+    self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search mod library" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
+    [self zs_assetExplorerRefreshListResettingScroll:YES];
+}
+
+- (NSDictionary<NSString *, id> *)zs_assetExplorerModLibraryDescriptorForEntry:(ModAssetLibraryEntry *)entry {
+    NSString *fontRoleName = entry.fontRole == ZSFontRoleNone ? @"None" : [ZSModsPaths displayNameForFontRole:entry.fontRole];
+    NSString *localizationKindName = @"None";
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) localizationKindName = @"JSON";
+    else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) localizationKindName = @"Pack";
+    NSArray<NSString *> *doctorStatusNames = @[@"Not dispatched", @"Uploading", @"Processing", @"Ready to download", @"Failed", @"Installed"];
+    NSInteger statusIndex = (NSInteger)entry.doctorStatus;
+    NSString *doctorStatusName = statusIndex >= 0 && statusIndex < (NSInteger)doctorStatusNames.count ? doctorStatusNames[(NSUInteger)statusIndex] : @"Unknown";
+
+    return @{
+        @"fileName": entry.fileName ?: @"",
+        @"path": entry.path ?: @"",
+        @"byteSize": @(entry.byteSize),
+        @"dateAdded": entry.dateAdded ?: @"",
+        @"isAssetBundle": @(entry.isAssetBundle),
+        @"fontRole": @((NSInteger)entry.fontRole),
+        @"fontRoleName": fontRoleName ?: @"Unknown",
+        @"cabIdentifier": entry.cabIdentifier ?: NSNull.null,
+        @"targetPlatform": entry.targetPlatform ?: NSNull.null,
+        @"livePathDescription": entry.livePathDescription ?: NSNull.null,
+        @"resolvedInstallTargetPath": entry.resolvedInstallTargetPath ?: NSNull.null,
+        @"zipCacheHash1": entry.zipCacheHash1 ?: NSNull.null,
+        @"zipCacheHash2": entry.zipCacheHash2 ?: NSNull.null,
+        @"remark": entry.remark ?: NSNull.null,
+        @"localizationKind": @((NSInteger)entry.localizationKind),
+        @"localizationKindName": localizationKindName,
+        @"localizationLanguage": entry.localizationLanguage ?: NSNull.null,
+        @"localizationRelativePath": entry.localizationRelativePath ?: NSNull.null,
+        @"cachedFromFolder": entry.cachedFromFolder ?: NSNull.null,
+        @"currentFolder": entry.currentFolder ?: NSNull.null,
+        @"doctorStatus": @((NSInteger)entry.doctorStatus),
+        @"doctorStatusName": doctorStatusName,
+        @"doctorUploadProgress": @(entry.doctorUploadProgress),
+        @"doctorUploadTotalBytes": @(entry.doctorUploadTotalBytes),
+        @"doctorProcessProgress": @(entry.doctorProcessProgress),
+        @"doctorDownloadProgress": @(entry.doctorDownloadProgress),
+        @"doctorDispatchCompressedByteSize": @(entry.doctorDispatchCompressedByteSize),
+        @"doctorScratchBranch": entry.doctorScratchBranch ?: NSNull.null,
+        @"doctorRunID": entry.doctorRunID ?: NSNull.null,
+        @"doctorRunURL": entry.doctorRunURL ?: NSNull.null,
+        @"doctorLastError": entry.doctorLastError ?: NSNull.null,
+        @"doctorTranscodeCodec": entry.doctorTranscodeCodec ?: NSNull.null,
+        @"doctorDownloadInFlight": @([self.doctorDownloadInFlightPaths containsObject:entry.path]),
+        @"fileExists": @([NSFileManager.defaultManager fileExistsAtPath:entry.path ?: @""])
+    };
+}
+
+- (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry {
+    if (!entry || !self.modsLibraryBrowseMode) return;
+    self.modsLibrarySelectedEntry = entry;
+    NSDictionary<NSString *, id> *descriptor = [self zs_assetExplorerModLibraryDescriptorForEntry:entry];
+    NSError *jsonError = nil;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&jsonError];
+    NSString *jsonText = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
+    self.assetExplorerTextView.text = jsonText ?: (jsonError.localizedDescription ?: @"Descriptor information is unavailable.");
+    self.assetExplorerTextView.contentOffset = CGPointZero;
+    self.assetExplorerTextView.hidden = NO;
+    self.assetExplorerTableView.hidden = YES;
+    self.assetExplorerThumbCollectionView.hidden = YES;
+    self.assetExplorerHubView.hidden = YES;
+    self.assetExplorerFMODTableView.hidden = YES;
+    self.assetExplorerLocalizeTableView.hidden = YES;
+    self.assetExplorerLocalizeJSONTableView.hidden = YES;
+    self.assetExplorerTextureImageView.hidden = YES;
+    self.assetExplorerBackdropView.hidden = YES;
+    self.assetExplorerTextureMessageLabel.hidden = YES;
+    self.assetExplorerTextureCaptionLabel.hidden = YES;
+    self.assetExplorerDebugLabel.hidden = YES;
+    self.assetExplorerTexturePagerStack.hidden = YES;
+    self.assetExplorerPageStack.hidden = YES;
+    self.assetExplorerModeControl.hidden = YES;
+    self.assetExplorerTextureBackButton.hidden = YES;
+    self.assetExplorerTextureExportButton.hidden = YES;
+    [self.assetExplorerTextureSpinner stopAnimating];
+
+    self.assetExplorerCloseButton.hidden = YES;
+    self.assetExplorerBackButton.hidden = NO;
+    self.assetExplorerTitleLabel.hidden = NO;
+    self.assetExplorerTitleLabel.text = entry.fileName ?: @"Asset Details";
+    self.assetExplorerStatusLabel.hidden = YES;
+    self.assetExplorerSearchContainer.hidden = YES;
+    self.assetExplorerControlsStack.hidden = YES;
+    [self zs_assetExplorerSyncControls];
 }
 
 - (void)zs_assetExplorerShowHub {

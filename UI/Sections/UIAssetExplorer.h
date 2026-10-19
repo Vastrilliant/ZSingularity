@@ -4,6 +4,10 @@
 
 @interface UserInterface (AssetExplorer)
 - (void)assetExplorerTapped;
+- (void)zs_openModLibraryFullScreenPanel;
+- (void)zs_assetExplorerRefreshModLibraryEntries;
+- (void)zs_assetExplorerShowModLibrary;
+- (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
 - (void)zs_selectModeTapped;
 - (void)zs_exitSelectModeTapped;
 - (void)zs_exitSelectMode;

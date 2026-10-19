@@ -1137,18 +1137,12 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 
 - (void)zs_rebuildModsLibrary {
     [self zs_refreshManifestZeroingRow];
-
     if (!self.modsLibraryStack) return;
 
-    BOOL wasDropdownOpen = self.modsOptionsDropdownOpen;
-    BOOL dropdownWasFolderMode = wasDropdownOpen && (self.modsOptionsDropdownEntry == nil);
-    NSString *dropdownTargetFolderName = wasDropdownOpen ? self.modsOptionsDropdownFolderName : nil;
-    NSString *dropdownTargetEntryPath = (wasDropdownOpen && !dropdownWasFolderMode) ? self.modsOptionsDropdownEntry.path : nil;
-
     [self zs_recoverStaleDoctorStateForThisLaunch];
+    if (self.modsOptionsDropdownOpen) [self zs_closeModsOptionsDropdownAnimated:NO];
 
     for (UIView *view in self.modsLibraryStack.arrangedSubviews) {
-
         UIButton *deleteButton = objc_getAssociatedObject(view, "zs_button_delete");
         if (deleteButton) {
             UIView *capsuleGlass = objc_getAssociatedObject(deleteButton, kZSHoldConfirmGlassViewKey);
@@ -1158,168 +1152,45 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         [view removeFromSuperview];
     }
 
-    NSMutableArray<NSString *> *folders = [[ModAssetLibrary folderNames] mutableCopy];
-    [folders removeObject:kZSStoredBundlesFolderName];
-    if (folders.count == 0) {
-        UILabel *empty = [[UILabel alloc] init];
-        empty.text = @"No mod folders yet.";
-        empty.font = zs_mono_font(11, UIFontWeightRegular);
-        empty.textColor = [UIColor colorWithWhite:1 alpha:0.45];
-        [self.modsLibraryStack addArrangedSubview:empty];
+    UIButton *openButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    openButton.translatesAutoresizingMaskIntoConstraints = NO;
+    openButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    openButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.055];
+    openButton.layer.cornerRadius = 10;
+    openButton.layer.cornerCurve = kCACornerCurveContinuous;
+    openButton.layer.borderWidth = 1;
+    openButton.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
+    openButton.clipsToBounds = YES;
+    openButton.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12);
+    openButton.titleLabel.font = zs_mono_font(11, UIFontWeightSemibold);
+    [openButton setTitle:@"Open Mod Library" forState:UIControlStateNormal];
+    [openButton setTitleColor:[UIColor colorWithWhite:0.94 alpha:1] forState:UIControlStateNormal];
+    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    UIImage *folderImage = [[UIImage systemImageNamed:@"folder.fill" withConfiguration:symbolConfig]
+        imageWithTintColor:zs_accent_green_color() renderingMode:UIImageRenderingModeAlwaysOriginal];
+    [openButton setImage:folderImage forState:UIControlStateNormal];
+    openButton.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
+    [openButton addTarget:self action:@selector(zs_openModLibraryTapped) forControlEvents:UIControlEventTouchUpInside];
+    [openButton.heightAnchor constraintEqualToConstant:42].active = YES;
+    [self.modsLibraryStack addArrangedSubview:openButton];
 
-    }
-
-    for (NSString *folderName in folders) {
-        BOOL expanded = [self.modsLibraryExpandedFolders containsObject:folderName];
-
-        NSString *folderRemark = [ModAssetLibrary remarkForFolder:folderName];
-        UIView *folderRow = zs_make_mods_folder_row(folderName, nil, folderRemark, expanded, self,
-            @selector(zs_modsLibraryFolderRowTapped:),
-            @selector(zs_modsLibraryFolderOptionsTapped:), 0);
-        [self.modsLibraryStack addArrangedSubview:folderRow];
-
-        if (!expanded) continue;
-
-        NSError *error = nil;
-        NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:&error];
-        if (!entries || entries.count == 0) {
-            UILabel *emptyFolder = [[UILabel alloc] init];
-            emptyFolder.text = @"  Empty.";
-            emptyFolder.font = zs_mono_font(11, UIFontWeightRegular);
-            emptyFolder.textColor = [UIColor colorWithWhite:1 alpha:0.4];
-            [self.modsLibraryStack addArrangedSubview:emptyFolder];
-            continue;
-        }
-
-        NSArray<ModAssetLibraryEntry *> *sortedEntries =
-            [entries sortedArrayUsingComparator:^NSComparisonResult(ModAssetLibraryEntry *a, ModAssetLibraryEntry *b) {
-                return [a.fileName localizedStandardCompare:b.fileName];
-            }];
-
-        for (ModAssetLibraryEntry *entry in sortedEntries) {
-            BOOL entryExpanded = [self.modsLibraryExpandedInfoEntries containsObject:entry.path];
-
-            UIView *entryRow = zs_make_mods_entry_row(entry, self,
-                @selector(zs_modsLibraryEntryInfoTapped:),
-                @selector(zs_modsLibraryEntryDispatchTapped:),
-                @selector(zs_modsLibraryEntryDownloadTapped:),
-                @selector(zs_modsLibraryEntryRetryTapped:),
-                @selector(zs_modsLibraryEntryOptionsTapped:),
-                entryExpanded,
-                [self.doctorDownloadInFlightPaths containsObject:entry.path],
-                NO, 0);
-            [self.modsLibraryStack addArrangedSubview:entryRow];
-
-            if (entryExpanded) {
-                UIView *infoPanel = zs_make_mods_entry_info_panel(entry,
-                    [self.doctorDownloadInFlightPaths containsObject:entry.path], NO);
-                [self.modsLibraryStack addArrangedSubview:infoPanel];
-            }
-        }
-    }
-
-    NSError *storedError = nil;
-    BOOL hasStoredBundlesFolder = [[ModAssetLibrary folderNames] containsObject:kZSStoredBundlesFolderName];
-    NSArray<ModAssetLibraryEntry *> *storedEntries =
-        hasStoredBundlesFolder ? [ModAssetLibrary entriesInFolder:kZSStoredBundlesFolderName error:&storedError] : nil;
-
-    NSArray<NSString *> *cachedSubFolders =
-        hasStoredBundlesFolder ? [ModAssetLibrary subFolderNamesInFolder:kZSStoredBundlesFolderName] : @[];
-
-    void (^appendStoredEntryRows)(NSArray<ModAssetLibraryEntry *> *, NSInteger) = ^(NSArray<ModAssetLibraryEntry *> *entriesToShow, NSInteger indentLevel) {
-        NSArray<ModAssetLibraryEntry *> *sorted =
-            [entriesToShow sortedArrayUsingComparator:^NSComparisonResult(ModAssetLibraryEntry *a, ModAssetLibraryEntry *b) {
-                return [a.fileName localizedStandardCompare:b.fileName];
-            }];
-
-        for (ModAssetLibraryEntry *entry in sorted) {
-            BOOL entryExpanded = [self.modsLibraryExpandedInfoEntries containsObject:entry.path];
-
-            UIView *entryRow = zs_make_mods_entry_row(entry, self,
-                @selector(zs_modsLibraryEntryInfoTapped:),
-                @selector(zs_modsLibraryEntryDispatchTapped:),
-                @selector(zs_modsLibraryEntryDownloadTapped:),
-                @selector(zs_modsLibraryEntryRetryTapped:),
-                @selector(zs_modsLibraryEntryOptionsTapped:),
-                entryExpanded,
-                NO,
-                YES, indentLevel);
-            [self.modsLibraryStack addArrangedSubview:entryRow];
-
-            if (entryExpanded) {
-                UIView *infoPanel = zs_make_mods_entry_info_panel(entry, NO, YES);
-                [self.modsLibraryStack addArrangedSubview:infoPanel];
-            }
-        }
-    };
-
-    if (storedEntries.count > 0 || cachedSubFolders.count > 0) {
-        BOOL storedExpanded = [self.modsLibraryExpandedFolders containsObject:kZSStoredBundlesFolderName];
-        UIView *storedFolderRow = zs_make_mods_folder_row(kZSStoredBundlesFolderName, nil,
-            kZSStoredBundlesFolderSubtext, storedExpanded, self,
-            @selector(zs_modsLibraryFolderRowTapped:), NULL, 0);
-        [self.modsLibraryStack addArrangedSubview:storedFolderRow];
-
-        if (storedExpanded) {
-            appendStoredEntryRows(storedEntries, 0);
-
-            for (NSString *cachedFolderName in cachedSubFolders) {
-                BOOL cachedFolderExpanded = [self.modsLibraryExpandedFolders containsObject:cachedFolderName];
-                NSError *cachedEntriesErr = nil;
-                NSArray<ModAssetLibraryEntry *> *cachedFolderEntries =
-                    [ModAssetLibrary entriesInFolder:cachedFolderName error:&cachedEntriesErr] ?: @[];
-
-                UIView *cachedFolderRow = zs_make_mods_folder_row(cachedFolderName,
-                    cachedFolderName.lastPathComponent, nil, cachedFolderExpanded, self,
-                    @selector(zs_modsLibraryFolderRowTapped:), @selector(zs_modsLibraryFolderOptionsTapped:), 1);
-                [self.modsLibraryStack addArrangedSubview:cachedFolderRow];
-
-                if (cachedFolderExpanded) appendStoredEntryRows(cachedFolderEntries, 1);
-            }
-        }
-    }
-
-    if (wasDropdownOpen) {
-
-        [self.contentOverlay layoutIfNeeded];
-
-        UIButton *newButton = nil;
-        ModAssetLibraryEntry *newEntry = nil;
-        for (UIView *view in self.modsLibraryStack.arrangedSubviews) {
-            if (dropdownWasFolderMode) {
-                NSString *rowFolderName = objc_getAssociatedObject(view, "zs_modsFolderName");
-                if (rowFolderName && [rowFolderName isEqualToString:dropdownTargetFolderName]) {
-                    newButton = objc_getAssociatedObject(view, "zs_button_options");
-                    break;
-                }
-            } else {
-                ModAssetLibraryEntry *rowEntry = objc_getAssociatedObject(view, "zs_modsEntry");
-                if (rowEntry && [rowEntry.path isEqualToString:dropdownTargetEntryPath]) {
-                    newButton = objc_getAssociatedObject(view, "zs_button_options");
-                    newEntry = rowEntry;
-                    break;
-                }
-            }
-        }
-
-        if (newButton) {
-
-            newButton.hidden = YES;
-            self.modsOptionsDropdownButton = newButton;
-            if (newEntry) self.modsOptionsDropdownEntry = newEntry;
-
-            CGRect newButtonFrame = [newButton convertRect:newButton.bounds toView:self.contentOverlay];
-            CGRect currentFrame = self.modsOptionsDropdownOverlay.frame;
-            CGFloat dx = CGRectGetMaxX(newButtonFrame) - CGRectGetMaxX(currentFrame);
-            CGFloat dy = CGRectGetMinY(newButtonFrame) - CGRectGetMinY(currentFrame);
-            if (dx != 0 || dy != 0) {
-                self.modsOptionsDropdownOverlay.frame = CGRectOffset(currentFrame, dx, dy);
-            }
+    if (self.modsLibraryBrowseMode && self.assetExplorerFullScreenOpen) {
+        BOOL wasShowingDetails = self.modsLibrarySelectedEntry != nil;
+        [self zs_assetExplorerRefreshModLibraryEntries];
+        if (self.modsLibrarySelectedEntry) {
+            [self zs_assetExplorerShowModLibraryEntry:self.modsLibrarySelectedEntry];
+        } else if (wasShowingDetails) {
+            [self zs_assetExplorerShowModLibrary];
         } else {
-
-            [self zs_closeModsOptionsDropdownAnimated:NO];
+            [self zs_assetExplorerRefreshListResettingScroll:NO];
         }
     }
+}
+
+- (void)zs_openModLibraryTapped {
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    [self zs_openModLibraryFullScreenPanel];
 }
 
 - (void)zs_modsLibraryFolderRowTapped:(UITapGestureRecognizer *)gesture {
@@ -1523,32 +1394,10 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     }];
 }
 
-- (void)zs_modsOptionsDropdownRowTapped:(UIButton *)sender {
-    ModAssetLibraryEntry *entry = self.modsOptionsDropdownEntry;
-    NSString *folderName = self.modsOptionsDropdownFolderName;
-    BOOL isFolderMode = (entry == nil);
-    BOOL isStoredBundlesRow = !isFolderMode && zs_mods_folder_is_or_within_stored_bundles(folderName);
-    NSArray<NSDictionary<NSString *, id> *> *options = isFolderMode ? zs_mods_options_for_folder(folderName)
-        : (isStoredBundlesRow ? zs_mods_stored_bundle_file_options() : zs_mods_file_options(entry));
-    if (sender.tag < 0 || sender.tag >= (NSInteger)options.count) {
-        [self zs_closeModsOptionsDropdownAnimated:YES];
-        return;
-    }
+- (void)zs_modsLibraryPerformOptionNamed:(NSString *)title forEntry:(nullable ModAssetLibraryEntry *)entry folderName:(NSString *)folderName {
+    if (folderName.length == 0 || title.length == 0) return;
 
-    NSDictionary<NSString *, id> *tappedOption = options[sender.tag];
-    [self zs_closeModsOptionsDropdownAnimated:YES];
-    if (!folderName) return;
-    if (!isFolderMode && !entry) return;
-
-    if ([tappedOption[@"disabled"] boolValue]) {
-        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-        [haptic notificationOccurred:UINotificationFeedbackTypeError];
-        return;
-    }
-
-    NSString *title = tappedOption[@"title"];
-
-    if (isFolderMode) {
+    if (!entry) {
         if ([title isEqualToString:@"Add mod"]) {
             [self zs_presentModImportPickerForFolder:folderName];
         } else if ([title isEqualToString:@"Rename"]) {
@@ -1578,6 +1427,31 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     } else if ([title isEqualToString:@"Delete"]) {
         [self zs_confirmDeleteModEntry:entry inFolder:folderName];
     }
+}
+
+- (void)zs_modsOptionsDropdownRowTapped:(UIButton *)sender {
+    ModAssetLibraryEntry *entry = self.modsOptionsDropdownEntry;
+    NSString *folderName = self.modsOptionsDropdownFolderName;
+    BOOL isFolderMode = (entry == nil);
+    BOOL isStoredBundlesRow = !isFolderMode && zs_mods_folder_is_or_within_stored_bundles(folderName);
+    NSArray<NSDictionary<NSString *, id> *> *options = isFolderMode ? zs_mods_options_for_folder(folderName)
+        : (isStoredBundlesRow ? zs_mods_stored_bundle_file_options() : zs_mods_file_options(entry));
+    if (sender.tag < 0 || sender.tag >= (NSInteger)options.count) {
+        [self zs_closeModsOptionsDropdownAnimated:YES];
+        return;
+    }
+
+    NSDictionary<NSString *, id> *tappedOption = options[sender.tag];
+    [self zs_closeModsOptionsDropdownAnimated:YES];
+    if (!folderName || (!isFolderMode && !entry)) return;
+
+    if ([tappedOption[@"disabled"] boolValue]) {
+        UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+        [haptic notificationOccurred:UINotificationFeedbackTypeError];
+        return;
+    }
+
+    [self zs_modsLibraryPerformOptionNamed:tappedOption[@"title"] forEntry:entry folderName:folderName];
 }
 
 - (void)zs_modsOptionsDropdownScrimTapped:(UIControl *)sender {

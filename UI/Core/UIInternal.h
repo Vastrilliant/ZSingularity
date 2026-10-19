@@ -195,6 +195,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) NSMutableArray<NSString *> *loadModsSummaryLines;
 
 @property (nonatomic, strong) UIStackView *modsLibraryStack;
+@property (nonatomic, assign) BOOL modsLibraryBrowseMode;
+@property (nonatomic, strong) NSArray<ModAssetLibraryEntry *> *modsLibraryBrowseEntries;
+@property (nonatomic, strong) NSArray<ModAssetLibraryEntry *> *modsLibraryDisplayedEntries;
+@property (nonatomic, strong) ModAssetLibraryEntry *modsLibrarySelectedEntry;
 @property (nonatomic, strong) ZSRow *manifestZeroingRow;
 @property (nonatomic, strong) NSMutableSet<NSString *> *modsLibraryExpandedFolders;
 @property (nonatomic, strong) NSMutableSet<NSString *> *modsLibraryExpandedInfoEntries;
