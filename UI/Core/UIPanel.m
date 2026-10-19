@@ -145,12 +145,12 @@ UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NSString 
     self.docsPanelWidth = self.panelWidth - kZSSectionIndexReservedWidth;
 
     if (zs_has_liquid_glass()) {
-        self.docsPanelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
-        self.docsPanelGlass.userInteractionEnabled = YES;
-        zs_configure_glass_corners_sides(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES, YES, NO);
-        [self.glassContainerContent addSubview:self.docsPanelGlass];
-        [self.glassContainerContent sendSubviewToBack:self.docsPanelGlass];
-        self.docsPanel = self.docsPanelGlass.contentView;
+        // The extended window no longer owns a Liquid Glass surface. The main panel glass (panelGlass)
+        // expands leftwards over it instead (see positionPanelAnimated:). docsPanel is only a
+        // placeholder that marks the extended window as built.
+        self.docsPanelGlass = nil;
+        self.docsPanel = [[UIView alloc] init];
+        self.docsPanel.hidden = YES;
     } else {
         self.docsPanel = [[UIView alloc] init];
         self.docsPanel.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
@@ -833,7 +833,6 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
     self.syslogFullScreenOpen = NO;
     [self zs_endAssetExplorerSession];
     [self zs_endDumperSession];
-    [self zs_endDumperSession];
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
     [self positionPanelAnimated:YES];
@@ -856,6 +855,16 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
 }
 
 #pragma mark Pinned actions
+
+// STUB: the pull tabs used to tuck themselves in behind the main panel (and hide) while an extended window
+// was open. With the main panel expanding over the extended window they now simply follow its left edge and
+// end up off-screen when it is fully extended. Return YES to restore the old tuck-in behaviour.
+static BOOL zs_pull_tabs_tuck_into_panel_when_extended(void) { return NO; }
+
+// STUB: the main panel used to flatten its left corners while an extended window was open (because a second
+// glass surface sat flush against it). The expanded panel keeps its rounded corners instead.
+// Return YES to restore flattening.
+static BOOL zs_flatten_main_panel_left_corners_when_extended(void) { return NO; }
 
 static NSString * const kZSPinKeyMemory = @"memory";
 static NSString * const kZSPinKeySyslog = @"syslog";
@@ -974,6 +983,16 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     return CGRectMake(x, handleY + (kHandleHeight - kZSPinnedTabHeight) * 0.5, kHandleWidth, kZSPinnedTabHeight);
 }
 
+- (BOOL)zs_expandsMainPanel {
+    return zs_has_liquid_glass() && self.panelGlass != nil;
+}
+
+- (BOOL)zs_pullTabsHiddenForFullScreen:(BOOL)fullScreenOpen {
+    if (!fullScreenOpen) return NO;
+    if (![self zs_expandsMainPanel]) return YES;
+    return zs_pull_tabs_tuck_into_panel_when_extended();
+}
+
 - (CGFloat)zs_handleRestingY {
     return (CGRectGetHeight(self.glassContainer.bounds) - kHandleHeight) * 0.5 + self.pinClusterOffsetY;
 }
@@ -1006,7 +1025,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     CGRect frame = handleElement.frame;
     handleElement.frame = CGRectMake(frame.origin.x, y, frame.size.width, frame.size.height);
     BOOL fullScreenOpen = self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen || self.dumperFullScreenOpen;
-    [self zs_layoutPinnedTabsWithHandleY:y localX:frame.origin.x visible:!fullScreenOpen];
+    [self zs_layoutPinnedTabsWithHandleY:y localX:frame.origin.x visible:![self zs_pullTabsHiddenForFullScreen:fullScreenOpen]];
 }
 
 - (void)zs_schedulePinClusterRecenter {
@@ -1871,11 +1890,24 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     UIView *panelElement = self.panelGlass ?: self.panel;
     UIView *handleElement = self.handleGlass ?: self.handle;
-    UIView *docsPanelElement = self.docsPanelGlass ?: self.docsPanel;
     UIView *clip = self.extendedContentClip;
     BOOL glass = zs_has_liquid_glass();
-
     CGFloat docsX = fullScreenOpen ? 0 : kHandleWidth;
+
+    // Liquid Glass: one glass surface. The main panel itself expands leftwards over the extended window,
+    // instead of a second glass surface being built and slid over.
+    BOOL expandPanel = [self zs_expandsMainPanel];
+    UIView *docsPanelElement = expandPanel ? nil : (self.docsPanelGlass ?: self.docsPanel);
+    BOOL pullTabsHidden = [self zs_pullTabsHiddenForFullScreen:fullScreenOpen];
+
+    // Column (container-local) holding the regular main panel content.
+    CGRect mainColumnLocal = CGRectMake(kHandleWidth + docsW, 0, panelW, height);
+    // Left edge of the main panel glass. Expanded: it reaches back to where the extended window starts.
+    CGFloat panelGlassLeft = (expandPanel && docsVisible) ? docsX : mainColumnLocal.origin.x;
+    CGRect panelFrameLocal = expandPanel
+        ? CGRectMake(panelGlassLeft, 0, chromeWidth - panelGlassLeft, height)
+        : mainColumnLocal;
+
     CGFloat docsSpanWidth = docsW + (fullScreenOpen ? kHandleWidth : 0);
     CGFloat docsLeftRadius = fullScreenOpen ? zs_screen_corner_radius(unityView, kPanelCornerRadiusMinimum) : kPanelCornerRadiusMinimum;
     CACornerMask docsCornerMask = kCALayerMinXMinYCorner | kCALayerMinXMaxYCorner;
@@ -1910,9 +1942,27 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }];
     }
 
+    void (^configurePanelCornersOn)(UIView *) = ^(UIView *target) {
+        if (!target) return;
+        if (expandPanel) {
+            if (docsVisible && zs_flatten_main_panel_left_corners_when_extended()) {
+                zs_configure_main_panel_glass_corners(target, kPanelCornerRadiusMinimum, NO);
+            } else {
+                // The expanded panel's left edge is the extended window's left edge.
+                zs_configure_main_panel_glass_corners_expanding(target,
+                                                                docsVisible ? docsLeftRadius : kPanelCornerRadiusMinimum,
+                                                                docsVisible ? !fullScreenOpen : YES,
+                                                                kPanelCornerRadiusMinimum);
+            }
+        } else {
+            zs_configure_main_panel_glass_corners(target, kPanelCornerRadiusMinimum, !docsVisible);
+        }
+    };
+
     void (^applyPanelCorners)(void) = ^{
         if (self.panelGlass) {
-            zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, !docsVisible);
+            configurePanelCornersOn(self.panelGlass);
+            configurePanelCornersOn(self.panelBlurOverlay);
         }
         if (self.contentOverlay) {
             self.contentOverlay.layer.maskedCorners = contentOverlayCornerMask;
@@ -1920,7 +1970,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     };
 
     void (^applyIconAlpha)(void) = ^{
-        CGFloat alpha = fullScreenOpen ? 0 : 1;
+        CGFloat alpha = pullTabsHidden ? 0 : 1;
         self.chevron.alpha = alpha;
         for (UIView *tab in self.pinnedTabElements.allValues) {
             [tab viewWithTag:kZSPinnedIconTag].alpha = alpha;
@@ -1942,14 +1992,19 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         CGRect dockFrame = CGRectMake(targetX, 0, chromeWidth, height);
         self.glassContainer.frame = dockFrame;
 
-        CGFloat handleLocalX = fullScreenOpen ? (kHandleWidth + docsW) : 0;
+        // Pull tabs follow the left edge of the main panel. When it is fully extended that is x < 0 (off-screen):
+        // the panel's expanded bounds deliberately do not clamp the tabs. The old behaviour (tucked behind the
+        // main column and hidden) is kept behind zs_pull_tabs_tuck_into_panel_when_extended().
+        CGFloat handleLocalX = (expandPanel && !zs_pull_tabs_tuck_into_panel_when_extended())
+            ? (panelGlassLeft - kHandleWidth)
+            : (fullScreenOpen ? (kHandleWidth + docsW) : 0);
         CGFloat handleRestingY = (height - kHandleHeight) * 0.5 + self.pinClusterOffsetY;
         handleElement.frame = CGRectMake(handleLocalX,
                                           handleRestingY,
                                           kHandleWidth,
                                           kHandleHeight);
-        handleElement.userInteractionEnabled = !fullScreenOpen;
-        [self zs_layoutPinnedTabsWithHandleY:handleRestingY localX:handleLocalX visible:!fullScreenOpen updateIcons:NO];
+        handleElement.userInteractionEnabled = !pullTabsHidden;
+        [self zs_layoutPinnedTabsWithHandleY:handleRestingY localX:handleLocalX visible:!pullTabsHidden updateIcons:NO];
 
         CGRect docsFrameLocal = CGRectMake(docsX, 0, docsSpanWidth, height);
 
@@ -1965,7 +2020,9 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
             }
         }
 
-        panelElement.frame = CGRectMake(kHandleWidth + docsW, 0, panelW, height);
+        panelElement.frame = panelFrameLocal;
+        if (expandPanel && self.panelBlurOverlay) self.panelBlurOverlay.frame = panelFrameLocal;
+        if (expandPanel) applyPanelCorners();
 
         if (self.docsPanelSeparator) {
             CGFloat hairline = 1.0 / MAX(unityView.traitCollection.displayScale, 1.0);
@@ -1984,11 +2041,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
 
         if (self.contentOverlay) {
-            self.contentOverlay.frame = [panelElement convertRect:panelElement.bounds toView:unityView];
+            self.contentOverlay.frame = [self.glassContainerContent convertRect:mainColumnLocal toView:unityView];
             self.contentOverlay.layer.cornerRadius = kPanelCornerRadiusMinimum;
             self.contentOverlay.layer.cornerCurve = kCACornerCurveContinuous;
         }
-        if (clip && docsPanelElement) {
+        if (clip && self.docsPanel) {
             clip.frame = [self.glassContainerContent convertRect:docsFrameLocal toView:unityView];
             clip.layer.cornerRadius = docsLeftRadius;
             clip.layer.cornerCurve = kCACornerCurveContinuous;
@@ -2001,7 +2058,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     void (^completion)(BOOL) = ^(BOOL finished) {
         if (self.docsPanelOpen) return;
         [self zs_finishExtendedPanelClose];
-        if (leftCornersFlatChanged && !docsVisible && animated) {
+        if (leftCornersFlatChanged && !expandPanel && !docsVisible && animated) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kCornerRestoreDelay * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 if (self.docsPanelOpen) return;
@@ -2054,7 +2111,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
-    if (leftCornersFlatChanged) {
+    if (animated && expandPanel && (leftCornersFlatChanged || fullScreenChanged)) {
+        [self zs_scheduleBlurSwapActive:(docsVisible && fullScreenOpen) mainDuration:mainDuration];
+    }
+
+    if (leftCornersFlatChanged && !expandPanel) {
         if (!animated) {
             applyPanelCorners();
         } else if (docsVisible) {
@@ -2245,6 +2306,146 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
         zs_add_restart_action(alert);
         [presenter presentViewController:alert animated:YES completion:nil];
     }
+}
+
+#pragma mark Panel glass <-> blur cross-fade
+
+static const UIBlurEffectStyle kZSPanelBlurStyle = UIBlurEffectStyleSystemMaterialDark;
+static const CGFloat kZSPanelBlurIntensity = 0.30;
+static const CGFloat kZSPanelBlurTint = 0.35;
+static const NSTimeInterval kZSPanelBlurFade = 0.40;
+static const CGFloat kZSPanelBlurOverlap = 0.05;
+static const CGFloat kZSPanelBlurCurve = 0.25;
+
+- (void)zs_scheduleBlurSwapActive:(BOOL)active mainDuration:(NSTimeInterval)mainDuration {
+    if (!self.panelBlurOverlay) return;
+    NSUInteger token = ++self.panelBlurToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || token != strongSelf.panelBlurToken || !strongSelf.panelBlurOverlay) return;
+        BOOL fullScreenNow = strongSelf.syslogFullScreenOpen || strongSelf.memoryFullScreenOpen || strongSelf.assetExplorerFullScreenOpen || strongSelf.dumperFullScreenOpen;
+        if ((strongSelf.docsPanelOpen && fullScreenNow) != active) return;
+        [strongSelf zs_setPanelBlurActive:active animated:YES];
+    });
+}
+
+- (void)zs_rebuildPanelBlurAnimator {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    if (!overlay) return;
+
+    UIViewPropertyAnimator *old = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (old && old.state == UIViewAnimatingStateActive) [old stopAnimation:YES];
+    overlay.effect = nil;
+
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:kZSPanelBlurStyle];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:1
+                                                                                   curve:UIViewAnimationCurveLinear
+                                                                              animations:^{ overlay.effect = blur; }];
+    animator.pausesOnCompletion = YES;
+    self.panelBlurAnimator = animator;
+    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
+}
+
+- (void)zs_applyPanelBlurProgress:(CGFloat)progress {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    if (!overlay) return;
+    progress = MAX(0, MIN(1, progress));
+    self.panelBlurProgress = progress;
+    if (self.panelBlurAnimator) {
+        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, kZSPanelBlurIntensity * powf(progress, kZSPanelBlurCurve)));
+    }
+    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:kZSPanelBlurTint * progress];
+}
+
+- (void)zs_finishPanelBlurIfInactive {
+    if (self.panelBlurActive || self.panelBlurProgress > 0.001) return;
+    UIViewPropertyAnimator *animator = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (animator && animator.state == UIViewAnimatingStateActive) [animator stopAnimation:YES];
+    self.panelBlurOverlay.effect = nil;
+    self.panelBlurOverlay.contentView.backgroundColor = UIColor.clearColor;
+    self.panelBlurOverlay.hidden = YES;
+}
+
+- (void)zs_setPanelBlurActive:(BOOL)active animated:(BOOL)animated {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    UIVisualEffectView *glassView = self.panelGlass;
+    if (!overlay || !glassView) return;
+    if (active == self.panelBlurActive && !self.panelBlurLink) return;
+    self.panelBlurActive = active;
+
+    NSTimeInterval duration = animated ? kZSPanelBlurFade : 0;
+
+    if (active) overlay.hidden = NO;
+    if (!self.panelBlurAnimator) [self zs_rebuildPanelBlurAnimator];
+
+    UIVisualEffect *glassTarget = active ? nil : zs_make_glass_effect_dark(NO);
+    NSUInteger glassToken = ++self.panelBlurGlassToken;
+    [self.panelBlurLink invalidate];
+    self.panelBlurLink = nil;
+
+    if (duration <= 0.001) {
+        [UIView performWithoutAnimation:^{ glassView.effect = glassTarget; }];
+        [self zs_applyPanelBlurProgress:active ? 1 : 0];
+        [self zs_finishPanelBlurIfInactive];
+        return;
+    }
+
+    NSTimeInterval legDuration = duration * (1 - kZSPanelBlurOverlap);
+    NSTimeInterval lagDelay = duration * kZSPanelBlurOverlap;
+    NSTimeInterval glassDelay = active ? lagDelay : 0;
+    NSTimeInterval blurDelay = active ? 0 : lagDelay;
+
+    __weak typeof(self) weakSelf = self;
+    void (^runGlass)(void) = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || glassToken != strongSelf.panelBlurGlassToken || !strongSelf.panelGlass) return;
+        [UIView animateWithDuration:legDuration
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveLinear
+                         animations:^{ strongSelf.panelGlass.effect = glassTarget; }
+                         completion:nil];
+    };
+    if (glassDelay <= 0.001) {
+        runGlass();
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(glassDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), runGlass);
+    }
+
+    self.panelBlurFrom = self.panelBlurProgress;
+    self.panelBlurTo = active ? 1 : 0;
+    self.panelBlurStartTime = CACurrentMediaTime() + blurDelay;
+    self.panelBlurDuration = legDuration;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_panelBlurTick:)];
+    [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    self.panelBlurLink = link;
+}
+
+- (void)zs_panelBlurTick:(CADisplayLink *)link {
+    CGFloat t = self.panelBlurDuration > 0 ? (CGFloat)((CACurrentMediaTime() - self.panelBlurStartTime) / self.panelBlurDuration) : 1;
+    t = MAX(0, MIN(1, t));
+    [self zs_applyPanelBlurProgress:self.panelBlurFrom + (self.panelBlurTo - self.panelBlurFrom) * t];
+    if (t >= 1) {
+        [link invalidate];
+        if (self.panelBlurLink == link) self.panelBlurLink = nil;
+        [self zs_finishPanelBlurIfInactive];
+    }
+}
+
+- (void)zs_teardownPanelBlur {
+    self.panelBlurToken = self.panelBlurToken + 1;
+    self.panelBlurGlassToken = self.panelBlurGlassToken + 1;
+    [self.panelBlurLink invalidate];
+    self.panelBlurLink = nil;
+    UIViewPropertyAnimator *animator = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (animator && animator.state == UIViewAnimatingStateActive) [animator stopAnimation:YES];
+    [self.panelBlurOverlay removeFromSuperview];
+    self.panelBlurOverlay = nil;
+    self.panelBlurActive = NO;
+    self.panelBlurProgress = 0;
 }
 
 - (void)disableEnkephalinChanged:(UISwitch *)toggle {

@@ -845,6 +845,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.extendedCoverMode = NO;
     self.extendedCoverEntering = NO;
 
+    [self zs_teardownPanelBlur];
     self.glassContainer = nil;
     self.panelGlass = nil;
     self.handleGlass = nil;
@@ -1496,6 +1497,9 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     self.glassContainer = chrome;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
+    // The pull tabs sit outside the main panel's bounds (and off-screen while it is fully extended); never clip them.
+    self.glassContainer.clipsToBounds = NO;
+    self.glassContainerContent.clipsToBounds = NO;
     self.glassContainer.hidden = YES;
     [unityView addSubview:self.glassContainer];
     zs_mark_host_owned(self.glassContainer);
@@ -1507,6 +1511,16 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         self.panelGlass.userInteractionEnabled = YES;
         zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];
+
+        // Blur twin of the panel glass. Invisible until the panel is cross-faded to blur while an extended
+        // window is open (see zs_setPanelBlurActive:animated:).
+        self.panelBlurActive = NO;
+        self.panelBlurProgress = 0;
+        self.panelBlurOverlay = [[UIVisualEffectView alloc] initWithEffect:nil];
+        self.panelBlurOverlay.userInteractionEnabled = NO;
+        self.panelBlurOverlay.hidden = YES;
+        zs_configure_main_panel_glass_corners(self.panelBlurOverlay, kPanelCornerRadiusMinimum, YES);
+        [self.glassContainerContent addSubview:self.panelBlurOverlay];
 
         self.handleGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
         self.handleGlass.userInteractionEnabled = YES;
