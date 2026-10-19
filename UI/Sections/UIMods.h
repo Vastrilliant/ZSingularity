@@ -47,6 +47,7 @@
 - (void)zs_refreshManifestZeroingRow;
 - (void)zs_rebuildModsLibrary;
 - (void)zs_openModLibraryTapped;
+- (void)zs_openModLibraryInFolder:(NSString *)folderName;
 - (void)zs_modsLibraryPerformOptionNamed:(NSString *)title forEntry:(nullable ModAssetLibraryEntry *)entry folderName:(NSString *)folderName;
 - (void)zs_modsLibraryFolderRowTapped:(UITapGestureRecognizer *)gesture;
 - (void)zs_modsLibraryEntryInfoTapped:(UITapGestureRecognizer *)gesture;

@@ -2575,10 +2575,12 @@ UIView *zs_make_mods_entry_row(ModAssetLibraryEntry *entry, id target, SEL tapAc
     NSString *iconName = @"doc.fill";
     if (isBank) {
         iconName = @"waveform";
-    } else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+    } else if (entry.fontRole != ZSFontRoleNone || [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) {
+        iconName = @"textformat";
+    } else if (entry.isAssetBundle) {
         iconName = @"shippingbox.fill";
-    } else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) {
-        iconName = @"text.bubble.fill";
+    } else if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        iconName = @"curlybraces";
     }
     UIImageView *icon = [[UIImageView alloc] initWithImage:
         [UIImage systemImageNamed:iconName withConfiguration:iconConfig]];

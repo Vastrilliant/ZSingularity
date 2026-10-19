@@ -14,10 +14,27 @@ static NSString *zs_mods_library_entry_kind(ModAssetLibraryEntry *entry) {
 
 static NSString *zs_mods_library_entry_symbol(ModAssetLibraryEntry *entry) {
     if ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) return @"waveform";
-    if (entry.isAssetBundle) return @"archivebox.fill";
-    if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) return @"text.bubble.fill";
-    if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) return @"shippingbox.fill";
+    if (entry.fontRole != ZSFontRoleNone || [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) return @"textformat";
+    if (entry.isAssetBundle) return @"shippingbox.fill";
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) return @"curlybraces";
     return @"doc.fill";
+}
+
+static NSString *zs_mods_library_target_platform_name(NSNumber *platform) {
+    if (!platform) return nil;
+    NSInteger value = platform.integerValue;
+    NSString *name = nil;
+    switch (value) {
+        case 2: name = @"StandaloneOSX"; break;
+        case 5: name = @"StandaloneWindows"; break;
+        case 9: name = @"iOS"; break;
+        case 13: name = @"Android"; break;
+        case 19: name = @"StandaloneWindows64"; break;
+        case 20: name = @"WebGL"; break;
+        case 24: name = @"StandaloneLinux64"; break;
+        default: break;
+    }
+    return name.length > 0 ? [NSString stringWithFormat:@"%@ (%ld)", name, (long)value] : [NSString stringWithFormat:@"%ld", (long)value];
 }
 
 static NSString *zs_mods_current_transcoder_codec_name(void) {
@@ -75,6 +92,11 @@ static void zs_mods_library_collect_folder_stats(NSString *folder, NSFileManager
     }
 }
 
+static NSString *zs_mods_library_folder_item_count(NSDictionary<NSString *, id> *folderRow) {
+    NSUInteger count = [folderRow[@"count"] unsignedIntegerValue];
+    return [NSString stringWithFormat:@"%lu %@", (unsigned long)count, count == 1 ? @"item" : @"items"];
+}
+
 static NSString *zs_mods_library_folder_info(NSDictionary<NSString *, id> *folderRow, BOOL compact) {
     NSUInteger count = [folderRow[@"count"] unsignedIntegerValue];
     NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObject:[NSString stringWithFormat:@"%lu %@", (unsigned long)count, count == 1 ? @"entry" : @"entries"]];
@@ -100,6 +122,7 @@ static const NSInteger kZSModsLibrarySortKind = 3;
 @property (nonatomic, strong) UILabel *badge;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *detailLabel;
+@property (nonatomic, assign) BOOL showsFolder;
 @end
 
 @implementation ZSModsLibraryIconCell
@@ -156,9 +179,15 @@ static const NSInteger kZSModsLibrarySortKind = 3;
     BOOL hasBadge = self.badge.text.length > 0;
     CGFloat badgeHeight = hasBadge ? 12 : 0;
     self.badge.frame = CGRectMake(4, tileHeight - badgeHeight - 5, width - 8, badgeHeight);
-    CGFloat glyphSide = MIN(tileHeight * 0.5, 40);
-    CGFloat glyphCenterY = hasBadge ? (tileHeight - badgeHeight - 5) / 2.0 : tileHeight / 2.0;
-    self.glyph.frame = CGRectMake((width - glyphSide) / 2.0, glyphCenterY - glyphSide / 2.0, glyphSide, glyphSide);
+    if (self.showsFolder) {
+        CGFloat folderWidth = MIN(width * 0.86, 76);
+        CGFloat folderHeight = MIN(tileHeight, folderWidth * 0.8);
+        self.glyph.frame = CGRectMake((width - folderWidth) / 2.0, (tileHeight - folderHeight) / 2.0, folderWidth, folderHeight);
+    } else {
+        CGFloat glyphSide = MIN(tileHeight * 0.5, 40);
+        CGFloat glyphCenterY = hasBadge ? (tileHeight - badgeHeight - 5) / 2.0 : tileHeight / 2.0;
+        self.glyph.frame = CGRectMake((width - glyphSide) / 2.0, glyphCenterY - glyphSide / 2.0, glyphSide, glyphSide);
+    }
     self.titleLabel.frame = CGRectMake(2, tileHeight + 6, width - 4, 26);
     self.detailLabel.frame = CGRectMake(2, tileHeight + 6 + 26 + 2, width - 4, 11);
 }
@@ -170,18 +199,19 @@ static const NSInteger kZSModsLibrarySortKind = 3;
 
 - (void)configureWithFolder:(NSDictionary<NSString *, id> *)folderRow {
     UIColor *blue = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
-    self.tile.backgroundColor = [blue colorWithAlphaComponent:0.16];
-    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightRegular];
+    self.showsFolder = YES;
+    self.tile.backgroundColor = UIColor.clearColor;
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:64 weight:UIImageSymbolWeightRegular];
     self.glyph.image = [UIImage systemImageNamed:@"folder.fill" withConfiguration:config];
     self.glyph.tintColor = blue;
     self.badge.text = nil;
     self.titleLabel.text = folderRow[@"title"];
-    NSString *remark = folderRow[@"remark"];
-    self.detailLabel.text = remark.length > 0 ? remark : zs_mods_library_folder_info(folderRow, YES);
+    self.detailLabel.text = zs_mods_library_folder_item_count(folderRow);
     [self setNeedsLayout];
 }
 
 - (void)configureWithEntry:(ModAssetLibraryEntry *)entry {
+    self.showsFolder = NO;
     self.tile.backgroundColor = [UIColor colorWithWhite:1 alpha:0.07];
     UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:30 weight:UIImageSymbolWeightRegular];
     self.glyph.image = [UIImage systemImageNamed:zs_mods_library_entry_symbol(entry) withConfiguration:config];
@@ -189,9 +219,7 @@ static const NSInteger kZSModsLibrarySortKind = 3;
     NSString *extension = entry.fileName.pathExtension.uppercaseString;
     self.badge.text = extension.length > 0 && extension.length <= 8 ? extension : nil;
     self.titleLabel.text = zs_mods_library_entry_title(entry);
-    NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
-    NSString *status = zs_mods_library_entry_status(entry);
-    self.detailLabel.text = status.length > 0 ? [NSString stringWithFormat:@"%@  •  %@", size, status] : size;
+    self.detailLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
     [self setNeedsLayout];
 }
 
@@ -764,6 +792,7 @@ static const NSInteger kZSModsLibrarySortKind = 3;
             strongSelf.loadModsSummaryLines = summaryLines;
             void (^afterDismiss)(void) = ^{
                 [strongSelf zs_rebuildModsLibrary];
+                [strongSelf zs_openModLibraryInFolder:folderName];
                 [strongSelf zs_processLoadModsBankURLs:bankURLs];
             };
             if (indexing.presentingViewController) {
@@ -1426,6 +1455,22 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
     [self zs_openModLibraryFullScreenPanel];
+}
+
+- (void)zs_openModLibraryInFolder:(NSString *)folderName {
+    if (folderName.length == 0 || ![[ModAssetLibrary folderNames] containsObject:folderName]) return;
+    BOOL alreadyBrowsing = self.assetExplorerFullScreenOpen && self.modsLibraryBrowseMode;
+    if (!alreadyBrowsing) {
+        if (self.assetExplorerFullScreenOpen) return;
+        [self zs_openModLibraryFullScreenPanel];
+        if (!self.assetExplorerFullScreenOpen) return;
+    }
+    if (self.modsLibrarySelectedEntry) {
+        [self zs_assetExplorerShowModLibrary];
+    } else {
+        [self zs_assetExplorerRefreshModLibraryEntries];
+    }
+    [self zs_modsLibraryOpenFolder:folderName];
 }
 
 - (void)zs_modsLibraryFolderRowTapped:(UITapGestureRecognizer *)gesture {
@@ -3589,6 +3634,9 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
     [rows addObject:@[@"Size", [NSString stringWithFormat:@"%@ (%@ bytes)", readable, exact]]];
 
     if (entry.cabIdentifier.length > 0) [rows addObject:@[@"CAB Identifier", entry.cabIdentifier]];
+    if (entry.resolvedInstallTargetPath.length > 0) [rows addObject:@[@"File path", entry.resolvedInstallTargetPath]];
+    NSString *platformName = zs_mods_library_target_platform_name(entry.targetPlatform);
+    if (platformName.length > 0) [rows addObject:@[@"Target Platform", platformName]];
 
     NSString *dateText = entry.dateAdded.length > 0 ? entry.dateAdded : @"Unknown";
     NSDateFormatter *parser = [[NSDateFormatter alloc] init];
@@ -3887,13 +3935,25 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
     }
     UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(button, title, tint, zs_mono_font(10, UIFontWeightSemibold));
+    zs_style_button_as_native_glass_with_font(button, title, tint, zs_mono_font(12, UIFontWeightSemibold));
+    button.titleLabel.numberOfLines = 1;
+    button.titleLabel.lineBreakMode = NSLineBreakByClipping;
+    button.titleLabel.adjustsFontSizeToFitWidth = YES;
+    button.titleLabel.minimumScaleFactor = 0.75;
+    if (@available(iOS 15.0, *)) {
+        UIButtonConfiguration *configuration = button.configuration;
+        if (configuration) {
+            configuration.titleLineBreakMode = NSLineBreakByClipping;
+            configuration.contentInsets = NSDirectionalEdgeInsetsMake(0, 4, 0, 4);
+            button.configuration = configuration;
+        }
+    }
     objc_setAssociatedObject(button, "zs_modsEntry", entry, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
-    ZSGlassControlRow *holder = [[ZSGlassControlRow alloc] initWithFrame:CGRectMake(0, 0, 64, 26)];
-    holder.itemSize = 26;
+    ZSGlassControlRow *holder = [[ZSGlassControlRow alloc] initWithFrame:CGRectMake(0, 0, 77, 31)];
+    holder.itemSize = 31;
     holder.itemSpacing = 0;
-    holder.itemWidths = @[@64];
+    holder.itemWidths = @[@77];
     holder.buttons = @[button];
     return holder;
 }
