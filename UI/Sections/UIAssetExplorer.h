@@ -8,8 +8,11 @@
 - (void)zs_assetExplorerRefreshModLibraryEntries;
 - (void)zs_assetExplorerShowModLibrary;
 - (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
-- (void)zs_modsLibraryBrowseFolderHeaderTapped:(UIControl *)sender;
 - (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
+- (NSDictionary<NSString *, id> *)zs_modsLibraryFolderAtIndexPath:(NSIndexPath *)indexPath;
+- (void)zs_modsLibraryApplyListChrome;
+- (void)zs_modsLibraryOpenFolder:(NSString *)folder;
+- (void)zs_modsLibraryNavigateUpFromFolder;
 - (void)zs_selectModeTapped;
 - (void)zs_exitSelectModeTapped;
 - (void)zs_exitSelectMode;
@@ -123,6 +126,7 @@
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath;
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point API_AVAILABLE(ios(13.0));
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0));
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0));
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath;
 - (UIButton *)zs_assetExplorerMakeHubTileWithSymbol:(NSString *)symbol title:(NSString *)title action:(SEL)action;
 - (void)zs_assetExplorerHubTilePressed:(UIButton *)tile;
