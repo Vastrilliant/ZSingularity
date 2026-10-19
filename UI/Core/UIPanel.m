@@ -2313,7 +2313,7 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
 static const UIBlurEffectStyle kZSPanelBlurStyle = UIBlurEffectStyleSystemMaterialDark;
 static const CGFloat kZSPanelBlurIntensity = 0.30;
 static const CGFloat kZSPanelBlurTint = 0.35;
-static const NSTimeInterval kZSPanelBlurFade = 0.40;
+static const NSTimeInterval kZSPanelBlurFade = 0.30;
 static const CGFloat kZSPanelBlurOverlap = 0.05;
 static const CGFloat kZSPanelBlurCurve = 0.25;
 
