@@ -3739,7 +3739,10 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
 
 - (void)zs_modsLibraryBuildHeaderControls {
     UIView *overlay = self.assetExplorerFullScreenOverlay;
-    if (!overlay || self.modsLibraryControlsRow) return;
+    if (!overlay) return;
+    if (self.modsLibraryControlsRow.superview == overlay && self.assetExplorerStatusTrailingToModsRow) return;
+    [self.modsLibraryIconsCollectionView removeFromSuperview];
+    [self.modsLibraryControlsRow removeFromSuperview];
 
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
     UIColor *idleTint = [UIColor colorWithWhite:1 alpha:0.9];
