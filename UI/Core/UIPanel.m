@@ -145,8 +145,7 @@ UIButton *zs_make_docs_language_option_button(NSDictionary<NSString *, NSString 
     self.docsPanelWidth = self.panelWidth - kZSSectionIndexReservedWidth;
 
     if (zs_has_liquid_glass()) {
-        self.docsPanelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_large_glass_effect(NO)];
-        zs_register_heavy_glass(self.docsPanelGlass);
+        self.docsPanelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_clear_large(NO)];
         self.docsPanelGlass.userInteractionEnabled = YES;
         zs_configure_glass_corners_sides(self.docsPanelGlass, kPanelCornerRadiusMinimum, YES, YES, NO);
         [self.glassContainerContent addSubview:self.docsPanelGlass];
@@ -1368,7 +1367,6 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     zs_logo_effects_set_paused(NO);
     zs_gif_tint_reconstruct_all();
 
-    zs_heavy_glass_animate_lite(0.28);
     [UIView animateWithDuration:0.28
                           delay:0
          usingSpringWithDamping:0.85
@@ -2051,7 +2049,6 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     }
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
-    if (animated) zs_heavy_glass_animate_lite(mainDuration);
 
     if (leftCornersFlatChanged) {
         if (!animated) {
@@ -2238,19 +2235,6 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
     if (presenter) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restart Required"
                                                                          message:@"You must restart the app for the Liquid Glass changes to take effect."
-                                                                  preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        zs_add_restart_action(alert);
-        [presenter presentViewController:alert animated:YES completion:nil];
-    }
-}
-
-- (void)glassQualityChanged:(ZSModeSlider *)slider {
-    zs_set_glass_quality((ZSGlassQuality)slider.selectedIndex);
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (presenter) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restart Required"
-                                                                         message:@"You must restart the app for the Glass Quality change to take effect."
                                                                   preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         zs_add_restart_action(alert);

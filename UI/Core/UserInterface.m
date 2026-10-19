@@ -667,7 +667,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     [self zs_updateSliderGlassVisibility];
 
     __weak typeof(self) weakSelf = self;
-    zs_heavy_glass_animate_lite(0.28);
     [UIView animateWithDuration:0.28
                           delay:0
          usingSpringWithDamping:0.85
@@ -756,7 +755,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     }
 
     __weak typeof(self) weakSelf = self;
-    zs_heavy_glass_animate_lite(0.28);
     [UIView animateWithDuration:0.28
                           delay:0
          usingSpringWithDamping:0.85
@@ -1501,8 +1499,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
 
     if (zs_has_liquid_glass()) {
 
-        self.panelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_large_glass_effect(NO)];
-        zs_register_heavy_glass(self.panelGlass);
+        self.panelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_clear_large(NO)];
         self.panelGlass.userInteractionEnabled = YES;
         zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];
@@ -2098,9 +2095,6 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
     [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
 
-    ZSRow *glassQualityRow = zs_make_mode_slider_row(@"Glass Quality", @[@"Full", @"Balanced", @"Light"], zs_glass_quality(), ZSGlassQualityBalanced);
-    [glassQualityRow.modeSlider addTarget:self action:@selector(glassQualityChanged:) forControlEvents:UIControlEventValueChanged];
-
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
@@ -2114,7 +2108,6 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         customGreetingRow,
         uidRedactorRow,
         disableLiquidGlassRow,
-        glassQualityRow,
         disableEnkephalinRow,
         assetExplorerButton,
         selectModeButton,

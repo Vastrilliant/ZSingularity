@@ -85,7 +85,6 @@ void zs_update_value_label(ZSCapsuleSlider *slider);
 - (void)lz4hcCompressionChanged:(UISwitch *)toggle;
 - (void)uidRedactorChanged:(UISwitch *)toggle;
 - (void)disableLiquidGlassChanged:(UISwitch *)toggle;
-- (void)glassQualityChanged:(ZSModeSlider *)slider;
 - (void)disableEnkephalinChanged:(UISwitch *)toggle;
 - (void)ramBypassChanged:(UISwitch *)toggle;
 - (void)ramHudChanged:(UISwitch *)toggle;

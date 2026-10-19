@@ -311,6 +311,11 @@ UIVisualEffect *zs_make_glass_effect_dark(BOOL interactive) {
     return zs_make_glass_effect_style(0 , interactive, zs_glass_tint_color());
 }
 
+// Clear-style glass (UIGlassEffectStyleClear = 1), same tint as the regular glass. Used only for the big panels.
+UIVisualEffect *zs_make_glass_effect_clear_large(BOOL interactive) {
+    return zs_make_glass_effect_style(1, interactive, zs_glass_tint_color());
+}
+
 void zs_set_track_glass_interactive(UIVisualEffectView *trackGlass, BOOL interactive) {
     if (!trackGlass) return;
     trackGlass.effect = zs_make_glass_effect(interactive);
@@ -509,97 +514,6 @@ void zs_set_glass_suspended(BOOL suspended) {
             }
         }
     }
-}
-
-#pragma mark - Glass quality (large-surface cost control)
-
-static NSString * const kZSGlassQualityKey = @"quality";
-static ZSGlassQuality gZSGlassQualityCache = ZSGlassQualityBalanced;
-static BOOL gZSGlassQualityCacheLoaded;
-
-ZSGlassQuality zs_glass_quality(void) {
-    if (!gZSGlassQualityCacheLoaded) {
-        NSDictionary *section = zs_settings_section(kZSLiquidGlassSettingsSection);
-        id stored = section[kZSGlassQualityKey];
-        NSInteger v = stored ? [stored integerValue] : ZSGlassQualityBalanced;
-        if (v < ZSGlassQualityFull || v > ZSGlassQualityLight) v = ZSGlassQualityBalanced;
-        gZSGlassQualityCache = (ZSGlassQuality)v;
-        gZSGlassQualityCacheLoaded = YES;
-    }
-    return gZSGlassQualityCache;
-}
-
-void zs_set_glass_quality(ZSGlassQuality quality) {
-    NSMutableDictionary *section = [zs_settings_section(kZSLiquidGlassSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
-    section[kZSGlassQualityKey] = @(quality);
-    zs_write_settings_section(kZSLiquidGlassSettingsSection, section);
-    gZSGlassQualityCache = quality;
-    gZSGlassQualityCacheLoaded = YES;
-}
-
-static UIVisualEffect *zs_make_lite_panel_effect(void) {
-    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThinMaterialDark];
-}
-
-// Effect for the big surfaces (main panel, extended/docs panel). Small controls keep using
-// zs_make_glass_effect*. In Light mode the big surfaces use a plain blur instead of Liquid Glass.
-UIVisualEffect *zs_make_large_glass_effect(BOOL interactive) {
-    if (zs_has_liquid_glass() && zs_glass_quality() == ZSGlassQualityLight) {
-        return zs_make_lite_panel_effect();
-    }
-    return zs_make_glass_effect_dark(interactive);
-}
-
-static NSHashTable<UIVisualEffectView *> *zs_heavy_glass_registry(void) {
-    static NSHashTable<UIVisualEffectView *> *table;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ table = [NSHashTable weakObjectsHashTable]; });
-    return table;
-}
-
-static const void *kZSHeavyGlassEffectKey = &kZSHeavyGlassEffectKey;
-static NSUInteger gZSHeavyGlassToken;
-
-void zs_register_heavy_glass(UIVisualEffectView *view) {
-    if (!view) return;
-    [zs_heavy_glass_registry() addObject:view];
-}
-
-// Balanced mode: while a big panel is moving/resizing, the glass would be re-rendered over the live
-// game view every frame. Swap the registered big surfaces to a cheap blur for the length of the
-// animation, then fade the glass back in once it has settled. Latest call wins if animations overlap.
-void zs_heavy_glass_animate_lite(NSTimeInterval duration) {
-    if (!zs_has_liquid_glass() || zs_glass_quality() != ZSGlassQualityBalanced) return;
-
-    NSUInteger token = ++gZSHeavyGlassToken;
-    UIVisualEffect *lite = zs_make_lite_panel_effect();
-
-    [UIView performWithoutAnimation:^{
-        for (UIVisualEffectView *view in zs_heavy_glass_registry()) {
-            if (!objc_getAssociatedObject(view, kZSHeavyGlassEffectKey) && view.effect) {
-                objc_setAssociatedObject(view, kZSHeavyGlassEffectKey, view.effect, OBJC_ASSOCIATION_RETAIN);
-            }
-            if (objc_getAssociatedObject(view, kZSHeavyGlassEffectKey)) view.effect = lite;
-        }
-    }];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((duration + 0.05) * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (token != gZSHeavyGlassToken) return;
-        NSArray<UIVisualEffectView *> *views = zs_heavy_glass_registry().allObjects;
-        [UIView animateWithDuration:0.22
-                              delay:0
-                            options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseOut
-                         animations:^{
-            for (UIVisualEffectView *view in views) {
-                UIVisualEffect *stored = objc_getAssociatedObject(view, kZSHeavyGlassEffectKey);
-                if (stored) {
-                    view.effect = stored;
-                    objc_setAssociatedObject(view, kZSHeavyGlassEffectKey, nil, OBJC_ASSOCIATION_RETAIN);
-                }
-            }
-        } completion:nil];
-    });
 }
 
 static void zs_clear_button_configuration(UIButton *button) {
