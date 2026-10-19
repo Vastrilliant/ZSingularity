@@ -1797,6 +1797,7 @@ static ZSFontRole MALFontRoleFromValue(id value) {
     if (self.doctorRunURL) d[@"doctorRunURL"] = self.doctorRunURL;
     if (self.doctorLastError) d[@"doctorLastError"] = self.doctorLastError;
     if (self.doctorTranscodeCodec) d[@"doctorTranscodeCodec"] = self.doctorTranscodeCodec;
+    if (self.doctorRGBA32Passthrough) d[@"doctorRGBA32Passthrough"] = self.doctorRGBA32Passthrough;
     return d;
 }
 
@@ -1838,6 +1839,7 @@ static ZSFontRole MALFontRoleFromValue(id value) {
     e.doctorRunURL = [d[@"doctorRunURL"] isKindOfClass:NSString.class] ? d[@"doctorRunURL"] : nil;
     e.doctorLastError = [d[@"doctorLastError"] isKindOfClass:NSString.class] ? d[@"doctorLastError"] : nil;
     e.doctorTranscodeCodec = [d[@"doctorTranscodeCodec"] isKindOfClass:NSString.class] ? d[@"doctorTranscodeCodec"] : nil;
+    e.doctorRGBA32Passthrough = [d[@"doctorRGBA32Passthrough"] isKindOfClass:NSNumber.class] ? d[@"doctorRGBA32Passthrough"] : nil;
     return e;
 }
 
@@ -3156,6 +3158,7 @@ static NSString *MALTimestampNow(void) {
     movedEntry.doctorRunURL = entry.doctorRunURL;
     movedEntry.doctorLastError = entry.doctorLastError;
     movedEntry.doctorTranscodeCodec = entry.doctorTranscodeCodec;
+    movedEntry.doctorRGBA32Passthrough = entry.doctorRGBA32Passthrough;
 
     NSMutableArray<ModAssetLibraryEntry *> *toEntries =
         [([self entriesInFolder:toFolder error:nil] ?: @[]) mutableCopy];
@@ -3292,6 +3295,7 @@ static NSString *MALTimestampNow(void) {
     replacedEntry.doctorRunURL = entry.doctorRunURL;
     replacedEntry.doctorLastError = entry.doctorLastError;
     replacedEntry.doctorTranscodeCodec = entry.doctorTranscodeCodec;
+    replacedEntry.doctorRGBA32Passthrough = entry.doctorRGBA32Passthrough;
 
     entries[existingIndex] = replacedEntry;
 

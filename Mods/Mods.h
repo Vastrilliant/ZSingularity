@@ -267,6 +267,7 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
 @property (nonatomic, copy, nullable) NSString *doctorRunURL;
 @property (nonatomic, copy, nullable) NSString *doctorLastError;
 @property (nonatomic, copy, nullable) NSString *doctorTranscodeCodec;
+@property (nonatomic, copy, nullable) NSNumber *doctorRGBA32Passthrough;
 @end
 
 @interface ModAssetLibrary : NSObject

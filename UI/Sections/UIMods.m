@@ -20,6 +20,25 @@ static NSString *zs_mods_library_entry_symbol(ModAssetLibraryEntry *entry) {
     return @"doc.fill";
 }
 
+static NSString *zs_mods_current_transcoder_codec_name(void) {
+    switch (zs_transcoder_codec()) {
+        case ZSTranscoderCodecASTC8x8: return @"ASTC 8x8";
+        case ZSTranscoderCodecASTC10x10: return @"ASTC 10x10";
+        case ZSTranscoderCodecRGBA32: return @"RGBA32";
+        default: return @"ASTC 6x6";
+    }
+}
+
+static NSString *zs_mods_library_entry_kind_title(ModAssetLibraryEntry *entry) {
+    if ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) return @"FMOD Sound bank";
+    if (entry.isAssetBundle) return @"Unity asset bundle";
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) return @"Localization pack";
+    if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) return @"Localization file";
+    if (entry.fontRole != ZSFontRoleNone || [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) return @"Font";
+    NSString *extension = entry.fileName.pathExtension.uppercaseString;
+    return extension.length > 0 ? [extension stringByAppendingString:@" file"] : @"File";
+}
+
 static NSString *zs_mods_library_entry_status(ModAssetLibraryEntry *entry) {
     switch (entry.doctorStatus) {
         case ModAssetLibraryDoctorStatusUploading: return @"Uploading";
@@ -964,7 +983,8 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         entryToMutate.doctorUploadTotalBytes = 0;
         entryToMutate.doctorProcessProgress = 0.0;
         entryToMutate.doctorLastError = nil;
-        entryToMutate.doctorTranscodeCodec = @"ASTC_RGBA_6x6";
+        entryToMutate.doctorTranscodeCodec = zs_mods_current_transcoder_codec_name();
+        entryToMutate.doctorRGBA32Passthrough = @(zs_transcoder_codec() != ZSTranscoderCodecRGBA32 && zs_transcoder_rgba32_passthrough());
         entryToMutate.doctorScratchBranch = nil;
         entryToMutate.doctorRunID = nil;
         entryToMutate.doctorRunURL = nil;
@@ -3558,60 +3578,60 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
     self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
     [self zs_assetExplorerRefreshListResettingScroll:YES];
 }
-- (NSDictionary<NSString *, id> *)zs_assetExplorerModLibraryDescriptorForEntry:(ModAssetLibraryEntry *)entry {
-    NSString *fontRoleName = entry.fontRole == ZSFontRoleNone ? @"None" : [ZSModsPaths displayNameForFontRole:entry.fontRole];
-    NSString *localizationKindName = @"None";
-    if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON) localizationKindName = @"JSON";
-    else if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) localizationKindName = @"Pack";
-    NSArray<NSString *> *doctorStatusNames = @[@"Not dispatched", @"Uploading", @"Processing", @"Ready to download", @"Failed", @"Installed"];
-    NSInteger statusIndex = (NSInteger)entry.doctorStatus;
-    NSString *doctorStatusName = statusIndex >= 0 && statusIndex < (NSInteger)doctorStatusNames.count ? doctorStatusNames[(NSUInteger)statusIndex] : @"Unknown";
+- (NSAttributedString *)zs_modsLibraryDetailTextForEntry:(ModAssetLibraryEntry *)entry {
+    NSMutableArray<NSArray<NSString *> *> *rows = [NSMutableArray array];
+    [rows addObject:@[@"Kind", zs_mods_library_entry_kind_title(entry)]];
 
-    return @{
-        @"fileName": entry.fileName ?: @"",
-        @"path": entry.path ?: @"",
-        @"byteSize": @(entry.byteSize),
-        @"dateAdded": entry.dateAdded ?: @"",
-        @"isAssetBundle": @(entry.isAssetBundle),
-        @"fontRole": @((NSInteger)entry.fontRole),
-        @"fontRoleName": fontRoleName ?: @"Unknown",
-        @"cabIdentifier": entry.cabIdentifier ?: NSNull.null,
-        @"targetPlatform": entry.targetPlatform ?: NSNull.null,
-        @"livePathDescription": entry.livePathDescription ?: NSNull.null,
-        @"resolvedInstallTargetPath": entry.resolvedInstallTargetPath ?: NSNull.null,
-        @"zipCacheHash1": entry.zipCacheHash1 ?: NSNull.null,
-        @"zipCacheHash2": entry.zipCacheHash2 ?: NSNull.null,
-        @"remark": entry.remark ?: NSNull.null,
-        @"localizationKind": @((NSInteger)entry.localizationKind),
-        @"localizationKindName": localizationKindName,
-        @"localizationLanguage": entry.localizationLanguage ?: NSNull.null,
-        @"localizationRelativePath": entry.localizationRelativePath ?: NSNull.null,
-        @"cachedFromFolder": entry.cachedFromFolder ?: NSNull.null,
-        @"currentFolder": entry.currentFolder ?: NSNull.null,
-        @"doctorStatus": @((NSInteger)entry.doctorStatus),
-        @"doctorStatusName": doctorStatusName,
-        @"doctorUploadProgress": @(entry.doctorUploadProgress),
-        @"doctorUploadTotalBytes": @(entry.doctorUploadTotalBytes),
-        @"doctorProcessProgress": @(entry.doctorProcessProgress),
-        @"doctorDownloadProgress": @(entry.doctorDownloadProgress),
-        @"doctorDispatchCompressedByteSize": @(entry.doctorDispatchCompressedByteSize),
-        @"doctorScratchBranch": entry.doctorScratchBranch ?: NSNull.null,
-        @"doctorRunID": entry.doctorRunID ?: NSNull.null,
-        @"doctorRunURL": entry.doctorRunURL ?: NSNull.null,
-        @"doctorLastError": entry.doctorLastError ?: NSNull.null,
-        @"doctorTranscodeCodec": entry.doctorTranscodeCodec ?: NSNull.null,
-        @"doctorDownloadInFlight": @([self.doctorDownloadInFlightPaths containsObject:entry.path]),
-        @"fileExists": @([NSFileManager.defaultManager fileExistsAtPath:entry.path ?: @""])
-    };
+    NSNumberFormatter *grouping = [[NSNumberFormatter alloc] init];
+    grouping.numberStyle = NSNumberFormatterDecimalStyle;
+    NSString *readable = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
+    NSString *exact = [grouping stringFromNumber:@(entry.byteSize)] ?: [NSString stringWithFormat:@"%llu", entry.byteSize];
+    [rows addObject:@[@"Size", [NSString stringWithFormat:@"%@ (%@ bytes)", readable, exact]]];
+
+    if (entry.cabIdentifier.length > 0) [rows addObject:@[@"CAB Identifier", entry.cabIdentifier]];
+
+    NSString *dateText = entry.dateAdded.length > 0 ? entry.dateAdded : @"Unknown";
+    NSDateFormatter *parser = [[NSDateFormatter alloc] init];
+    parser.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    parser.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'Z'";
+    parser.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];
+    NSDate *added = entry.dateAdded.length > 0 ? [parser dateFromString:entry.dateAdded] : nil;
+    if (added) dateText = [NSDateFormatter localizedStringFromDate:added dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterShortStyle];
+    [rows addObject:@[@"Date Added", dateText]];
+
+    BOOL installed = entry.isAssetBundle ? entry.doctorStatus == ModAssetLibraryDoctorStatusInstalled : YES;
+    [rows addObject:@[@"Status", installed ? @"Installed" : @"Not installed"]];
+
+    if (entry.isAssetBundle || entry.doctorTranscodeCodec.length > 0) {
+        NSString *codec = entry.doctorTranscodeCodec.length > 0 ? entry.doctorTranscodeCodec : @"—";
+        if ([codec isEqualToString:@"ASTC_RGBA_6x6"]) codec = @"ASTC 6x6";
+        [rows addObject:@[@"Codec", codec]];
+    }
+    if (entry.isAssetBundle) {
+        NSString *passthrough = entry.doctorRGBA32Passthrough ? (entry.doctorRGBA32Passthrough.boolValue ? @"Yes" : @"No") : @"—";
+        [rows addObject:@[@"Passthrough RGBA32", passthrough]];
+    }
+
+    UIFont *labelFont = zs_mono_font(9, UIFontWeightMedium);
+    UIFont *valueFont = zs_mono_font(12, UIFontWeightRegular);
+    UIColor *labelColor = [UIColor colorWithWhite:1 alpha:0.42];
+    UIColor *valueColor = [UIColor colorWithWhite:1 alpha:0.92];
+    NSMutableParagraphStyle *labelStyle = [[NSMutableParagraphStyle alloc] init];
+    labelStyle.paragraphSpacing = 2;
+    NSMutableParagraphStyle *valueStyle = [[NSMutableParagraphStyle alloc] init];
+    valueStyle.paragraphSpacing = 14;
+
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] init];
+    for (NSArray<NSString *> *row in rows) {
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[row[0].uppercaseString stringByAppendingString:@"\n"] attributes:@{NSFontAttributeName: labelFont, NSForegroundColorAttributeName: labelColor, NSParagraphStyleAttributeName: labelStyle, NSKernAttributeName: @0.6}]];
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:[row[1] stringByAppendingString:@"\n"] attributes:@{NSFontAttributeName: valueFont, NSForegroundColorAttributeName: valueColor, NSParagraphStyleAttributeName: valueStyle}]];
+    }
+    return text;
 }
 - (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry {
     if (!entry || !self.modsLibraryBrowseMode) return;
     self.modsLibrarySelectedEntry = entry;
-    NSDictionary<NSString *, id> *descriptor = [self zs_assetExplorerModLibraryDescriptorForEntry:entry];
-    NSError *jsonError = nil;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:&jsonError];
-    NSString *jsonText = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
-    self.assetExplorerTextView.text = jsonText ?: (jsonError.localizedDescription ?: @"Descriptor information is unavailable.");
+    self.assetExplorerTextView.attributedText = [self zs_modsLibraryDetailTextForEntry:entry];
     self.assetExplorerTextView.contentOffset = CGPointZero;
     self.assetExplorerTextView.hidden = NO;
     self.assetExplorerTableView.hidden = YES;

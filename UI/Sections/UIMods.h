@@ -107,6 +107,7 @@
 - (void)zs_assetExplorerRefreshModLibraryEntries;
 - (void)zs_assetExplorerShowModLibrary;
 - (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
+- (NSAttributedString *)zs_modsLibraryDetailTextForEntry:(ModAssetLibraryEntry *)entry;
 - (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
 - (NSDictionary<NSString *, id> *)zs_modsLibraryFolderAtIndexPath:(NSIndexPath *)indexPath;
 - (void)zs_modsLibraryApplyListChrome;
