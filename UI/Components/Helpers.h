@@ -74,6 +74,17 @@ CGFloat zs_screen_corner_radius(UIView *view, CGFloat fallback);
 void zs_configure_main_panel_glass_corners_split(UIView *view, CGFloat radius, BOOL roundTopLeft, BOOL roundBottomLeft);
 void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft);
 void zs_register_suspendable_glass(UIVisualEffectView *view);
+
+typedef NS_ENUM(NSInteger, ZSGlassQuality) {
+    ZSGlassQualityFull = 0,
+    ZSGlassQualityBalanced = 1,
+    ZSGlassQualityLight = 2,
+};
+ZSGlassQuality zs_glass_quality(void);
+void zs_set_glass_quality(ZSGlassQuality quality);
+UIVisualEffect *zs_make_large_glass_effect(BOOL interactive);
+void zs_register_heavy_glass(UIVisualEffectView *view);
+void zs_heavy_glass_animate_lite(NSTimeInterval duration);
 void zs_set_glass_suspended(BOOL suspended);
 void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font);
 UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSString *title, UIColor *tintColor, UIFont *font);
