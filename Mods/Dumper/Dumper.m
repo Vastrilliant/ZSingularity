@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <string.h>
 #import "ZTweakLog.h"
+#import "ScriptDump.h"
 
 typedef void *(*zs_domain_get_fn)(void);
 typedef void **(*zs_domain_get_assemblies_fn)(const void *, size_t *);
@@ -111,6 +112,10 @@ typedef struct {
 static ZSRuntimeAPI gAPI;
 static BOOL gResolved;
 static BOOL gRunning;
+static BOOL gCancel;
+static BOOL gWriteBodies = YES;
+static NSDictionary *gLastSummary;
+static NSURL *gLastOutput;
 static NSLock *gRuntimeLock;
 
 static const NSUInteger kZSWriterFlushThreshold = 1 << 18;
@@ -558,7 +563,7 @@ static BOOL zs_safe_copy(uintptr_t source, void *destination, size_t length) {
         NSMutableString *built = [NSMutableString stringWithFormat:@"VA 0x%llx", (unsigned long long)virtualAddress];
         if (module.index > 0) [built appendFormat:@" Module %lu", (unsigned long)module.index];
         uint64_t size = [module sizeOfFunctionAt:address];
-        if (size > 0 && size <= kZSMaxBodySize) {
+        if (gWriteBodies && size > 0 && size <= kZSMaxBodySize) {
             if (_scratch.length < size) [_scratch setLength:(NSUInteger)size];
             if (zs_safe_copy(address, _scratch.mutableBytes, (size_t)size)) {
                 uint64_t offset = _bodies.written;
@@ -780,7 +785,9 @@ static BOOL zs_copy_file(NSString *source, NSString *destination) {
     return result == 0;
 }
 
-static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
+static NSError *zs_dump_attached(void *domain, ZSDumpOptions *options, ZSDumpProgress progress, ZSDumpLog logf, NSURL **outputURL) {
+    gWriteBodies = options.dumpBodies;
+    NSMutableDictionary *scriptSummary = nil;
     NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
     if (documents.length == 0) return zs_dump_error(4, @"The app Documents directory could not be resolved.");
 
@@ -796,7 +803,7 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
         return error ?: zs_dump_error(5, @"Could not create the dump folder.");
     }
 
-    NSArray<NSString *> *fileNames = @[@"Dump.cs", @"Bodies.bin"];
+    NSArray<NSString *> *fileNames = options.dumpSource ? @[@"Dump.cs", @"Bodies.bin"] : @[];
     NSMutableArray<ZSDumpWriter *> *writers = [NSMutableArray arrayWithCapacity:fileNames.count];
     for (NSString *fileName in fileNames) {
         NSError *openError = nil;
@@ -809,14 +816,16 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
         [writers addObject:writer];
     }
 
-    ZSDumpSession *session = [[ZSDumpSession alloc] initWithSource:writers[0] bodies:writers[1]];
+    ZSDumpSession *session = writers.count == 2 ? [[ZSDumpSession alloc] initWithSource:writers[0] bodies:writers[1]] : nil;
     size_t assemblyCount = 0;
     void **assemblies = gAPI.domain_get_assemblies(domain, &assemblyCount);
     if (!assemblies) assemblyCount = 0;
     NSUInteger writtenAssemblies = 0;
     NSDate *started = [NSDate date];
 
-    for (size_t assemblyIndex = 0; assemblyIndex < assemblyCount; assemblyIndex++) {
+    for (size_t assemblyIndex = 0; session && assemblyIndex < assemblyCount; assemblyIndex++) {
+        if (gCancel) break;
+        if (progress) progress(@"Dumping classes", assemblyCount ? (double)assemblyIndex / (double)assemblyCount : 0);
         @autoreleasepool {
             const void *assembly = assemblies[assemblyIndex];
             const void *image = assembly ? gAPI.assembly_get_image(assembly) : NULL;
@@ -829,7 +838,7 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
                     void *klass = (void *)gAPI.image_get_class(image, classSlot);
                     if (klass) [session writeClass:klass];
                 }
-                if (zs_any_writer_failed(writers)) break;
+                if (zs_any_writer_failed(writers) || gCancel) break;
             }
         }
         if (zs_any_writer_failed(writers)) break;
@@ -844,8 +853,33 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
         }
     }
 
-    BOOL copiedFramework = zs_copy_file(zs_unity_framework_path(), [folderPath stringByAppendingPathComponent:@"UnityFramework"]);
-    BOOL copiedMetadata = zs_copy_file(zs_global_metadata_path(), [folderPath stringByAppendingPathComponent:@"global-metadata.dat"]);
+    if (gCancel) {
+        [fm removeItemAtPath:folderPath error:nil];
+        return zs_dump_error(9, @"Dump cancelled.");
+    }
+    if (!options.dumpBodies) [fm removeItemAtPath:[folderPath stringByAppendingPathComponent:@"Bodies.bin"] error:nil];
+    if (progress) progress(@"Copying binaries", 0);
+    BOOL copiedFramework = options.copyBinaries && zs_copy_file(zs_unity_framework_path(), [folderPath stringByAppendingPathComponent:@"UnityFramework"]);
+    BOOL copiedMetadata = options.copyBinaries && zs_copy_file(zs_global_metadata_path(), [folderPath stringByAppendingPathComponent:@"global-metadata.dat"]);
+
+    if (options.scriptMethods || options.metadataUsages || options.addresses || options.stringLiterals || options.genericMethods) {
+        NSError *scriptError = nil;
+        NSDictionary *scriptResult = [ZSScriptDump generateIntoFolder:folderPath options:options progress:progress log:logf cancelled:^BOOL{ return gCancel; } error:&scriptError];
+        if (!scriptResult) {
+            if (gCancel) {
+                [fm removeItemAtPath:folderPath error:nil];
+                return zs_dump_error(9, @"Dump cancelled.");
+            }
+            if (logf) logf([NSString stringWithFormat:@"Script generation failed: %@", scriptError.localizedDescription]);
+        } else {
+            scriptSummary = [scriptResult mutableCopy];
+        }
+    }
+    if (options.exportScripts) {
+        NSError *exportError = nil;
+        NSUInteger exported = [ZSScriptDump exportScriptsIntoFolder:folderPath error:&exportError];
+        if (logf) logf(exportError ? [NSString stringWithFormat:@"Exporting scripts failed: %@", exportError.localizedDescription] : [NSString stringWithFormat:@"Exported %lu script files", (unsigned long)exported]);
+    }
 
     NSMutableArray *modules = [NSMutableArray arrayWithCapacity:session.modules.count];
     for (ZSModule *module in session.modules) {
@@ -877,11 +911,12 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
             @"bodyBytes": @(session.bodyBytes)
         },
         @"files": @{
-            @"source": @"Dump.cs",
-            @"bodies": @"Bodies.bin",
+            @"source": options.dumpSource ? @"Dump.cs" : (id)NSNull.null,
+            @"bodies": (options.dumpSource && options.dumpBodies) ? @"Bodies.bin" : (id)NSNull.null,
             @"unityFramework": copiedFramework ? @"UnityFramework" : (id)NSNull.null,
             @"globalMetadata": copiedMetadata ? @"global-metadata.dat" : (id)NSNull.null
         },
+        @"script": scriptSummary ?: (id)NSNull.null,
         @"modules": modules,
         @"format": @{
             @"classHeader": @"// <type token> Size <instance size> [generic]",
@@ -901,10 +936,11 @@ static NSError *zs_dump_attached(void *domain, NSURL **outputURL) {
     }
 
     if (outputURL) *outputURL = [NSURL fileURLWithPath:folderPath isDirectory:YES];
+    gLastSummary = @{@"counts": metadata[@"counts"] ?: @{}, @"script": scriptSummary ?: @{}, @"elapsed": metadata[@"elapsedSeconds"] ?: @0};
     return nil;
 }
 
-static NSError *zs_dump_runtime(NSURL **outputURL) {
+static NSError *zs_dump_runtime(ZSDumpOptions *options, ZSDumpProgress progress, ZSDumpLog logf, NSURL **outputURL) {
     NSError *error = nil;
     if (!zs_resolve_api(&error)) return error;
     void *domain = gAPI.domain_get();
@@ -917,10 +953,60 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
     }
     if (!thread) return zs_dump_error(3, @"Could not attach the dumper thread to the IL2CPP runtime.");
 
-    NSError *result = zs_dump_attached(domain, outputURL);
+    NSError *result = zs_dump_attached(domain, options, progress, logf, outputURL);
     if (attachedHere) gAPI.thread_detach(thread);
     return result;
 }
+
+@implementation ZSDumpOptions
+
+static NSString * const kZSDumpOptionsKey = @"ZSDumperOptions";
+
+- (void)resetToDefaults {
+    self.dumpSource = YES;
+    self.dumpBodies = NO;
+    self.copyBinaries = YES;
+    self.scriptMethods = YES;
+    self.genericMethods = YES;
+    self.metadataUsages = YES;
+    self.addresses = YES;
+    self.stringLiterals = YES;
+    self.exportScripts = YES;
+    self.minifyJSON = YES;
+}
+
++ (instancetype)savedOptions {
+    ZSDumpOptions *options = [ZSDumpOptions new];
+    [options resetToDefaults];
+    NSDictionary *saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:kZSDumpOptionsKey];
+    if (saved) {
+        for (NSString *key in saved) {
+            if ([options respondsToSelector:NSSelectorFromString([NSString stringWithFormat:@"set%@%@:", [[key substringToIndex:1] uppercaseString], [key substringFromIndex:1]])]) {
+                [options setValue:saved[key] forKey:key];
+            }
+        }
+    }
+    return options;
+}
+
+- (NSDictionary *)dictionaryRepresentation {
+    return @{@"dumpSource": @(self.dumpSource), @"dumpBodies": @(self.dumpBodies), @"copyBinaries": @(self.copyBinaries),
+             @"scriptMethods": @(self.scriptMethods), @"genericMethods": @(self.genericMethods), @"metadataUsages": @(self.metadataUsages),
+             @"addresses": @(self.addresses), @"stringLiterals": @(self.stringLiterals), @"exportScripts": @(self.exportScripts),
+             @"minifyJSON": @(self.minifyJSON)};
+}
+
+- (void)save {
+    [NSUserDefaults.standardUserDefaults setObject:[self dictionaryRepresentation] forKey:kZSDumpOptionsKey];
+}
+
+- (id)copyWithZone:(NSZone *)zone {
+    ZSDumpOptions *copy = [ZSDumpOptions new];
+    [copy setValuesForKeysWithDictionary:[self dictionaryRepresentation]];
+    return copy;
+}
+
+@end
 
 @implementation ZSDumper
 
@@ -928,7 +1014,33 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
     if (self == [ZSDumper class]) gRuntimeLock = [NSLock new];
 }
 
-+ (void)dumpIL2CPPToDocumentsWithCompletion:(void (^ _Nullable)(NSURL * _Nullable, NSError * _Nullable))completion {
++ (BOOL)isRunning {
+    [gRuntimeLock lock];
+    BOOL running = gRunning;
+    [gRuntimeLock unlock];
+    return running;
+}
+
++ (void)cancel {
+    gCancel = YES;
+}
+
++ (NSDictionary *)lastSummary {
+    return gLastSummary;
+}
+
++ (NSURL *)lastOutputURL {
+    return gLastOutput;
+}
+
++ (void)dumpIL2CPPToDocumentsWithCompletion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
+    [self dumpWithOptions:[ZSDumpOptions savedOptions] progress:nil log:nil completion:completion];
+}
+
++ (void)dumpWithOptions:(ZSDumpOptions *)options
+               progress:(ZSDumpProgress)progress
+                    log:(ZSDumpLog)logf
+             completion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
     [gRuntimeLock lock];
     if (gRunning) {
         [gRuntimeLock unlock];
@@ -938,17 +1050,20 @@ static NSError *zs_dump_runtime(NSURL **outputURL) {
         return;
     }
     gRunning = YES;
+    gCancel = NO;
     [gRuntimeLock unlock];
 
+    ZSDumpOptions *snapshot = [options copy];
     NSThread *worker = [[NSThread alloc] initWithBlock:^{
         @autoreleasepool {
             NSURL *url = nil;
-            NSError *error = zs_dump_runtime(&url);
+            NSError *error = zs_dump_runtime(snapshot, progress, logf, &url);
             [gRuntimeLock lock];
             gRunning = NO;
             [gRuntimeLock unlock];
             if (error) ZLog(@"[ZSDumper] failed: %@", error.localizedDescription);
             else ZLog(@"[ZSDumper] completed: %@", url.path);
+            gLastOutput = error ? nil : url;
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (completion) completion(url, error);
             });

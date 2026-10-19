@@ -740,28 +740,7 @@ static void zs_collect_rows_recursive(UIView *view, NSMutableArray<ZSRow *> *out
 }
 
 - (void)dumpIL2CPPMethodsTapped {
-    UIViewController *presenter = zs_key_window().rootViewController;
-    if (!presenter) return;
-
-    UIAlertController *working = [self zs_presentDylibInstallWorkingAlertWithTitle:@"Dumping IL2CPP…"
-                                                                             message:@"Enumerating loaded assemblies, classes, methods, fields, and properties."];
-    __weak typeof(self) weakSelf = self;
-    [ZSDumper dumpIL2CPPToDocumentsWithCompletion:^(NSURL * _Nullable outputURL, NSError * _Nullable error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [strongSelf zs_dismissDylibInstallWorkingAlert:working thenRun:^{
-            UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
-            if (error) {
-                [haptic notificationOccurred:UINotificationFeedbackTypeError];
-                [strongSelf zs_presentModsAlertWithTitle:@"IL2CPP Dump Failed"
-                                                  message:error.localizedDescription ?: @"Unknown error."];
-                return;
-            }
-            [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
-            [strongSelf zs_presentModsAlertWithTitle:@"IL2CPP Dump Complete"
-                                              message:[NSString stringWithFormat:@"Saved to %@", outputURL.path ?: @"Documents"]];
-        }];
-    }];
+    [self zs_openDumperFullScreenPanel];
 }
 
 #pragma mark Developer (Keep Alive)

@@ -788,7 +788,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
 }
 
 - (void)zs_syncReducedPanelFPS {
-    [[FPS120Controller shared] setReducedPanelFPS:self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen];
+    [[FPS120Controller shared] setReducedPanelFPS:self.syslogFullScreenOpen || self.memoryFullScreenOpen || self.assetExplorerFullScreenOpen || self.dumperFullScreenOpen];
 }
 
 - (void)zs_openSyslogFullScreenPanel {
@@ -800,6 +800,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
 
     [self zs_endMemoryAnalysis];
     [self zs_endAssetExplorerSession];
+    [self zs_endDumperSession];
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = YES;
     [self zs_startSyslogInfoRefresh];
@@ -849,11 +850,14 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     pinch.enabled = YES;
     if (self.memoryPopupScrim || self.pinchDismissInFlight) return;
     if (self.extendedCoverMode && self.panelOpen) {
-        UIView *coverOverlay = self.memoryFullScreenOpen ? self.memoryFullScreenOverlay : (self.assetExplorerFullScreenOpen ? self.assetExplorerFullScreenOverlay : (self.syslogFullScreenOpen ? self.syslogFullScreenOverlay : nil));
+        UIView *coverOverlay = self.dumperFullScreenOpen ? self.dumperFullScreenOverlay : self.memoryFullScreenOpen ? self.memoryFullScreenOverlay : (self.assetExplorerFullScreenOpen ? self.assetExplorerFullScreenOverlay : (self.syslogFullScreenOpen ? self.syslogFullScreenOverlay : nil));
         [self zs_pinchDismissCoverOverlay:coverOverlay];
         return;
     }
-    if (self.memoryFullScreenOpen) {
+    if (self.dumperFullScreenOpen) {
+        [self zs_playPinchDismissOnOverlay:self.dumperFullScreenOverlay];
+        [self zs_closeDumperFullScreenPanelTapped];
+    } else if (self.memoryFullScreenOpen) {
         [self zs_playPinchDismissOnOverlay:self.memoryFullScreenOverlay];
         [self zs_closeMemoryFullScreenPanelTapped];
     } else if (self.assetExplorerFullScreenOpen) {
@@ -1178,6 +1182,7 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
         [self zs_syncSyslogButtonState];
     }
     [self zs_endAssetExplorerSession];
+    [self zs_endDumperSession];
 
     self.docsActiveKey = nil;
     self.memoryFullScreenOpen = YES;

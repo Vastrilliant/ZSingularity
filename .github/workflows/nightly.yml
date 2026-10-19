@@ -192,6 +192,7 @@ jobs:
             Mods/BundleTools/AssetExplorer.m \
             Core/IL2CppIntrospection.m \
             Mods/Dumper/Dumper.m \
+            Mods/Dumper/ScriptDump.m \
             Core/DumpTypeRegistry.m \
             Core/Engine.m \
             Core/RamBypass/RamDonor.m \

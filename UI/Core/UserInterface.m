@@ -705,6 +705,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.docsActiveKey = nil;
     self.syslogFullScreenOpen = NO;
     self.assetExplorerFullScreenOpen = NO;
+    self.dumperFullScreenOpen = NO;
     [self zs_syncSyslogButtonState];
     [self zs_endMemoryAnalysis];
     [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
@@ -844,7 +845,6 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.extendedCoverMode = NO;
     self.extendedCoverEntering = NO;
 
-    [self zs_teardownPanelBlur];
     self.glassContainer = nil;
     self.panelGlass = nil;
     self.handleGlass = nil;
@@ -953,6 +953,9 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     self.memoryUsageAnalyzeButton = nil;
     [self zs_assetExplorerLocalizeReset];
+    [self.dumperFullScreenOverlay removeFromSuperview];
+    self.dumperFullScreenOverlay = nil;
+    self.dumperUI = nil;
     [self.assetExplorerFullScreenOverlay removeFromSuperview];
     self.assetExplorerFullScreenOverlay = nil;
     self.assetExplorerLocalizeTableView = nil;
@@ -1493,9 +1496,6 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     self.glassContainer = chrome;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
-    // The pull tabs sit outside the main panel's bounds (and off-screen while it is fully extended); never clip them.
-    self.glassContainer.clipsToBounds = NO;
-    self.glassContainerContent.clipsToBounds = NO;
     self.glassContainer.hidden = YES;
     [unityView addSubview:self.glassContainer];
     zs_mark_host_owned(self.glassContainer);
@@ -1507,16 +1507,6 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         self.panelGlass.userInteractionEnabled = YES;
         zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];
-
-        // Blur twin of the panel glass. Invisible until the panel is cross-faded to blur while an extended
-        // window is open (see zs_setPanelBlurActive:animated:).
-        self.panelBlurActive = NO;
-        self.panelBlurProgress = 0;
-        self.panelBlurOverlay = [[UIVisualEffectView alloc] initWithEffect:nil];
-        self.panelBlurOverlay.userInteractionEnabled = NO;
-        self.panelBlurOverlay.hidden = YES;
-        zs_configure_main_panel_glass_corners(self.panelBlurOverlay, kPanelCornerRadiusMinimum, YES);
-        [self.glassContainerContent addSubview:self.panelBlurOverlay];
 
         self.handleGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
         self.handleGlass.userInteractionEnabled = YES;
@@ -1600,6 +1590,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [self zs_buildSyslogFullScreenPanelIfNeeded];
     [self zs_buildMemoryFullScreenPanelIfNeeded];
     [self zs_buildAssetExplorerFullScreenPanelIfNeeded];
+    [self zs_buildDumperFullScreenPanelIfNeeded];
 
     [self zs_restackPinChrome];
 
@@ -2016,6 +2007,9 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     ZSRow *experimentalEnabledRow = zs_make_switch_row(@"Enable Experimental Settings", g_experimentalSettingsEnabled);
     [experimentalEnabledRow.toggle addTarget:self action:@selector(experimentalSettingsEnabledChanged:) forControlEvents:UIControlEventValueChanged];
 
+    UIButton *dumperButton = zs_make_grouped_action_button(@"IL2CPP Dumper", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [dumperButton addTarget:self action:@selector(dumperTapped) forControlEvents:UIControlEventTouchUpInside];
+
     UIButton *syslogButton = zs_make_grouped_action_button(@"Show system logs", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     self.syslogButton = syslogButton;
 
@@ -2026,6 +2020,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         checkCIBuildsRow,
         experimentalEnabledRow,
         fullManifestZeroingRow,
+        dumperButton,
         syslogButton,
     ]);
     developerActionsCard.layer.borderWidth = 1;
@@ -3088,6 +3083,11 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
 - (void)setMemoryFullScreenOpen:(BOOL)open {
     _memoryFullScreenOpen = open;
+    [self zs_syncReducedPanelFPS];
+}
+
+- (void)setDumperFullScreenOpen:(BOOL)open {
+    _dumperFullScreenOpen = open;
     [self zs_syncReducedPanelFPS];
 }
 
