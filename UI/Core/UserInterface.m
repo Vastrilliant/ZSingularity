@@ -2121,11 +2121,11 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [blurStyleRow.wheelPicker addTarget:self action:@selector(zs_blurStyleChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *blurIntensityRow = zs_make_slider_row(@"[Temp] Blur Intensity", 0, 1, blurCfg.intensity, blurTwoDecimal);
-    blurIntensityRow.slider.defaultValue = 1.0; blurIntensityRow.slider.hasDefaultValue = YES;
+    blurIntensityRow.slider.defaultValue = 0.25; blurIntensityRow.slider.hasDefaultValue = YES;
     [blurIntensityRow.slider addTarget:self action:@selector(zs_blurIntensityChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *blurTintRow = zs_make_slider_row(@"[Temp] Blur Tint (black)", 0, 1, blurCfg.tint, blurTwoDecimal);
-    blurTintRow.slider.defaultValue = 0.2; blurTintRow.slider.hasDefaultValue = YES;
+    blurTintRow.slider.defaultValue = 0.35; blurTintRow.slider.hasDefaultValue = YES;
     [blurTintRow.slider addTarget:self action:@selector(zs_blurTintChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *blurFadeRow = zs_make_slider_row(@"[Temp] Fade Duration", 0.05, 1.0, blurCfg.fade, blurSeconds);
@@ -2133,11 +2133,11 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     [blurFadeRow.slider addTarget:self action:@selector(zs_blurFadeChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *blurOpenAtRow = zs_make_slider_row(@"[Temp] Swap Point (open)", 0, 1, blurCfg.openAt, blurTwoDecimal);
-    blurOpenAtRow.slider.defaultValue = 0.5; blurOpenAtRow.slider.hasDefaultValue = YES;
+    blurOpenAtRow.slider.defaultValue = 0.10; blurOpenAtRow.slider.hasDefaultValue = YES;
     [blurOpenAtRow.slider addTarget:self action:@selector(zs_blurOpenAtChanged:) forControlEvents:UIControlEventValueChanged];
 
     ZSRow *blurCloseAtRow = zs_make_slider_row(@"[Temp] Swap Point (close)", 0, 1, blurCfg.closeAt, blurTwoDecimal);
-    blurCloseAtRow.slider.defaultValue = 0.5; blurCloseAtRow.slider.hasDefaultValue = YES;
+    blurCloseAtRow.slider.defaultValue = 0.10; blurCloseAtRow.slider.hasDefaultValue = YES;
     [blurCloseAtRow.slider addTarget:self action:@selector(zs_blurCloseAtChanged:) forControlEvents:UIControlEventValueChanged];
 
     UIButton *blurPreviewButton = zs_make_grouped_action_button(@"[Temp] Preview Blur (toggle)", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);

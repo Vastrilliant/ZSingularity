@@ -530,7 +530,7 @@ static const void *kZSSuspendedGlassEffectKey = &kZSSuspendedGlassEffectKey;
 #pragma mark - Panel blur tunables (TEMPORARY)
 
 static NSString * const kZSPanelBlurSection = @"panelBlur";
-const NSInteger kZSPanelBlurDefaultStyle = 1;
+const NSInteger kZSPanelBlurDefaultStyle = 2;
 
 static NSMutableDictionary *zs_panel_blur_store(void) {
     static NSMutableDictionary *store;
@@ -561,11 +561,11 @@ ZSPanelBlurConfig zs_panel_blur_config(void) {
     ZSPanelBlurConfig c;
     c.enabled = zs_panel_blur_value(@"enabled", 1) > 0.5;
     c.style = (NSInteger)zs_panel_blur_value(@"style", kZSPanelBlurDefaultStyle);
-    c.intensity = (CGFloat)zs_panel_blur_value(@"intensity", 1.0);
-    c.tint = (CGFloat)zs_panel_blur_value(@"tint", 0.2);
+    c.intensity = (CGFloat)zs_panel_blur_value(@"intensity", 0.25);
+    c.tint = (CGFloat)zs_panel_blur_value(@"tint", 0.35);
     c.fade = (CGFloat)zs_panel_blur_value(@"fade", 0.2);
-    c.openAt = (CGFloat)zs_panel_blur_value(@"openAt", 0.5);
-    c.closeAt = (CGFloat)zs_panel_blur_value(@"closeAt", 0.5);
+    c.openAt = (CGFloat)zs_panel_blur_value(@"openAt", 0.10);
+    c.closeAt = (CGFloat)zs_panel_blur_value(@"closeAt", 0.10);
     return c;
 }
 

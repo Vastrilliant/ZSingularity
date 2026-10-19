@@ -2307,6 +2307,8 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 #pragma mark Panel glass <-> blur cross-fade (TEMPORARY tunables)
 
+static const CGFloat kZSPanelBlurOverlap = 0.4;
+
 - (void)zs_scheduleBlurSwapActive:(BOOL)active mainDuration:(NSTimeInterval)mainDuration {
     ZSPanelBlurConfig cfg = zs_panel_blur_config();
     if (!self.panelBlurOverlay) return;
@@ -2381,8 +2383,8 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
     if (active) overlay.hidden = NO;
     if (!self.panelBlurAnimator) [self zs_rebuildPanelBlurAnimator];
 
-    // Glass side: dematerialize / materialize through the effect (the supported way to animate glass).
     UIVisualEffect *glassTarget = active ? nil : zs_make_glass_effect_dark(NO);
+    NSUInteger glassToken = ++self.panelBlurGlassToken;
     [self.panelBlurLink invalidate];
     self.panelBlurLink = nil;
 
@@ -2393,17 +2395,31 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
         return;
     }
 
-    [UIView animateWithDuration:duration
-                          delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
-                     animations:^{ glassView.effect = glassTarget; }
-                     completion:nil];
+    NSTimeInterval legDuration = duration * (1 - kZSPanelBlurOverlap);
+    NSTimeInterval lagDelay = duration * kZSPanelBlurOverlap;
+    NSTimeInterval glassDelay = active ? lagDelay : 0;
+    NSTimeInterval blurDelay = active ? 0 : lagDelay;
 
-    // Blur side: driven by a display link so intensity and tint can be tuned independently.
+    __weak typeof(self) weakSelf = self;
+    void (^runGlass)(void) = ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || glassToken != strongSelf.panelBlurGlassToken || !strongSelf.panelGlass) return;
+        [UIView animateWithDuration:legDuration
+                              delay:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                         animations:^{ strongSelf.panelGlass.effect = glassTarget; }
+                         completion:nil];
+    };
+    if (glassDelay <= 0.001) {
+        runGlass();
+    } else {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(glassDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), runGlass);
+    }
+
     self.panelBlurFrom = self.panelBlurProgress;
     self.panelBlurTo = active ? 1 : 0;
-    self.panelBlurStartTime = CACurrentMediaTime();
-    self.panelBlurDuration = duration;
+    self.panelBlurStartTime = CACurrentMediaTime() + blurDelay;
+    self.panelBlurDuration = legDuration;
     CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_panelBlurTick:)];
     [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
     self.panelBlurLink = link;
@@ -2423,6 +2439,7 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 - (void)zs_teardownPanelBlur {
     self.panelBlurToken = self.panelBlurToken + 1;
+    self.panelBlurGlassToken = self.panelBlurGlassToken + 1;
     [self.panelBlurLink invalidate];
     self.panelBlurLink = nil;
     UIViewPropertyAnimator *animator = self.panelBlurAnimator;

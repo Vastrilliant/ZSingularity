@@ -142,6 +142,7 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, assign) CFTimeInterval panelBlurStartTime;
 @property (nonatomic, assign) NSTimeInterval panelBlurDuration;
 @property (nonatomic, assign) NSUInteger panelBlurToken;
+@property (nonatomic, assign) NSUInteger panelBlurGlassToken;
 @property (nonatomic, strong) UIView *docsPanel;
 @property (nonatomic, strong) UIView *docsContentOverlay;
 @property (nonatomic, strong) UIView *extendedContentClip;
