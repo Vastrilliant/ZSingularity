@@ -527,6 +527,71 @@ static NSHashTable<UIVisualEffectView *> *zs_suspendable_glass_registry(void) {
 
 static const void *kZSSuspendedGlassEffectKey = &kZSSuspendedGlassEffectKey;
 
+#pragma mark - Panel blur tunables (TEMPORARY)
+
+static NSString * const kZSPanelBlurSection = @"panelBlur";
+const NSInteger kZSPanelBlurDefaultStyle = 1;
+
+static NSMutableDictionary *zs_panel_blur_store(void) {
+    static NSMutableDictionary *store;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        store = [zs_settings_section(kZSPanelBlurSection) mutableCopy] ?: [NSMutableDictionary new];
+    });
+    return store;
+}
+
+static double zs_panel_blur_value(NSString *key, double fallback) {
+    id v = zs_panel_blur_store()[key];
+    return [v isKindOfClass:[NSNumber class]] ? [v doubleValue] : fallback;
+}
+
+void zs_panel_blur_set(NSString *key, double value) {
+    zs_panel_blur_store()[key] = @(value);
+    static BOOL writePending;
+    if (writePending) return;
+    writePending = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        writePending = NO;
+        zs_write_settings_section(kZSPanelBlurSection, [zs_panel_blur_store() copy]);
+    });
+}
+
+ZSPanelBlurConfig zs_panel_blur_config(void) {
+    ZSPanelBlurConfig c;
+    c.enabled = zs_panel_blur_value(@"enabled", 1) > 0.5;
+    c.style = (NSInteger)zs_panel_blur_value(@"style", kZSPanelBlurDefaultStyle);
+    c.intensity = (CGFloat)zs_panel_blur_value(@"intensity", 1.0);
+    c.tint = (CGFloat)zs_panel_blur_value(@"tint", 0.2);
+    c.fade = (CGFloat)zs_panel_blur_value(@"fade", 0.2);
+    c.openAt = (CGFloat)zs_panel_blur_value(@"openAt", 0.5);
+    c.closeAt = (CGFloat)zs_panel_blur_value(@"closeAt", 0.5);
+    return c;
+}
+
+NSArray<NSString *> *zs_panel_blur_style_names(void) {
+    return @[@"Ultra Thin Dark", @"Thin Dark", @"Material Dark", @"Thick Dark", @"Chrome Dark",
+             @"Dark", @"Regular", @"Prominent", @"Light", @"Extra Light"];
+}
+
+UIBlurEffectStyle zs_panel_blur_style_at(NSInteger index) {
+    static const UIBlurEffectStyle styles[] = {
+        UIBlurEffectStyleSystemUltraThinMaterialDark,
+        UIBlurEffectStyleSystemThinMaterialDark,
+        UIBlurEffectStyleSystemMaterialDark,
+        UIBlurEffectStyleSystemThickMaterialDark,
+        UIBlurEffectStyleSystemChromeMaterialDark,
+        UIBlurEffectStyleDark,
+        UIBlurEffectStyleRegular,
+        UIBlurEffectStyleProminent,
+        UIBlurEffectStyleLight,
+        UIBlurEffectStyleExtraLight,
+    };
+    NSInteger count = (NSInteger)(sizeof(styles) / sizeof(styles[0]));
+    if (index < 0 || index >= count) index = kZSPanelBlurDefaultStyle;
+    return styles[index];
+}
+
 void zs_register_suspendable_glass(UIVisualEffectView *view) {
     if (!view) return;
     [zs_suspendable_glass_registry() addObject:view];

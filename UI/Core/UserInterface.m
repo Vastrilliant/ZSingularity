@@ -844,6 +844,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.extendedCoverMode = NO;
     self.extendedCoverEntering = NO;
 
+    [self zs_teardownPanelBlur];
     self.glassContainer = nil;
     self.panelGlass = nil;
     self.handleGlass = nil;
@@ -1507,6 +1508,16 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];
 
+        // Blur twin of the panel glass. Invisible until the panel is cross-faded to blur while an extended
+        // window is open (see zs_setPanelBlurActive:animated:).
+        self.panelBlurActive = NO;
+        self.panelBlurProgress = 0;
+        self.panelBlurOverlay = [[UIVisualEffectView alloc] initWithEffect:nil];
+        self.panelBlurOverlay.userInteractionEnabled = NO;
+        self.panelBlurOverlay.hidden = YES;
+        zs_configure_main_panel_glass_corners(self.panelBlurOverlay, kPanelCornerRadiusMinimum, YES);
+        [self.glassContainerContent addSubview:self.panelBlurOverlay];
+
         self.handleGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(YES)];
         self.handleGlass.userInteractionEnabled = YES;
         zs_configure_glass_corners(self.handleGlass, kHandleCornerRadius, NO);
@@ -2098,6 +2109,41 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     ZSRow *disableLiquidGlassRow = zs_make_switch_row(@"Disable Liquid Glass", zs_liquid_glass_disabled_by_user());
     [disableLiquidGlassRow.toggle addTarget:self action:@selector(disableLiquidGlassChanged:) forControlEvents:UIControlEventValueChanged];
 
+    // ---- TEMPORARY: panel glass -> blur cross-fade tunables (hardcode the winners, then delete these rows) ----
+    ZSPanelBlurConfig blurCfg = zs_panel_blur_config();
+    NSString *(^blurTwoDecimal)(float) = ^NSString *(float v) { return [NSString stringWithFormat:@"%.2f", v]; };
+    NSString *(^blurSeconds)(float) = ^NSString *(float v) { return [NSString stringWithFormat:@"%.2fs", v]; };
+
+    ZSRow *blurEnabledRow = zs_make_switch_row(@"[Temp] Blur Swap", blurCfg.enabled);
+    [blurEnabledRow.toggle addTarget:self action:@selector(zs_blurEnabledChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurStyleRow = zs_make_wheel_row(@"[Temp] Blur Style", zs_panel_blur_style_names(), blurCfg.style, kZSPanelBlurDefaultStyle);
+    [blurStyleRow.wheelPicker addTarget:self action:@selector(zs_blurStyleChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurIntensityRow = zs_make_slider_row(@"[Temp] Blur Intensity", 0, 1, blurCfg.intensity, blurTwoDecimal);
+    blurIntensityRow.slider.defaultValue = 1.0; blurIntensityRow.slider.hasDefaultValue = YES;
+    [blurIntensityRow.slider addTarget:self action:@selector(zs_blurIntensityChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurTintRow = zs_make_slider_row(@"[Temp] Blur Tint (black)", 0, 1, blurCfg.tint, blurTwoDecimal);
+    blurTintRow.slider.defaultValue = 0.2; blurTintRow.slider.hasDefaultValue = YES;
+    [blurTintRow.slider addTarget:self action:@selector(zs_blurTintChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurFadeRow = zs_make_slider_row(@"[Temp] Fade Duration", 0.05, 1.0, blurCfg.fade, blurSeconds);
+    blurFadeRow.slider.defaultValue = 0.2; blurFadeRow.slider.hasDefaultValue = YES;
+    [blurFadeRow.slider addTarget:self action:@selector(zs_blurFadeChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurOpenAtRow = zs_make_slider_row(@"[Temp] Swap Point (open)", 0, 1, blurCfg.openAt, blurTwoDecimal);
+    blurOpenAtRow.slider.defaultValue = 0.5; blurOpenAtRow.slider.hasDefaultValue = YES;
+    [blurOpenAtRow.slider addTarget:self action:@selector(zs_blurOpenAtChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurCloseAtRow = zs_make_slider_row(@"[Temp] Swap Point (close)", 0, 1, blurCfg.closeAt, blurTwoDecimal);
+    blurCloseAtRow.slider.defaultValue = 0.5; blurCloseAtRow.slider.hasDefaultValue = YES;
+    [blurCloseAtRow.slider addTarget:self action:@selector(zs_blurCloseAtChanged:) forControlEvents:UIControlEventValueChanged];
+
+    UIButton *blurPreviewButton = zs_make_grouped_action_button(@"[Temp] Preview Blur (toggle)", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
+    [blurPreviewButton addTarget:self action:@selector(zs_blurPreviewTapped) forControlEvents:UIControlEventTouchUpInside];
+    // ---- end TEMPORARY ----
+
     ZSRow *disableEnkephalinRow = zs_make_switch_row(@"Disable Enkephalin", zs_enkephalin_disabled_by_user());
     [disableEnkephalinRow.toggle addTarget:self action:@selector(disableEnkephalinChanged:) forControlEvents:UIControlEventValueChanged];
 
@@ -2111,6 +2157,14 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         customGreetingRow,
         uidRedactorRow,
         disableLiquidGlassRow,
+        blurEnabledRow,
+        blurStyleRow,
+        blurIntensityRow,
+        blurTintRow,
+        blurFadeRow,
+        blurOpenAtRow,
+        blurCloseAtRow,
+        blurPreviewButton,
         disableEnkephalinRow,
         assetExplorerButton,
         selectModeButton,

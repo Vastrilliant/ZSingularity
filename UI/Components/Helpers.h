@@ -75,6 +75,22 @@ void zs_configure_main_panel_glass_corners_split(UIView *view, CGFloat radius, B
 void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft);
 void zs_configure_main_panel_glass_corners_expanding(UIView *view, CGFloat leftRadius, BOOL leftConcentric, CGFloat rightMinimumRadius);
 void zs_register_suspendable_glass(UIVisualEffectView *view);
+
+// TEMPORARY: tunables for the panel glass -> blur cross-fade (edited from Miscellaneous).
+typedef struct {
+    BOOL enabled;
+    NSInteger style;      // index into zs_panel_blur_style_names()
+    CGFloat intensity;    // 0...1 (blur strength)
+    CGFloat tint;         // 0...1 (black overlay alpha)
+    CGFloat fade;         // cross-fade duration, seconds
+    CGFloat openAt;       // 0...1 of the opening animation at which the swap starts
+    CGFloat closeAt;      // 0...1 of the closing animation at which the swap back starts
+} ZSPanelBlurConfig;
+ZSPanelBlurConfig zs_panel_blur_config(void);
+void zs_panel_blur_set(NSString *key, double value);
+NSArray<NSString *> *zs_panel_blur_style_names(void);
+UIBlurEffectStyle zs_panel_blur_style_at(NSInteger index);
+extern const NSInteger kZSPanelBlurDefaultStyle;
 void zs_set_glass_suspended(BOOL suspended);
 void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font);
 UIButton *zs_make_liquid_glass_fallback_twin(UIButton *primaryButton, NSString *title, UIColor *tintColor, UIFont *font);

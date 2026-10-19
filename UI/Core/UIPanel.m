@@ -1939,21 +1939,27 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }];
     }
 
+    void (^configurePanelCornersOn)(UIView *) = ^(UIView *target) {
+        if (!target) return;
+        if (expandPanel) {
+            if (docsVisible && zs_flatten_main_panel_left_corners_when_extended()) {
+                zs_configure_main_panel_glass_corners(target, kPanelCornerRadiusMinimum, NO);
+            } else {
+                // The expanded panel's left edge is the extended window's left edge.
+                zs_configure_main_panel_glass_corners_expanding(target,
+                                                                docsVisible ? docsLeftRadius : kPanelCornerRadiusMinimum,
+                                                                docsVisible ? !fullScreenOpen : YES,
+                                                                kPanelCornerRadiusMinimum);
+            }
+        } else {
+            zs_configure_main_panel_glass_corners(target, kPanelCornerRadiusMinimum, !docsVisible);
+        }
+    };
+
     void (^applyPanelCorners)(void) = ^{
         if (self.panelGlass) {
-            if (expandPanel) {
-                if (docsVisible && zs_flatten_main_panel_left_corners_when_extended()) {
-                    zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, NO);
-                } else {
-                    // The expanded panel's left edge is the extended window's left edge.
-                    zs_configure_main_panel_glass_corners_expanding(self.panelGlass,
-                                                                    docsVisible ? docsLeftRadius : kPanelCornerRadiusMinimum,
-                                                                    docsVisible ? !fullScreenOpen : YES,
-                                                                    kPanelCornerRadiusMinimum);
-                }
-            } else {
-                zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, !docsVisible);
-            }
+            configurePanelCornersOn(self.panelGlass);
+            configurePanelCornersOn(self.panelBlurOverlay);
         }
         if (self.contentOverlay) {
             self.contentOverlay.layer.maskedCorners = contentOverlayCornerMask;
@@ -2012,6 +2018,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
         }
 
         panelElement.frame = panelFrameLocal;
+        if (expandPanel && self.panelBlurOverlay) self.panelBlurOverlay.frame = panelFrameLocal;
         if (expandPanel) applyPanelCorners();
 
         if (self.docsPanelSeparator) {
@@ -2100,6 +2107,11 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     }
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
+
+    // Extended window opening / closing: cross-fade the panel glass <-> blur partway through the animation.
+    if (animated && expandPanel && leftCornersFlatChanged) {
+        [self zs_scheduleBlurSwapActive:docsVisible mainDuration:mainDuration];
+    }
 
     if (leftCornersFlatChanged && !expandPanel) {
         if (!animated) {
@@ -2291,6 +2303,180 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
         zs_add_restart_action(alert);
         [presenter presentViewController:alert animated:YES completion:nil];
     }
+}
+
+#pragma mark Panel glass <-> blur cross-fade (TEMPORARY tunables)
+
+- (void)zs_scheduleBlurSwapActive:(BOOL)active mainDuration:(NSTimeInterval)mainDuration {
+    ZSPanelBlurConfig cfg = zs_panel_blur_config();
+    if (!self.panelBlurOverlay) return;
+    NSUInteger token = ++self.panelBlurToken;
+    if (!cfg.enabled) {
+        if (self.panelBlurActive) [self zs_setPanelBlurActive:NO animated:YES];
+        return;
+    }
+
+    NSTimeInterval delay = mainDuration * MAX(0, MIN(1, active ? cfg.openAt : cfg.closeAt));
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || token != strongSelf.panelBlurToken || !strongSelf.panelBlurOverlay) return;
+        if (strongSelf.docsPanelOpen != active) return;
+        [strongSelf zs_setPanelBlurActive:active animated:YES];
+    });
+}
+
+- (void)zs_rebuildPanelBlurAnimator {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    if (!overlay) return;
+    ZSPanelBlurConfig cfg = zs_panel_blur_config();
+
+    UIViewPropertyAnimator *old = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (old && old.state == UIViewAnimatingStateActive) [old stopAnimation:YES];
+    overlay.effect = nil;
+
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:zs_panel_blur_style_at(cfg.style)];
+    UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:1
+                                                                                   curve:UIViewAnimationCurveLinear
+                                                                              animations:^{ overlay.effect = blur; }];
+    animator.pausesOnCompletion = YES;
+    self.panelBlurAnimator = animator;
+    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
+}
+
+// progress 0 = fully glass, 1 = fully blur. Intensity scales the blur radius, tint scales the dark overlay.
+- (void)zs_applyPanelBlurProgress:(CGFloat)progress {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    if (!overlay) return;
+    ZSPanelBlurConfig cfg = zs_panel_blur_config();
+    progress = MAX(0, MIN(1, progress));
+    self.panelBlurProgress = progress;
+    if (self.panelBlurAnimator) {
+        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, cfg.intensity * progress));
+    }
+    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:cfg.tint * progress];
+}
+
+- (void)zs_finishPanelBlurIfInactive {
+    if (self.panelBlurActive || self.panelBlurProgress > 0.001) return;
+    UIViewPropertyAnimator *animator = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (animator && animator.state == UIViewAnimatingStateActive) [animator stopAnimation:YES];
+    self.panelBlurOverlay.effect = nil;
+    self.panelBlurOverlay.contentView.backgroundColor = UIColor.clearColor;
+    self.panelBlurOverlay.hidden = YES;
+}
+
+- (void)zs_setPanelBlurActive:(BOOL)active animated:(BOOL)animated {
+    UIVisualEffectView *overlay = self.panelBlurOverlay;
+    UIVisualEffectView *glassView = self.panelGlass;
+    if (!overlay || !glassView) return;
+    if (active == self.panelBlurActive && !self.panelBlurLink) return;
+    self.panelBlurActive = active;
+
+    ZSPanelBlurConfig cfg = zs_panel_blur_config();
+    NSTimeInterval duration = animated ? cfg.fade : 0;
+
+    if (active) overlay.hidden = NO;
+    if (!self.panelBlurAnimator) [self zs_rebuildPanelBlurAnimator];
+
+    // Glass side: dematerialize / materialize through the effect (the supported way to animate glass).
+    UIVisualEffect *glassTarget = active ? nil : zs_make_glass_effect_dark(NO);
+    [self.panelBlurLink invalidate];
+    self.panelBlurLink = nil;
+
+    if (duration <= 0.001) {
+        [UIView performWithoutAnimation:^{ glassView.effect = glassTarget; }];
+        [self zs_applyPanelBlurProgress:active ? 1 : 0];
+        [self zs_finishPanelBlurIfInactive];
+        return;
+    }
+
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                     animations:^{ glassView.effect = glassTarget; }
+                     completion:nil];
+
+    // Blur side: driven by a display link so intensity and tint can be tuned independently.
+    self.panelBlurFrom = self.panelBlurProgress;
+    self.panelBlurTo = active ? 1 : 0;
+    self.panelBlurStartTime = CACurrentMediaTime();
+    self.panelBlurDuration = duration;
+    CADisplayLink *link = [CADisplayLink displayLinkWithTarget:self selector:@selector(zs_panelBlurTick:)];
+    [link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    self.panelBlurLink = link;
+}
+
+- (void)zs_panelBlurTick:(CADisplayLink *)link {
+    CGFloat t = self.panelBlurDuration > 0 ? (CGFloat)((CACurrentMediaTime() - self.panelBlurStartTime) / self.panelBlurDuration) : 1;
+    t = MAX(0, MIN(1, t));
+    CGFloat eased = t * t * (3 - 2 * t);
+    [self zs_applyPanelBlurProgress:self.panelBlurFrom + (self.panelBlurTo - self.panelBlurFrom) * eased];
+    if (t >= 1) {
+        [link invalidate];
+        if (self.panelBlurLink == link) self.panelBlurLink = nil;
+        [self zs_finishPanelBlurIfInactive];
+    }
+}
+
+- (void)zs_teardownPanelBlur {
+    self.panelBlurToken = self.panelBlurToken + 1;
+    [self.panelBlurLink invalidate];
+    self.panelBlurLink = nil;
+    UIViewPropertyAnimator *animator = self.panelBlurAnimator;
+    self.panelBlurAnimator = nil;
+    if (animator && animator.state == UIViewAnimatingStateActive) [animator stopAnimation:YES];
+    [self.panelBlurOverlay removeFromSuperview];
+    self.panelBlurOverlay = nil;
+    self.panelBlurActive = NO;
+    self.panelBlurProgress = 0;
+}
+
+- (void)zs_refreshPanelBlurAppearance {
+    if (self.panelBlurAnimator || self.panelBlurActive) [self zs_rebuildPanelBlurAnimator];
+}
+
+- (void)zs_blurEnabledChanged:(UISwitch *)toggle {
+    zs_panel_blur_set(@"enabled", toggle.on ? 1 : 0);
+    if (!toggle.on && self.panelBlurActive) [self zs_setPanelBlurActive:NO animated:YES];
+}
+
+- (void)zs_blurStyleChanged:(ZSWheelPicker *)picker {
+    zs_panel_blur_set(@"style", (double)picker.selectedIndex);
+    [self zs_refreshPanelBlurAppearance];
+}
+
+- (void)zs_blurIntensityChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"intensity", slider.value);
+    [self zs_refreshPanelBlurAppearance];
+}
+
+- (void)zs_blurTintChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"tint", slider.value);
+    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
+}
+
+- (void)zs_blurFadeChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"fade", slider.value);
+}
+
+- (void)zs_blurOpenAtChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"openAt", slider.value);
+}
+
+- (void)zs_blurCloseAtChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"closeAt", slider.value);
+}
+
+- (void)zs_blurPreviewTapped {
+    [self zs_setPanelBlurActive:!self.panelBlurActive animated:YES];
 }
 
 - (void)disableEnkephalinChanged:(UISwitch *)toggle {
