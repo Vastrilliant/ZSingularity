@@ -11,6 +11,7 @@ on:
       - 'demo/**'
       - 'site/**'
       - '.gitattributes'
+      - 'scripts/**'
 
 env:
   LZ4_REF: v1.10.0
