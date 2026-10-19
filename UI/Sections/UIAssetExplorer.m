@@ -3202,9 +3202,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 UIMenuElementAttributes attributes = 0;
                 if ([option[@"destructive"] boolValue]) attributes |= UIMenuElementAttributesDestructive;
                 if ([option[@"disabled"] boolValue]) attributes |= UIMenuElementAttributesDisabled;
-                UIAction *item = [UIAction actionWithTitle:title image:(symbol.length > 0 ? [UIImage systemImageNamed:symbol] : nil) identifier:nil attributes:attributes handler:^(__kindof UIAction *action) {
+                UIAction *item = [UIAction actionWithTitle:title image:(symbol.length > 0 ? [UIImage systemImageNamed:symbol] : nil) identifier:nil handler:^(__kindof UIAction *action) {
                     [weakSelf zs_modsLibraryPerformOptionNamed:title forEntry:entry folderName:folderName];
                 }];
+                item.attributes = attributes;
                 [optionItems addObject:item];
             }
             if (optionItems.count > 0) {
@@ -3257,10 +3258,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             if ([option[@"disabled"] boolValue]) continue;
             NSString *title = option[@"title"] ?: @"Action";
             BOOL destructive = [option[@"destructive"] boolValue];
-            UIContextualAction *action = [UIContextualAction contextualActionWithStyle:(destructive ? UIContextualActionStyleDestructive : UIContextualActionStyleNormal) title:title handler:^BOOL(UIContextualAction *swipeAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
+            UIContextualAction *action = [UIContextualAction contextualActionWithStyle:(destructive ? UIContextualActionStyleDestructive : UIContextualActionStyleNormal) title:title handler:^(UIContextualAction *swipeAction, UIView *sourceView, void (^completionHandler)(BOOL)) {
                 [weakSelf zs_modsLibraryPerformOptionNamed:title forEntry:entry folderName:folderName];
                 completionHandler(YES);
-                return YES;
             }];
             action.image = [UIImage systemImageNamed:option[@"symbol"] ?: @"ellipsis"];
             if (!destructive) action.backgroundColor = [UIColor colorWithRed:0.20 green:0.30 blue:0.38 alpha:1.0];
