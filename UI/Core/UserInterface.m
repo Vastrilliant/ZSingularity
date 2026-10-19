@@ -1492,6 +1492,9 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     self.glassContainer = chrome;
     self.glassContainerContent = chrome.contentView;
     self.glassContainer.userInteractionEnabled = YES;
+    // The pull tabs sit outside the main panel's bounds (and off-screen while it is fully extended); never clip them.
+    self.glassContainer.clipsToBounds = NO;
+    self.glassContainerContent.clipsToBounds = NO;
     self.glassContainer.hidden = YES;
     [unityView addSubview:self.glassContainer];
     zs_mark_host_owned(self.glassContainer);
@@ -1499,7 +1502,7 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
 
     if (zs_has_liquid_glass()) {
 
-        self.panelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_clear_large(NO)];
+        self.panelGlass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
         self.panelGlass.userInteractionEnabled = YES;
         zs_configure_main_panel_glass_corners(self.panelGlass, kPanelCornerRadiusMinimum, YES);
         [self.glassContainerContent addSubview:self.panelGlass];

@@ -65,7 +65,6 @@ BOOL zs_has_liquid_glass(void);
 UIColor *zs_glass_tint_color(void);
 UIVisualEffect *zs_make_glass_effect(BOOL interactive);
 UIVisualEffect *zs_make_glass_effect_dark(BOOL interactive);
-UIVisualEffect *zs_make_glass_effect_clear_large(BOOL interactive);
 void zs_set_track_glass_interactive(UIVisualEffectView *trackGlass, BOOL interactive);
 void zs_dump_glass_effect_instance_info(void);
 UIVisualEffect *zs_make_glass_container_effect(CGFloat spacing);
@@ -74,6 +73,7 @@ void zs_configure_glass_corners_sides(UIView *view, CGFloat radius, BOOL concent
 CGFloat zs_screen_corner_radius(UIView *view, CGFloat fallback);
 void zs_configure_main_panel_glass_corners_split(UIView *view, CGFloat radius, BOOL roundTopLeft, BOOL roundBottomLeft);
 void zs_configure_main_panel_glass_corners(UIView *view, CGFloat radius, BOOL roundLeft);
+void zs_configure_main_panel_glass_corners_expanding(UIView *view, CGFloat leftRadius, BOOL leftConcentric, CGFloat rightMinimumRadius);
 void zs_register_suspendable_glass(UIVisualEffectView *view);
 void zs_set_glass_suspended(BOOL suspended);
 void zs_style_button_as_native_glass_with_font(UIButton *button, NSString *title, UIColor *tintColor, UIFont *font);

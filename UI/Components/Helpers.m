@@ -311,11 +311,6 @@ UIVisualEffect *zs_make_glass_effect_dark(BOOL interactive) {
     return zs_make_glass_effect_style(0 , interactive, zs_glass_tint_color());
 }
 
-// Clear-style glass (UIGlassEffectStyleClear = 1), same tint as the regular glass. Used only for the big panels.
-UIVisualEffect *zs_make_glass_effect_clear_large(BOOL interactive) {
-    return zs_make_glass_effect_style(1, interactive, zs_glass_tint_color());
-}
-
 void zs_set_track_glass_interactive(UIVisualEffectView *trackGlass, BOOL interactive) {
     if (!trackGlass) return;
     trackGlass.effect = zs_make_glass_effect(interactive);
@@ -476,6 +471,44 @@ void zs_configure_main_panel_glass_corners_split(UIView *view, CGFloat radius, B
     id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, topLeft, rightFixed, bottomLeft, rightFixed);
     if (!configuration) {
         zs_configure_glass_corners_sides(view, radius, YES, fallbackRoundLeft, YES);
+        return;
+    }
+    ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
+}
+
+// Corner configuration for the main panel glass while it is expanded leftwards over the extended window.
+// Left corners are always round (concentric with the screen, or a fixed radius when flush with the screen
+// edge); right corners match the regular main panel.
+void zs_configure_main_panel_glass_corners_expanding(UIView *view, CGFloat leftRadius, BOOL leftConcentric, CGFloat rightMinimumRadius) {
+    if (!view || !zs_has_liquid_glass()) return;
+
+    Class radiusClass = NSClassFromString(@"UICornerRadius");
+    Class configClass = NSClassFromString(@"UICornerConfiguration");
+    SEL concentricSelector = NSSelectorFromString(@"containerConcentricRadiusWithMinimum:");
+    SEL fixedSelector = NSSelectorFromString(@"fixedRadius:");
+    SEL fourCornerSelector = NSSelectorFromString(@"configurationWithTopLeftRadius:topRightRadius:bottomLeftRadius:bottomRightRadius:");
+    SEL setConfiguration = NSSelectorFromString(@"setCornerConfiguration:");
+
+    if (!radiusClass || !configClass ||
+        ![radiusClass respondsToSelector:concentricSelector] ||
+        ![radiusClass respondsToSelector:fixedSelector] ||
+        ![configClass respondsToSelector:fourCornerSelector] ||
+        ![view respondsToSelector:setConfiguration]) {
+        zs_configure_glass_corners_sides(view, leftRadius, leftConcentric, YES, YES);
+        return;
+    }
+
+    CGFloat rightRadius = MAX(zs_screen_corner_radius(view, rightMinimumRadius), rightMinimumRadius);
+    id left = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, leftConcentric ? concentricSelector : fixedSelector, leftRadius);
+    id right = ((id (*)(id, SEL, CGFloat))objc_msgSend)(radiusClass, fixedSelector, rightRadius);
+    if (!left || !right) {
+        zs_configure_glass_corners_sides(view, leftRadius, leftConcentric, YES, YES);
+        return;
+    }
+
+    id configuration = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(configClass, fourCornerSelector, left, right, left, right);
+    if (!configuration) {
+        zs_configure_glass_corners_sides(view, leftRadius, leftConcentric, YES, YES);
         return;
     }
     ((void (*)(id, SEL, id))objc_msgSend)(view, setConfiguration, configuration);
