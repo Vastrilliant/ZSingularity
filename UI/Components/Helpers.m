@@ -531,6 +531,7 @@ static const void *kZSSuspendedGlassEffectKey = &kZSSuspendedGlassEffectKey;
 
 static NSString * const kZSPanelBlurSection = @"panelBlur";
 const NSInteger kZSPanelBlurDefaultStyle = 2;
+const NSInteger kZSPanelBlurDefaultEase = 3;
 
 static NSMutableDictionary *zs_panel_blur_store(void) {
     static NSMutableDictionary *store;
@@ -566,12 +567,21 @@ ZSPanelBlurConfig zs_panel_blur_config(void) {
     c.fade = (CGFloat)zs_panel_blur_value(@"fade", 0.2);
     c.openAt = (CGFloat)zs_panel_blur_value(@"openAt", 0.10);
     c.closeAt = (CGFloat)zs_panel_blur_value(@"closeAt", 0.10);
+    c.overlap = (CGFloat)zs_panel_blur_value(@"overlap", 0.4);
+    c.blurCurve = (CGFloat)zs_panel_blur_value(@"blurCurve", 1.0);
+    c.tintCurve = (CGFloat)zs_panel_blur_value(@"tintCurve", 1.0);
+    c.glassEase = (NSInteger)zs_panel_blur_value(@"glassEase", kZSPanelBlurDefaultEase);
+    c.blurEase = (NSInteger)zs_panel_blur_value(@"blurEase", kZSPanelBlurDefaultEase);
     return c;
 }
 
 NSArray<NSString *> *zs_panel_blur_style_names(void) {
     return @[@"Ultra Thin Dark", @"Thin Dark", @"Material Dark", @"Thick Dark", @"Chrome Dark",
              @"Dark", @"Regular", @"Prominent", @"Light", @"Extra Light"];
+}
+
+NSArray<NSString *> *zs_panel_blur_ease_names(void) {
+    return @[@"Linear", @"Ease In", @"Ease Out", @"Ease In-Out"];
 }
 
 UIBlurEffectStyle zs_panel_blur_style_at(NSInteger index) {

@@ -2307,7 +2307,23 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
 
 #pragma mark Panel glass <-> blur cross-fade (TEMPORARY tunables)
 
-static const CGFloat kZSPanelBlurOverlap = 0.4;
+static CGFloat zs_panel_blur_ease(NSInteger mode, CGFloat t) {
+    switch (mode) {
+        case 0: return t;
+        case 1: return t * t;
+        case 2: return 1 - (1 - t) * (1 - t);
+        default: return t * t * (3 - 2 * t);
+    }
+}
+
+static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
+    switch (mode) {
+        case 0: return UIViewAnimationOptionCurveLinear;
+        case 1: return UIViewAnimationOptionCurveEaseIn;
+        case 2: return UIViewAnimationOptionCurveEaseOut;
+        default: return UIViewAnimationOptionCurveEaseInOut;
+    }
+}
 
 - (void)zs_scheduleBlurSwapActive:(BOOL)active mainDuration:(NSTimeInterval)mainDuration {
     ZSPanelBlurConfig cfg = zs_panel_blur_config();
@@ -2355,9 +2371,9 @@ static const CGFloat kZSPanelBlurOverlap = 0.4;
     progress = MAX(0, MIN(1, progress));
     self.panelBlurProgress = progress;
     if (self.panelBlurAnimator) {
-        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, cfg.intensity * progress));
+        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, cfg.intensity * powf(progress, MAX(0.05, cfg.blurCurve))));
     }
-    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:cfg.tint * progress];
+    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:cfg.tint * powf(progress, MAX(0.05, cfg.tintCurve))];
 }
 
 - (void)zs_finishPanelBlurIfInactive {
@@ -2395,8 +2411,8 @@ static const CGFloat kZSPanelBlurOverlap = 0.4;
         return;
     }
 
-    NSTimeInterval legDuration = duration * (1 - kZSPanelBlurOverlap);
-    NSTimeInterval lagDelay = duration * kZSPanelBlurOverlap;
+    NSTimeInterval legDuration = duration * (1 - MAX(0, MIN(0.9, cfg.overlap)));
+    NSTimeInterval lagDelay = duration * MAX(0, MIN(0.9, cfg.overlap));
     NSTimeInterval glassDelay = active ? lagDelay : 0;
     NSTimeInterval blurDelay = active ? 0 : lagDelay;
 
@@ -2406,7 +2422,7 @@ static const CGFloat kZSPanelBlurOverlap = 0.4;
         if (!strongSelf || glassToken != strongSelf.panelBlurGlassToken || !strongSelf.panelGlass) return;
         [UIView animateWithDuration:legDuration
                               delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveEaseInOut
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | zs_panel_glass_ease_option(cfg.glassEase)
                          animations:^{ strongSelf.panelGlass.effect = glassTarget; }
                          completion:nil];
     };
@@ -2428,7 +2444,7 @@ static const CGFloat kZSPanelBlurOverlap = 0.4;
 - (void)zs_panelBlurTick:(CADisplayLink *)link {
     CGFloat t = self.panelBlurDuration > 0 ? (CGFloat)((CACurrentMediaTime() - self.panelBlurStartTime) / self.panelBlurDuration) : 1;
     t = MAX(0, MIN(1, t));
-    CGFloat eased = t * t * (3 - 2 * t);
+    CGFloat eased = zs_panel_blur_ease(zs_panel_blur_config().blurEase, t);
     [self zs_applyPanelBlurProgress:self.panelBlurFrom + (self.panelBlurTo - self.panelBlurFrom) * eased];
     if (t >= 1) {
         [link invalidate];
@@ -2490,6 +2506,31 @@ static const CGFloat kZSPanelBlurOverlap = 0.4;
 - (void)zs_blurCloseAtChanged:(ZSCapsuleSlider *)slider {
     zs_update_value_label(slider);
     zs_panel_blur_set(@"closeAt", slider.value);
+}
+
+- (void)zs_blurOverlapChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"overlap", slider.value);
+}
+
+- (void)zs_blurCurveChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"blurCurve", slider.value);
+    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
+}
+
+- (void)zs_blurTintCurveChanged:(ZSCapsuleSlider *)slider {
+    zs_update_value_label(slider);
+    zs_panel_blur_set(@"tintCurve", slider.value);
+    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
+}
+
+- (void)zs_blurGlassEaseChanged:(ZSWheelPicker *)picker {
+    zs_panel_blur_set(@"glassEase", (double)picker.selectedIndex);
+}
+
+- (void)zs_blurBlurEaseChanged:(ZSWheelPicker *)picker {
+    zs_panel_blur_set(@"blurEase", (double)picker.selectedIndex);
 }
 
 - (void)zs_blurPreviewTapped {

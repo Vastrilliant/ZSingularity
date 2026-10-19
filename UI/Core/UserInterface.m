@@ -2140,6 +2140,24 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     blurCloseAtRow.slider.defaultValue = 0.10; blurCloseAtRow.slider.hasDefaultValue = YES;
     [blurCloseAtRow.slider addTarget:self action:@selector(zs_blurCloseAtChanged:) forControlEvents:UIControlEventValueChanged];
 
+    ZSRow *blurOverlapRow = zs_make_slider_row(@"[Temp] Overlap", 0, 0.9, blurCfg.overlap, blurTwoDecimal);
+    blurOverlapRow.slider.defaultValue = 0.4; blurOverlapRow.slider.hasDefaultValue = YES;
+    [blurOverlapRow.slider addTarget:self action:@selector(zs_blurOverlapChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurCurveRow = zs_make_slider_row(@"[Temp] Blur Curve", 0.25, 4, blurCfg.blurCurve, blurTwoDecimal);
+    blurCurveRow.slider.defaultValue = 1.0; blurCurveRow.slider.hasDefaultValue = YES;
+    [blurCurveRow.slider addTarget:self action:@selector(zs_blurCurveChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurTintCurveRow = zs_make_slider_row(@"[Temp] Tint Curve", 0.25, 4, blurCfg.tintCurve, blurTwoDecimal);
+    blurTintCurveRow.slider.defaultValue = 1.0; blurTintCurveRow.slider.hasDefaultValue = YES;
+    [blurTintCurveRow.slider addTarget:self action:@selector(zs_blurTintCurveChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurGlassEaseRow = zs_make_wheel_row(@"[Temp] Glass Easing", zs_panel_blur_ease_names(), blurCfg.glassEase, kZSPanelBlurDefaultEase);
+    [blurGlassEaseRow.wheelPicker addTarget:self action:@selector(zs_blurGlassEaseChanged:) forControlEvents:UIControlEventValueChanged];
+
+    ZSRow *blurBlurEaseRow = zs_make_wheel_row(@"[Temp] Blur Easing", zs_panel_blur_ease_names(), blurCfg.blurEase, kZSPanelBlurDefaultEase);
+    [blurBlurEaseRow.wheelPicker addTarget:self action:@selector(zs_blurBlurEaseChanged:) forControlEvents:UIControlEventValueChanged];
+
     UIButton *blurPreviewButton = zs_make_grouped_action_button(@"[Temp] Preview Blur (toggle)", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [blurPreviewButton addTarget:self action:@selector(zs_blurPreviewTapped) forControlEvents:UIControlEventTouchUpInside];
     // ---- end TEMPORARY ----
@@ -2164,6 +2182,11 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         blurFadeRow,
         blurOpenAtRow,
         blurCloseAtRow,
+        blurOverlapRow,
+        blurCurveRow,
+        blurTintCurveRow,
+        blurGlassEaseRow,
+        blurBlurEaseRow,
         blurPreviewButton,
         disableEnkephalinRow,
         assetExplorerButton,
