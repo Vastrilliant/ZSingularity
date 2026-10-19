@@ -47,7 +47,11 @@
 - (void)zs_refreshManifestZeroingRow;
 - (void)zs_rebuildModsLibrary;
 - (void)zs_openModLibraryTapped;
-- (UIView *)zs_makeStoredBackupsCard;
+- (UIView *)zs_makeStoredBackupsSection;
+- (UIView *)zs_makeLz4hcCompressSection;
+- (NSString *)zs_lz4hcPromptForCount:(NSUInteger)count;
+- (void)zs_lz4hcToggleTapped:(UIButton *)sender;
+- (void)zs_lz4hcConfirmTapped:(UIButton *)sender;
 - (void)zs_refreshStoredBackupsSizeForCard:(UIView *)card;
 - (void)zs_storedBackupsToggleTapped:(UIButton *)sender;
 - (void)zs_storedBackupsConfirmTapped:(UIButton *)sender;

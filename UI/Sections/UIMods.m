@@ -278,6 +278,9 @@ static const NSInteger kZSModsLibrarySortKind = 3;
 @end
 
 static BOOL g_zsStoredBackupsExpanded;
+static BOOL g_zsLz4hcExpanded;
+static BOOL g_zsLz4hcBusy;
+static NSArray<NSString *> *g_zsLz4hcPendingPaths;
 
 static UIColor *zs_stored_backups_red_color(void) {
     return [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
@@ -292,7 +295,14 @@ static NSString *zs_stored_backups_size_string(unsigned long long bytes) {
 
 static UIView *zs_stored_backups_card_for_view(UIView *view) {
     for (UIView *candidate = view; candidate; candidate = candidate.superview) {
-        if (objc_getAssociatedObject(candidate, "zs_innerStack")) return candidate;
+        if (objc_getAssociatedObject(candidate, "zs_backupsWrapper")) return candidate;
+    }
+    return nil;
+}
+
+static UIView *zs_lz4hc_section_for_view(UIView *view) {
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if (objc_getAssociatedObject(candidate, "zs_lz4Wrapper")) return candidate;
     }
     return nil;
 }
@@ -1461,13 +1471,11 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
 
     UIButton *openButton = zs_make_grouped_action_button(@"Open Mod Library", zs_accent_green_color());
     [openButton addTarget:self action:@selector(zs_openModLibraryTapped) forControlEvents:UIControlEventTouchUpInside];
-    UIView *openCard = zs_make_grouped_action_card(@[openButton]);
-    openCard.layer.borderWidth = 1;
-    openCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
-    [self.modsLibraryStack addArrangedSubview:openCard];
-    [self.modsLibraryStack setCustomSpacing:8 afterView:openCard];
-
-    [self.modsLibraryStack addArrangedSubview:[self zs_makeStoredBackupsCard]];
+    UIView *libraryCard = zs_make_grouped_action_card(@[openButton, [self zs_makeStoredBackupsSection], [self zs_makeLz4hcCompressSection]]);
+    libraryCard.layer.borderWidth = 1;
+    libraryCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+    [self.modsLibraryStack addArrangedSubview:libraryCard];
+    [self.modsLibraryStack setCustomSpacing:8 afterView:libraryCard];
 
     if (self.modsLibraryBrowseMode && self.assetExplorerFullScreenOpen) {
         BOOL wasShowingDetails = self.modsLibrarySelectedEntry != nil;
@@ -1482,7 +1490,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     }
 }
 
-- (UIView *)zs_makeStoredBackupsCard {
+- (UIView *)zs_makeStoredBackupsSection {
     UIView *row = [[UIView alloc] init];
     row.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -1544,16 +1552,77 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     ]];
 
     UIView *wrapper = zs_make_reveal_wrapper(expansion, g_zsStoredBackupsExpanded);
-    UIView *card = zs_make_grouped_action_card(@[row]);
-    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
-    [inner addArrangedSubview:wrapper];
+    UIStackView *section = [[UIStackView alloc] initWithArrangedSubviews:@[row, wrapper]];
+    section.axis = UILayoutConstraintAxisVertical;
+    section.spacing = 0;
+    section.translatesAutoresizingMaskIntoConstraints = NO;
+    objc_setAssociatedObject(section, "zs_selfSizingRow", @YES, OBJC_ASSOCIATION_RETAIN);
 
-    objc_setAssociatedObject(card, "zs_backupsWrapper", wrapper, OBJC_ASSOCIATION_RETAIN);
-    objc_setAssociatedObject(card, "zs_backupsSubtext", subtext, OBJC_ASSOCIATION_RETAIN);
-    objc_setAssociatedObject(card, "zs_backupsExpansionLabel", expansionLabel, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_backupsWrapper", wrapper, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_backupsSubtext", subtext, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_backupsExpansionLabel", expansionLabel, OBJC_ASSOCIATION_RETAIN);
 
-    [self zs_refreshStoredBackupsSizeForCard:card];
-    return card;
+    [self zs_refreshStoredBackupsSizeForCard:section];
+    return section;
+}
+
+- (UIView *)zs_makeLz4hcCompressSection {
+    UIButton *button = zs_make_grouped_action_button(@"LZ4HC Compress Bundles", [UIColor colorWithRed:1.0 green:0.72 blue:0.3 alpha:1.0]);
+    [button addTarget:self action:@selector(zs_lz4hcToggleTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [button.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight].active = YES;
+
+    UIView *expansion = [[UIView alloc] init];
+    expansion.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView *topSeparator = zs_make_stored_backups_separator();
+    UILabel *expansionLabel = [[UILabel alloc] init];
+    expansionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    expansionLabel.numberOfLines = 0;
+    expansionLabel.font = zs_mono_font(11, UIFontWeightMedium);
+    expansionLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+    UIView *confirmSeparator = zs_make_stored_backups_separator();
+    UIButton *confirm = zs_make_grouped_action_button(@"Confirm", zs_accent_green_color());
+    confirm.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [confirm addTarget:self action:@selector(zs_lz4hcConfirmTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    for (UIView *view in @[topSeparator, expansionLabel, confirmSeparator, confirm]) [expansion addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [topSeparator.topAnchor constraintEqualToAnchor:expansion.topAnchor],
+        [topSeparator.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [topSeparator.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [expansionLabel.topAnchor constraintEqualToAnchor:topSeparator.bottomAnchor constant:12],
+        [expansionLabel.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [expansionLabel.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirmSeparator.topAnchor constraintEqualToAnchor:expansionLabel.bottomAnchor constant:12],
+        [confirmSeparator.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [confirmSeparator.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirm.topAnchor constraintEqualToAnchor:confirmSeparator.bottomAnchor],
+        [confirm.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [confirm.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirm.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+        [confirm.bottomAnchor constraintEqualToAnchor:expansion.bottomAnchor],
+    ]];
+
+    BOOL expanded = g_zsLz4hcExpanded && g_zsLz4hcPendingPaths.count > 0;
+    g_zsLz4hcExpanded = expanded;
+    if (expanded) expansionLabel.text = [self zs_lz4hcPromptForCount:g_zsLz4hcPendingPaths.count];
+
+    UIView *wrapper = zs_make_reveal_wrapper(expansion, expanded);
+    UIStackView *section = [[UIStackView alloc] initWithArrangedSubviews:@[button, wrapper]];
+    section.axis = UILayoutConstraintAxisVertical;
+    section.spacing = 0;
+    section.translatesAutoresizingMaskIntoConstraints = NO;
+    objc_setAssociatedObject(section, "zs_selfSizingRow", @YES, OBJC_ASSOCIATION_RETAIN);
+
+    objc_setAssociatedObject(section, "zs_lz4Wrapper", wrapper, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_lz4Label", expansionLabel, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_lz4Button", button, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(section, "zs_lz4Confirm", confirm, OBJC_ASSOCIATION_RETAIN);
+    return section;
+}
+
+- (NSString *)zs_lz4hcPromptForCount:(NSUInteger)count {
+    return [NSString stringWithFormat:@"Found %lu uncompressed bundle(s), compress them? This can take a while.", (unsigned long)count];
 }
 
 - (void)zs_refreshStoredBackupsSizeForCard:(UIView *)card {
@@ -2694,18 +2763,183 @@ static dispatch_queue_t zs_mods_replace_queue(void) {
 
 static BOOL g_zsModsReplaceInFlight = NO;
 
+static void * const kZSModsButtonFlashingKey = (void *)&kZSModsButtonFlashingKey;
+
+static BOOL zs_mods_button_is_flashing(UIButton *button) {
+    return [objc_getAssociatedObject(button, kZSModsButtonFlashingKey) boolValue];
+}
+
 static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, NSString *originalTitle) {
     button.titleLabel.adjustsFontSizeToFitWidth = YES;
     button.titleLabel.minimumScaleFactor = 0.7;
+    objc_setAssociatedObject(button, kZSModsButtonFlashingKey, @YES, OBJC_ASSOCIATION_RETAIN);
     [UIView performWithoutAnimation:^{
         [button setTitle:flashTitle forState:UIControlStateNormal];
         [button layoutIfNeeded];
     }];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [UIView performWithoutAnimation:^{
             [button setTitle:originalTitle forState:UIControlStateNormal];
             [button layoutIfNeeded];
         }];
+        objc_setAssociatedObject(button, kZSModsButtonFlashingKey, nil, OBJC_ASSOCIATION_RETAIN);
+    });
+}
+
+static NSArray<NSString *> *zs_mods_uncompressed_bundle_paths(void) {
+    NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *folderName in [ModAssetLibrary folderNames]) {
+        if (zs_mods_folder_is_or_within_stored_bundles(folderName)) continue;
+        NSArray<ModAssetLibraryEntry *> *entries = [ModAssetLibrary entriesInFolder:folderName error:nil] ?: @[];
+        for (ModAssetLibraryEntry *entry in entries) {
+            @autoreleasepool {
+                if (!entry.isAssetBundle) continue;
+                NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+                if (entry.path.length > 0) [candidates addObject:entry.path];
+                if (entry.doctorStatus == ModAssetLibraryDoctorStatusInstalled) {
+                    NSString *livePath = zs_mods_live_stock_url_for_entry(entry).path;
+                    if (livePath.length > 0) [candidates addObject:livePath];
+                }
+                for (NSString *candidate in candidates) {
+                    if (![fm fileExistsAtPath:candidate]) continue;
+                    if ([UnityBundleCAB compressionTypeForBundleAtPath:candidate error:nil] == UnityBundleCABCompressionNone) {
+                        [paths addObject:candidate];
+                    }
+                }
+            }
+        }
+    }
+    return paths.array;
+}
+
+static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
+    NSData *compressed = [UnityBundleCAB LZ4HCDataForBundleAtPath:path error:error];
+    if (!compressed) return NO;
+    return [compressed writeToFile:path options:NSDataWritingAtomic error:error];
+}
+
+- (void)zs_lz4hcToggleTapped:(UIButton *)sender {
+    if (g_zsLz4hcBusy || zs_mods_button_is_flashing(sender)) return;
+    UIView *section = zs_lz4hc_section_for_view(sender);
+    UIView *wrapper = objc_getAssociatedObject(section, "zs_lz4Wrapper");
+    UILabel *label = objc_getAssociatedObject(section, "zs_lz4Label");
+    if (!wrapper) return;
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+
+    if (g_zsLz4hcExpanded) {
+        g_zsLz4hcExpanded = NO;
+        g_zsLz4hcPendingPaths = nil;
+        [self zs_lowResAnimateChanges:^{
+            zs_reveal_set_expanded(wrapper, NO);
+        }];
+        return;
+    }
+
+    g_zsLz4hcBusy = YES;
+    __weak typeof(self) weakSelf = self;
+    __weak UIButton *weakSender = sender;
+    __weak UIView *weakWrapper = wrapper;
+    __weak UILabel *weakLabel = label;
+    dispatch_async(zs_mods_replace_queue(), ^{
+        NSArray<NSString *> *found = zs_mods_uncompressed_bundle_paths();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsLz4hcBusy = NO;
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (found.count == 0) {
+                UIButton *button = weakSender;
+                if (button) zs_mods_flash_button_title(button, @"Nothing to compress", @"LZ4HC Compress Bundles");
+                return;
+            }
+            g_zsLz4hcPendingPaths = found;
+            g_zsLz4hcExpanded = YES;
+            weakLabel.text = [strongSelf zs_lz4hcPromptForCount:found.count];
+            UIView *strongWrapper = weakWrapper;
+            [strongSelf zs_lowResAnimateChanges:^{
+                zs_reveal_set_expanded(strongWrapper, YES);
+            }];
+        });
+    });
+}
+
+- (void)zs_lz4hcConfirmTapped:(UIButton *)sender {
+    if (g_zsLz4hcBusy || g_zsModsReplaceInFlight) return;
+    NSArray<NSString *> *paths = g_zsLz4hcPendingPaths;
+    if (paths.count == 0) return;
+
+    UIView *section = zs_lz4hc_section_for_view(sender);
+    UIView *wrapper = objc_getAssociatedObject(section, "zs_lz4Wrapper");
+    UIButton *mainButton = objc_getAssociatedObject(section, "zs_lz4Button");
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+
+    g_zsLz4hcBusy = YES;
+    g_zsModsReplaceInFlight = YES;
+    sender.enabled = NO;
+    mainButton.enabled = NO;
+    NSUInteger total = paths.count;
+    __weak typeof(self) weakSelf = self;
+    __weak UIButton *weakConfirm = sender;
+    __weak UIButton *weakMain = mainButton;
+    __weak UIView *weakWrapper = wrapper;
+    dispatch_async(zs_mods_replace_queue(), ^{
+        NSUInteger succeeded = 0, failed = 0;
+        NSString *firstError = nil;
+        for (NSUInteger i = 0; i < total; i++) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIButton *confirm = weakConfirm;
+                if (!confirm) return;
+                [UIView performWithoutAnimation:^{
+                    [confirm setTitle:[NSString stringWithFormat:@"Compressing %lu/%lu", (unsigned long)(i + 1), (unsigned long)total] forState:UIControlStateNormal];
+                    [confirm layoutIfNeeded];
+                }];
+            });
+            @autoreleasepool {
+                NSError *error = nil;
+                if (zs_mods_lz4hc_compress_bundle(paths[i], &error)) {
+                    succeeded++;
+                } else {
+                    failed++;
+                    if (!firstError) firstError = error.localizedDescription ?: @"Unknown error.";
+                    ZLog(@"[Mods Library] LZ4HC compress \"%@\" failed: %@", paths[i], error.localizedDescription);
+                }
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            g_zsLz4hcBusy = NO;
+            g_zsModsReplaceInFlight = NO;
+            g_zsLz4hcExpanded = NO;
+            g_zsLz4hcPendingPaths = nil;
+            ZLog(@"[Mods Library] LZ4HC compressed bundles: %lu succeeded, %lu failed", (unsigned long)succeeded, (unsigned long)failed);
+            typeof(self) strongSelf = weakSelf;
+            UIButton *confirm = weakConfirm;
+            UIButton *titleButton = weakMain;
+            confirm.enabled = YES;
+            titleButton.enabled = YES;
+            [UIView performWithoutAnimation:^{
+                [confirm setTitle:@"Confirm" forState:UIControlStateNormal];
+                [confirm layoutIfNeeded];
+            }];
+            UINotificationFeedbackGenerator *result = [UINotificationFeedbackGenerator new];
+            [result notificationOccurred:failed > 0 ? UINotificationFeedbackTypeWarning : UINotificationFeedbackTypeSuccess];
+            UIView *strongWrapper = weakWrapper;
+            if (strongWrapper) {
+                [strongSelf zs_lowResAnimateChanges:^{
+                    zs_reveal_set_expanded(strongWrapper, NO);
+                }];
+            }
+            if (failed > 0) {
+                [strongSelf zs_presentModsAlertWithTitle:@"LZ4HC Compress Bundles"
+                                                 message:[NSString stringWithFormat:@"%lu compressed, %lu failed. %@", (unsigned long)succeeded, (unsigned long)failed, firstError]];
+            } else if (titleButton) {
+                zs_mods_flash_button_title(titleButton, @"Compression complete", @"LZ4HC Compress Bundles");
+            }
+        });
     });
 }
 
@@ -2775,7 +3009,7 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
 }
 
 - (void)reloadModsTapped:(UIButton *)sender {
-    if (g_zsModsReplaceInFlight) return;
+    if (g_zsModsReplaceInFlight || zs_mods_button_is_flashing(sender)) return;
     g_zsModsReplaceInFlight = YES;
 
     NSString *originalTitle = [sender titleForState:UIControlStateNormal] ?: @"Reload Mods";
