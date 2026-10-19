@@ -713,16 +713,33 @@ static BOOL g_zsInjectionWarningShownThisLaunch = NO;
     message.attributedText = messageText;
     [panelHost addSubview:message];
 
-    UIButton *checkbox = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIControl *checkbox = [[UIControl alloc] init];
     checkbox.translatesAutoresizingMaskIntoConstraints = NO;
-    checkbox.tintColor = zs_accent_green_color();
-    checkbox.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
-    UIImageSymbolConfiguration *boxConfig = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightRegular];
-    [checkbox setImage:[UIImage systemImageNamed:@"square" withConfiguration:boxConfig] forState:UIControlStateNormal];
-    [checkbox setImage:[UIImage systemImageNamed:@"checkmark.square.fill" withConfiguration:boxConfig] forState:UIControlStateSelected];
-    [checkbox setTitle:@" Don\u2019t show again" forState:UIControlStateNormal];
-    [checkbox setTitleColor:[UIColor colorWithWhite:1 alpha:0.85] forState:UIControlStateNormal];
-    checkbox.titleLabel.font = zs_mono_font(12, UIFontWeightMedium);
+    checkbox.backgroundColor = UIColor.clearColor;
+    UIImageSymbolConfiguration *boxConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
+    UIImageView *boxImage = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"square" withConfiguration:boxConfig]];
+    boxImage.translatesAutoresizingMaskIntoConstraints = NO;
+    boxImage.tintColor = [UIColor colorWithWhite:1 alpha:0.6];
+    boxImage.contentMode = UIViewContentModeScaleAspectFit;
+    boxImage.userInteractionEnabled = NO;
+    boxImage.tag = kZSWarningCheckboxImageTag;
+    [checkbox addSubview:boxImage];
+    UILabel *boxLabel = [[UILabel alloc] init];
+    boxLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    boxLabel.text = @"Don\u2019t show again";
+    boxLabel.font = zs_mono_font(12, UIFontWeightMedium);
+    boxLabel.textColor = [UIColor colorWithWhite:1 alpha:0.85];
+    boxLabel.userInteractionEnabled = NO;
+    [checkbox addSubview:boxLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [boxImage.leadingAnchor constraintEqualToAnchor:checkbox.leadingAnchor],
+        [boxImage.centerYAnchor constraintEqualToAnchor:checkbox.centerYAnchor],
+        [boxImage.widthAnchor constraintEqualToConstant:20],
+        [boxImage.heightAnchor constraintEqualToConstant:20],
+        [boxLabel.leadingAnchor constraintEqualToAnchor:boxImage.trailingAnchor constant:8],
+        [boxLabel.centerYAnchor constraintEqualToAnchor:checkbox.centerYAnchor],
+        [boxLabel.trailingAnchor constraintEqualToAnchor:checkbox.trailingAnchor],
+    ]];
     [checkbox addTarget:self action:@selector(zs_warningCheckboxTapped:) forControlEvents:UIControlEventTouchUpInside];
     [panelHost addSubview:checkbox];
     self.warningCheckbox = checkbox;
@@ -777,8 +794,12 @@ static BOOL g_zsInjectionWarningShownThisLaunch = NO;
     return YES;
 }
 
-- (void)zs_warningCheckboxTapped:(UIButton *)sender {
+- (void)zs_warningCheckboxTapped:(UIControl *)sender {
     sender.selected = !sender.selected;
+    UIImageView *boxImage = [sender viewWithTag:kZSWarningCheckboxImageTag];
+    UIImageSymbolConfiguration *boxConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
+    boxImage.image = [UIImage systemImageNamed:(sender.selected ? @"checkmark.square.fill" : @"square") withConfiguration:boxConfig];
+    boxImage.tintColor = sender.selected ? zs_accent_green_color() : [UIColor colorWithWhite:1 alpha:0.6];
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
 }
