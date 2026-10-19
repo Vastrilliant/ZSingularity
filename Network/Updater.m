@@ -4,6 +4,12 @@
 #import <dlfcn.h>
 #import <compression.h>
 #import <sys/stat.h>
+#import <mach-o/loader.h>
+#import <mach-o/fat.h>
+#import <libkern/OSByteOrder.h>
+#import <stdio.h>
+#import <errno.h>
+#import <string.h>
 #import "Version.h"
 
 #pragma mark - ZSDylibUpdater
@@ -11,6 +17,42 @@
 static NSString * const kZSLiveContainerTweaksSubpath = @"Documents/Tweaks";
 static NSString * const kZSInstalledDylibName = @"ZSingularity.dylib";
 static const NSUInteger kZSLiveContainerHomeAscentToDocuments = 3;
+
+static NSString * const kZSTweakFolderName = @"ZSingularity";
+
+static BOOL zs_dylib_command_names_tweak(const struct dylib_command *command) {
+    uint32_t offset = command->dylib.name.offset;
+    if (offset < sizeof(struct dylib_command) || offset >= command->cmdsize) return NO;
+    const char *name = (const char *)command + offset;
+    size_t available = command->cmdsize - offset;
+    size_t length = strnlen(name, available);
+    if (length == available) return NO;
+    NSString *loadedName = [[NSString alloc] initWithBytes:name length:length encoding:NSUTF8StringEncoding];
+    return [loadedName.lastPathComponent isEqualToString:kZSInstalledDylibName];
+}
+
+static void zs_weaken_slice(uint8_t *slice, size_t size, NSInteger *patched, NSInteger *alreadyWeak) {
+    if (size < sizeof(struct mach_header_64)) return;
+    struct mach_header_64 *header = (struct mach_header_64 *)slice;
+    if (header->magic != MH_MAGIC_64) return;
+    size_t offset = sizeof(struct mach_header_64);
+    for (uint32_t i = 0; i < header->ncmds; i++) {
+        if (offset + sizeof(struct load_command) > size) break;
+        struct load_command *command = (struct load_command *)(slice + offset);
+        if (command->cmdsize < sizeof(struct load_command) || offset + command->cmdsize > size) break;
+        if ((command->cmd == LC_LOAD_DYLIB || command->cmd == LC_LOAD_WEAK_DYLIB) &&
+            command->cmdsize >= sizeof(struct dylib_command) &&
+            zs_dylib_command_names_tweak((struct dylib_command *)command)) {
+            if (command->cmd == LC_LOAD_DYLIB) {
+                command->cmd = LC_LOAD_WEAK_DYLIB;
+                (*patched)++;
+            } else {
+                (*alreadyWeak)++;
+            }
+        }
+        offset += command->cmdsize;
+    }
+}
 
 static void zs_self_image_anchor(void) {}
 
@@ -104,6 +146,15 @@ static void zs_self_image_anchor(void) {}
         return;
     }
 
+    if ([self isRunningUnderLiveContainer] && [self isStandaloneInstall]) {
+        NSString *tweaksDir = [self zs_liveContainerTweaksDirectory];
+        NSString *embeddedPath = [self zs_selfImagePath];
+        if (tweaksDir.length > 0 && embeddedPath.length > 0) {
+            [self zs_relocateToTweaksDirectory:tweaksDir embeddedPath:embeddedPath data:data completion:completion];
+            return;
+        }
+    }
+
     NSString *targetPath = [self installedDylibPath];
     if (!targetPath) {
         finish(NO, @"Couldn't locate the installed dylib.");
@@ -111,6 +162,185 @@ static void zs_self_image_anchor(void) {}
     }
 
     [self zs_stageAndReplaceAtPath:targetPath withData:data completion:completion];
+}
+
++ (BOOL)zs_weakenExecutableLoadCommandAtPath:(NSString *)executablePath message:(NSString **)message {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableData *buffer = [NSMutableData dataWithContentsOfFile:executablePath options:0 error:nil];
+    if (buffer.length < sizeof(uint32_t)) {
+        if (message) *message = @"Couldn't read the app executable.";
+        return NO;
+    }
+
+    uint8_t *bytes = buffer.mutableBytes;
+    size_t length = buffer.length;
+    uint32_t rawMagic = *(uint32_t *)bytes;
+    NSInteger patched = 0;
+    NSInteger alreadyWeak = 0;
+
+    if (rawMagic == MH_MAGIC_64) {
+        zs_weaken_slice(bytes, length, &patched, &alreadyWeak);
+    } else if (OSSwapBigToHostInt32(rawMagic) == FAT_MAGIC && length >= sizeof(struct fat_header)) {
+        struct fat_header *fat = (struct fat_header *)bytes;
+        uint32_t archCount = OSSwapBigToHostInt32(fat->nfat_arch);
+        for (uint32_t i = 0; i < archCount; i++) {
+            size_t archOffset = sizeof(struct fat_header) + i * sizeof(struct fat_arch);
+            if (archOffset + sizeof(struct fat_arch) > length) break;
+            struct fat_arch *arch = (struct fat_arch *)(bytes + archOffset);
+            size_t sliceOffset = OSSwapBigToHostInt32(arch->offset);
+            size_t sliceSize = OSSwapBigToHostInt32(arch->size);
+            if (sliceOffset > length || sliceSize > length - sliceOffset) continue;
+            zs_weaken_slice(bytes + sliceOffset, sliceSize, &patched, &alreadyWeak);
+        }
+    } else {
+        if (message) *message = @"Unsupported app executable format.";
+        return NO;
+    }
+
+    if (patched == 0 && alreadyWeak == 0) {
+        if (message) *message = @"The app executable doesn't load the tweak directly, so it was left in place.";
+        return NO;
+    }
+    if (patched == 0) {
+        ZLog(@"[ZSDylibUpdater] executable already loads the tweak weakly");
+        return YES;
+    }
+
+    NSDictionary *attributes = [fm attributesOfItemAtPath:executablePath error:nil];
+    NSString *tempPath = [executablePath stringByAppendingPathExtension:@"zsnew"];
+    NSError *writeError = nil;
+    if (![buffer writeToFile:tempPath options:NSDataWritingAtomic error:&writeError]) {
+        if (message) *message = writeError.localizedDescription ?: @"Couldn't write the patched executable.";
+        return NO;
+    }
+    NSNumber *permissions = attributes[NSFilePosixPermissions];
+    [fm setAttributes:@{NSFilePosixPermissions: permissions ?: @(0755)} ofItemAtPath:tempPath error:nil];
+    if (rename(tempPath.fileSystemRepresentation, executablePath.fileSystemRepresentation) != 0) {
+        [fm removeItemAtPath:tempPath error:nil];
+        if (message) *message = [NSString stringWithFormat:@"Couldn't replace the app executable (errno %d).", errno];
+        return NO;
+    }
+
+    ZLog(@"[ZSDylibUpdater] converted %ld load command(s) for %@ to weak in %@", (long)patched, kZSInstalledDylibName, executablePath.lastPathComponent);
+    return YES;
+}
+
++ (void)zs_relocateToTweaksDirectory:(NSString *)tweaksDir
+                        embeddedPath:(NSString *)embeddedPath
+                                data:(NSData *)data
+                          completion:(void (^)(BOOL success, NSString *message))completion {
+    void (^finish)(BOOL, NSString *) = ^(BOOL success, NSString *message) {
+        dispatch_async(dispatch_get_main_queue(), ^{ if (completion) completion(success, message); });
+    };
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+        NSString *destinationFolder = nil;
+        for (NSString *folder in [fm contentsOfDirectoryAtPath:tweaksDir error:nil]) {
+            NSString *folderPath = [tweaksDir stringByAppendingPathComponent:folder];
+            NSString *candidate = [folderPath stringByAppendingPathComponent:kZSInstalledDylibName];
+            BOOL isDirectory = NO;
+            if ([fm fileExistsAtPath:candidate isDirectory:&isDirectory] && !isDirectory) {
+                destinationFolder = folderPath;
+                break;
+            }
+        }
+        if (!destinationFolder) destinationFolder = [tweaksDir stringByAppendingPathComponent:kZSTweakFolderName];
+
+        NSError *directoryError = nil;
+        if (![fm createDirectoryAtPath:destinationFolder withIntermediateDirectories:YES attributes:nil error:&directoryError]) {
+            finish(NO, directoryError.localizedDescription ?: @"Couldn't create the Tweaks folder.");
+            return;
+        }
+
+        NSString *destinationPath = [destinationFolder stringByAppendingPathComponent:kZSInstalledDylibName];
+        BOOL destinationExisted = [fm fileExistsAtPath:destinationPath];
+        NSString *incomingPath = [destinationPath stringByAppendingPathExtension:@"incoming"];
+        NSError *writeError = nil;
+        if (![data writeToFile:incomingPath options:NSDataWritingAtomic error:&writeError]) {
+            finish(NO, writeError.localizedDescription ?: @"Couldn't write the new dylib to disk.");
+            return;
+        }
+        if (rename(incomingPath.fileSystemRepresentation, destinationPath.fileSystemRepresentation) != 0) {
+            int renameErrno = errno;
+            [fm removeItemAtPath:incomingPath error:nil];
+            finish(NO, [NSString stringWithFormat:@"Couldn't place the new dylib in the Tweaks folder (errno %d).", renameErrno]);
+            return;
+        }
+
+        NSString *executablePath = NSBundle.mainBundle.executablePath;
+        NSString *patchMessage = nil;
+        if (executablePath.length == 0 || ![self zs_weakenExecutableLoadCommandAtPath:executablePath message:&patchMessage]) {
+            if (!destinationExisted) [fm removeItemAtPath:destinationPath error:nil];
+            finish(NO, patchMessage ?: @"Couldn't locate the app executable.");
+            return;
+        }
+
+        NSError *removeError = nil;
+        if (![fm removeItemAtPath:embeddedPath error:&removeError]) {
+            ZLog(@"[ZSDylibUpdater] couldn't remove embedded dylib %@: %@", embeddedPath, removeError);
+        }
+
+        ZLog(@"[ZSDylibUpdater] relocated update to %@", destinationPath);
+        finish(YES, @"Installed to the LiveContainer Tweaks folder. Make sure that tweak folder is enabled for this app, then relaunch.");
+    });
+}
+
++ (BOOL)applyRequiredInfoPlistKeysIfNeeded {
+    if (![self isRunningUnderLiveContainer]) return NO;
+
+    NSString *plistPath = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Info.plist"];
+    NSData *plistData = [NSData dataWithContentsOfFile:plistPath];
+    if (plistData.length == 0) return NO;
+
+    NSPropertyListFormat format = NSPropertyListXMLFormat_v1_0;
+    NSError *parseError = nil;
+    NSMutableDictionary *info = [NSPropertyListSerialization propertyListWithData:plistData
+                                                                          options:NSPropertyListMutableContainers
+                                                                           format:&format
+                                                                            error:&parseError];
+    if (![info isKindOfClass:[NSMutableDictionary class]]) {
+        ZLog(@"[ZSDylibUpdater] couldn't parse Info.plist: %@", parseError);
+        return NO;
+    }
+
+    NSArray<NSString *> *requiredKeys = @[
+        @"CADisableMinimumFrameDurationOnPhone",
+        @"CADisableMinimumFrameDuration",
+        @"LSSupportsGameMode",
+        @"LSSupportsOpeningDocumentsInPlace",
+        @"UIFileSharingEnabled",
+    ];
+
+    NSMutableArray<NSString *> *changedKeys = [NSMutableArray array];
+    for (NSString *key in requiredKeys) {
+        id value = info[key];
+        BOOL enabled = [value isKindOfClass:[NSNumber class]] && [value boolValue];
+        if (enabled) continue;
+        info[key] = @YES;
+        [changedKeys addObject:key];
+    }
+    if (changedKeys.count == 0) return NO;
+
+    NSError *serializeError = nil;
+    NSData *updatedData = [NSPropertyListSerialization dataWithPropertyList:info
+                                                                     format:format
+                                                                    options:0
+                                                                      error:&serializeError];
+    if (updatedData.length == 0) {
+        ZLog(@"[ZSDylibUpdater] couldn't serialize Info.plist: %@", serializeError);
+        return NO;
+    }
+
+    NSError *writeError = nil;
+    if (![updatedData writeToFile:plistPath options:NSDataWritingAtomic error:&writeError]) {
+        ZLog(@"[ZSDylibUpdater] couldn't write Info.plist: %@", writeError);
+        return NO;
+    }
+
+    ZLog(@"[ZSDylibUpdater] wrote missing Info.plist keys: %@", [changedKeys componentsJoinedByString:@", "]);
+    return YES;
 }
 
 + (nullable NSString *)selfLoadedDylibPath {

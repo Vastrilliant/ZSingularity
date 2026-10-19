@@ -16,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (nullable NSString *)selfLoadedDylibPath;
 
++ (BOOL)applyRequiredInfoPlistKeysIfNeeded;
+
 @end
 
 extern NSString * const kZSUpdateRepoOwner;

@@ -3134,6 +3134,26 @@ static const CGFloat kZSPanelSectionBuildHeadroom = 20.0;
 
 #pragma mark - Startup
 
+static UIViewController *zs_topmost_presenter(void) {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    return presenter;
+}
+
+static void zs_prompt_info_plist_restart_if_needed(void) {
+    if (![ZSDylibUpdater applyRequiredInfoPlistKeysIfNeeded]) return;
+
+    UIViewController *presenter = zs_topmost_presenter();
+    if (!presenter) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Restart Required"
+        message:@"ZSingularity updated this app's Info.plist with settings it needs (ProMotion, Game Mode, file access). Restart the app for them to take effect."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Later" style:UIAlertActionStyleCancel handler:nil]];
+    zs_add_restart_action(alert);
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
 __attribute__((constructor))
 static void graphics_debug_overlay_init(void) {
     [[UserInterface shared] zs_bootstrapSyslogCaptureIfNeeded];
@@ -3144,6 +3164,7 @@ static void graphics_debug_overlay_init(void) {
         if ([UserInterface shared].installed) {
             zs_dump_glass_effect_instance_info();
             [timer invalidate];
+            dispatch_async(dispatch_get_main_queue(), ^{ zs_prompt_info_plist_restart_if_needed(); });
         }
     }];
     [[NSRunLoop mainRunLoop] addTimer:installTimer forMode:NSRunLoopCommonModes];
