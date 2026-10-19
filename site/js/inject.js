@@ -14,6 +14,8 @@ const TRUE_KEYS = [
 ];
 const LOCATION_KEYS = ["NSLocationWhenInUseUsageDescription", "NSLocationAlwaysAndWhenInUseUsageDescription"];
 const LOCATION_TEXT = "Used by the Keep Alive developer tool to prevent suspension during testing.";
+const SIGNATURE_KEY = "ZSInjectionSignature";
+const SIGNATURE_VALUE = "ZSPortal.v1";
 const DYLIB_NAME = "ZSingularity.dylib";
 const DYLIB_REF = "@executable_path/Frameworks/" + DYLIB_NAME;
 const UNITY_FRAMEWORK = "/Frameworks/UnityFramework.framework/UnityFramework";
@@ -54,6 +56,8 @@ export async function inject(ipa, payload, opts = {}) {
     log("Info.plist " + k + ": " + (root.get(k) === undefined ? "(unset)" : "(was set)") + " -> set");
     root.set(k, LOCATION_TEXT);
   }
+  log("Info.plist " + SIGNATURE_KEY + ": " + JSON.stringify(root.get(SIGNATURE_KEY)) + " -> " + SIGNATURE_VALUE);
+  root.set(SIGNATURE_KEY, SIGNATURE_VALUE);
   log("Info.plist UIBackgroundModes: " + JSON.stringify(root.get("UIBackgroundModes")) + " -> [\"location\"]");
   root.set("UIBackgroundModes", ["location"]);
   const plistBytes = serializePlist(root, parsed.format);

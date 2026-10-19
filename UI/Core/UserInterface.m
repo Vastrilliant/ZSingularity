@@ -56,7 +56,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
     [ZCrashLogger reinstallHandlersIfNeeded];
     if (![self zs_presentCrashReportIfNeeded]) {
-        [self zs_presentTutorialIfNeeded];
+        [self zs_presentStartupPopupsIfNeeded];
     }
     [self zs_refreshMetalTabs];
     [[ZSMetalTabs shared] setRamHudVisible:zs_ram_hud_enabled()];
@@ -80,7 +80,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
 - (void)zs_handleOpenPanelGesture:(UISwipeGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateRecognized) return;
-    if (self.crashReportPresented) return;
+    if (self.crashReportPresented || self.warningPresented) return;
     if (self.tutorialPresented) {
         [self zs_flashTutorialGestureWarning];
         return;
@@ -601,6 +601,197 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     self.crashReport = nil;
     self.crashReportPresented = NO;
 
+    [self zs_presentStartupPopupsIfNeeded];
+    [self zs_refreshMetalTabs];
+
+    [UIView animateWithDuration:0.18 animations:^{
+        panel.alpha = 0;
+        panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:^(BOOL finished) {
+        [overlay removeFromSuperview];
+    }];
+}
+
+static BOOL g_zsInjectionWarningShownThisLaunch = NO;
+
+- (void)zs_presentStartupPopupsIfNeeded {
+    if ([self zs_presentInjectionWarningIfNeeded]) return;
+    [self zs_presentTutorialIfNeeded];
+}
+
+- (BOOL)zs_presentInjectionWarningIfNeeded {
+    if (self.warningPresented) return YES;
+    if (g_zsInjectionWarningShownThisLaunch || zs_injected_via_portal() || zs_injection_warning_suppressed()) return NO;
+
+    UIView *unityView = zs_ui_host_view();
+    if (!unityView) return NO;
+
+    g_zsInjectionWarningShownThisLaunch = YES;
+    self.warningPresented = YES;
+
+    UIView *overlay = [[UIView alloc] initWithFrame:unityView.bounds];
+    overlay.backgroundColor = UIColor.clearColor;
+    overlay.opaque = NO;
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.userInteractionEnabled = YES;
+    [unityView addSubview:overlay];
+    zs_mark_host_owned(overlay);
+    self.warningOverlay = overlay;
+    zs_force_dark(overlay);
+
+    UIView *panelHost;
+    UIView *panel;
+    if (zs_has_liquid_glass()) {
+        UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect_dark(NO)];
+        glass.translatesAutoresizingMaskIntoConstraints = NO;
+        glass.userInteractionEnabled = YES;
+        zs_configure_glass_corners(glass, 24, NO);
+        glass.layer.borderWidth = 1;
+        glass.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        panel = glass;
+        panelHost = glass.contentView;
+    } else {
+        UIView *plain = [[UIView alloc] init];
+        plain.translatesAutoresizingMaskIntoConstraints = NO;
+        plain.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.96];
+        plain.layer.cornerRadius = 24;
+        plain.layer.cornerCurve = kCACornerCurveContinuous;
+        plain.layer.borderWidth = 1;
+        plain.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.14].CGColor;
+        plain.clipsToBounds = YES;
+        panel = plain;
+        panelHost = plain;
+    }
+
+    [overlay addSubview:panel];
+    self.warningPanel = panel;
+
+    UILabel *header = [[UILabel alloc] init];
+    header.translatesAutoresizingMaskIntoConstraints = NO;
+    header.textAlignment = NSTextAlignmentLeft;
+    header.attributedText = zs_make_title_string(20.5, 27.5);
+    [panelHost addSubview:header];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = @"Warning: Reduced Functionality";
+    titleLabel.font = zs_mono_font(16, UIFontWeightBold);
+    titleLabel.textColor = UIColor.systemOrangeColor;
+    titleLabel.numberOfLines = 1;
+    titleLabel.adjustsFontSizeToFitWidth = YES;
+    titleLabel.minimumScaleFactor = 0.6;
+    [panelHost addSubview:titleLabel];
+
+    NSDictionary *messageAttributes = @{
+        NSFontAttributeName: zs_mono_font(12, UIFontWeightRegular),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.72]
+    };
+    NSMutableAttributedString *messageText = [[NSMutableAttributedString alloc] initWithString:@"It looks like ZSingularity was injected into the app through unsupported means. This will reduce the mod\u2019s functionality, please inject it through " attributes:messageAttributes];
+    [messageText appendAttributedString:[[NSAttributedString alloc] initWithString:@"the web portal" attributes:@{
+        NSFontAttributeName: zs_mono_font(12, UIFontWeightBold),
+        NSLinkAttributeName: [NSURL URLWithString:kZSPortalURL],
+        NSBackgroundColorAttributeName: [zs_accent_green_color() colorWithAlphaComponent:0.18]
+    }]];
+    [messageText appendAttributedString:[[NSAttributedString alloc] initWithString:@".\n\nThe following features are unavailable:\n\u2022 Extend Ram Usage\n\u2022 Suppress IAP error popup\n\u2022 Enable Custom Localize Manager\n\u2022 Higher framerate for ProMotion devices\n\u2022 Exposed Documents" attributes:messageAttributes]];
+
+    UITextView *message = [[UITextView alloc] init];
+    message.translatesAutoresizingMaskIntoConstraints = NO;
+    message.tag = kZSWarningMessageTextViewTag;
+    message.backgroundColor = UIColor.clearColor;
+    message.opaque = NO;
+    message.editable = NO;
+    message.selectable = YES;
+    message.scrollEnabled = YES;
+    message.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    message.textContainerInset = UIEdgeInsetsZero;
+    message.textContainer.lineFragmentPadding = 0;
+    message.delegate = self;
+    message.linkTextAttributes = @{
+        NSForegroundColorAttributeName: zs_accent_green_color(),
+        NSUnderlineStyleAttributeName: @(NSUnderlineStyleSingle)
+    };
+    message.attributedText = messageText;
+    [panelHost addSubview:message];
+
+    UIButton *checkbox = [UIButton buttonWithType:UIButtonTypeSystem];
+    checkbox.translatesAutoresizingMaskIntoConstraints = NO;
+    checkbox.tintColor = zs_accent_green_color();
+    checkbox.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
+    UIImageSymbolConfiguration *boxConfig = [UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightRegular];
+    [checkbox setImage:[UIImage systemImageNamed:@"square" withConfiguration:boxConfig] forState:UIControlStateNormal];
+    [checkbox setImage:[UIImage systemImageNamed:@"checkmark.square.fill" withConfiguration:boxConfig] forState:UIControlStateSelected];
+    [checkbox setTitle:@" Don\u2019t show again" forState:UIControlStateNormal];
+    [checkbox setTitleColor:[UIColor colorWithWhite:1 alpha:0.85] forState:UIControlStateNormal];
+    checkbox.titleLabel.font = zs_mono_font(12, UIFontWeightMedium);
+    [checkbox addTarget:self action:@selector(zs_warningCheckboxTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [panelHost addSubview:checkbox];
+    self.warningCheckbox = checkbox;
+
+    UIButton *okButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    okButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_solid_glass_with_font(okButton, @"OK", zs_accent_green_color(), zs_mono_font(18, UIFontWeightBold));
+    [okButton addTarget:self action:@selector(zs_warningOKTapped) forControlEvents:UIControlEventTouchUpInside];
+    [panelHost addSubview:okButton];
+
+    CGFloat panelWidth = MIN(440.0, MAX(300.0, unityView.bounds.size.width - 32.0));
+    CGFloat panelHeight = MIN(440.0, MAX(300.0, unityView.bounds.size.height - 48.0));
+
+    [NSLayoutConstraint activateConstraints:@[
+        [panel.centerXAnchor constraintEqualToAnchor:overlay.centerXAnchor],
+        [panel.centerYAnchor constraintEqualToAnchor:overlay.centerYAnchor],
+        [panel.widthAnchor constraintEqualToConstant:panelWidth],
+        [panel.heightAnchor constraintEqualToConstant:panelHeight],
+
+        [header.topAnchor constraintEqualToAnchor:panelHost.topAnchor constant:18],
+        [header.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:20],
+        [header.trailingAnchor constraintLessThanOrEqualToAnchor:panelHost.trailingAnchor constant:-20],
+        [header.heightAnchor constraintEqualToConstant:34],
+
+        [titleLabel.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [titleLabel.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [titleLabel.topAnchor constraintEqualToAnchor:header.bottomAnchor constant:18],
+
+        [message.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [message.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [message.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:14],
+        [message.bottomAnchor constraintEqualToAnchor:checkbox.topAnchor constant:-10],
+
+        [checkbox.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [checkbox.trailingAnchor constraintLessThanOrEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [checkbox.bottomAnchor constraintEqualToAnchor:okButton.topAnchor constant:-10],
+        [checkbox.heightAnchor constraintEqualToConstant:28],
+
+        [okButton.leadingAnchor constraintEqualToAnchor:panelHost.leadingAnchor constant:22],
+        [okButton.trailingAnchor constraintEqualToAnchor:panelHost.trailingAnchor constant:-22],
+        [okButton.bottomAnchor constraintEqualToAnchor:panelHost.bottomAnchor constant:-20],
+        [okButton.heightAnchor constraintEqualToConstant:46],
+    ]];
+
+    panel.alpha = 0;
+    panel.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    [UIView animateWithDuration:0.22 animations:^{
+        panel.alpha = 1;
+        panel.transform = CGAffineTransformIdentity;
+    }];
+
+    return YES;
+}
+
+- (void)zs_warningCheckboxTapped:(UIButton *)sender {
+    sender.selected = !sender.selected;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+}
+
+- (void)zs_warningOKTapped {
+    if (self.warningCheckbox.selected) zs_set_injection_warning_suppressed(YES);
+    self.warningCheckbox = nil;
+    UIView *panel = self.warningPanel;
+    UIView *overlay = self.warningOverlay;
+    self.warningPanel = nil;
+    self.warningOverlay = nil;
+    self.warningPresented = NO;
+
     [self zs_presentTutorialIfNeeded];
     [self zs_refreshMetalTabs];
 
@@ -610,6 +801,11 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     } completion:^(BOOL finished) {
         [overlay removeFromSuperview];
     }];
+}
+
+- (void)zs_layoutInjectionWarningForWindow:(UIView *)unityView {
+    if (!self.warningOverlay || !self.warningPanel) return;
+    self.warningOverlay.frame = unityView.bounds;
 }
 
 - (void)openPanel {

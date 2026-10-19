@@ -133,6 +133,26 @@ void zs_set_enkephalin_disabled_by_user(BOOL disabled) {
 
 NSString * const kZSSocialGitHubURL = @"https://github.com/Vastrilliant/ZSingularity";
 NSString * const kZSSocialDiscordURL = @"https://discord.gg/nRmztE2unw";
+NSString * const kZSPortalURL = @"https://vastrilliant.github.io/ZSingularity/";
+
+static NSString * const kZSInjectionWarningSettingsSection = @"injectionWarning";
+static NSString * const kZSInjectionWarningSuppressedKey = @"suppressed";
+
+BOOL zs_injection_warning_suppressed(void) {
+    NSDictionary *section = zs_settings_section(kZSInjectionWarningSettingsSection);
+    return [section[kZSInjectionWarningSuppressedKey] boolValue];
+}
+
+void zs_set_injection_warning_suppressed(BOOL suppressed) {
+    NSMutableDictionary *section = [zs_settings_section(kZSInjectionWarningSettingsSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSInjectionWarningSuppressedKey] = @(suppressed);
+    zs_write_settings_section(kZSInjectionWarningSettingsSection, section);
+}
+
+BOOL zs_injected_via_portal(void) {
+    id value = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"ZSInjectionSignature"];
+    return [value isKindOfClass:[NSString class]] && [(NSString *)value isEqualToString:@"ZSPortal.v1"];
+}
 
 void zs_style_social_text_button(UIButton *button, NSString *text) {
     UIFont *baseFont = zs_mono_font(kZSSubtitleFontSize, UIFontWeightMedium);

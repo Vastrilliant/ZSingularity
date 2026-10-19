@@ -36,6 +36,7 @@ static const CGFloat kZSSubtitleFontSize = 10;
 static const float kDefaultValueEpsilon = 0.0005f;
 
 static const NSInteger kZSCrashMessageTextViewTag = 0x5A435248;
+static const NSInteger kZSWarningMessageTextViewTag = 0x5A57524E;
 
 static const NSInteger kZSDeveloperUnlockTapCount = 10;
 static const CFTimeInterval kZSDeveloperUnlockTapInterval = 0.6;
@@ -130,6 +131,10 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) UIView *crashPanel;
 @property (nonatomic, assign) BOOL crashReportPresented;
 @property (nonatomic, copy) NSDictionary *crashReport;
+@property (nonatomic, strong) UIView *warningOverlay;
+@property (nonatomic, strong) UIView *warningPanel;
+@property (nonatomic, assign) BOOL warningPresented;
+@property (nonatomic, strong) UIButton *warningCheckbox;
 
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
 @property (nonatomic, strong) UIVisualEffectView *panelBlurOverlay;
@@ -548,6 +553,11 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 - (void)zs_layoutTutorialForWindow:(UIView *)unityView;
 - (void)zs_layoutCrashReportForWindow:(UIView *)unityView;
 - (BOOL)zs_presentCrashReportIfNeeded;
+- (void)zs_presentStartupPopupsIfNeeded;
+- (BOOL)zs_presentInjectionWarningIfNeeded;
+- (void)zs_warningOKTapped;
+- (void)zs_warningCheckboxTapped:(UIButton *)sender;
+- (void)zs_layoutInjectionWarningForWindow:(UIView *)unityView;
 - (void)zs_crashSaveTapped:(UIButton *)sender;
 - (void)zs_crashOKTapped;
 - (void)openPanel;

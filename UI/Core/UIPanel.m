@@ -652,7 +652,7 @@ static NSArray<NSArray<NSString *> *> *zs_section_index_entries(void) {
 
 - (BOOL)textView:(UITextView *)textView shouldInteractWithURL:(NSURL *)URL
          inRange:(NSRange)characterRange interaction:(UITextItemInteraction)interaction {
-    if (textView.tag == kZSCrashMessageTextViewTag) {
+    if (textView.tag == kZSCrashMessageTextViewTag || textView.tag == kZSWarningMessageTextViewTag) {
         [[UIApplication sharedApplication] openURL:URL options:@{} completionHandler:nil];
         return NO;
     }
@@ -1250,7 +1250,7 @@ static void zs_configure_glass_corners_flat_right(UIView *view, CGFloat leftRadi
     NSArray<NSString *> *keys = [self zs_pinnedActionKeys];
     BOOL handlePinned = [pinnedKeys containsObject:kZSMTHandleKey];
     BOOL hasPinnedItems = handlePinned || keys.count > 0;
-    BOOL show = unityView && self.installed && !self.panelOpen && (allowHierarchy || !self.glassContainer) && !self.tutorialPresented && !self.crashReportPresented && hasPinnedItems;
+    BOOL show = unityView && self.installed && !self.panelOpen && (allowHierarchy || !self.glassContainer) && !self.tutorialPresented && !self.crashReportPresented && !self.warningPresented && hasPinnedItems;
     if (!show) {
         [tabs setVisible:NO snap:NO];
         return;
@@ -1857,6 +1857,7 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
     [self zs_dismissPinMenuAnimated:NO delay:0 completion:nil];
     [self zs_layoutTutorialForWindow:unityView];
     [self zs_layoutCrashReportForWindow:unityView];
+    [self zs_layoutInjectionWarningForWindow:unityView];
     if (!self.panel) return;
     [self layoutPanelForWindow:unityView];
 }
