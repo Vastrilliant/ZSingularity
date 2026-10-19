@@ -7,8 +7,6 @@
 - (void)assetExplorerTapped {
     UIImpactFeedbackGenerator *tapHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [tapHaptic impactOccurred];
-    self.modsLibraryBrowseMode = NO;
-    self.modsLibrarySelectedEntry = nil;
     [self zs_openAssetExplorerFullScreenPanel];
 }
 
@@ -924,6 +922,7 @@
         [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:statusLabel.leadingAnchor constant:-10],
 
         [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [statusLabel.trailingAnchor constraintEqualToAnchor:controlsStack.leadingAnchor constant:-10],
         [statusLabel.widthAnchor constraintLessThanOrEqualToConstant:180],
 
         [tableView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
@@ -937,10 +936,6 @@
         [thumbCollection.bottomAnchor constraintEqualToAnchor:tableView.bottomAnchor],
     ]];
 
-    self.assetExplorerStatusTrailingToControls = [statusLabel.trailingAnchor constraintEqualToAnchor:controlsStack.leadingAnchor constant:-10];
-    self.assetExplorerStatusTrailingToControls.active = YES;
-
-    [self zs_modsLibraryBuildHeaderControls];
     [self zs_assetExplorerBuildHubAndFMODViews];
 }
 
@@ -1087,16 +1082,13 @@
     if (self.memoryFullScreenOpen) {
         [self zs_endMemoryAnalysis];
     }
+    [self zs_endDumperSession];
 
     self.docsActiveKey = nil;
     self.assetExplorerFullScreenOpen = YES;
     self.docsPanelOpen = YES;
     [self positionPanelAnimated:!self.extendedCoverEntering];
-    if (self.modsLibraryBrowseMode) {
-        [self zs_assetExplorerShowModLibrary];
-    } else {
-        [self zs_assetExplorerShowHub];
-    }
+    [self zs_assetExplorerShowHub];
 }
 
 - (void)zs_endAssetExplorerSession {
@@ -1110,12 +1102,6 @@
     self.assetExplorerCloseButton.hidden = NO;
     self.assetExplorerBackButton.hidden = YES;
     self.assetExplorerFullScreenOverlay.hidden = YES;
-    self.modsLibraryBrowseMode = NO;
-    self.modsLibraryBrowseEntries = @[];
-    self.modsLibraryDisplayedEntries = @[];
-    self.modsLibraryDisplayedFolders = @[];
-    self.modsLibrarySelectedFolder = nil;
-    self.modsLibrarySelectedEntry = nil;
     self.assetExplorerFMODGeneration += 1;
     [ZSAssetExplorer unloadAllBundles];
     [self.assetExplorerThumbSource reset];
@@ -1819,26 +1805,6 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)zs_assetExplorerBackTapped {
-    if (self.modsLibraryBrowseMode) {
-        if (!self.modsLibrarySelectedEntry) {
-            [self zs_modsLibraryNavigateUpFromFolder];
-            return;
-        }
-        self.modsLibrarySelectedEntry = nil;
-        self.assetExplorerTextView.hidden = YES;
-        self.assetExplorerTableView.hidden = NO;
-        self.assetExplorerCloseButton.hidden = NO;
-        self.assetExplorerBackButton.hidden = YES;
-        self.assetExplorerTitleLabel.hidden = NO;
-        self.assetExplorerTitleLabel.text = @"Mod Library";
-        self.assetExplorerStatusLabel.hidden = NO;
-        self.assetExplorerTextureCaptionLabel.hidden = YES;
-        [self zs_assetExplorerSyncControls];
-        [self zs_assetExplorerRefreshListResettingScroll:NO];
-        UIImpactFeedbackGenerator *libraryHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
-        [libraryHaptic impactOccurred];
-        return;
-    }
     if (self.assetExplorerLocalizeMode) {
         [self zs_assetExplorerLocalizeBackTapped];
         return;
@@ -2242,10 +2208,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerRefreshListResettingScroll:(BOOL)resetScroll {
     NSString *query = [self.assetExplorerSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
-    if (self.modsLibraryBrowseMode) {
-        [self zs_modsLibraryRefreshListResettingScroll:resetScroll query:query];
-        return;
-    }
     NSUInteger shown = 0;
     NSUInteger total = 0;
     NSString *noun = nil;
@@ -2410,17 +2372,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerSyncControls {
     [self zs_assetExplorerUpdateThumbnailGrid];
-    [self zs_modsLibrarySyncHeaderControls];
-    if (self.modsLibraryBrowseMode) {
-        BOOL detail = self.modsLibrarySelectedEntry != nil;
-        self.assetExplorerSearchContainer.hidden = detail;
-        self.assetExplorerControlsStack.hidden = YES;
-        self.assetExplorerFilterButton.hidden = YES;
-        self.assetExplorerSortButton.hidden = YES;
-        self.assetExplorerShareButton.hidden = YES;
-        self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
-        return;
-    }
     if (self.assetExplorerLocalizeMode) {
         [self zs_assetExplorerLocalizeSyncControls];
         return;
@@ -2965,9 +2916,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
-        return self.modsLibrarySelectedEntry ? 0 : 1;
-    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return MAX((NSInteger)zs_ae_section_kinds(bookmarked, modded, total).count, 1);
@@ -2977,10 +2925,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
-        if (self.modsLibrarySelectedEntry) return 0;
-        return (NSInteger)(self.modsLibraryDisplayedFolders.count + self.modsLibraryDisplayedEntries.count);
-    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
@@ -2996,7 +2940,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return CGFLOAT_MIN;
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return total == 0 ? CGFLOAT_MIN : 26;
@@ -3006,7 +2949,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return nil;
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
@@ -3018,7 +2960,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return [self zs_modsLibraryCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONCellForTableView:tableView indexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODCellForTableView:tableView indexPath:indexPath];
@@ -3094,7 +3035,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point API_AVAILABLE(ios(13.0)) {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) return [self zs_modsLibraryContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeJSONTableView) return [self zs_assetExplorerLocalizeJSONContextMenuForIndexPath:indexPath];
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODContextMenuForIndexPath:indexPath];
@@ -3127,9 +3067,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
-        return [self zs_modsLibraryDeleteSwipeForIndexPath:indexPath];
-    }
     if (tableView == self.assetExplorerFMODTableView) return [self zs_assetExplorerFMODSwipeForIndexPath:indexPath];
     if (tableView == self.assetExplorerLocalizeTableView) return [self zs_assetExplorerLocalizeSwipeForIndexPath:indexPath];
     if (tableView != self.assetExplorerTableView || self.assetExplorerHubVisible) return nil;
@@ -3146,18 +3083,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                                          bookmarkSet:[self zs_assetExplorerBookmarks]];
 }
 
-- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView leadingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
-        return [self zs_modsLibraryRemarkSwipeForIndexPath:indexPath];
-    }
-    return nil;
-}
-
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
-        [self zs_modsLibrarySelectRowAtIndexPath:indexPath inTableView:tableView];
-        return;
-    }
     if (tableView == self.assetExplorerLocalizeTableView) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
         [self zs_assetExplorerLocalizeSelectRow:[self zs_assetExplorerListIndexForIndexPath:indexPath inTableView:tableView]];
@@ -3911,7 +3837,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerLocalizeDisplayedEntries = @[];
     self.assetExplorerLocalizeOffsets = nil;
     self.assetExplorerLocalizePendingOffset = nil;
-    self.assetExplorerLocalizePendingOpenFilePath = nil;
     self.assetExplorerLocalizeFileData = nil;
     self.assetExplorerLocalizeRootNode = nil;
     self.assetExplorerLocalizeVisibleRows = nil;
@@ -4113,16 +4038,6 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 [table layoutIfNeeded];
                 CGFloat maxOffset = MAX(0, table.contentSize.height - table.bounds.size.height);
                 [table setContentOffset:CGPointMake(0, MIN(pending.doubleValue, maxOffset)) animated:NO];
-            }
-            NSString *pendingFile = strongSelf.assetExplorerLocalizePendingOpenFilePath;
-            if (pendingFile.length > 0) {
-                strongSelf.assetExplorerLocalizePendingOpenFilePath = nil;
-                for (NSDictionary *candidate in entries) {
-                    if (![candidate[@"dir"] boolValue] && [candidate[@"path"] isEqualToString:pendingFile]) {
-                        [strongSelf zs_assetExplorerLocalizeOpenFile:candidate];
-                        break;
-                    }
-                }
             }
         });
     });

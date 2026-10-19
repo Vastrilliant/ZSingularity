@@ -132,17 +132,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, copy) NSDictionary *crashReport;
 
 @property (nonatomic, strong) UIVisualEffectView *docsPanelGlass;
-@property (nonatomic, strong) UIVisualEffectView *panelBlurOverlay;
-@property (nonatomic, strong) UIViewPropertyAnimator *panelBlurAnimator;
-@property (nonatomic, strong) CADisplayLink *panelBlurLink;
-@property (nonatomic, assign) BOOL panelBlurActive;
-@property (nonatomic, assign) CGFloat panelBlurProgress;
-@property (nonatomic, assign) CGFloat panelBlurFrom;
-@property (nonatomic, assign) CGFloat panelBlurTo;
-@property (nonatomic, assign) CFTimeInterval panelBlurStartTime;
-@property (nonatomic, assign) NSTimeInterval panelBlurDuration;
-@property (nonatomic, assign) NSUInteger panelBlurToken;
-@property (nonatomic, assign) NSUInteger panelBlurGlassToken;
 @property (nonatomic, strong) UIView *docsPanel;
 @property (nonatomic, strong) UIView *docsContentOverlay;
 @property (nonatomic, strong) UIView *extendedContentClip;
@@ -206,26 +195,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) NSMutableArray<NSString *> *loadModsSummaryLines;
 
 @property (nonatomic, strong) UIStackView *modsLibraryStack;
-@property (nonatomic, assign) BOOL modsLibraryBrowseMode;
-@property (nonatomic, strong) NSArray<ModAssetLibraryEntry *> *modsLibraryBrowseEntries;
-@property (nonatomic, strong) NSArray<ModAssetLibraryEntry *> *modsLibraryDisplayedEntries;
-@property (nonatomic, strong) NSArray<NSDictionary<NSString *, id> *> *modsLibraryDisplayedFolders;
-@property (nonatomic, copy) NSString *modsLibrarySelectedFolder;
-@property (nonatomic, strong) ModAssetLibraryEntry *modsLibrarySelectedEntry;
 @property (nonatomic, strong) ZSRow *manifestZeroingRow;
 @property (nonatomic, strong) NSMutableSet<NSString *> *modsLibraryExpandedFolders;
 @property (nonatomic, strong) NSMutableSet<NSString *> *modsLibraryExpandedInfoEntries;
-@property (nonatomic, strong) ZSGlassControlRow *modsLibraryControlsRow;
-@property (nonatomic, strong) UIButton *modsLibraryAddButton;
-@property (nonatomic, strong) UIButton *modsLibrarySortButton;
-@property (nonatomic, strong) UIButton *modsLibraryViewButton;
-@property (nonatomic, assign) NSInteger modsLibrarySortMode;
-@property (nonatomic, assign) BOOL modsLibrarySortDescending;
-@property (nonatomic, assign) BOOL modsLibraryIconsMode;
-@property (nonatomic, strong) UICollectionView *modsLibraryIconsCollectionView;
-@property (nonatomic, strong) id modsLibraryIconsSource;
-@property (nonatomic, strong) NSLayoutConstraint *assetExplorerStatusTrailingToControls;
-@property (nonatomic, strong) NSLayoutConstraint *assetExplorerStatusTrailingToModsRow;
 
 @property (nonatomic, weak) UIDocumentPickerViewController *libraryImportPicker;
 @property (nonatomic, copy) NSString *libraryImportTargetFolder;
@@ -318,6 +290,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, assign) BOOL memoryFullScreenOpen;
 @property (nonatomic, assign) BOOL assetExplorerFullScreenOpen;
 @property (nonatomic, strong) UIView *assetExplorerFullScreenOverlay;
+@property (nonatomic, assign) BOOL dumperFullScreenOpen;
+@property (nonatomic, strong) UIView *dumperFullScreenOverlay;
+@property (nonatomic, strong) NSMutableDictionary *dumperUI;
 @property (nonatomic, strong) UIView *selectModeOverlay;
 @property (nonatomic, strong) UIView *selectModeHeader;
 @property (nonatomic, strong) UISegmentedControl *selectModeKindControl;
@@ -454,7 +429,6 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) NSArray<NSDictionary *> *assetExplorerLocalizeDisplayedEntries;
 @property (nonatomic, strong) NSMutableArray<NSNumber *> *assetExplorerLocalizeOffsets;
 @property (nonatomic, strong) NSNumber *assetExplorerLocalizePendingOffset;
-@property (nonatomic, copy) NSString *assetExplorerLocalizePendingOpenFilePath;
 @property (nonatomic, strong) NSData *assetExplorerLocalizeFileData;
 @property (nonatomic, strong) ZSLocJSONNode *assetExplorerLocalizeRootNode;
 @property (nonatomic, strong) NSMutableArray<ZSLocJSONNode *> *assetExplorerLocalizeVisibleRows;
@@ -577,3 +551,4 @@ UIImage *zs_section_collapse_chevron_image(BOOL collapsed);
 #import "UIMods.h"
 #import "UIDiagnostics.h"
 #import "UIAssetExplorer.h"
+#import "UIDumper.h"
