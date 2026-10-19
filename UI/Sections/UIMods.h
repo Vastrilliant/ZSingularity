@@ -47,6 +47,10 @@
 - (void)zs_refreshManifestZeroingRow;
 - (void)zs_rebuildModsLibrary;
 - (void)zs_openModLibraryTapped;
+- (UIView *)zs_makeStoredBackupsCard;
+- (void)zs_refreshStoredBackupsSizeForCard:(UIView *)card;
+- (void)zs_storedBackupsToggleTapped:(UIButton *)sender;
+- (void)zs_storedBackupsConfirmTapped:(UIButton *)sender;
 - (void)zs_openModLibraryInFolder:(NSString *)folderName;
 - (void)zs_modsLibraryPerformOptionNamed:(NSString *)title forEntry:(nullable ModAssetLibraryEntry *)entry folderName:(NSString *)folderName;
 - (void)zs_modsLibraryFolderRowTapped:(UITapGestureRecognizer *)gesture;

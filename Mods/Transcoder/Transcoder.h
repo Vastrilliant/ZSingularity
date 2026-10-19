@@ -86,6 +86,7 @@ typedef NS_ENUM(NSInteger, ZTranscoderInstallerErrorCode) {
 + (NSInteger)restoreAllBackedUpBundlesWithError:(NSError **)error;
 + (NSInteger)restoreAllBackedUpBundlesForce:(BOOL)force error:(NSError **)error;
 + (BOOL)cacheOriginalBackForStockBundleURL:(NSURL *)stockBundleURL error:(NSError **)error;
++ (BOOL)discardBackupForStockBundleURL:(NSURL *)stockBundleURL;
 + (void)reconcileModdedBundles;
 @end
 

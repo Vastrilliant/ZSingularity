@@ -97,6 +97,39 @@ static NSString * const kZSModsFontsDirectoryName = @"Fonts";
     }
 }
 
++ (unsigned long long)modsBackupsByteSize {
+    NSString *backups = [self modsBackupsDirectory];
+    if (backups.length == 0) return 0;
+    return [LocalizationTransplant totalByteSizeAtPath:backups];
+}
+
++ (BOOL)deleteAllStoredBackupsWithError:(NSError **)error {
+    NSString *backups = [self modsBackupsDirectory];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (backups.length == 0 || ![fm fileExistsAtPath:backups]) return YES;
+
+    NSError *listErr = nil;
+    NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:backups error:&listErr];
+    if (!children) {
+        if (error) *error = listErr;
+        return NO;
+    }
+
+    NSError *firstError = nil;
+    for (NSString *child in children) {
+        NSError *removeErr = nil;
+        if (![fm removeItemAtPath:[backups stringByAppendingPathComponent:child] error:&removeErr] && !firstError) {
+            firstError = removeErr;
+        }
+    }
+    if (firstError) {
+        if (error) *error = firstError;
+        return NO;
+    }
+    ZLog(@"[ZSModsPaths] deleted all stored backups at \"%@\"", backups);
+    return YES;
+}
+
 + (ZSFontKind)fontKindForFileName:(NSString *)fileName {
     NSString *ext = fileName.pathExtension.lowercaseString;
     if ([ext isEqualToString:@"ttf"]) return ZSFontKindTrueType;
@@ -338,6 +371,24 @@ static NSString * const kBTMobileBuildsRelativePath = @"Assets/Sound/FMODBuilds/
     }
 
     return [self bt_restoreOneBackupEntry:backupEntryName inBackupDir:backupDir mobileDir:mobileDir force:NO] ? 1 : 0;
+}
+
++ (BOOL)discardBackupForBankNamed:(NSString *)name {
+    if (name.length == 0) return NO;
+    NSString *mobileDir = [self mobileFMODBuildsDirectory];
+    NSString *backupDir = [self bankBackupDirectory];
+    if (!mobileDir || !backupDir) return NO;
+
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *backupPath = [backupDir stringByAppendingPathComponent:[name stringByAppendingString:kBTBackupSuffix]];
+    if (![fm fileExistsAtPath:backupPath]) return NO;
+
+    NSString *livePath = [mobileDir stringByAppendingPathComponent:name];
+    if (![self bt_fileAtPath:livePath hasIdenticalBytesToFileAtPath:backupPath]) return NO;
+
+    if (![fm removeItemAtPath:backupPath error:nil]) return NO;
+    ZLog(@"[BankTransplant] discarded the stored backup for %@", name);
+    return YES;
 }
 
 + (NSArray<NSString *> *)documentsRelativePathsOfSwappedBanks {
@@ -1138,6 +1189,36 @@ static NSString *LTPackFingerprint(NSString *packPath) {
         return NO;
     }
     return [self lt_restoreFileBackupAtPath:backupPath toRelativeTarget:relativeTarget force:YES];
+}
+
++ (BOOL)discardFileBackupForRelativeTarget:(NSString *)relativeTarget {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!LTRelativeTargetIsSafe(relativeTarget)) return NO;
+
+    NSString *localizeDir = [self localizeDirectory];
+    NSString *backupPath = LTFileBackupPath(relativeTarget);
+    if (!localizeDir || !backupPath || ![fm fileExistsAtPath:backupPath]) return NO;
+
+    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+    if (![fm contentsEqualAtPath:targetPath andPath:backupPath]) return NO;
+
+    if (![fm removeItemAtPath:backupPath error:nil]) return NO;
+    ZLog(@"[LocalizationTransplant] discarded the stored backup for %@", relativeTarget);
+    return YES;
+}
+
++ (BOOL)discardPackBackupForLanguage:(NSString *)languageCode {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (!LTIsValidLanguageCode(languageCode)) return NO;
+
+    NSString *packBackup = LTPackBackupPath(languageCode);
+    NSString *languageDir = [self languageDirectoryForCode:languageCode];
+    if (!packBackup || !languageDir || ![fm fileExistsAtPath:packBackup]) return NO;
+    if (![fm contentsEqualAtPath:languageDir andPath:packBackup]) return NO;
+
+    if (![fm removeItemAtPath:packBackup error:nil]) return NO;
+    ZLog(@"[LocalizationTransplant] discarded the stored backup for the \"%@\" language folder", languageCode);
+    return YES;
 }
 
 + (BOOL)restorePackForLanguage:(NSString *)languageCode ifAppliedFromPackAtPath:(NSString *)packPath {

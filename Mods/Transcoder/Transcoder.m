@@ -1769,11 +1769,8 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     uint32_t oldCompressedInfoSize = zt_be32(bytes + pos); (void)oldCompressedInfoSize; pos += 4;
     uint32_t oldUncompressedInfoSize = zt_be32(bytes + pos); (void)oldUncompressedInfoSize; pos += 4;
     uint32_t flags = zt_be32(bytes + pos); pos += 4;
-    uint32_t compression = flags & kZSTranscoderUnityFSCompressionMask;
-    if (compression != UnityBundleCABCompressionNone && compression != UnityBundleCABCompressionLZ4 && compression != UnityBundleCABCompressionLZ4HC) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"UnityFS template uses unsupported compression type %u.", compression]);
-        return NO;
-    }
+    uint32_t compression = UnityBundleCABCompressionLZ4HC;
+    flags = (flags & ~kZSTranscoderUnityFSCompressionMask) | compression;
     if (originalArchive.nodes.count != 2) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The input bundle does not contain exactly the expected serialized + .resS node pair.");
         return NO;
@@ -3204,6 +3201,30 @@ static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
 
 + (NSInteger)restoreAllBackedUpBundlesWithError:(NSError **)error {
     return [self restoreAllBackedUpBundlesForce:NO error:error];
+}
+
++ (BOOL)discardBackupForStockBundleURL:(NSURL *)stockBundleURL {
+    NSString *dir = [self bundleBackupDirectory];
+    if (!dir || !stockBundleURL) return NO;
+    NSString *backupKey = [self bds_backupKeyForStockBundleURL:stockBundleURL];
+    NSString *backupPath = [dir stringByAppendingPathComponent:[backupKey stringByAppendingString:kBackupSuffix]];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm fileExistsAtPath:backupPath]) return NO;
+
+    BOOL scoped = [stockBundleURL startAccessingSecurityScopedResource];
+    BOOL originalInPlace = zt_files_have_identical_bytes(stockBundleURL.path, backupPath);
+    if (scoped) [stockBundleURL stopAccessingSecurityScopedResource];
+    if (!originalInPlace) return NO;
+
+    if (![fm removeItemAtPath:backupPath error:nil]) return NO;
+
+    NSMutableDictionary<NSString *, NSString *> *manifest = [self bds_loadManifest];
+    if (manifest[backupKey]) {
+        [manifest removeObjectForKey:backupKey];
+        [self bds_writeManifest:manifest];
+    }
+    ZLog(@"[ZTranscoderInstaller] discarded the stored backup for %@", stockBundleURL.lastPathComponent);
+    return YES;
 }
 
 + (BOOL)cacheOriginalBackForStockBundleURL:(NSURL *)stockBundleURL error:(NSError **)error {

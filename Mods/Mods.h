@@ -31,6 +31,10 @@ typedef NS_ENUM(NSInteger, ZSFontRole) {
 
 + (NSString *)modsFontsDirectory;
 
++ (unsigned long long)modsBackupsByteSize;
+
++ (BOOL)deleteAllStoredBackupsWithError:(NSError **)error;
+
 + (nullable NSString *)ensuredDirectoryAtPath:(nullable NSString *)path;
 
 + (void)migrateLegacyDirectoryAtPath:(nullable NSString *)oldPath toPath:(nullable NSString *)newPath;
@@ -66,6 +70,8 @@ typedef NS_ENUM(NSInteger, BankTransplantErrorCode) {
 + (NSInteger)restoreAllBackedUpBanksForce:(BOOL)force error:(NSError **)error;
 
 + (NSInteger)restoreBackedUpBankNamed:(NSString *)name error:(NSError **)error;
+
++ (BOOL)discardBackupForBankNamed:(NSString *)name;
 
 + (nullable NSDictionary<NSString *, id> *)fmodHeaderInfoForBankAtPath:(NSString *)path;
 
@@ -129,6 +135,10 @@ typedef NS_ENUM(NSInteger, LocalizationTransplantErrorCode) {
 
 + (BOOL)restorePackForLanguage:(NSString *)languageCode
        ifAppliedFromPackAtPath:(NSString *)packPath;
+
++ (BOOL)discardFileBackupForRelativeTarget:(NSString *)relativeTarget;
+
++ (BOOL)discardPackBackupForLanguage:(NSString *)languageCode;
 
 + (NSInteger)restoreAllBackupsForce:(BOOL)force error:(NSError **)error;
 

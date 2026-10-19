@@ -277,6 +277,34 @@ static const NSInteger kZSModsLibrarySortKind = 3;
 
 @end
 
+static BOOL g_zsStoredBackupsExpanded;
+
+static UIColor *zs_stored_backups_red_color(void) {
+    return [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
+}
+
+static NSString *zs_stored_backups_size_string(unsigned long long bytes) {
+    NSByteCountFormatter *formatter = [[NSByteCountFormatter alloc] init];
+    formatter.countStyle = NSByteCountFormatterCountStyleFile;
+    formatter.allowsNonnumericFormatting = NO;
+    return [formatter stringFromByteCount:(long long)bytes];
+}
+
+static UIView *zs_stored_backups_card_for_view(UIView *view) {
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if (objc_getAssociatedObject(candidate, "zs_innerStack")) return candidate;
+    }
+    return nil;
+}
+
+static UIView *zs_make_stored_backups_separator(void) {
+    UIView *line = [[UIView alloc] init];
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    line.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    [line.heightAnchor constraintEqualToConstant:1].active = YES;
+    return line;
+}
+
 @implementation UserInterface (Mods)
 
 #pragma mark Mods (Load Mods - single entry point, routes by file kind)
@@ -1437,6 +1465,9 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     openCard.layer.borderWidth = 1;
     openCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
     [self.modsLibraryStack addArrangedSubview:openCard];
+    [self.modsLibraryStack setCustomSpacing:8 afterView:openCard];
+
+    [self.modsLibraryStack addArrangedSubview:[self zs_makeStoredBackupsCard]];
 
     if (self.modsLibraryBrowseMode && self.assetExplorerFullScreenOpen) {
         BOOL wasShowingDetails = self.modsLibrarySelectedEntry != nil;
@@ -1449,6 +1480,148 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
             [self zs_assetExplorerRefreshListResettingScroll:NO];
         }
     }
+}
+
+- (UIView *)zs_makeStoredBackupsCard {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIButton *button = zs_make_grouped_action_button(@"Delete Stored Backups", [UIColor colorWithWhite:0.9 alpha:1]);
+    [button addTarget:self action:@selector(zs_storedBackupsToggleTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [row addSubview:button];
+
+    UILabel *subtext = [[UILabel alloc] init];
+    subtext.translatesAutoresizingMaskIntoConstraints = NO;
+    subtext.font = zs_mono_font(8, UIFontWeightRegular);
+    subtext.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+    subtext.numberOfLines = 0;
+    subtext.text = @"Calculating backup size...";
+    [subtext setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisVertical];
+    [row addSubview:subtext];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [button.topAnchor constraintEqualToAnchor:row.topAnchor],
+        [button.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [button.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [button.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+        [subtext.topAnchor constraintEqualToAnchor:row.topAnchor constant:kZSGroupedCardRowHeight - 4],
+        [subtext.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [subtext.trailingAnchor constraintEqualToAnchor:row.trailingAnchor],
+        [subtext.bottomAnchor constraintEqualToAnchor:row.bottomAnchor constant:-9],
+    ]];
+    objc_setAssociatedObject(row, "zs_selfSizingRow", @YES, OBJC_ASSOCIATION_RETAIN);
+
+    UIView *expansion = [[UIView alloc] init];
+    expansion.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UIView *topSeparator = zs_make_stored_backups_separator();
+    UILabel *expansionLabel = [[UILabel alloc] init];
+    expansionLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    expansionLabel.numberOfLines = 0;
+    expansionLabel.font = zs_mono_font(11, UIFontWeightMedium);
+    expansionLabel.textColor = [UIColor colorWithWhite:0.9 alpha:1];
+    UIView *confirmSeparator = zs_make_stored_backups_separator();
+    UIButton *confirm = zs_make_grouped_action_button(@"Confirm", zs_stored_backups_red_color());
+    confirm.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    [confirm addTarget:self action:@selector(zs_storedBackupsConfirmTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    for (UIView *view in @[topSeparator, expansionLabel, confirmSeparator, confirm]) [expansion addSubview:view];
+    [NSLayoutConstraint activateConstraints:@[
+        [topSeparator.topAnchor constraintEqualToAnchor:expansion.topAnchor],
+        [topSeparator.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [topSeparator.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [expansionLabel.topAnchor constraintEqualToAnchor:topSeparator.bottomAnchor constant:12],
+        [expansionLabel.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [expansionLabel.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirmSeparator.topAnchor constraintEqualToAnchor:expansionLabel.bottomAnchor constant:12],
+        [confirmSeparator.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [confirmSeparator.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirm.topAnchor constraintEqualToAnchor:confirmSeparator.bottomAnchor],
+        [confirm.leadingAnchor constraintEqualToAnchor:expansion.leadingAnchor],
+        [confirm.trailingAnchor constraintEqualToAnchor:expansion.trailingAnchor],
+        [confirm.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+        [confirm.bottomAnchor constraintEqualToAnchor:expansion.bottomAnchor],
+    ]];
+
+    UIView *wrapper = zs_make_reveal_wrapper(expansion, g_zsStoredBackupsExpanded);
+    UIView *card = zs_make_grouped_action_card(@[row]);
+    UIStackView *inner = objc_getAssociatedObject(card, "zs_innerStack");
+    [inner addArrangedSubview:wrapper];
+
+    objc_setAssociatedObject(card, "zs_backupsWrapper", wrapper, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(card, "zs_backupsSubtext", subtext, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(card, "zs_backupsExpansionLabel", expansionLabel, OBJC_ASSOCIATION_RETAIN);
+
+    [self zs_refreshStoredBackupsSizeForCard:card];
+    return card;
+}
+
+- (void)zs_refreshStoredBackupsSizeForCard:(UIView *)card {
+    __weak UIView *weakCard = card;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        unsigned long long bytes = [ZSModsPaths modsBackupsByteSize];
+        NSString *size = zs_stored_backups_size_string(bytes);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIView *strongCard = weakCard;
+            if (!strongCard) return;
+            UILabel *subtext = objc_getAssociatedObject(strongCard, "zs_backupsSubtext");
+            UILabel *expansionLabel = objc_getAssociatedObject(strongCard, "zs_backupsExpansionLabel");
+            subtext.text = [NSString stringWithFormat:@"Backups folder is taking up %@", size];
+            expansionLabel.text = [NSString stringWithFormat:@"Deleting stored backups will reclaim %@ of storage.\n\nHowever, deleting mods without backups will prompt you to download those files again, are you sure you want to continue?", size];
+        });
+    });
+}
+
+- (void)zs_storedBackupsToggleTapped:(UIButton *)sender {
+    UIView *card = zs_stored_backups_card_for_view(sender);
+    UIView *wrapper = objc_getAssociatedObject(card, "zs_backupsWrapper");
+    if (!wrapper) return;
+
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+
+    g_zsStoredBackupsExpanded = !g_zsStoredBackupsExpanded;
+    BOOL expanded = g_zsStoredBackupsExpanded;
+    if (expanded) [self zs_refreshStoredBackupsSizeForCard:card];
+    [self zs_lowResAnimateChanges:^{
+        zs_reveal_set_expanded(wrapper, expanded);
+    }];
+}
+
+- (void)zs_storedBackupsConfirmTapped:(UIButton *)sender {
+    UIView *card = zs_stored_backups_card_for_view(sender);
+    __weak UIView *weakCard = card;
+    __weak typeof(self) weakSelf = self;
+
+    UINotificationFeedbackGenerator *haptic = [UINotificationFeedbackGenerator new];
+    [haptic notificationOccurred:UINotificationFeedbackTypeWarning];
+
+    sender.enabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        BOOL ok = [ZSModsPaths deleteAllStoredBackupsWithError:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            sender.enabled = YES;
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+
+            UINotificationFeedbackGenerator *result = [UINotificationFeedbackGenerator new];
+            [result notificationOccurred:ok ? UINotificationFeedbackTypeSuccess : UINotificationFeedbackTypeError];
+
+            g_zsStoredBackupsExpanded = NO;
+            UIView *strongCard = weakCard;
+            UIView *wrapper = objc_getAssociatedObject(strongCard, "zs_backupsWrapper");
+            if (wrapper) {
+                [strongSelf zs_lowResAnimateChanges:^{
+                    zs_reveal_set_expanded(wrapper, NO);
+                }];
+            }
+            if (strongCard) [strongSelf zs_refreshStoredBackupsSizeForCard:strongCard];
+            if (!ok) {
+                [strongSelf zs_presentModsAlertWithTitle:@"Couldn't Delete Backups" message:error.localizedDescription ?: @"Unknown error."];
+            }
+        });
+    });
 }
 
 - (void)zs_openModLibraryTapped {
@@ -3043,8 +3216,10 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
 - (void)zs_restoreLocalizationEntryBestEffort:(ModAssetLibraryEntry *)entry {
     if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
         [LocalizationTransplant restorePackForLanguage:entry.localizationLanguage ifAppliedFromPackAtPath:entry.path];
+        [LocalizationTransplant discardPackBackupForLanguage:entry.localizationLanguage];
     } else if (entry.localizationKind == ModAssetLibraryLocalizationKindJSON && entry.localizationRelativePath.length > 0) {
         [LocalizationTransplant restoreRelativeTarget:entry.localizationRelativePath ifAppliedFromModFileAtPath:entry.path];
+        [LocalizationTransplant discardFileBackupForRelativeTarget:entry.localizationRelativePath];
     }
 }
 
@@ -3076,13 +3251,16 @@ static void zs_mods_flash_button_title(UIButton *button, NSString *flashTitle, N
     if (bankError) {
         ZLog(@"[Mods Library] couldn't restore %@ before removing it from the library: %@", entry.fileName, bankError.localizedDescription);
     }
+    [BankTransplant discardBackupForBankNamed:entry.fileName];
 
     if (entry.isAssetBundle) {
         NSURL *stockURL = zs_mods_live_stock_url_for_entry(entry);
         if (stockURL) {
             NSError *bundleError = nil;
             BOOL restored = [ZTranscoderInstaller cacheOriginalBackForStockBundleURL:stockURL error:&bundleError];
-            if (!restored) {
+            if (restored) {
+                [ZTranscoderInstaller discardBackupForStockBundleURL:stockURL];
+            } else {
                 ZLog(@"[Mods Library] couldn't restore %@'s live bundle at %@ before removing it from the library: %@", entry.fileName, stockURL.path, bundleError.localizedDescription);
             }
         }
