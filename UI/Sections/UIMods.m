@@ -1152,27 +1152,12 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
         [view removeFromSuperview];
     }
 
-    UIButton *openButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    openButton.translatesAutoresizingMaskIntoConstraints = NO;
-    openButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeading;
-    openButton.backgroundColor = [UIColor colorWithWhite:1 alpha:0.055];
-    openButton.layer.cornerRadius = 10;
-    openButton.layer.cornerCurve = kCACornerCurveContinuous;
-    openButton.layer.borderWidth = 1;
-    openButton.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.12].CGColor;
-    openButton.clipsToBounds = YES;
-    openButton.contentEdgeInsets = UIEdgeInsetsMake(0, 12, 0, 12);
-    openButton.titleLabel.font = zs_mono_font(11, UIFontWeightSemibold);
-    [openButton setTitle:@"Open Mod Library" forState:UIControlStateNormal];
-    [openButton setTitleColor:[UIColor colorWithWhite:0.94 alpha:1] forState:UIControlStateNormal];
-    UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
-    UIImage *folderImage = [[UIImage systemImageNamed:@"folder.fill" withConfiguration:symbolConfig]
-        imageWithTintColor:zs_accent_green_color() renderingMode:UIImageRenderingModeAlwaysOriginal];
-    [openButton setImage:folderImage forState:UIControlStateNormal];
-    openButton.titleEdgeInsets = UIEdgeInsetsMake(0, 8, 0, 0);
+    UIButton *openButton = zs_make_grouped_action_button(@"Open Mod Library", zs_accent_green_color());
     [openButton addTarget:self action:@selector(zs_openModLibraryTapped) forControlEvents:UIControlEventTouchUpInside];
-    [openButton.heightAnchor constraintEqualToConstant:42].active = YES;
-    [self.modsLibraryStack addArrangedSubview:openButton];
+    UIView *openCard = zs_make_grouped_action_card(@[openButton]);
+    openCard.layer.borderWidth = 1;
+    openCard.layer.borderColor = [zs_accent_green_color() colorWithAlphaComponent:0.2].CGColor;
+    [self.modsLibraryStack addArrangedSubview:openCard];
 
     if (self.modsLibraryBrowseMode && self.assetExplorerFullScreenOpen) {
         BOOL wasShowingDetails = self.modsLibrarySelectedEntry != nil;

@@ -8,6 +8,8 @@
 - (void)zs_assetExplorerRefreshModLibraryEntries;
 - (void)zs_assetExplorerShowModLibrary;
 - (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryBrowseFolderHeaderTapped:(UIControl *)sender;
+- (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
 - (void)zs_selectModeTapped;
 - (void)zs_exitSelectModeTapped;
 - (void)zs_exitSelectMode;

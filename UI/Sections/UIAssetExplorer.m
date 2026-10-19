@@ -1,5 +1,10 @@
 #import "UIInternal.h"
 
+static NSString *zs_mods_library_entry_title(ModAssetLibraryEntry *entry) {
+    if (entry.remark.length > 0) return entry.remark;
+    return entry.fileName.length > 0 ? entry.fileName : @"Unnamed asset";
+}
+
 @implementation UserInterface (AssetExplorer)
 
 #pragma mark Asset explorer full-screen viewer
@@ -18,6 +23,7 @@
     self.modsLibrarySelectedEntry = nil;
     self.modsLibraryBrowseEntries = @[];
     self.modsLibraryDisplayedEntries = @[];
+    self.modsLibraryDisplayedSections = @[];
     [self zs_openAssetExplorerFullScreenPanel];
 }
 
@@ -2260,7 +2266,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 ![language localizedCaseInsensitiveContainsString:query]) continue;
             [matches addObject:entry];
         }
-        self.modsLibraryDisplayedEntries = matches;
+        [self zs_modsLibraryRebuildSectionsWithMatches:matches searching:query.length > 0];
         NSUInteger shownCount = matches.count;
         NSUInteger totalCount = self.modsLibraryBrowseEntries.count;
         NSString *plural = totalCount == 1 ? @"" : @"s";
@@ -2990,7 +2996,9 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return 1;
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        return self.modsLibrarySelectedEntry ? 0 : (NSInteger)self.modsLibraryDisplayedSections.count;
+    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return MAX((NSInteger)zs_ae_section_kinds(bookmarked, modded, total).count, 1);
@@ -3001,7 +3009,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
-        return self.modsLibrarySelectedEntry ? 0 : (NSInteger)self.modsLibraryDisplayedEntries.count;
+        if (self.modsLibrarySelectedEntry) return 0;
+        NSDictionary<NSString *, id> *librarySection = [self zs_modsLibrarySectionAtIndex:section];
+        if (!librarySection || ![self zs_modsLibrarySectionIsExpanded:librarySection]) return 0;
+        return (NSInteger)[librarySection[@"entries"] count];
     }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
@@ -3018,7 +3029,11 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return CGFLOAT_MIN;
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        NSDictionary<NSString *, id> *librarySection = self.modsLibrarySelectedEntry ? nil : [self zs_modsLibrarySectionAtIndex:section];
+        if (!librarySection) return CGFLOAT_MIN;
+        return [librarySection[@"remark"] length] > 0 ? 52 : 38;
+    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         return total == 0 ? CGFLOAT_MIN : 26;
@@ -3028,7 +3043,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 }
 
 - (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
-    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) return nil;
+    if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
+        NSDictionary<NSString *, id> *librarySection = self.modsLibrarySelectedEntry ? nil : [self zs_modsLibrarySectionAtIndex:section];
+        return librarySection ? [self zs_modsLibraryHeaderViewForSection:librarySection] : nil;
+    }
     NSUInteger bookmarked = 0, modded = 0, total = 0;
     if ([self zs_assetExplorerSectionCountsForTableView:tableView bookmarked:&bookmarked modded:&modded total:&total]) {
         NSArray<NSNumber *> *kinds = zs_ae_section_kinds(bookmarked, modded, total);
@@ -3044,8 +3062,10 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         static NSString * const libraryIdentifier = @"zs.asset.explorer.mod-library.cell";
         UITableViewCell *libraryCell = [tableView dequeueReusableCellWithIdentifier:libraryIdentifier];
         if (!libraryCell) libraryCell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:libraryIdentifier];
-        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return libraryCell;
-        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        ModAssetLibraryEntry *entry = [self zs_modsLibraryEntryAtIndexPath:indexPath];
+        if (!entry) return libraryCell;
+        libraryCell.indentationLevel = 1;
+        libraryCell.indentationWidth = 10;
         libraryCell.backgroundColor = UIColor.clearColor;
         libraryCell.contentView.backgroundColor = UIColor.clearColor;
         libraryCell.textLabel.font = zs_mono_font(11, UIFontWeightRegular);
@@ -3057,8 +3077,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         libraryCell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.42];
         libraryCell.detailTextLabel.numberOfLines = 1;
         libraryCell.detailTextLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        libraryCell.textLabel.text = entry.fileName.length > 0 ? entry.fileName : @"Unnamed asset";
-        NSString *folder = entry.currentFolder.length > 0 ? entry.currentFolder : @"Unknown folder";
+        libraryCell.textLabel.text = zs_mods_library_entry_title(entry);
         NSString *size = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
         NSString *kind = entry.isAssetBundle ? @"Asset Bundle" : (entry.localizationKind == ModAssetLibraryLocalizationKindJSON ? @"Localization JSON" : (entry.localizationKind == ModAssetLibraryLocalizationKindPack ? @"Localization Pack" : entry.fileName.pathExtension.uppercaseString));
         NSString *status = nil;
@@ -3070,9 +3089,11 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             case ModAssetLibraryDoctorStatusInstalled: status = @"Installed"; break;
             default: break;
         }
-        libraryCell.detailTextLabel.text = status.length > 0
-            ? [NSString stringWithFormat:@"%@  •  %@  •  %@", folder, size, status]
-            : [NSString stringWithFormat:@"%@  •  %@  •  %@", folder, size, kind.length > 0 ? kind : @"File"];
+        NSMutableArray<NSString *> *detailParts = [NSMutableArray array];
+        if (entry.remark.length > 0 && entry.fileName.length > 0) [detailParts addObject:entry.fileName];
+        [detailParts addObject:size];
+        [detailParts addObject:status.length > 0 ? status : (kind.length > 0 ? kind : @"File")];
+        libraryCell.detailTextLabel.text = [detailParts componentsJoinedByString:@"  •  "];
         NSString *symbol = @"doc.fill";
         if ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) symbol = @"waveform";
         else if (entry.isAssetBundle) symbol = @"archivebox.fill";
@@ -3161,8 +3182,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point API_AVAILABLE(ios(13.0)) {
     if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
-        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return nil;
-        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        ModAssetLibraryEntry *entry = [self zs_modsLibraryEntryAtIndexPath:indexPath];
+        if (!entry) return nil;
         NSString *folderName = entry.currentFolder ?: @"";
         BOOL storedEntry = zs_mods_folder_is_or_within_stored_bundles(folderName);
         __weak typeof(self) weakSelf = self;
@@ -3247,8 +3268,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0)) {
     if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode && !self.modsLibrarySelectedEntry) {
-        if (indexPath.row < 0 || indexPath.row >= (NSInteger)self.modsLibraryDisplayedEntries.count) return nil;
-        ModAssetLibraryEntry *entry = self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row];
+        ModAssetLibraryEntry *entry = [self zs_modsLibraryEntryAtIndexPath:indexPath];
+        if (!entry) return nil;
         NSString *folderName = entry.currentFolder ?: @"";
         BOOL storedEntry = zs_mods_folder_is_or_within_stored_bundles(folderName);
         NSArray<NSDictionary<NSString *, id> *> *options = storedEntry ? zs_mods_stored_bundle_file_options() : zs_mods_file_options(entry);
@@ -3290,9 +3311,8 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     if (tableView == self.assetExplorerTableView && self.modsLibraryBrowseMode) {
         [tableView deselectRowAtIndexPath:indexPath animated:YES];
-        if (!self.modsLibrarySelectedEntry && indexPath.row >= 0 && indexPath.row < (NSInteger)self.modsLibraryDisplayedEntries.count) {
-            [self zs_assetExplorerShowModLibraryEntry:self.modsLibraryDisplayedEntries[(NSUInteger)indexPath.row]];
-        }
+        ModAssetLibraryEntry *selectedLibraryEntry = self.modsLibrarySelectedEntry ? nil : [self zs_modsLibraryEntryAtIndexPath:indexPath];
+        if (selectedLibraryEntry) [self zs_assetExplorerShowModLibraryEntry:selectedLibraryEntry];
         return;
     }
     if (tableView == self.assetExplorerLocalizeTableView) {
@@ -3481,6 +3501,207 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     ]];
 }
 
+- (NSDictionary<NSString *, id> *)zs_modsLibrarySectionAtIndex:(NSInteger)index {
+    if (index < 0 || index >= (NSInteger)self.modsLibraryDisplayedSections.count) return nil;
+    return self.modsLibraryDisplayedSections[(NSUInteger)index];
+}
+
+- (BOOL)zs_modsLibrarySectionIsExpanded:(NSDictionary<NSString *, id> *)section {
+    NSString *query = [self.assetExplorerSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+    if (query.length > 0) return YES;
+    return ![self.modsLibraryCollapsedFolders containsObject:section[@"folder"]];
+}
+
+- (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath {
+    NSDictionary<NSString *, id> *section = [self zs_modsLibrarySectionAtIndex:indexPath.section];
+    NSArray<ModAssetLibraryEntry *> *entries = section[@"entries"];
+    if (indexPath.row < 0 || indexPath.row >= (NSInteger)entries.count) return nil;
+    return entries[(NSUInteger)indexPath.row];
+}
+
+- (void)zs_modsLibraryRebuildSectionsWithMatches:(NSArray<ModAssetLibraryEntry *> *)matches searching:(BOOL)searching {
+    NSMutableArray<NSString *> *order = [[ModAssetLibrary folderNames] mutableCopy] ?: [NSMutableArray array];
+    BOOL hasStored = [order containsObject:kZSStoredBundlesFolderName];
+    [order removeObject:kZSStoredBundlesFolderName];
+    NSArray<NSString *> *storedSubFolders = hasStored ? [ModAssetLibrary subFolderNamesInFolder:kZSStoredBundlesFolderName] : @[];
+    if (hasStored) {
+        [order addObject:kZSStoredBundlesFolderName];
+        for (NSString *subFolder in storedSubFolders) {
+            if (![order containsObject:subFolder]) [order addObject:subFolder];
+        }
+    }
+
+    NSMutableDictionary<NSString *, NSMutableArray<ModAssetLibraryEntry *> *> *grouped = [NSMutableDictionary dictionary];
+    for (ModAssetLibraryEntry *entry in matches) {
+        NSString *folder = entry.currentFolder.length > 0 ? entry.currentFolder : @"Unknown folder";
+        if (!grouped[folder]) grouped[folder] = [NSMutableArray array];
+        [grouped[folder] addObject:entry];
+        if (![order containsObject:folder]) [order addObject:folder];
+    }
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *sections = [NSMutableArray arrayWithCapacity:order.count];
+    NSMutableArray<ModAssetLibraryEntry *> *flattened = [NSMutableArray arrayWithCapacity:matches.count];
+    for (NSString *folder in order) {
+        NSArray<ModAssetLibraryEntry *> *items = [grouped[folder] sortedArrayUsingComparator:^NSComparisonResult(ModAssetLibraryEntry *a, ModAssetLibraryEntry *b) {
+            NSComparisonResult result = [zs_mods_library_entry_title(a) localizedStandardCompare:zs_mods_library_entry_title(b)];
+            if (result != NSOrderedSame) return result;
+            return [a.fileName ?: @"" localizedStandardCompare:b.fileName ?: @""];
+        }] ?: @[];
+        BOOL isStoredRoot = [folder isEqualToString:kZSStoredBundlesFolderName];
+        if (searching && items.count == 0) continue;
+        if (isStoredRoot && items.count == 0 && storedSubFolders.count == 0) continue;
+        NSString *remark = isStoredRoot ? kZSStoredBundlesFolderSubtext : [ModAssetLibrary remarkForFolder:folder];
+        [sections addObject:@{
+            @"folder": folder,
+            @"title": isStoredRoot ? folder : folder.lastPathComponent,
+            @"remark": remark ?: @"",
+            @"nested": @(!isStoredRoot && zs_mods_folder_is_or_within_stored_bundles(folder)),
+            @"hasOptions": @(!isStoredRoot),
+            @"entries": items,
+        }];
+        [flattened addObjectsFromArray:items];
+    }
+    self.modsLibraryDisplayedSections = sections;
+    self.modsLibraryDisplayedEntries = flattened;
+}
+
+- (UIMenu *)zs_modsLibraryFolderMenuForFolder:(NSString *)folder {
+    __weak typeof(self) weakSelf = self;
+    NSArray<NSDictionary<NSString *, id> *> *options = zs_mods_options_for_folder(folder);
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray arrayWithCapacity:options.count];
+    for (NSDictionary<NSString *, id> *option in options) {
+        NSString *title = option[@"title"] ?: @"Action";
+        NSString *symbol = option[@"symbol"];
+        UIAction *item = [UIAction actionWithTitle:title image:(symbol.length > 0 ? [UIImage systemImageNamed:symbol] : nil) identifier:nil handler:^(__kindof UIAction *action) {
+            [weakSelf zs_modsLibraryPerformOptionNamed:title forEntry:nil folderName:folder];
+        }];
+        UIMenuElementAttributes attributes = 0;
+        if ([option[@"destructive"] boolValue]) attributes |= UIMenuElementAttributesDestructive;
+        if ([option[@"disabled"] boolValue]) attributes |= UIMenuElementAttributesDisabled;
+        item.attributes = attributes;
+        [items addObject:item];
+    }
+    return [UIMenu menuWithTitle:@"" children:items];
+}
+
+- (UIView *)zs_modsLibraryHeaderViewForSection:(NSDictionary<NSString *, id> *)section {
+    NSString *folder = section[@"folder"];
+    NSString *remark = section[@"remark"];
+    BOOL expanded = [self zs_modsLibrarySectionIsExpanded:section];
+    BOOL nested = [section[@"nested"] boolValue];
+    BOOL hasOptions = [section[@"hasOptions"] boolValue];
+    NSUInteger count = [section[@"entries"] count];
+    CGFloat indent = nested ? 14 : 0;
+
+    UIControl *header = [[UIControl alloc] init];
+    header.backgroundColor = UIColor.clearColor;
+    objc_setAssociatedObject(header, "zs_modsFolderName", folder, OBJC_ASSOCIATION_COPY);
+    [header addTarget:self action:@selector(zs_modsLibraryBrowseFolderHeaderTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIImageSymbolConfiguration *chevronConfig = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightSemibold];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:(expanded ? @"chevron.down" : @"chevron.right") withConfiguration:chevronConfig]];
+    chevron.translatesAutoresizingMaskIntoConstraints = NO;
+    chevron.tintColor = [UIColor colorWithWhite:1 alpha:0.55];
+    chevron.contentMode = UIViewContentModeCenter;
+    chevron.userInteractionEnabled = NO;
+    [header addSubview:chevron];
+
+    UIImageSymbolConfiguration *folderConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightRegular];
+    UIImageView *folderIcon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"folder.fill" withConfiguration:folderConfig]];
+    folderIcon.translatesAutoresizingMaskIntoConstraints = NO;
+    folderIcon.tintColor = [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0];
+    folderIcon.contentMode = UIViewContentModeCenter;
+    folderIcon.userInteractionEnabled = NO;
+    [header addSubview:folderIcon];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    titleLabel.text = section[@"title"];
+    titleLabel.font = zs_mono_font(12, UIFontWeightMedium);
+    titleLabel.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+    titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    titleLabel.userInteractionEnabled = NO;
+    [header addSubview:titleLabel];
+
+    UILabel *countLabel = [[UILabel alloc] init];
+    countLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    countLabel.text = [NSString stringWithFormat:@"%lu", (unsigned long)count];
+    countLabel.font = zs_mono_font(10, UIFontWeightRegular);
+    countLabel.textColor = [UIColor colorWithWhite:1 alpha:0.4];
+    countLabel.userInteractionEnabled = NO;
+    [countLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [countLabel setContentCompressionResistancePriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [header addSubview:countLabel];
+
+    UIButton *optionsButton = nil;
+    if (hasOptions) {
+        optionsButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        optionsButton.translatesAutoresizingMaskIntoConstraints = NO;
+        UIImageSymbolConfiguration *dotsConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightSemibold];
+        [optionsButton setImage:[UIImage systemImageNamed:@"ellipsis" withConfiguration:dotsConfig] forState:UIControlStateNormal];
+        optionsButton.tintColor = [UIColor colorWithWhite:1 alpha:0.6];
+        optionsButton.menu = [self zs_modsLibraryFolderMenuForFolder:folder];
+        optionsButton.showsMenuAsPrimaryAction = YES;
+        [header addSubview:optionsButton];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [chevron.leadingAnchor constraintEqualToAnchor:header.leadingAnchor constant:(14 + indent)],
+        [chevron.widthAnchor constraintEqualToConstant:14],
+        [folderIcon.leadingAnchor constraintEqualToAnchor:chevron.trailingAnchor constant:4],
+        [folderIcon.widthAnchor constraintEqualToConstant:18],
+        [titleLabel.leadingAnchor constraintEqualToAnchor:folderIcon.trailingAnchor constant:6],
+        [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:countLabel.leadingAnchor constant:-8],
+        [countLabel.trailingAnchor constraintEqualToAnchor:(optionsButton ? optionsButton.leadingAnchor : header.trailingAnchor) constant:(optionsButton ? -2 : -16)],
+        [countLabel.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+    ]];
+    if (optionsButton) {
+        [NSLayoutConstraint activateConstraints:@[
+            [optionsButton.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-8],
+            [optionsButton.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+            [optionsButton.widthAnchor constraintEqualToConstant:30],
+            [optionsButton.heightAnchor constraintEqualToConstant:30],
+        ]];
+    }
+
+    if (remark.length > 0) {
+        UILabel *remarkLabel = [[UILabel alloc] init];
+        remarkLabel.translatesAutoresizingMaskIntoConstraints = NO;
+        remarkLabel.text = remark;
+        remarkLabel.font = zs_mono_font(9, UIFontWeightRegular);
+        remarkLabel.textColor = [UIColor colorWithWhite:1 alpha:0.42];
+        remarkLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        remarkLabel.userInteractionEnabled = NO;
+        [header addSubview:remarkLabel];
+        [NSLayoutConstraint activateConstraints:@[
+            [titleLabel.topAnchor constraintEqualToAnchor:header.topAnchor constant:10],
+            [chevron.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+            [folderIcon.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+            [remarkLabel.leadingAnchor constraintEqualToAnchor:titleLabel.leadingAnchor],
+            [remarkLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:2],
+            [remarkLabel.trailingAnchor constraintEqualToAnchor:header.trailingAnchor constant:-16],
+        ]];
+    } else {
+        [NSLayoutConstraint activateConstraints:@[
+            [titleLabel.centerYAnchor constraintEqualToAnchor:header.centerYAnchor constant:2],
+            [chevron.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+            [folderIcon.centerYAnchor constraintEqualToAnchor:titleLabel.centerYAnchor],
+        ]];
+    }
+    return header;
+}
+
+- (void)zs_modsLibraryBrowseFolderHeaderTapped:(UIControl *)sender {
+    NSString *folder = objc_getAssociatedObject(sender, "zs_modsFolderName");
+    if (folder.length == 0) return;
+    if (!self.modsLibraryCollapsedFolders) self.modsLibraryCollapsedFolders = [NSMutableSet set];
+    if ([self.modsLibraryCollapsedFolders containsObject:folder]) [self.modsLibraryCollapsedFolders removeObject:folder];
+    else [self.modsLibraryCollapsedFolders addObject:folder];
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    [haptic impactOccurred];
+    [self.assetExplorerTableView reloadData];
+}
+
 - (void)zs_assetExplorerRefreshModLibraryEntries {
     NSMutableArray<NSString *> *pendingFolders = [[ModAssetLibrary folderNames] mutableCopy];
     NSMutableSet<NSString *> *visitedFolders = [NSMutableSet set];
@@ -3649,7 +3870,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerCloseButton.hidden = YES;
     self.assetExplorerBackButton.hidden = NO;
     self.assetExplorerTitleLabel.hidden = NO;
-    self.assetExplorerTitleLabel.text = entry.fileName ?: @"Asset Details";
+    self.assetExplorerTitleLabel.text = entry.remark.length > 0 ? entry.remark : (entry.fileName ?: @"Asset Details");
     self.assetExplorerStatusLabel.hidden = YES;
     self.assetExplorerSearchContainer.hidden = YES;
     self.assetExplorerControlsStack.hidden = YES;
