@@ -4,15 +4,6 @@
 
 @interface UserInterface (AssetExplorer)
 - (void)assetExplorerTapped;
-- (void)zs_openModLibraryFullScreenPanel;
-- (void)zs_assetExplorerRefreshModLibraryEntries;
-- (void)zs_assetExplorerShowModLibrary;
-- (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
-- (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
-- (NSDictionary<NSString *, id> *)zs_modsLibraryFolderAtIndexPath:(NSIndexPath *)indexPath;
-- (void)zs_modsLibraryApplyListChrome;
-- (void)zs_modsLibraryOpenFolder:(NSString *)folder;
-- (void)zs_modsLibraryNavigateUpFromFolder;
 - (void)zs_selectModeTapped;
 - (void)zs_exitSelectModeTapped;
 - (void)zs_exitSelectMode;

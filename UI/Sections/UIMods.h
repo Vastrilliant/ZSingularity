@@ -103,4 +103,19 @@
 - (void)zs_deleteModFolderConfirmed:(NSString *)folderName;
 - (void)zs_presentModImportPickerForFolder:(NSString *)folderName;
 - (void)zs_handlePickedLibraryImportURLs:(NSArray<NSURL *> *)urls intoFolder:(NSString *)folderName;
+- (void)zs_openModLibraryFullScreenPanel;
+- (void)zs_assetExplorerRefreshModLibraryEntries;
+- (void)zs_assetExplorerShowModLibrary;
+- (void)zs_assetExplorerShowModLibraryEntry:(ModAssetLibraryEntry *)entry;
+- (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
+- (NSDictionary<NSString *, id> *)zs_modsLibraryFolderAtIndexPath:(NSIndexPath *)indexPath;
+- (void)zs_modsLibraryApplyListChrome;
+- (void)zs_modsLibraryOpenFolder:(NSString *)folder;
+- (void)zs_modsLibraryNavigateUpFromFolder;
+- (void)zs_modsLibraryRefreshListResettingScroll:(BOOL)resetScroll query:(NSString *)query;
+- (UITableViewCell *)zs_modsLibraryCellForTableView:(UITableView *)tableView indexPath:(NSIndexPath *)indexPath;
+- (UIContextMenuConfiguration *)zs_modsLibraryContextMenuForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(13.0));
+- (void)zs_modsLibrarySelectRowAtIndexPath:(NSIndexPath *)indexPath inTableView:(UITableView *)tableView;
+- (UISwipeActionsConfiguration *)zs_modsLibraryDeleteSwipeForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0));
+- (UISwipeActionsConfiguration *)zs_modsLibraryRemarkSwipeForIndexPath:(NSIndexPath *)indexPath API_AVAILABLE(ios(11.0));
 @end
