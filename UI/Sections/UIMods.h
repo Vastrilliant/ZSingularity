@@ -110,6 +110,18 @@
 - (ModAssetLibraryEntry *)zs_modsLibraryEntryAtIndexPath:(NSIndexPath *)indexPath;
 - (NSDictionary<NSString *, id> *)zs_modsLibraryFolderAtIndexPath:(NSIndexPath *)indexPath;
 - (void)zs_modsLibraryApplyListChrome;
+- (void)zs_modsLibraryApplyViewModeVisibility;
+- (nullable UIView *)zs_modsLibraryInstallAccessoryForEntry:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryLeaveForAssetExplorer;
+- (void)zs_modsLibraryViewEntryInAssetExplorer:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryViewBundleEntryInAssetExplorer:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryViewBankEntryInAssetExplorer:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryViewLocalizationEntryInAssetExplorer:(ModAssetLibraryEntry *)entry;
+- (void)zs_modsLibraryBuildHeaderControls;
+- (void)zs_modsLibrarySyncHeaderControls;
+- (void)zs_modsLibraryRebuildHeaderMenus;
+- (void)zs_modsLibraryAddModTapped;
+- (void)zs_modsLibraryViewModeTapped;
 - (void)zs_modsLibraryOpenFolder:(NSString *)folder;
 - (void)zs_modsLibraryNavigateUpFromFolder;
 - (void)zs_modsLibraryRefreshListResettingScroll:(BOOL)resetScroll query:(NSString *)query;

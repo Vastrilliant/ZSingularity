@@ -924,7 +924,6 @@
         [titleLabel.trailingAnchor constraintLessThanOrEqualToAnchor:statusLabel.leadingAnchor constant:-10],
 
         [statusLabel.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [statusLabel.trailingAnchor constraintEqualToAnchor:controlsStack.leadingAnchor constant:-10],
         [statusLabel.widthAnchor constraintLessThanOrEqualToConstant:180],
 
         [tableView.topAnchor constraintEqualToAnchor:closeButton.bottomAnchor constant:12],
@@ -938,6 +937,10 @@
         [thumbCollection.bottomAnchor constraintEqualToAnchor:tableView.bottomAnchor],
     ]];
 
+    self.assetExplorerStatusTrailingToControls = [statusLabel.trailingAnchor constraintEqualToAnchor:controlsStack.leadingAnchor constant:-10];
+    self.assetExplorerStatusTrailingToControls.active = YES;
+
+    [self zs_modsLibraryBuildHeaderControls];
     [self zs_assetExplorerBuildHubAndFMODViews];
 }
 
@@ -2407,6 +2410,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
 
 - (void)zs_assetExplorerSyncControls {
     [self zs_assetExplorerUpdateThumbnailGrid];
+    [self zs_modsLibrarySyncHeaderControls];
     if (self.modsLibraryBrowseMode) {
         BOOL detail = self.modsLibrarySelectedEntry != nil;
         self.assetExplorerSearchContainer.hidden = detail;
@@ -2414,7 +2418,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
         self.assetExplorerFilterButton.hidden = YES;
         self.assetExplorerSortButton.hidden = YES;
         self.assetExplorerShareButton.hidden = YES;
-        self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search mod library" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
+        self.assetExplorerSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search" attributes:@{NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.35]}];
         return;
     }
     if (self.assetExplorerLocalizeMode) {
@@ -3907,6 +3911,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
     self.assetExplorerLocalizeDisplayedEntries = @[];
     self.assetExplorerLocalizeOffsets = nil;
     self.assetExplorerLocalizePendingOffset = nil;
+    self.assetExplorerLocalizePendingOpenFilePath = nil;
     self.assetExplorerLocalizeFileData = nil;
     self.assetExplorerLocalizeRootNode = nil;
     self.assetExplorerLocalizeVisibleRows = nil;
@@ -4108,6 +4113,16 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
                 [table layoutIfNeeded];
                 CGFloat maxOffset = MAX(0, table.contentSize.height - table.bounds.size.height);
                 [table setContentOffset:CGPointMake(0, MIN(pending.doubleValue, maxOffset)) animated:NO];
+            }
+            NSString *pendingFile = strongSelf.assetExplorerLocalizePendingOpenFilePath;
+            if (pendingFile.length > 0) {
+                strongSelf.assetExplorerLocalizePendingOpenFilePath = nil;
+                for (NSDictionary *candidate in entries) {
+                    if (![candidate[@"dir"] boolValue] && [candidate[@"path"] isEqualToString:pendingFile]) {
+                        [strongSelf zs_assetExplorerLocalizeOpenFile:candidate];
+                        break;
+                    }
+                }
             }
         });
     });
