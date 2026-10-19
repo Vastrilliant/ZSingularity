@@ -2108,9 +2108,8 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
-    // Extended window opening / closing: cross-fade the panel glass <-> blur partway through the animation.
-    if (animated && expandPanel && leftCornersFlatChanged) {
-        [self zs_scheduleBlurSwapActive:docsVisible mainDuration:mainDuration];
+    if (animated && expandPanel && (leftCornersFlatChanged || fullScreenChanged)) {
+        [self zs_scheduleBlurSwapActive:(docsVisible && fullScreenOpen) mainDuration:mainDuration];
     }
 
     if (leftCornersFlatChanged && !expandPanel) {
@@ -2305,41 +2304,24 @@ void zs_update_value_label(ZSCapsuleSlider *slider) {
     }
 }
 
-#pragma mark Panel glass <-> blur cross-fade (TEMPORARY tunables)
+#pragma mark Panel glass <-> blur cross-fade
 
-static CGFloat zs_panel_blur_ease(NSInteger mode, CGFloat t) {
-    switch (mode) {
-        case 0: return t;
-        case 1: return t * t;
-        case 2: return 1 - (1 - t) * (1 - t);
-        default: return t * t * (3 - 2 * t);
-    }
-}
-
-static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
-    switch (mode) {
-        case 0: return UIViewAnimationOptionCurveLinear;
-        case 1: return UIViewAnimationOptionCurveEaseIn;
-        case 2: return UIViewAnimationOptionCurveEaseOut;
-        default: return UIViewAnimationOptionCurveEaseInOut;
-    }
-}
+static const UIBlurEffectStyle kZSPanelBlurStyle = UIBlurEffectStyleSystemMaterialDark;
+static const CGFloat kZSPanelBlurIntensity = 0.30;
+static const CGFloat kZSPanelBlurTint = 0.35;
+static const NSTimeInterval kZSPanelBlurFade = 0.40;
+static const CGFloat kZSPanelBlurOverlap = 0.05;
+static const CGFloat kZSPanelBlurCurve = 0.25;
 
 - (void)zs_scheduleBlurSwapActive:(BOOL)active mainDuration:(NSTimeInterval)mainDuration {
-    ZSPanelBlurConfig cfg = zs_panel_blur_config();
     if (!self.panelBlurOverlay) return;
     NSUInteger token = ++self.panelBlurToken;
-    if (!cfg.enabled) {
-        if (self.panelBlurActive) [self zs_setPanelBlurActive:NO animated:YES];
-        return;
-    }
-
-    NSTimeInterval delay = mainDuration * MAX(0, MIN(1, active ? cfg.openAt : cfg.closeAt));
     __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || token != strongSelf.panelBlurToken || !strongSelf.panelBlurOverlay) return;
-        if (strongSelf.docsPanelOpen != active) return;
+        BOOL fullScreenNow = strongSelf.syslogFullScreenOpen || strongSelf.memoryFullScreenOpen || strongSelf.assetExplorerFullScreenOpen;
+        if ((strongSelf.docsPanelOpen && fullScreenNow) != active) return;
         [strongSelf zs_setPanelBlurActive:active animated:YES];
     });
 }
@@ -2347,14 +2329,13 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
 - (void)zs_rebuildPanelBlurAnimator {
     UIVisualEffectView *overlay = self.panelBlurOverlay;
     if (!overlay) return;
-    ZSPanelBlurConfig cfg = zs_panel_blur_config();
 
     UIViewPropertyAnimator *old = self.panelBlurAnimator;
     self.panelBlurAnimator = nil;
     if (old && old.state == UIViewAnimatingStateActive) [old stopAnimation:YES];
     overlay.effect = nil;
 
-    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:zs_panel_blur_style_at(cfg.style)];
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:kZSPanelBlurStyle];
     UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:1
                                                                                    curve:UIViewAnimationCurveLinear
                                                                               animations:^{ overlay.effect = blur; }];
@@ -2363,17 +2344,15 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
     [self zs_applyPanelBlurProgress:self.panelBlurProgress];
 }
 
-// progress 0 = fully glass, 1 = fully blur. Intensity scales the blur radius, tint scales the dark overlay.
 - (void)zs_applyPanelBlurProgress:(CGFloat)progress {
     UIVisualEffectView *overlay = self.panelBlurOverlay;
     if (!overlay) return;
-    ZSPanelBlurConfig cfg = zs_panel_blur_config();
     progress = MAX(0, MIN(1, progress));
     self.panelBlurProgress = progress;
     if (self.panelBlurAnimator) {
-        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, cfg.intensity * powf(progress, MAX(0.05, cfg.blurCurve))));
+        self.panelBlurAnimator.fractionComplete = MAX(0, MIN(1, kZSPanelBlurIntensity * powf(progress, kZSPanelBlurCurve)));
     }
-    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:cfg.tint * powf(progress, MAX(0.05, cfg.tintCurve))];
+    overlay.contentView.backgroundColor = [UIColor colorWithWhite:0 alpha:kZSPanelBlurTint * progress];
 }
 
 - (void)zs_finishPanelBlurIfInactive {
@@ -2393,8 +2372,7 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
     if (active == self.panelBlurActive && !self.panelBlurLink) return;
     self.panelBlurActive = active;
 
-    ZSPanelBlurConfig cfg = zs_panel_blur_config();
-    NSTimeInterval duration = animated ? cfg.fade : 0;
+    NSTimeInterval duration = animated ? kZSPanelBlurFade : 0;
 
     if (active) overlay.hidden = NO;
     if (!self.panelBlurAnimator) [self zs_rebuildPanelBlurAnimator];
@@ -2411,8 +2389,8 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
         return;
     }
 
-    NSTimeInterval legDuration = duration * (1 - MAX(0, MIN(0.9, cfg.overlap)));
-    NSTimeInterval lagDelay = duration * MAX(0, MIN(0.9, cfg.overlap));
+    NSTimeInterval legDuration = duration * (1 - kZSPanelBlurOverlap);
+    NSTimeInterval lagDelay = duration * kZSPanelBlurOverlap;
     NSTimeInterval glassDelay = active ? lagDelay : 0;
     NSTimeInterval blurDelay = active ? 0 : lagDelay;
 
@@ -2422,7 +2400,7 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
         if (!strongSelf || glassToken != strongSelf.panelBlurGlassToken || !strongSelf.panelGlass) return;
         [UIView animateWithDuration:legDuration
                               delay:0
-                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | zs_panel_glass_ease_option(cfg.glassEase)
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionCurveLinear
                          animations:^{ strongSelf.panelGlass.effect = glassTarget; }
                          completion:nil];
     };
@@ -2444,8 +2422,7 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
 - (void)zs_panelBlurTick:(CADisplayLink *)link {
     CGFloat t = self.panelBlurDuration > 0 ? (CGFloat)((CACurrentMediaTime() - self.panelBlurStartTime) / self.panelBlurDuration) : 1;
     t = MAX(0, MIN(1, t));
-    CGFloat eased = zs_panel_blur_ease(zs_panel_blur_config().blurEase, t);
-    [self zs_applyPanelBlurProgress:self.panelBlurFrom + (self.panelBlurTo - self.panelBlurFrom) * eased];
+    [self zs_applyPanelBlurProgress:self.panelBlurFrom + (self.panelBlurTo - self.panelBlurFrom) * t];
     if (t >= 1) {
         [link invalidate];
         if (self.panelBlurLink == link) self.panelBlurLink = nil;
@@ -2465,76 +2442,6 @@ static UIViewAnimationOptions zs_panel_glass_ease_option(NSInteger mode) {
     self.panelBlurOverlay = nil;
     self.panelBlurActive = NO;
     self.panelBlurProgress = 0;
-}
-
-- (void)zs_refreshPanelBlurAppearance {
-    if (self.panelBlurAnimator || self.panelBlurActive) [self zs_rebuildPanelBlurAnimator];
-}
-
-- (void)zs_blurEnabledChanged:(UISwitch *)toggle {
-    zs_panel_blur_set(@"enabled", toggle.on ? 1 : 0);
-    if (!toggle.on && self.panelBlurActive) [self zs_setPanelBlurActive:NO animated:YES];
-}
-
-- (void)zs_blurStyleChanged:(ZSWheelPicker *)picker {
-    zs_panel_blur_set(@"style", (double)picker.selectedIndex);
-    [self zs_refreshPanelBlurAppearance];
-}
-
-- (void)zs_blurIntensityChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"intensity", slider.value);
-    [self zs_refreshPanelBlurAppearance];
-}
-
-- (void)zs_blurTintChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"tint", slider.value);
-    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
-}
-
-- (void)zs_blurFadeChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"fade", slider.value);
-}
-
-- (void)zs_blurOpenAtChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"openAt", slider.value);
-}
-
-- (void)zs_blurCloseAtChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"closeAt", slider.value);
-}
-
-- (void)zs_blurOverlapChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"overlap", slider.value);
-}
-
-- (void)zs_blurCurveChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"blurCurve", slider.value);
-    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
-}
-
-- (void)zs_blurTintCurveChanged:(ZSCapsuleSlider *)slider {
-    zs_update_value_label(slider);
-    zs_panel_blur_set(@"tintCurve", slider.value);
-    [self zs_applyPanelBlurProgress:self.panelBlurProgress];
-}
-
-- (void)zs_blurGlassEaseChanged:(ZSWheelPicker *)picker {
-    zs_panel_blur_set(@"glassEase", (double)picker.selectedIndex);
-}
-
-- (void)zs_blurBlurEaseChanged:(ZSWheelPicker *)picker {
-    zs_panel_blur_set(@"blurEase", (double)picker.selectedIndex);
-}
-
-- (void)zs_blurPreviewTapped {
-    [self zs_setPanelBlurActive:!self.panelBlurActive animated:YES];
 }
 
 - (void)disableEnkephalinChanged:(UISwitch *)toggle {
