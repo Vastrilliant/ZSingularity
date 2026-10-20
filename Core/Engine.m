@@ -5060,6 +5060,8 @@ static BOOL ZSUID_HotFieldResolve(void) {
 
 static int32_t gUIDHotLastSceneState = -1;
 
+static void ZSUID_RedactColdTargets(void);
+
 static void ZSUID_HotFieldTick(void) {
     if (!gUIDRedactorEnabledCacheLoaded) {
         gUIDRedactorEnabledCache = UIDRedactor.isEnabled;
@@ -5069,6 +5071,14 @@ static void ZSUID_HotFieldTick(void) {
 
     int32_t sceneState = -1;
     BOOL sceneStateKnown = ZSGlobalScene_Current(&sceneState);
+
+    if (sceneStateKnown && sceneState == ZSGlobalSceneStateLogin && gUIDHotLastSceneState != ZSGlobalSceneStateLogin) {
+        gUIDHotLastSceneState = sceneState;
+        ZSUID_HotFieldInvalidate();
+        ZSUID_RedactColdTargets();
+        ZLog(@"[UIDRedactor] reached the login scene - ran the redaction once");
+        return;
+    }
 
     if (!sceneStateKnown || sceneState != ZSGlobalSceneStateMain) {
         if (sceneStateKnown && sceneState != gUIDHotLastSceneState) {
