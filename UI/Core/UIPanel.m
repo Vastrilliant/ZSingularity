@@ -2112,7 +2112,10 @@ static const CGFloat kZSSliderGlassCullMargin = 0;
 
     NSTimeInterval mainDuration = fullScreenChanged ? kZSFullScreenPanelDuration : 0.28;
 
-    if (animated && expandPanel && (leftCornersFlatChanged || fullScreenChanged)) {
+    if (expandPanel && coverActive) {
+        self.panelBlurToken = self.panelBlurToken + 1;
+        [self zs_setPanelBlurActive:YES animated:NO];
+    } else if (animated && expandPanel && (leftCornersFlatChanged || fullScreenChanged)) {
         [self zs_scheduleBlurSwapActive:(docsVisible && fullScreenOpen) mainDuration:mainDuration];
     }
 
