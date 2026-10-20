@@ -1946,7 +1946,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
         return;
     }
-    NSString *textureName = asset.assetName.length > 0 ? asset.assetName : (asset.displayName.length > 0 ? asset.displayName : @"this texture");
+    NSString *textureName = asset.assetName.length > 0 ? asset.assetName : [NSString stringWithFormat:@"%@ %lld", asset.typeName ?: @"Texture2D", (long long)asset.pathID];
     NSString *fileName = displayName.length > 0 ? displayName : path.lastPathComponent;
     NSString *title = [NSString stringWithFormat:@"Swap %@ for %@?", textureName, fileName];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
