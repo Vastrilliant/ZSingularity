@@ -367,6 +367,11 @@ static UIView *zs_make_stored_backups_separator(void) {
         [self zs_handleLogoImportPickedURL:urls.firstObject];
         return;
     }
+    if (controller == self.assetExplorerSwapDocumentPicker) {
+        self.assetExplorerSwapDocumentPicker = nil;
+        [self zs_assetExplorerSwapPickedImageURL:urls.firstObject];
+        return;
+    }
     if (controller == self.patchLCPicker) {
         self.patchLCPicker = nil;
         [self zs_handlePatchLCPickedURL:urls.firstObject];

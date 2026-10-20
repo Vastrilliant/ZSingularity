@@ -96,4 +96,8 @@ typedef NS_ENUM(NSInteger, ZTranscoderInstallerErrorCode) {
                      completion:(void (^)(BOOL success, NSString *summary))completion;
 @end
 
+@interface ZTTextureSwapper : NSObject
++ (BOOL)swapTexturePathID:(int64_t)pathID inBundleAtPath:(NSString *)bundlePath withImageAtPath:(NSString *)imagePath error:(NSError **)error;
+@end
+
 NS_ASSUME_NONNULL_END

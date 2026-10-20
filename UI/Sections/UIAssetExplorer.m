@@ -1,4 +1,6 @@
 #import "UIInternal.h"
+#import <PhotosUI/PhotosUI.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @implementation UserInterface (AssetExplorer)
 
@@ -582,6 +584,14 @@
     [overlay addSubview:textureExportButton];
     self.assetExplorerTextureExportButton = textureExportButton;
 
+    UIButton *textureSwapButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    textureSwapButton.translatesAutoresizingMaskIntoConstraints = NO;
+    zs_style_button_as_native_glass_with_font(textureSwapButton, @"Swap", [UIColor colorWithWhite:1 alpha:0.85], [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]);
+    [textureSwapButton addTarget:self action:@selector(zs_assetExplorerTextureSwapTapped) forControlEvents:UIControlEventTouchUpInside];
+    textureSwapButton.hidden = YES;
+    [overlay addSubview:textureSwapButton];
+    self.assetExplorerTextureSwapButton = textureSwapButton;
+
     ZSModeSlider *modeControl = [[ZSModeSlider alloc] init];
     modeControl.translatesAutoresizingMaskIntoConstraints = NO;
     modeControl.labels = @[@"Preview", @"Data"];
@@ -861,6 +871,12 @@
         [controlsStack.trailingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor constant:-8],
     ]];
 
+    NSLayoutConstraint *swapLeading = [textureSwapButton.leadingAnchor constraintEqualToAnchor:textureExportButton.trailingAnchor constant:0];
+    NSLayoutConstraint *swapWidth = [textureSwapButton.widthAnchor constraintEqualToConstant:0];
+    [NSLayoutConstraint activateConstraints:@[swapLeading, swapWidth]];
+    self.assetExplorerTextureSwapLeading = swapLeading;
+    self.assetExplorerTextureSwapWidth = swapWidth;
+
     [NSLayoutConstraint activateConstraints:@[
         [textureBackButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
         [textureBackButton.leadingAnchor constraintEqualToAnchor:closeButton.trailingAnchor constant:8],
@@ -873,7 +889,9 @@
         [textureExportButton.heightAnchor constraintEqualToConstant:30],
 
         [modeControl.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
-        [modeControl.leadingAnchor constraintEqualToAnchor:textureExportButton.trailingAnchor constant:8],
+        [textureSwapButton.centerYAnchor constraintEqualToAnchor:closeButton.centerYAnchor],
+        [textureSwapButton.heightAnchor constraintEqualToConstant:30],
+        [modeControl.leadingAnchor constraintEqualToAnchor:textureSwapButton.trailingAnchor constant:8],
         [modeControl.heightAnchor constraintEqualToConstant:30],
         [modeControl.trailingAnchor constraintLessThanOrEqualToAnchor:pagerStack.leadingAnchor constant:-6],
 
@@ -1285,6 +1303,7 @@ static void zs_preview_axis_range(CGFloat clipLen, CGFloat winMin, CGFloat winMa
     self.assetExplorerCloseButton.hidden = visible ? NO : (self.assetExplorerSelectedBundle != nil);
     self.assetExplorerTextureBackButton.hidden = !visible;
     self.assetExplorerTextureExportButton.hidden = !visible;
+    [self zs_assetExplorerSyncSwapButton];
     self.assetExplorerTextureImageView.hidden = !visible;
     self.assetExplorerTextView.hidden = YES;
     self.assetExplorerTextView.text = @"";
@@ -1373,6 +1392,7 @@ static void zs_preview_axis_range(CGFloat clipLen, CGFloat winMin, CGFloat winMa
     [self.assetExplorerTextureSpinner startAnimating];
     self.assetExplorerTextureExportButton.enabled = NO;
     self.assetExplorerTextureExportButton.alpha = 0.35;
+    [self zs_assetExplorerSyncSwapButton];
     [self zs_assetExplorerSyncTexturePager];
     [self zs_assetExplorerSyncPagePager];
 
@@ -1411,6 +1431,7 @@ static void zs_preview_axis_range(CGFloat clipLen, CGFloat winMin, CGFloat winMa
                 strongSelf.assetExplorerTextureImageView.image = image;
                 strongSelf.assetExplorerTextureExportButton.enabled = YES;
                 strongSelf.assetExplorerTextureExportButton.alpha = 1;
+                [strongSelf zs_assetExplorerSyncSwapButton];
                 if (strongSelf.assetExplorerDataMode) [strongSelf zs_assetExplorerApplyDisplayMode];
                 else [strongSelf zs_assetExplorerStartLiveFromElapsed:0];
             } else {
@@ -1428,6 +1449,7 @@ static void zs_preview_axis_range(CGFloat clipLen, CGFloat winMin, CGFloat winMa
     self.assetExplorerModeControl.hidden = !available;
     [self.assetExplorerModeControl setGlassEnabled:available];
     [self.assetExplorerModeControl setSelectedIndex:self.assetExplorerDataMode ? 1 : 0 animated:NO];
+    [self zs_assetExplorerSyncSwapButton];
 }
 
 - (void)zs_assetExplorerModeChanged:(ZSModeSlider *)control {
@@ -1776,6 +1798,198 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
             [presenter presentViewController:activityVC animated:YES completion:nil];
             UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
             [haptic impactOccurred];
+        });
+    });
+}
+
+- (ZSAssetExplorerAsset *)zs_assetExplorerCurrentSwappableTexture {
+    if (!self.assetExplorerTextureOpen || self.assetExplorerLocalizeMode || self.assetExplorerFMODMode || self.assetExplorerDataMode || self.assetExplorerSwapBusy) return nil;
+    NSInteger index = self.assetExplorerTextureIndex;
+    if (index < 0 || index >= (NSInteger)self.assetExplorerTextureAssets.count) return nil;
+    ZSAssetExplorerAsset *asset = self.assetExplorerTextureAssets[(NSUInteger)index];
+    ZSAssetExplorerVisual *visual = self.assetExplorerVisual;
+    if (asset.classID != 28 || !visual || visual.text.length > 0 || !self.assetExplorerTextureImageView.image) return nil;
+    return asset;
+}
+
+- (void)zs_assetExplorerSyncSwapButton {
+    UIButton *button = self.assetExplorerTextureSwapButton;
+    if (!button) return;
+    BOOL available = [self zs_assetExplorerCurrentSwappableTexture] != nil;
+    button.hidden = !available;
+    self.assetExplorerTextureSwapLeading.constant = available ? 8 : 0;
+    self.assetExplorerTextureSwapWidth.constant = available ? 52 : 0;
+}
+
+- (UIViewController *)zs_assetExplorerSwapPresenter {
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    return presenter;
+}
+
+- (void)zs_assetExplorerTextureSwapTapped {
+    if (![self zs_assetExplorerCurrentSwappableTexture]) return;
+    UIViewController *presenter = [self zs_assetExplorerSwapPresenter];
+    if (!presenter) return;
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Swap texture" message:@"Choose an image to replace this texture with." preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Files" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf zs_assetExplorerSwapPickFromFiles];
+    }]];
+    if (@available(iOS 14.0, *)) {
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Photos" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [weakSelf zs_assetExplorerSwapPickFromPhotos];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    UIButton *source = self.assetExplorerTextureSwapButton;
+    sheet.popoverPresentationController.sourceView = source;
+    sheet.popoverPresentationController.sourceRect = source.bounds;
+    [presenter presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)zs_assetExplorerSwapPickFromFiles {
+    if (![self zs_assetExplorerCurrentSwappableTexture]) return;
+    UIDocumentPickerViewController *picker;
+    if (@available(iOS 14.0, *)) {
+        picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeImage] asCopy:YES];
+    } else {
+        picker = [[UIDocumentPickerViewController alloc] initWithDocumentTypes:@[@"public.image"] inMode:UIDocumentPickerModeImport];
+    }
+    picker.delegate = self;
+    picker.allowsMultipleSelection = NO;
+    UIViewController *presenter = [self zs_assetExplorerSwapPresenter];
+    if (!presenter) return;
+    self.assetExplorerSwapDocumentPicker = picker;
+    [presenter presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)zs_assetExplorerSwapPickFromPhotos {
+    if (![self zs_assetExplorerCurrentSwappableTexture]) return;
+    if (@available(iOS 14.0, *)) {
+        PHPickerConfiguration *configuration = [[PHPickerConfiguration alloc] init];
+        configuration.filter = [PHPickerFilter imagesFilter];
+        configuration.selectionLimit = 1;
+        PHPickerViewController *picker = [[PHPickerViewController alloc] initWithConfiguration:configuration];
+        picker.delegate = (id<PHPickerViewControllerDelegate>)self;
+        UIViewController *presenter = [self zs_assetExplorerSwapPresenter];
+        if (!presenter) return;
+        [presenter presentViewController:picker animated:YES completion:nil];
+    }
+}
+
+- (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
+    [picker dismissViewControllerAnimated:YES completion:nil];
+    PHPickerResult *result = results.firstObject;
+    if (!result) return;
+    NSItemProvider *provider = result.itemProvider;
+    NSString *identifier = UTTypeImage.identifier;
+    for (NSString *registered in provider.registeredTypeIdentifiers) {
+        UTType *type = [UTType typeWithIdentifier:registered];
+        if (type && [type conformsToType:UTTypeImage]) {
+            identifier = registered;
+            break;
+        }
+    }
+    __weak typeof(self) weakSelf = self;
+    [provider loadFileRepresentationForTypeIdentifier:identifier completionHandler:^(NSURL *url, NSError *error) {
+        NSString *staged = nil;
+        if (url) {
+            NSString *extension = url.pathExtension.length > 0 ? url.pathExtension : @"img";
+            staged = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSSwapImage-%@.%@", NSUUID.UUID.UUIDString, extension]];
+            if (![NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:staged] error:nil]) staged = nil;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (staged) [strongSelf zs_assetExplorerSwapPickedImagePath:staged];
+            else [strongSelf zs_presentModsAlertWithTitle:@"Swap failed" message:@"Couldn't load the selected photo."];
+        });
+    }];
+}
+
+- (void)zs_assetExplorerSwapPickedImageURL:(NSURL *)url {
+    if (!url) return;
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSString *staged = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSSwapImage-%@.%@", NSUUID.UUID.UUIDString, url.pathExtension.length > 0 ? url.pathExtension : @"img"]];
+    BOOL copied = [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:staged] error:nil];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    if (!copied) {
+        [self zs_presentModsAlertWithTitle:@"Swap failed" message:@"Couldn't read the selected file."];
+        return;
+    }
+    [self zs_assetExplorerSwapPickedImagePath:staged];
+}
+
+- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path {
+    ZSAssetExplorerAsset *asset = [self zs_assetExplorerCurrentSwappableTexture];
+    UIViewController *presenter = [self zs_assetExplorerSwapPresenter];
+    if (!asset || !presenter) {
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        return;
+    }
+    NSString *summary = self.assetExplorerVisual.summary.length > 0 ? self.assetExplorerVisual.summary : (asset.assetName ?: @"this texture");
+    NSString *message = [NSString stringWithFormat:@"Replace %@ with the selected image? It will be stretched to the texture's exact size and stored uncompressed (RGBA32). A backup of the original bundle is kept and Restore Originals will bring it back.", summary];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Swap texture?" message:message preferredStyle:UIAlertControllerStyleAlert];
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Swap" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        [weakSelf zs_assetExplorerSwapPerformWithImagePath:path];
+    }]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)zs_assetExplorerSwapPerformWithImagePath:(NSString *)path {
+    ZSAssetExplorerAsset *asset = [self zs_assetExplorerCurrentSwappableTexture];
+    ZSAssetExplorerBundle *bundle = self.assetExplorerSelectedBundle;
+    if (!asset || !bundle) {
+        [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+        return;
+    }
+    self.assetExplorerSwapBusy = YES;
+    [self zs_assetExplorerSyncSwapButton];
+    self.assetExplorerTextureExportButton.enabled = NO;
+    self.assetExplorerTextureExportButton.alpha = 0.35;
+    self.assetExplorerTextureCaptionLabel.text = @"Swapping texture…";
+    [self.assetExplorerTextureSpinner startAnimating];
+
+    __weak typeof(self) weakSelf = self;
+    NSString *bundlePath = [bundle.filePath copy];
+    int64_t pathID = asset.pathID;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        BOOL ok = NO;
+        NSArray<ZSAssetExplorerAsset *> *assets = nil;
+        @autoreleasepool {
+            [ZSAssetExplorer unloadBundleAtPath:bundlePath];
+            ok = [ZTTextureSwapper swapTexturePathID:pathID inBundleAtPath:bundlePath withImageAtPath:path error:&error];
+            [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+            [ZSAssetExplorer unloadBundleAtPath:bundlePath];
+            [ZSAssetExplorer loadBundleIntoMemoryAtPath:bundlePath error:nil];
+            if (ok) assets = [ZSAssetExplorer assetsForBundleAtPath:bundlePath error:nil];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf.assetExplorerSwapBusy = NO;
+            [strongSelf.assetExplorerTextureSpinner stopAnimating];
+            BOOL stillHere = strongSelf.assetExplorerFullScreenOpen && [strongSelf.assetExplorerSelectedBundle.filePath isEqualToString:bundlePath];
+            if (ok && stillHere) {
+                if (assets) strongSelf.assetExplorerAssets = assets;
+                [strongSelf.assetExplorerThumbSource reset];
+                [strongSelf zs_assetExplorerRefreshListResettingScroll:NO];
+                if (strongSelf.assetExplorerTextureOpen) [strongSelf zs_assetExplorerLoadTextureAtCurrentIndex];
+            } else if (stillHere && strongSelf.assetExplorerTextureOpen) {
+                [strongSelf zs_assetExplorerLoadTextureAtCurrentIndex];
+            }
+            if (ok) {
+                UINotificationFeedbackGenerator *haptic = [[UINotificationFeedbackGenerator alloc] init];
+                [haptic notificationOccurred:UINotificationFeedbackTypeSuccess];
+            } else {
+                [strongSelf zs_presentModsAlertWithTitle:@"Swap failed" message:error.localizedDescription ?: @"The texture couldn't be swapped."];
+            }
         });
     });
 }

@@ -216,6 +216,7 @@ jobs:
             -framework CoreText \
             -framework ImageIO \
             -framework UniformTypeIdentifiers \
+            -framework PhotosUI \
             -framework Security \
             -framework CoreLocation \
             -framework WebKit \

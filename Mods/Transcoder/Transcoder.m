@@ -19,6 +19,8 @@
 #import <fcntl.h>
 #import <unistd.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <ImageIO/ImageIO.h>
+#import <CoreGraphics/CoreGraphics.h>
 
 NSString * const ZTranscoderServiceErrorDomain = @"ZTranscoderServiceErrorDomain";
 
@@ -1772,8 +1774,8 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     uint32_t flags = zt_be32(bytes + pos); pos += 4;
     uint32_t compression = UnityBundleCABCompressionLZ4HC;
     flags = (flags & ~kZSTranscoderUnityFSCompressionMask) | compression;
-    if (originalArchive.nodes.count != 2) {
-        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The input bundle does not contain exactly the expected serialized + .resS node pair.");
+    if (originalArchive.nodes.count != 1 && originalArchive.nodes.count != 2) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The input bundle does not contain the expected serialized node with an optional .resS node.");
         return NO;
     }
     NSString *cabPath = nil;
@@ -1784,7 +1786,7 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
     }
     UnityBundleNode *originalResS = nil;
     for (UnityBundleNode *node in originalArchive.nodes) if ([node.path hasSuffix:@".resS"]) originalResS = node;
-    if (!originalResS || originalResS.offset < 0 || originalResS.size < 0 || (uint64_t)originalResS.offset > originalArchive.data.length || (uint64_t)originalResS.size > originalArchive.data.length - (uint64_t)originalResS.offset) {
+    if (originalArchive.nodes.count == 2 && (!originalResS || originalResS.offset < 0 || originalResS.size < 0 || (uint64_t)originalResS.offset > originalArchive.data.length || (uint64_t)originalResS.size > originalArchive.data.length - (uint64_t)originalResS.offset)) {
         if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The UnityFS template has no readable .resS node.");
         return NO;
     }
@@ -1887,7 +1889,7 @@ static BOOL zt_write_unityfs(NSString *templateBundlePath, UnityBundleArchive *o
         const uint8_t *fl = blockFlags.bytes + (size_t)i * 2u;
         [info appendBytes:us length:4]; [info appendBytes:cs length:4]; [info appendBytes:fl length:2];
     }
-    zt_put_be32(info, 2u);
+    zt_put_be32(info, (uint32_t)originalArchive.nodes.count);
     uint64_t nodeOffset = 0;
     for (NSUInteger i = 0; i < originalArchive.nodes.count; i++) {
         UnityBundleNode *node = originalArchive.nodes[i];
@@ -3709,6 +3711,299 @@ static BOOL zt_live_apply_job(ZTLiveJob *job, NSString **outSummary) {
             if (completion) completion(success, summary);
         });
     });
+}
+
+@end
+
+static const int32_t kZTTextureFormatRGBA32 = 4;
+static const uint64_t kZTSwapMaxSourcePixels = 8192ull * 8192ull;
+
+static BOOL zt_swap_decode_image(NSString *imagePath, uint32_t width, uint32_t height, NSMutableData **outBottomUp, NSError **error) {
+    NSURL *url = [NSURL fileURLWithPath:imagePath];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    if (!source || CGImageSourceGetCount(source) == 0) {
+        if (source) CFRelease(source);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The selected file isn't a readable image.");
+        return NO;
+    }
+    NSUInteger maxSide = 8192;
+    NSDictionary *properties = (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+    NSUInteger sourceWidth = [properties[(__bridge NSString *)kCGImagePropertyPixelWidth] unsignedIntegerValue];
+    NSUInteger sourceHeight = [properties[(__bridge NSString *)kCGImagePropertyPixelHeight] unsignedIntegerValue];
+    if (sourceWidth > 0 && sourceHeight > 0) maxSide = MIN(maxSide, MAX(sourceWidth, sourceHeight));
+    NSDictionary *options = @{
+        (__bridge NSString *)kCGImageSourceCreateThumbnailFromImageAlways: @YES,
+        (__bridge NSString *)kCGImageSourceCreateThumbnailWithTransform: @YES,
+        (__bridge NSString *)kCGImageSourceShouldCacheImmediately: @YES,
+        (__bridge NSString *)kCGImageSourceThumbnailMaxPixelSize: @(maxSide),
+    };
+    CGImageRef image = CGImageSourceCreateThumbnailAtIndex(source, 0, (__bridge CFDictionaryRef)options);
+    CFRelease(source);
+    if (!image) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't decode the selected image.");
+        return NO;
+    }
+    size_t imageWidth = CGImageGetWidth(image);
+    size_t imageHeight = CGImageGetHeight(image);
+    if (imageWidth == 0 || imageHeight == 0 || (uint64_t)imageWidth * (uint64_t)imageHeight > kZTSwapMaxSourcePixels) {
+        CGImageRelease(image);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The selected image has unsupported dimensions.");
+        return NO;
+    }
+    uint64_t decodeBytes = (uint64_t)imageWidth * (uint64_t)imageHeight * 4u;
+    uint64_t targetBytes = (uint64_t)width * (uint64_t)height * 4u;
+    if (!zt_memory_allows(decodeBytes * 2u + targetBytes * 3u)) {
+        CGImageRelease(image);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Not enough free memory to decode this image.");
+        return NO;
+    }
+    NSMutableData *pixels = [NSMutableData dataWithLength:(NSUInteger)decodeBytes];
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef context = pixels && colorSpace ? CGBitmapContextCreate(pixels.mutableBytes, imageWidth, imageHeight, 8, imageWidth * 4u, colorSpace, (CGBitmapInfo)kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big) : NULL;
+    if (colorSpace) CGColorSpaceRelease(colorSpace);
+    if (!context) {
+        CGImageRelease(image);
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't allocate a decode buffer for the image.");
+        return NO;
+    }
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    CGContextDrawImage(context, CGRectMake(0, 0, (CGFloat)imageWidth, (CGFloat)imageHeight), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+
+    uint8_t *bytes = pixels.mutableBytes;
+    size_t pixelCount = imageWidth * imageHeight;
+    for (size_t i = 0; i < pixelCount; i++) {
+        uint8_t *px = bytes + i * 4u;
+        uint32_t a = px[3];
+        if (a == 0 || a == 255) continue;
+        for (int c = 0; c < 3; c++) {
+            uint32_t v = ((uint32_t)px[c] * 255u + a / 2u) / a;
+            px[c] = (uint8_t)MIN(v, 255u);
+        }
+    }
+
+    NSMutableData *resized = nil;
+    if (imageWidth == width && imageHeight == height) {
+        resized = pixels;
+    } else {
+        resized = zt_resize_rgba(pixels, (uint32_t)imageWidth, (uint32_t)imageHeight, width, height);
+    }
+    pixels = nil;
+    if (!resized || resized.length != (NSUInteger)targetBytes) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't resize the image to the texture's dimensions.");
+        return NO;
+    }
+
+    uint8_t *rows = resized.mutableBytes;
+    size_t rowBytes = (size_t)width * 4u;
+    uint8_t *scratch = malloc(rowBytes);
+    if (!scratch) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't allocate a row buffer.");
+        return NO;
+    }
+    for (uint32_t y = 0; y < height / 2u; y++) {
+        uint8_t *top = rows + (size_t)y * rowBytes;
+        uint8_t *bottom = rows + (size_t)(height - 1u - y) * rowBytes;
+        memcpy(scratch, top, rowBytes);
+        memcpy(top, bottom, rowBytes);
+        memcpy(bottom, scratch, rowBytes);
+    }
+    free(scratch);
+    *outBottomUp = resized;
+    return YES;
+}
+
+static void zt_swap_node_digest(UnityBundleArchive *archive, UnityBundleNode *node, uint8_t out[CC_SHA256_DIGEST_LENGTH]) {
+    CC_SHA256_CTX context;
+    CC_SHA256_Init(&context);
+    const uint8_t *cursor = (const uint8_t *)archive.data.bytes + (uint64_t)node.offset;
+    uint64_t remaining = (uint64_t)node.size;
+    while (remaining) {
+        CC_LONG n = (CC_LONG)MIN(remaining, (uint64_t)(1u << 24));
+        CC_SHA256_Update(&context, cursor, n);
+        cursor += n;
+        remaining -= n;
+    }
+    CC_SHA256_Final(out, &context);
+}
+
+static UnityBundleNode *zt_swap_find_resS(UnityBundleArchive *archive) {
+    for (UnityBundleNode *node in archive.nodes) if ([node.path hasSuffix:@".resS"]) return node;
+    return nil;
+}
+
+static BOOL zt_swap_node_in_range(UnityBundleArchive *archive, UnityBundleNode *node) {
+    return node && node.offset >= 0 && node.size >= 0 && (uint64_t)node.offset <= archive.data.length && (uint64_t)node.size <= archive.data.length - (uint64_t)node.offset;
+}
+
+static BOOL zt_swap_verify_serialized(NSString *path, ZTSerializedDocument *source, int64_t pathID, uint32_t encodedSize, NSError **error) {
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    NSError *parseError = nil;
+    ZTSerializedDocument *rebuilt = data ? zt_parse_serialized(data, &parseError) : nil;
+    if (!rebuilt) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"The rebuilt SerializedFile could not be read back: %@", parseError.localizedDescription ?: @"unknown error"]);
+        return NO;
+    }
+    if (rebuilt.objects.count != source.objects.count || rebuilt.textures.count != source.textures.count) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The rebuilt SerializedFile's object count changed.");
+        return NO;
+    }
+    for (NSUInteger i = 0; i < source.objects.count; i++) {
+        ZTSerializedObject *before = source.objects[i];
+        ZTSerializedObject *after = rebuilt.objects[i];
+        if (before.pathID != after.pathID || before.typeIndex != after.typeIndex) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The rebuilt SerializedFile's object table changed.");
+            return NO;
+        }
+        if (before.pathID == pathID) continue;
+        NSData *beforeData = zt_object_data(before, source.data);
+        NSData *afterData = zt_object_data(after, rebuilt.data);
+        if (!beforeData || !afterData || beforeData.length != afterData.length || memcmp(beforeData.bytes, afterData.bytes, beforeData.length) != 0) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, [NSString stringWithFormat:@"Object PathID=%lld changed during the rebuild.", (long long)before.pathID]);
+            return NO;
+        }
+    }
+    ZTTextureRecord *swapped = nil;
+    for (ZTTextureRecord *texture in rebuilt.textures) if (texture.object.pathID == pathID) swapped = texture;
+    if (!swapped || swapped.format != kZTTextureFormatRGBA32 || swapped.mipCount != 1 || swapped.imageDataLength != encodedSize || swapped.completeImageSize != encodedSize || swapped.streamSize != 0 || swapped.streamPathLength != 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The swapped texture did not read back as inline RGBA32.");
+        return NO;
+    }
+    return YES;
+}
+
+static BOOL zt_swap_build(NSString *bundlePath, int64_t pathID, NSString *imagePath, NSString *workDir, NSString **outBundle, uint8_t digest[CC_SHA256_DIGEST_LENGTH], BOOL *outHadResS, NSError **error) {
+    NSError *localError = nil;
+    UnityBundleArchive *archive = [UnityBundleCAB decompressedArchiveAtPath:bundlePath error:&localError];
+    if (!archive) {
+        if (error) *error = localError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't read the bundle.");
+        return NO;
+    }
+    UnityBundleNode *cabNode = nil;
+    for (UnityBundleNode *node in archive.nodes) if (node.flags & 4u) cabNode = node;
+    UnityBundleNode *resS = zt_swap_find_resS(archive);
+    BOOL layoutOK = zt_swap_node_in_range(archive, cabNode) && (archive.nodes.count == 1 || (archive.nodes.count == 2 && resS && resS != cabNode && zt_swap_node_in_range(archive, resS)));
+    if (!layoutOK) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"This bundle's layout isn't supported for texture swapping.");
+        return NO;
+    }
+    NSData *serialized = [NSData dataWithBytesNoCopy:(void *)((uint8_t *)archive.data.bytes + (uint64_t)cabNode.offset) length:(NSUInteger)cabNode.size freeWhenDone:NO];
+    ZTSerializedDocument *doc = zt_parse_serialized(serialized, &localError);
+    if (!doc) {
+        if (error) *error = localError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't parse the bundle's SerializedFile.");
+        return NO;
+    }
+    ZTTextureRecord *target = nil;
+    for (ZTTextureRecord *texture in doc.textures) if (texture.object.pathID == pathID) target = texture;
+    if (!target) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"That asset isn't a Texture2D that can be swapped.");
+        return NO;
+    }
+    if (target.width > kZSTranscoderMaxTextureDimension || target.height > kZSTranscoderMaxTextureDimension) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The texture's dimensions are too large to swap.");
+        return NO;
+    }
+    NSMutableData *rgba = nil;
+    if (!zt_swap_decode_image(imagePath, target.width, target.height, &rgba, error)) return NO;
+    NSString *encodedPath = [workDir stringByAppendingPathComponent:@"swap.rgba"];
+    if (![rgba writeToFile:encodedPath options:0 error:&localError]) {
+        if (error) *error = localError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Couldn't stage the replacement pixels.");
+        return NO;
+    }
+    uint32_t encodedSize = (uint32_t)rgba.length;
+    rgba = nil;
+    NSData *objectData = zt_object_data(target.object, doc.data);
+    if (!objectData) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Couldn't read the texture object.");
+        return NO;
+    }
+    ZTTextureReplacement *replacement = [ZTTextureReplacement new];
+    replacement.source = target;
+    replacement.target = target;
+    replacement.baseTexture = target;
+    replacement.baseObjectData = objectData;
+    replacement.outputFormat = kZTTextureFormatRGBA32;
+    replacement.outputMipCount = 1;
+    replacement.encodedPath = encodedPath;
+    replacement.encodedSize = encodedSize;
+    NSDictionary<NSString *, ZTTextureReplacement *> *replacements = @{[NSString stringWithFormat:@"%lld", (long long)pathID]: replacement};
+    NSString *serializedOutput = [workDir stringByAppendingPathComponent:@"swap.cab"];
+    if (!zt_rebuild_serialized_correctly(doc, replacements, serializedOutput, error)) return NO;
+    if (!zt_swap_verify_serialized(serializedOutput, doc, pathID, encodedSize, error)) return NO;
+    [[NSFileManager defaultManager] removeItemAtPath:encodedPath error:nil];
+    memset(digest, 0, CC_SHA256_DIGEST_LENGTH);
+    if (resS) zt_swap_node_digest(archive, resS, digest);
+    *outHadResS = resS != nil;
+    NSString *bundleOutput = [workDir stringByAppendingPathComponent:@"swap.bundle"];
+    if (!zt_write_unityfs(bundlePath, archive, serializedOutput, bundleOutput, error)) return NO;
+    if (zt_file_size(bundleOutput) == 0) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The rebuilt bundle is empty.");
+        return NO;
+    }
+    *outBundle = bundleOutput;
+    return YES;
+}
+
+static BOOL zt_swap_verify_bundle(NSString *bundlePath, const uint8_t expectedDigest[CC_SHA256_DIGEST_LENGTH], BOOL expectResS, NSError **error) {
+    NSError *localError = nil;
+    UnityBundleArchive *archive = [UnityBundleCAB decompressedArchiveAtPath:bundlePath error:&localError];
+    if (!archive) {
+        if (error) *error = localError ?: ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The rebuilt bundle could not be read back.");
+        return NO;
+    }
+    UnityBundleNode *cabNode = nil;
+    for (UnityBundleNode *node in archive.nodes) if (node.flags & 4u) cabNode = node;
+    UnityBundleNode *resS = zt_swap_find_resS(archive);
+    if (!zt_swap_node_in_range(archive, cabNode) || (resS != nil) != expectResS || (resS && !zt_swap_node_in_range(archive, resS))) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The rebuilt bundle's node layout is wrong.");
+        return NO;
+    }
+    if (resS) {
+        uint8_t actual[CC_SHA256_DIGEST_LENGTH];
+        zt_swap_node_digest(archive, resS, actual);
+        if (memcmp(actual, expectedDigest, CC_SHA256_DIGEST_LENGTH) != 0) {
+            if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"The .resS node changed during the swap.");
+            return NO;
+        }
+    }
+    return YES;
+}
+
+@implementation ZTTextureSwapper
+
++ (BOOL)swapTexturePathID:(int64_t)pathID inBundleAtPath:(NSString *)bundlePath withImageAtPath:(NSString *)imagePath error:(NSError **)error {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:bundlePath] || ![fm fileExistsAtPath:imagePath]) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"The bundle or the selected image is missing.");
+        return NO;
+    }
+    if (!zt_memory_allows(zt_file_size(bundlePath) * 3u)) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorCantReadModdedBundle, @"Not enough free memory to swap a texture in this bundle.");
+        return NO;
+    }
+    NSString *workDir = zt_temp_directory();
+    if (!workDir) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, @"Couldn't create a scratch directory.");
+        return NO;
+    }
+    uint8_t digest[CC_SHA256_DIGEST_LENGTH];
+    BOOL hadResS = NO;
+    NSString *built = nil;
+    BOOL ok = NO;
+    @autoreleasepool {
+        ok = zt_swap_build(bundlePath, pathID, imagePath, workDir, &built, digest, &hadResS, error);
+    }
+    if (ok) {
+        @autoreleasepool {
+            ok = zt_swap_verify_bundle(built, digest, hadResS, error);
+        }
+    }
+    if (ok) {
+        ok = [ZTranscoderInstaller installDoctoredBundleAtURL:[NSURL fileURLWithPath:built] toStockBundleURL:[NSURL fileURLWithPath:bundlePath] error:error];
+    }
+    [fm removeItemAtPath:workDir error:nil];
+    return ok;
 }
 
 @end

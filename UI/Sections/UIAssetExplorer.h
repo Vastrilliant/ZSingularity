@@ -55,6 +55,13 @@
 - (void)zs_assetExplorerSyncTexturePager;
 - (void)zs_assetExplorerStepTexture:(NSInteger)delta;
 - (void)zs_assetExplorerTextureExportTapped;
+- (void)zs_assetExplorerTextureSwapTapped;
+- (void)zs_assetExplorerSyncSwapButton;
+- (void)zs_assetExplorerSwapPickFromFiles;
+- (void)zs_assetExplorerSwapPickFromPhotos;
+- (void)zs_assetExplorerSwapPickedImageURL:(NSURL *)url;
+- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path;
+- (void)zs_assetExplorerSwapPerformWithImagePath:(NSString *)path;
 - (void)zs_assetExplorerTexturePrevTapped;
 - (void)zs_assetExplorerTextureNextTapped;
 - (void)zs_assetExplorerTextureBackTapped;
