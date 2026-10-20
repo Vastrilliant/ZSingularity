@@ -3970,6 +3970,31 @@ static BOOL zt_swap_verify_bundle(NSString *bundlePath, const uint8_t expectedDi
     return YES;
 }
 
+static BOOL zt_swap_install_built_bundle(NSString *builtPath, NSString *bundlePath, NSError **error) {
+    NSData *data = [NSData dataWithContentsOfFile:builtPath options:NSDataReadingMappedIfSafe error:error];
+    if (!data) return NO;
+    NSURL *bundleURL = [NSURL fileURLWithPath:bundlePath];
+    BOOL scoped = [bundleURL startAccessingSecurityScopedResource];
+    NSError *writeError = nil;
+    BOOL written = [data writeToURL:bundleURL options:NSDataWritingAtomic error:&writeError];
+    if (scoped) [bundleURL stopAccessingSecurityScopedResource];
+    if (!written) {
+        if (error) *error = ZTMakeTranscoderError(ZTranscoderServiceErrorOutputMissing, writeError.localizedDescription ?: @"Couldn't write the swapped bundle.");
+        return NO;
+    }
+    zs_track_asset_path(bundlePath);
+    NSString *cab = zt_cab_for_installed_bundle(bundlePath);
+    if (cab.length == 0) {
+        ZLog(@"[ZTTextureSwapper] swapped %@ but couldn't resolve its CAB, so it was not recorded in moddedBundles", bundlePath.lastPathComponent);
+    } else if (zs_bundle_is_modded(cab)) {
+        ZLog(@"[ZTTextureSwapper] %@ is already recorded in moddedBundles", cab);
+    } else {
+        zs_set_bundle_modded(cab, YES);
+        ZLog(@"[ZTTextureSwapper] recorded %@ in moddedBundles", cab);
+    }
+    return YES;
+}
+
 @implementation ZTTextureSwapper
 
 + (BOOL)swapTexturePathID:(int64_t)pathID inBundleAtPath:(NSString *)bundlePath withImageAtPath:(NSString *)imagePath error:(NSError **)error {
@@ -4000,7 +4025,7 @@ static BOOL zt_swap_verify_bundle(NSString *bundlePath, const uint8_t expectedDi
         }
     }
     if (ok) {
-        ok = [ZTranscoderInstaller installDoctoredBundleAtURL:[NSURL fileURLWithPath:built] toStockBundleURL:[NSURL fileURLWithPath:bundlePath] error:error];
+        ok = zt_swap_install_built_bundle(built, bundlePath, error);
     }
     [fm removeItemAtPath:workDir error:nil];
     return ok;

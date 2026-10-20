@@ -60,7 +60,7 @@
 - (void)zs_assetExplorerSwapPickFromFiles;
 - (void)zs_assetExplorerSwapPickFromPhotos;
 - (void)zs_assetExplorerSwapPickedImageURL:(NSURL *)url;
-- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path;
+- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path displayName:(NSString *)displayName;
 - (void)zs_assetExplorerSwapPerformWithImagePath:(NSString *)path;
 - (void)zs_assetExplorerTexturePrevTapped;
 - (void)zs_assetExplorerTextureNextTapped;

@@ -586,7 +586,7 @@
 
     UIButton *textureSwapButton = [UIButton buttonWithType:UIButtonTypeSystem];
     textureSwapButton.translatesAutoresizingMaskIntoConstraints = NO;
-    zs_style_button_as_native_glass_with_font(textureSwapButton, @"Swap", [UIColor colorWithWhite:1 alpha:0.85], [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold]);
+    zs_style_pill_icon_button_as_native_glass(textureSwapButton, [UIImage systemImageNamed:@"arrow.left.arrow.right" withConfiguration:symbolConfig], [UIColor colorWithWhite:1 alpha:0.85]);
     [textureSwapButton addTarget:self action:@selector(zs_assetExplorerTextureSwapTapped) forControlEvents:UIControlEventTouchUpInside];
     textureSwapButton.hidden = YES;
     [overlay addSubview:textureSwapButton];
@@ -1818,7 +1818,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     BOOL available = [self zs_assetExplorerCurrentSwappableTexture] != nil;
     button.hidden = !available;
     self.assetExplorerTextureSwapLeading.constant = available ? 8 : 0;
-    self.assetExplorerTextureSwapWidth.constant = available ? 52 : 0;
+    self.assetExplorerTextureSwapWidth.constant = available ? 30 : 0;
 }
 
 - (UIViewController *)zs_assetExplorerSwapPresenter {
@@ -1879,9 +1879,11 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
 }
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14.0)) {
-    [picker dismissViewControllerAnimated:YES completion:nil];
     PHPickerResult *result = results.firstObject;
-    if (!result) return;
+    if (!result) {
+        [picker dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
     NSItemProvider *provider = result.itemProvider;
     NSString *identifier = UTTypeImage.identifier;
     for (NSString *registered in provider.registeredTypeIdentifiers) {
@@ -1891,21 +1893,36 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
             break;
         }
     }
-    __weak typeof(self) weakSelf = self;
+    dispatch_group_t group = dispatch_group_create();
+    __block NSString *staged = nil;
+    __block NSString *displayName = nil;
+    NSString *suggestedName = provider.suggestedName;
+    dispatch_group_enter(group);
     [provider loadFileRepresentationForTypeIdentifier:identifier completionHandler:^(NSURL *url, NSError *error) {
-        NSString *staged = nil;
         if (url) {
             NSString *extension = url.pathExtension.length > 0 ? url.pathExtension : @"img";
-            staged = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSSwapImage-%@.%@", NSUUID.UUID.UUIDString, extension]];
-            if (![NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:staged] error:nil]) staged = nil;
+            NSString *destination = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSSwapImage-%@.%@", NSUUID.UUID.UUIDString, extension]];
+            if ([NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:destination] error:nil]) {
+                staged = destination;
+                displayName = suggestedName.length > 0 ? [suggestedName stringByAppendingPathExtension:extension] : url.lastPathComponent;
+            }
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            typeof(self) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            if (staged) [strongSelf zs_assetExplorerSwapPickedImagePath:staged];
-            else [strongSelf zs_presentModsAlertWithTitle:@"Swap failed" message:@"Couldn't load the selected photo."];
-        });
+        dispatch_group_leave(group);
     }];
+    dispatch_group_enter(group);
+    [picker dismissViewControllerAnimated:YES completion:^{
+        dispatch_group_leave(group);
+    }];
+    __weak typeof(self) weakSelf = self;
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) {
+            if (staged) [NSFileManager.defaultManager removeItemAtPath:staged error:nil];
+            return;
+        }
+        if (staged) [strongSelf zs_assetExplorerSwapPickedImagePath:staged displayName:displayName];
+        else [strongSelf zs_presentModsAlertWithTitle:@"Swap failed" message:@"Couldn't load the selected photo."];
+    });
 }
 
 - (void)zs_assetExplorerSwapPickedImageURL:(NSURL *)url {
@@ -1913,24 +1930,26 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
     BOOL scoped = [url startAccessingSecurityScopedResource];
     NSString *staged = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"ZSSwapImage-%@.%@", NSUUID.UUID.UUIDString, url.pathExtension.length > 0 ? url.pathExtension : @"img"]];
     BOOL copied = [NSFileManager.defaultManager copyItemAtURL:url toURL:[NSURL fileURLWithPath:staged] error:nil];
+    NSString *displayName = url.lastPathComponent;
     if (scoped) [url stopAccessingSecurityScopedResource];
     if (!copied) {
         [self zs_presentModsAlertWithTitle:@"Swap failed" message:@"Couldn't read the selected file."];
         return;
     }
-    [self zs_assetExplorerSwapPickedImagePath:staged];
+    [self zs_assetExplorerSwapPickedImagePath:staged displayName:displayName];
 }
 
-- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path {
+- (void)zs_assetExplorerSwapPickedImagePath:(NSString *)path displayName:(NSString *)displayName {
     ZSAssetExplorerAsset *asset = [self zs_assetExplorerCurrentSwappableTexture];
     UIViewController *presenter = [self zs_assetExplorerSwapPresenter];
     if (!asset || !presenter) {
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
         return;
     }
-    NSString *summary = self.assetExplorerVisual.summary.length > 0 ? self.assetExplorerVisual.summary : (asset.assetName ?: @"this texture");
-    NSString *message = [NSString stringWithFormat:@"Replace %@ with the selected image? It will be stretched to the texture's exact size and stored uncompressed (RGBA32). A backup of the original bundle is kept and Restore Originals will bring it back.", summary];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Swap texture?" message:message preferredStyle:UIAlertControllerStyleAlert];
+    NSString *textureName = asset.assetName.length > 0 ? asset.assetName : (asset.displayName.length > 0 ? asset.displayName : @"this texture");
+    NSString *fileName = displayName.length > 0 ? displayName : path.lastPathComponent;
+    NSString *title = [NSString stringWithFormat:@"Swap %@ for %@?", textureName, fileName];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleAlert];
     __weak typeof(self) weakSelf = self;
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
         [NSFileManager.defaultManager removeItemAtPath:path error:nil];
