@@ -5,6 +5,10 @@
 #import "UnityBundleTools.h"
 #import <CoreFoundation/CoreFoundation.h>
 #import <compression.h>
+#import <CommonCrypto/CommonDigest.h>
+#import <sys/stat.h>
+#import <fcntl.h>
+#import <unistd.h>
 
 static NSString * const kZSModsRootDirectoryName = @"Mods";
 static NSString * const kZSModsLibraryDirectoryName = @"library";
@@ -13,6 +17,58 @@ static NSString * const kZSModsBackupsLocalizeDirectoryName = @"Localize";
 static NSString * const kZSModsBackupsBanksDirectoryName = @"Banks";
 static NSString * const kZSModsBackupsAssetsDirectoryName = @"Assets";
 static NSString * const kZSModsFontsDirectoryName = @"Fonts";
+
+static BOOL zs_mods_sha256_of_file(NSString *path, uint8_t out[CC_SHA256_DIGEST_LENGTH]) {
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return NO;
+    const size_t chunk = 256 * 1024;
+    uint8_t *buf = malloc(chunk);
+    if (!buf) { close(fd); return NO; }
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    BOOL ok = YES;
+    while (YES) {
+        ssize_t n = read(fd, buf, chunk);
+        if (n < 0) { ok = NO; break; }
+        if (n == 0) break;
+        CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
+    }
+    free(buf);
+    close(fd);
+    if (!ok) return NO;
+    CC_SHA256_Final(out, &ctx);
+    return YES;
+}
+
+static BOOL zs_mods_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
+    struct stat statA, statB;
+    if (stat(pathA.fileSystemRepresentation, &statA) != 0 || stat(pathB.fileSystemRepresentation, &statB) != 0) return NO;
+    if (!S_ISREG(statA.st_mode) || !S_ISREG(statB.st_mode) || statA.st_size != statB.st_size) return NO;
+    uint8_t hashA[CC_SHA256_DIGEST_LENGTH], hashB[CC_SHA256_DIGEST_LENGTH];
+    if (!zs_mods_sha256_of_file(pathA, hashA) || !zs_mods_sha256_of_file(pathB, hashB)) return NO;
+    return memcmp(hashA, hashB, CC_SHA256_DIGEST_LENGTH) == 0;
+}
+
+static BOOL zs_mods_directory_contents_match(NSString *sourceDir, NSString *destDir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:sourceDir error:nil];
+    if (!entries) return NO;
+    for (NSString *name in entries) {
+        if ([name isEqualToString:@".DS_Store"] || [name hasPrefix:@"._"]) continue;
+        NSString *sourceItem = [sourceDir stringByAppendingPathComponent:name];
+        NSString *destItem = [destDir stringByAppendingPathComponent:name];
+        BOOL sourceIsDirectory = NO;
+        BOOL destIsDirectory = NO;
+        if (![fm fileExistsAtPath:sourceItem isDirectory:&sourceIsDirectory]) return NO;
+        if (![fm fileExistsAtPath:destItem isDirectory:&destIsDirectory] || sourceIsDirectory != destIsDirectory) return NO;
+        if (sourceIsDirectory) {
+            if (!zs_mods_directory_contents_match(sourceItem, destItem)) return NO;
+        } else if (!zs_mods_files_have_identical_sha256(sourceItem, destItem)) {
+            return NO;
+        }
+    }
+    return YES;
+}
 
 @implementation ZSModsPaths
 
@@ -214,6 +270,13 @@ static NSString * const kBTMobileBuildsRelativePath = @"Assets/Sound/FMODBuilds/
         if (error) *error = BTError(BankTransplantErrorCantReadModded,
             [NSString stringWithFormat:@"Couldn't read the picked file %@.", fileName]);
         return NO;
+    }
+
+    if (zs_mods_files_have_identical_sha256(moddedURL.path, originalPath)) {
+        if (accessing) [moddedURL stopAccessingSecurityScopedResource];
+        ZLog(@"[BankTransplant] %@ already matches the modded bank (SHA-256) - skipping backup and swap", fileName);
+        zs_track_asset_path(originalPath);
+        return YES;
     }
 
     NSString *backupDir = [self bankBackupDirectory];
@@ -1064,9 +1127,16 @@ static NSString *LTPackFingerprint(NSString *packPath) {
         return NO;
     }
 
+    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
+    if (zs_mods_files_have_identical_sha256(modPath, targetPath)) {
+        zs_track_asset_path(targetPath);
+        [ZSFileIndex ensureLocalizationIndexUpToDate];
+        ZLog(@"[LocalizationTransplant] %@ already matches the modded file (SHA-256) - skipping backup and swap", relativeTarget);
+        return YES;
+    }
+
     if (![self lt_ensureFileBackupForRelativeTarget:relativeTarget error:error]) return NO;
 
-    NSString *targetPath = [localizeDir stringByAppendingPathComponent:relativeTarget];
     if (![self lt_placeFileAtPath:modPath atPath:targetPath error:error]) return NO;
 
     zs_track_asset_path(targetPath);
@@ -1091,8 +1161,13 @@ static NSString *LTPackFingerprint(NSString *packPath) {
         return NO;
     }
 
-    if (![self lt_ensurePackBackupForLanguage:languageCode error:error]) return NO;
-    if (![self lt_mergeDirectoryAtPath:languageDir withContentsOfDirectoryAtPath:packPath error:error]) return NO;
+    BOOL packAlreadyApplied = zs_mods_directory_contents_match(packPath, languageDir);
+    if (packAlreadyApplied) {
+        ZLog(@"[LocalizationTransplant] %@ already matches the \"%@\" language folder (SHA-256) - skipping backup and merge", packPath.lastPathComponent, languageCode);
+    } else {
+        if (![self lt_ensurePackBackupForLanguage:languageCode error:error]) return NO;
+        if (![self lt_mergeDirectoryAtPath:languageDir withContentsOfDirectoryAtPath:packPath error:error]) return NO;
+    }
 
     NSString *markerPath = LTPackMarkerPath(languageCode);
     if (markerPath) {
