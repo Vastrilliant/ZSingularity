@@ -18,6 +18,7 @@
 #import <sys/stat.h>
 #import <fcntl.h>
 #import <unistd.h>
+#import <CommonCrypto/CommonDigest.h>
 
 NSString * const ZTranscoderServiceErrorDomain = @"ZTranscoderServiceErrorDomain";
 
@@ -2983,6 +2984,34 @@ static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
     return identical;
 }
 
+static BOOL zt_sha256_of_file(NSString *path, uint8_t out[CC_SHA256_DIGEST_LENGTH]) {
+    int fd = open(path.fileSystemRepresentation, O_RDONLY);
+    if (fd < 0) return NO;
+    const size_t chunk = 256 * 1024;
+    uint8_t *buf = malloc(chunk);
+    if (!buf) { close(fd); return NO; }
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    BOOL ok = YES;
+    while (YES) {
+        ssize_t n = read(fd, buf, chunk);
+        if (n < 0) { ok = NO; break; }
+        if (n == 0) break;
+        CC_SHA256_Update(&ctx, buf, (CC_LONG)n);
+    }
+    free(buf);
+    close(fd);
+    if (!ok) return NO;
+    CC_SHA256_Final(out, &ctx);
+    return YES;
+}
+
+static BOOL zt_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
+    uint8_t hashA[CC_SHA256_DIGEST_LENGTH], hashB[CC_SHA256_DIGEST_LENGTH];
+    if (!zt_sha256_of_file(pathA, hashA) || !zt_sha256_of_file(pathB, hashB)) return NO;
+    return memcmp(hashA, hashB, CC_SHA256_DIGEST_LENGTH) == 0;
+}
+
 @implementation ZTranscoderInstaller
 
 + (NSString *)bundleBackupDirectory {
@@ -3068,7 +3097,11 @@ static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
     NSFileManager *fm = [NSFileManager defaultManager];
 
     BOOL stockExists = [fm fileExistsAtPath:stockBundleURL.path];
-    if (stockExists && ![fm fileExistsAtPath:backupPath]) {
+    BOOL alreadyInstalled = stockExists && zt_files_have_identical_sha256(doctoredURL.path, stockBundleURL.path);
+    if (alreadyInstalled) {
+        ZLog(@"[ZTranscoderInstaller] %@ already matches the modded bundle (SHA-256) - skipping backup and rewrite.", stockBundleURL.lastPathComponent);
+    }
+    if (stockExists && !alreadyInstalled && ![fm fileExistsAtPath:backupPath]) {
         NSError *backupError = nil;
         if (![fm copyItemAtURL:stockBundleURL toURL:[NSURL fileURLWithPath:backupPath] error:&backupError]) {
             if (error) {
@@ -3088,7 +3121,7 @@ static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
     }
 
     NSError *writeError = nil;
-    if (![doctoredData writeToURL:stockBundleURL options:NSDataWritingAtomic error:&writeError]) {
+    if (!alreadyInstalled && ![doctoredData writeToURL:stockBundleURL options:NSDataWritingAtomic error:&writeError]) {
         if (error) {
             *error = [NSError errorWithDomain:ZTranscoderInstallerErrorDomain
                                           code:ZTranscoderInstallerErrorWriteFailed
