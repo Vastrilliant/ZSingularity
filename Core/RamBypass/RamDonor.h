@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (class, readonly) ZSRamDonor *shared;
 @property (class, readonly, nullable) NSString *donorBundleIdentifier;
+@property (class, readonly) NSArray<NSString *> *donorBundleIdentifiers;
 @property (readonly) NSUInteger liveDonorCount;
 @property (nonatomic) NSUInteger maxDonors;
 @property (nonatomic) BOOL killDonorsAfterMapping;

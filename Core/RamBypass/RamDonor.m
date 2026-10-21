@@ -120,13 +120,13 @@ static ZSRamDonor *sharedDonor;
     }
 }
 
-+ (NSString *)donorBundleIdentifier
++ (NSArray<NSString *> *)donorBundleIdentifiers
 {
-    static NSString *identifier;
+    static NSArray<NSString *> *identifiers;
     static dispatch_once_t once;
 
     dispatch_once(&once, ^{
-        NSMutableArray<NSBundle *> *hosts = [NSMutableArray arrayWithObject:NSBundle.mainBundle];
+        NSMutableArray<NSBundle *> *hosts = [NSMutableArray array];
         SEL liveContainerSelector = NSSelectorFromString(@"lcMainBundle");
 
         if ([NSUserDefaults respondsToSelector:liveContainerSelector])
@@ -139,20 +139,19 @@ static ZSRamDonor *sharedDonor;
             }
         }
 
+        [hosts addObject:NSBundle.mainBundle];
+
+        NSMutableArray<NSString *> *found = [NSMutableArray array];
+
         for (NSBundle *host in hosts)
         {
             NSURL *plugIns = host.builtInPlugInsURL;
-
-            if (!plugIns)
-            {
-                continue;
-            }
-
-            NSArray<NSURL *> *contents =
-                [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugIns
-                                            includingPropertiesForKeys:nil
-                                                               options:0
-                                                                 error:nil];
+            NSArray<NSURL *> *contents = plugIns
+                ? [NSFileManager.defaultManager contentsOfDirectoryAtURL:plugIns
+                                              includingPropertiesForKeys:nil
+                                                                 options:0
+                                                                   error:nil]
+                : nil;
 
             for (NSURL *url in contents)
             {
@@ -163,36 +162,73 @@ static ZSRamDonor *sharedDonor;
 
                 NSBundle *bundle = [NSBundle bundleWithURL:url];
                 NSString *principal = bundle.infoDictionary[@"NSExtension"][@"NSExtensionPrincipalClass"];
+                NSString *bundleID = bundle.bundleIdentifier;
 
-                if ([principal isEqualToString:@"ZSRamDonorHandler"])
+                if ([principal isEqualToString:@"ZSRamDonorHandler"] && bundleID.length > 0 && ![found containsObject:bundleID])
                 {
-                    identifier = bundle.bundleIdentifier;
-                    break;
+                    [found addObject:bundleID];
                 }
             }
 
-            if (identifier)
+            NSString *hostID = host.bundleIdentifier;
+
+            if (hostID.length > 0)
             {
-                break;
+                NSString *derived = [hostID stringByAppendingString:@".ZSRamDonor"];
+
+                if (![found containsObject:derived])
+                {
+                    [found addObject:derived];
+                }
             }
         }
 
-        ZLog(@"[RamBypass] donor extension: %@", identifier ?: @"not found in PlugIns");
+        identifiers = [found copy];
+        ZLog(@"[RamBypass] donor extension candidates: %@", identifiers.count > 0 ? [identifiers componentsJoinedByString:@", "] : @"none found");
     });
 
-    return identifier;
+    return identifiers;
 }
+
++ (NSString *)donorBundleIdentifier
+{
+    return self.donorBundleIdentifiers.firstObject;
+}
+
+static NSString *sWorkingDonorIdentifier;
 
 - (BOOL)startOneDonorWithTimeout:(NSTimeInterval)timeout
 {
-    NSString *identifier = ZSRamDonor.donorBundleIdentifier;
+    NSMutableArray<NSString *> *candidates = [ZSRamDonor.donorBundleIdentifiers mutableCopy];
 
-    if (!identifier)
+    if (candidates.count == 0)
     {
         self.lastError = @"The memory helper is missing from this build";
         return NO;
     }
 
+    NSString *known = sWorkingDonorIdentifier;
+
+    if (known && [candidates containsObject:known])
+    {
+        [candidates removeObject:known];
+        [candidates insertObject:known atIndex:0];
+    }
+
+    for (NSString *identifier in candidates)
+    {
+        if ([self startOneDonorWithIdentifier:identifier timeout:timeout])
+        {
+            sWorkingDonorIdentifier = identifier;
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+- (BOOL)startOneDonorWithIdentifier:(NSString *)identifier timeout:(NSTimeInterval)timeout
+{
     NSError *error = nil;
     NSExtension *extension = [NSExtension extensionWithIdentifier:identifier error:&error];
 
