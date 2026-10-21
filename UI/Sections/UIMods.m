@@ -4065,7 +4065,8 @@ static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
     [rows addObject:@[@"Date Added", dateText]];
 
     BOOL installed = entry.isAssetBundle ? entry.doctorStatus == ModAssetLibraryDoctorStatusInstalled : YES;
-    [rows addObject:@[@"Status", installed ? @"Installed" : @"Not installed"]];
+    BOOL checksumMismatch = [ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch;
+    [rows addObject:@[@"Status", checksumMismatch ? @"Checksum mismatch" : (installed ? @"Installed" : @"Not installed")]];
 
     if (entry.isAssetBundle || entry.doctorTranscodeCodec.length > 0) {
         NSString *codec = entry.doctorTranscodeCodec.length > 0 ? entry.doctorTranscodeCodec : @"—";

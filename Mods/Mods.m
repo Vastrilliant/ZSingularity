@@ -2468,6 +2468,142 @@ static NSString *MALCABRejectionLine(NSString *displayName) {
     return nil;
 }
 
+static NSString *MALAbsolutePathForHomeRelative(NSString *path) {
+    if (path.length == 0) return nil;
+    return [path hasPrefix:@"/"] ? path : [NSHomeDirectory() stringByAppendingPathComponent:path];
+}
+
+static NSString *MALManifestRelativePath(NSString *homeRelativePath) {
+    if (homeRelativePath.length == 0) return nil;
+    NSString *padded = [@"/" stringByAppendingString:homeRelativePath];
+    NSRange assetsRange = [padded rangeOfString:@"/Assets/"];
+    if (assetsRange.location == NSNotFound) return nil;
+    NSString *relative = [padded substringFromIndex:assetsRange.location + 1];
+    NSStringCompareOptions anchored = NSCaseInsensitiveSearch | NSAnchoredSearch;
+    if ([relative rangeOfString:kBTMobileBuildsRelativePath options:anchored].location == NSNotFound &&
+        [relative rangeOfString:kLTLocalizeRelativePath options:anchored].location == NSNotFound) return nil;
+    return relative;
+}
+
+static NSMutableDictionary<NSString *, NSNumber *> *g_malChecksumCache;
+
+static BOOL MALFilesChecksumMatch(NSString *storedPath, NSString *livePath) {
+    struct stat storedStat, liveStat;
+    if (stat(storedPath.fileSystemRepresentation, &storedStat) != 0 || stat(livePath.fileSystemRepresentation, &liveStat) != 0) return NO;
+    NSString *key = [NSString stringWithFormat:@"%@|%lld.%ld|%lld|%@|%lld.%ld|%lld",
+                     storedPath, (long long)storedStat.st_mtimespec.tv_sec, (long)storedStat.st_mtimespec.tv_nsec, (long long)storedStat.st_size,
+                     livePath, (long long)liveStat.st_mtimespec.tv_sec, (long)liveStat.st_mtimespec.tv_nsec, (long long)liveStat.st_size];
+    @synchronized ([ModAssetLibrary class]) {
+        NSNumber *cached = g_malChecksumCache[key];
+        if (cached) return cached.boolValue;
+    }
+    BOOL match = zs_mods_files_have_identical_sha256(storedPath, livePath);
+    @synchronized ([ModAssetLibrary class]) {
+        if (!g_malChecksumCache || g_malChecksumCache.count > 512) g_malChecksumCache = [NSMutableDictionary dictionary];
+        g_malChecksumCache[key] = @(match);
+    }
+    return match;
+}
+
+static BOOL MALPackChecksumMatch(NSString *packPath, NSString *languageDir) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:packPath];
+    NSUInteger checked = 0;
+    for (NSString *child in enumerator) {
+        if ([child.lastPathComponent isEqualToString:@".DS_Store"] || [child.lastPathComponent hasPrefix:@"._"]) continue;
+        if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+        if (!MALFilesChecksumMatch([packPath stringByAppendingPathComponent:child], [languageDir stringByAppendingPathComponent:child])) return NO;
+        checked++;
+    }
+    return checked > 0;
+}
+
++ (nullable NSString *)mal_livePathForEntry:(ModAssetLibraryEntry *)entry {
+    if (entry.isAssetBundle) {
+        return MALAbsolutePathForHomeRelative(entry.resolvedInstallTargetPath.length > 0 ? entry.resolvedInstallTargetPath : entry.livePathDescription);
+    }
+    if (entry.localizationKind != ModAssetLibraryLocalizationKindNone) {
+        return MALAbsolutePathForHomeRelative(entry.livePathDescription);
+    }
+    if ([entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
+        NSString *bankDir = [BankTransplant mobileFMODBuildsDirectory];
+        return bankDir ? [bankDir stringByAppendingPathComponent:entry.fileName] : nil;
+    }
+    return nil;
+}
+
++ (ModAssetLibraryIntegrity)integrityForEntry:(ModAssetLibraryEntry *)entry {
+    if (!entry || entry.path.length == 0 || [self mal_folderIsStored:entry.currentFolder]) return ModAssetLibraryIntegrityNotApplied;
+    if (entry.fontRole != ZSFontRoleNone || [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) return ModAssetLibraryIntegrityNotApplied;
+    if (entry.isAssetBundle && entry.doctorStatus != ModAssetLibraryDoctorStatusInstalled) return ModAssetLibraryIntegrityNotApplied;
+
+    NSString *livePath = [self mal_livePathForEntry:entry];
+    if (livePath.length == 0) return ModAssetLibraryIntegrityNotApplied;
+    if (![NSFileManager.defaultManager fileExistsAtPath:livePath]) return ModAssetLibraryIntegrityMismatch;
+
+    BOOL match = entry.localizationKind == ModAssetLibraryLocalizationKindPack
+        ? MALPackChecksumMatch(entry.path, livePath)
+        : MALFilesChecksumMatch(entry.path, livePath);
+    return match ? ModAssetLibraryIntegrityVerified : ModAssetLibraryIntegrityMismatch;
+}
+
++ (NSArray<ModAssetLibraryEntry *> *)activeModdedEntries {
+    NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
+    for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
+
+    NSMutableArray<ModAssetLibraryEntry *> *active = [NSMutableArray array];
+    for (NSString *folder in allFolders) {
+        if ([self mal_folderIsStored:folder]) continue;
+        for (ModAssetLibraryEntry *entry in [self entriesInFolder:folder error:nil] ?: @[]) {
+            if ([self integrityForEntry:entry] == ModAssetLibraryIntegrityVerified) [active addObject:entry];
+        }
+    }
+    return active;
+}
+
++ (NSSet<NSString *> *)moddedBundleCABs {
+    NSMutableSet<NSString *> *cabs = [NSMutableSet set];
+    for (ModAssetLibraryEntry *entry in [self activeModdedEntries]) {
+        if (!entry.isAssetBundle) continue;
+        if (entry.cabIdentifier.length > 0) [cabs addObject:entry.cabIdentifier];
+        NSString *livePath = [self mal_livePathForEntry:entry];
+        NSString *liveCAB = livePath.length > 0 ? [ZSFileIndex persistedCABForPath:livePath] : nil;
+        if (liveCAB.length > 0) [cabs addObject:liveCAB];
+    }
+    return cabs;
+}
+
++ (BOOL)bundleCABIsModded:(NSString *)cab {
+    if (cab.length == 0) return NO;
+    return [[self moddedBundleCABs] containsObject:cab];
+}
+
++ (NSArray<NSString *> *)moddedManifestRelativePaths {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
+    for (ModAssetLibraryEntry *entry in [self activeModdedEntries]) {
+        if (entry.isAssetBundle) continue;
+
+        if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+            NSString *languageRelative = MALManifestRelativePath(entry.livePathDescription);
+            if (languageRelative.length == 0) continue;
+            NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:entry.path];
+            for (NSString *child in enumerator) {
+                if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+                [paths addObject:[languageRelative stringByAppendingPathComponent:child]];
+            }
+            continue;
+        }
+
+        NSString *relative = MALManifestRelativePath(entry.livePathDescription);
+        if (relative.length == 0 && [entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
+            relative = [kBTMobileBuildsRelativePath stringByAppendingPathComponent:entry.fileName];
+        }
+        if (relative.length > 0) [paths addObject:relative];
+    }
+    return paths.array;
+}
+
 + (BOOL)activateFontForEntry:(ModAssetLibraryEntry *)entry error:(NSError **)error {
     [self deactivateFontForEntry:entry];
     NSString *fontsDir = [ZSModsPaths ensuredDirectoryAtPath:[ZSModsPaths modsFontsDirectory]];

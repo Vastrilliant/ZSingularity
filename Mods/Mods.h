@@ -231,6 +231,12 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
     ModAssetLibraryLocalizationKindPack,
 };
 
+typedef NS_ENUM(NSInteger, ModAssetLibraryIntegrity) {
+    ModAssetLibraryIntegrityNotApplied = 0,
+    ModAssetLibraryIntegrityVerified,
+    ModAssetLibraryIntegrityMismatch,
+};
+
 @interface ModAssetLibraryEntry : NSObject
 @property (nonatomic, copy) NSString *fileName;
 @property (nonatomic, copy) NSString *path;
@@ -311,6 +317,16 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryLocalizationKind) {
 + (nullable NSArray<ModAssetLibraryEntry *> *)entriesInFolder:(NSString *)folderName error:(NSError **)error;
 
 + (nullable ModAssetLibraryEntry *)fontEntryOccupyingRole:(ZSFontRole)role;
+
++ (ModAssetLibraryIntegrity)integrityForEntry:(ModAssetLibraryEntry *)entry;
+
++ (NSArray<ModAssetLibraryEntry *> *)activeModdedEntries;
+
++ (NSSet<NSString *> *)moddedBundleCABs;
+
++ (BOOL)bundleCABIsModded:(nullable NSString *)cab;
+
++ (NSArray<NSString *> *)moddedManifestRelativePaths;
 
 + (BOOL)importFileURLs:(NSArray<NSURL *> *)moddedURLs
              intoFolder:(NSString *)folderName

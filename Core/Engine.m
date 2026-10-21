@@ -688,113 +688,6 @@ void zs_clear_tracked_asset_paths(void) {
     zs_persist_current_settings();
 }
 
-#pragma mark - Modded bundles (settings.json "moddedBundles")
-
-static BOOL zs_persist_current_settings_checked(void);
-
-static NSMutableArray<NSString *> *g_moddedBundles = nil;
-static BOOL g_moddedBundlesDirty = NO;
-
-static NSObject *zs_modded_bundles_lock(void) {
-    static NSObject *lock = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ lock = [NSObject new]; });
-    return lock;
-}
-
-static void zs_ensure_modded_bundles_loaded(void) {
-    @synchronized (zs_modded_bundles_lock()) {
-        if (g_moddedBundles) return;
-        NSDictionary *saved = zs_load_settings_dictionary();
-        id list = saved[@"moddedBundles"];
-        g_moddedBundles = [NSMutableArray new];
-        if (![list isKindOfClass:[NSArray class]]) return;
-        for (id cab in (NSArray *)list) {
-            if (![cab isKindOfClass:[NSString class]] || [(NSString *)cab length] == 0) continue;
-            if (![g_moddedBundles containsObject:cab]) [g_moddedBundles addObject:cab];
-        }
-    }
-}
-
-NSArray<NSString *> *zs_modded_bundle_cabs(void) {
-    zs_ensure_modded_bundles_loaded();
-    @synchronized (zs_modded_bundles_lock()) {
-        return [g_moddedBundles sortedArrayUsingSelector:@selector(compare:)];
-    }
-}
-
-BOOL zs_bundle_is_modded(NSString *cab) {
-    if (cab.length == 0) return NO;
-    zs_ensure_modded_bundles_loaded();
-    @synchronized (zs_modded_bundles_lock()) {
-        return [g_moddedBundles containsObject:cab];
-    }
-}
-
-void zs_set_bundle_modded(NSString *cab, BOOL modded) {
-    cab = [cab stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (cab.length == 0) return;
-    zs_ensure_modded_bundles_loaded();
-    BOOL needsFlush = NO;
-    @synchronized (zs_modded_bundles_lock()) {
-        BOOL present = [g_moddedBundles containsObject:cab];
-        if (modded && !present) {
-            [g_moddedBundles addObject:cab];
-            g_moddedBundlesDirty = YES;
-        } else if (!modded && present) {
-            [g_moddedBundles removeObject:cab];
-            g_moddedBundlesDirty = YES;
-        }
-        needsFlush = g_moddedBundlesDirty;
-    }
-    if (!needsFlush) return;
-    if (zs_persist_current_settings_checked()) {
-        @synchronized (zs_modded_bundles_lock()) { g_moddedBundlesDirty = NO; }
-    } else {
-        ZLog(@"[ZSScripts] couldn't persist moddedBundles yet, will retry on the next change");
-    }
-}
-
-void zs_apply_modded_bundle_changes(NSArray<NSString *> *toAdd, NSArray<NSString *> *toRemove) {
-    zs_ensure_modded_bundles_loaded();
-    BOOL needsFlush = NO;
-    @synchronized (zs_modded_bundles_lock()) {
-        for (NSString *raw in toRemove) {
-            NSString *cab = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            if (cab.length == 0 || ![g_moddedBundles containsObject:cab]) continue;
-            [g_moddedBundles removeObject:cab];
-            g_moddedBundlesDirty = YES;
-        }
-        for (NSString *raw in toAdd) {
-            NSString *cab = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-            if (cab.length == 0 || [g_moddedBundles containsObject:cab]) continue;
-            [g_moddedBundles addObject:cab];
-            g_moddedBundlesDirty = YES;
-        }
-        needsFlush = g_moddedBundlesDirty;
-    }
-    if (!needsFlush) return;
-    if (zs_persist_current_settings_checked()) {
-        @synchronized (zs_modded_bundles_lock()) { g_moddedBundlesDirty = NO; }
-    } else {
-        ZLog(@"[ZSScripts] couldn't persist moddedBundles yet, will retry on the next change");
-    }
-}
-
-void zs_clear_modded_bundles(void) {
-    zs_ensure_modded_bundles_loaded();
-    BOOL changed = NO;
-    @synchronized (zs_modded_bundles_lock()) {
-        changed = g_moddedBundles.count > 0 || g_moddedBundlesDirty;
-        [g_moddedBundles removeAllObjects];
-        g_moddedBundlesDirty = changed;
-    }
-    if (!changed) return;
-    if (zs_persist_current_settings_checked()) {
-        @synchronized (zs_modded_bundles_lock()) { g_moddedBundlesDirty = NO; }
-    }
-}
-
 #pragma mark - File index (Mod Loader Pipeline caching, stored in its own Index.json)
 
 static void zs_ensure_file_index_snapshot_loaded_impl(void) {
@@ -868,7 +761,6 @@ void zs_ensure_settings_loaded_from_disk(void) {
         g_syslogBlacklist = blacklist;
 
         zs_ensure_tracked_asset_paths_loaded();
-        zs_ensure_modded_bundles_loaded();
         zs_ensure_file_index_snapshot_loaded_impl();
     });
 }
@@ -915,7 +807,6 @@ NSDictionary *zs_current_settings_dictionary(void) {
         @"modLoader": @{
             @"trackedAssetPaths": g_trackedAssetPaths ?: @[],
         },
-        @"moddedBundles": zs_modded_bundle_cabs(),
         @"diagnostics": @{
             @"syslogBlacklist": g_syslogBlacklist ?: @[],
         },

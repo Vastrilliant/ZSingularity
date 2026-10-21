@@ -2944,22 +2944,6 @@ static NSString * const kBackupSuffix = @".orig-bak";
 
 static NSString * const kManifestFileName = @"manifest.json";
 
-static NSString *zt_cab_for_bundle_file(NSString *path) {
-    if (path.length == 0 || ![NSFileManager.defaultManager fileExistsAtPath:path]) return nil;
-    NSString *cab = [UnityBundleCAB primaryCABForBundleAtPath:path error:nil];
-    return cab.length > 0 ? cab : nil;
-}
-
-static void zt_set_modded(NSString *cab, BOOL modded) {
-    if (cab.length > 0) zs_set_bundle_modded(cab, modded);
-}
-
-static NSString *zt_cab_for_installed_bundle(NSString *path) {
-    NSString *cab = zt_cab_for_bundle_file(path);
-    if (cab.length > 0) return cab;
-    return [ZSFileIndex persistedCABForPath:path];
-}
-
 static BOOL zt_files_have_identical_bytes(NSString *pathA, NSString *pathB) {
     struct stat statA, statB;
     if (stat(pathA.fileSystemRepresentation, &statA) != 0 || stat(pathB.fileSystemRepresentation, &statB) != 0) return NO;
@@ -3138,47 +3122,7 @@ static BOOL zt_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
 
     zs_track_asset_path(stockBundleURL.path);
 
-    NSMutableOrderedSet<NSString *> *moddedCABs = [NSMutableOrderedSet orderedSet];
-    NSString *doctoredCAB = zt_cab_for_bundle_file(doctoredURL.path);
-    NSString *installedCAB = zt_cab_for_installed_bundle(stockBundleURL.path);
-    NSString *backupCAB = [fm fileExistsAtPath:backupPath] ? zt_cab_for_bundle_file(backupPath) : nil;
-    if (doctoredCAB.length > 0) [moddedCABs addObject:doctoredCAB];
-    if (installedCAB.length > 0) [moddedCABs addObject:installedCAB];
-    if (backupCAB.length > 0) [moddedCABs addObject:backupCAB];
-    if (moddedCABs.count == 0) {
-        ZLog(@"[ZTranscoderInstaller] installed %@ but couldn't resolve its CAB, so it was not recorded in moddedBundles", stockBundleURL.path.lastPathComponent);
-    }
-    for (NSString *cab in moddedCABs) {
-        zt_set_modded(cab, YES);
-        ZLog(@"[ZTranscoderInstaller] recorded %@ in moddedBundles", cab);
-    }
-
     return YES;
-}
-
-+ (void)reconcileModdedBundles {
-    NSString *dir = [self bundleBackupDirectory];
-    if (!dir) return;
-
-    NSDictionary<NSString *, NSString *> *manifest = [self bds_loadManifest];
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableOrderedSet<NSString *> *toAdd = [NSMutableOrderedSet orderedSet];
-    NSMutableOrderedSet<NSString *> *toRemove = [NSMutableOrderedSet orderedSet];
-    for (NSString *backupKey in manifest) {
-        NSString *livePath = manifest[backupKey];
-        if (![livePath isKindOfClass:[NSString class]] || livePath.length == 0) continue;
-        NSString *backupPath = [dir stringByAppendingPathComponent:[backupKey stringByAppendingString:kBackupSuffix]];
-        if (![fm fileExistsAtPath:backupPath]) continue;
-        if (![fm fileExistsAtPath:livePath]) continue;
-
-        NSString *backupCAB = zt_cab_for_bundle_file(backupPath);
-        NSString *liveCAB = zt_cab_for_installed_bundle(livePath);
-        NSMutableOrderedSet<NSString *> *target = zt_files_have_identical_bytes(livePath, backupPath) ? toRemove : toAdd;
-        if (backupCAB.length > 0) [target addObject:backupCAB];
-        if (liveCAB.length > 0) [target addObject:liveCAB];
-    }
-    [toRemove minusOrderedSet:toAdd];
-    zs_apply_modded_bundle_changes(toAdd.array, toRemove.array);
 }
 
 + (BOOL)bds_fileAtPath:(NSString *)pathA hasIdenticalBytesToFileAtPath:(NSString *)pathB {
@@ -3213,19 +3157,15 @@ static BOOL zt_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
         if (![fm fileExistsAtPath:backupPath] || originalPath.length == 0) continue;
 
         if (!force && [self bds_fileAtPath:originalPath hasIdenticalBytesToFileAtPath:backupPath]) {
-            zt_set_modded(zt_cab_for_bundle_file(backupPath), NO);
             continue;
         }
 
         NSData *backupData = [NSData dataWithContentsOfFile:backupPath];
         if (!backupData) continue;
 
-        NSString *liveCAB = zt_cab_for_bundle_file(originalPath);
         NSError *writeError = nil;
         if ([backupData writeToFile:originalPath options:NSDataWritingAtomic error:&writeError]) {
             restored++;
-            zt_set_modded(liveCAB, NO);
-            zt_set_modded(zt_cab_for_bundle_file(backupPath), NO);
         } else {
             ZLog(@"[ZTranscoderInstaller] couldn't restore %@ to %@: %@", backupKey, originalPath, writeError);
         }
@@ -3287,7 +3227,6 @@ static BOOL zt_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
         return NO;
     }
 
-    NSString *liveCAB = zt_cab_for_bundle_file(stockBundleURL.path);
     BOOL scoped = [stockBundleURL startAccessingSecurityScopedResource];
     NSError *writeError = nil;
     BOOL wrote = [backupData writeToURL:stockBundleURL options:NSDataWritingAtomic error:&writeError];
@@ -3301,9 +3240,6 @@ static BOOL zt_files_have_identical_sha256(NSString *pathA, NSString *pathB) {
         }
         return NO;
     }
-
-    zt_set_modded(liveCAB, NO);
-    zt_set_modded(zt_cab_for_bundle_file(backupPath), NO);
 
     ZLog(@"[ZTranscoderInstaller] cached %@ - live bytes swapped back to the backed-up original", stockBundleURL.lastPathComponent);
     return YES;
@@ -3983,15 +3919,6 @@ static BOOL zt_swap_install_built_bundle(NSString *builtPath, NSString *bundlePa
         return NO;
     }
     zs_track_asset_path(bundlePath);
-    NSString *cab = zt_cab_for_installed_bundle(bundlePath);
-    if (cab.length == 0) {
-        ZLog(@"[ZTTextureSwapper] swapped %@ but couldn't resolve its CAB, so it was not recorded in moddedBundles", bundlePath.lastPathComponent);
-    } else if (zs_bundle_is_modded(cab)) {
-        ZLog(@"[ZTTextureSwapper] %@ is already recorded in moddedBundles", cab);
-    } else {
-        zs_set_bundle_modded(cab, YES);
-        ZLog(@"[ZTTextureSwapper] recorded %@ in moddedBundles", cab);
-    }
     return YES;
 }
 

@@ -1051,21 +1051,15 @@
         };
         deliver(bundles, error);
 
-        NSArray<NSString *> *moddedBefore = zs_modded_bundle_cabs();
         NSDictionary *indexBefore = [ZSFileIndex persistedCABMap];
-        static dispatch_once_t reconcileOnce;
-        dispatch_once(&reconcileOnce, ^{
-            [ZTranscoderInstaller reconcileModdedBundles];
-        });
         [ZSFileIndex ensureIndexUpToDate];
         NSDictionary *indexAfter = [ZSFileIndex persistedCABMap];
-        BOOL moddedChanged = ![moddedBefore isEqualToArray:zs_modded_bundle_cabs()];
         BOOL indexChanged = indexBefore != indexAfter && ![indexBefore isEqualToDictionary:indexAfter];
         NSArray<ZSAssetExplorerBundle *> *finalBundles = bundles;
-        if (moddedChanged || indexChanged) {
+        if (indexChanged) {
             NSError *refreshError = nil;
-            NSArray<ZSAssetExplorerBundle *> *refreshed = indexChanged ? [ZSAssetExplorer cachedBundles:&refreshError] : bundles;
-            deliver(refreshed, indexChanged ? refreshError : error);
+            NSArray<ZSAssetExplorerBundle *> *refreshed = [ZSAssetExplorer cachedBundles:&refreshError];
+            deliver(refreshed, refreshError);
             finalBundles = refreshed;
         }
 
@@ -2602,7 +2596,7 @@ static long long zs_asset_explorer_bundle_timestamp(NSString *bundlePath) {
             }
             return result;
         }];
-        NSSet<NSString *> *moddedCABs = [NSSet setWithArray:zs_modded_bundle_cabs()];
+        NSSet<NSString *> *moddedCABs = [ModAssetLibrary moddedBundleCABs];
         NSMutableOrderedSet<NSString *> *bookmarkedKeys = [self zs_assetExplorerBookmarks];
         NSMutableArray<ZSAssetExplorerBundle *> *bookmarkedBundles = [NSMutableArray array];
         NSMutableArray<ZSAssetExplorerBundle *> *moddedBundles = [NSMutableArray array];

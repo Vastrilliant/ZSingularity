@@ -120,6 +120,9 @@ static NSSet<NSString *> *PMReplacedAssetPaths(void) {
     for (NSString *path in [LocalizationTransplant documentsRelativePathsOfSwappedFiles]) {
         [paths addObject:PMNormalizedPath(path)];
     }
+    for (NSString *path in [ModAssetLibrary moddedManifestRelativePaths]) {
+        [paths addObject:PMNormalizedPath(path)];
+    }
     return paths;
 }
 

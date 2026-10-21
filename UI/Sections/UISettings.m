@@ -1218,7 +1218,6 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
         }
     }
     zs_clear_tracked_asset_paths();
-    zs_clear_modded_bundles();
 
     NSString *bankBackupDir = [BankTransplant bankBackupDirectory];
     if (bankBackupDir) [fm removeItemAtPath:bankBackupDir error:nil];

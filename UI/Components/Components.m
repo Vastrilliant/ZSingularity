@@ -2778,7 +2778,9 @@ static NSString *zs_size_descriptor_for_entry(ModAssetLibraryEntry *entry) {
     return base;
 }
 
-NSString *zs_doctor_status_text_for_entry(ModAssetLibraryEntry *entry, BOOL downloadInFlight, BOOL isStoredBundlesFolder) {    if (isStoredBundlesFolder) return @"Stored";
+NSString *zs_doctor_status_text_for_entry(ModAssetLibraryEntry *entry, BOOL downloadInFlight, BOOL isStoredBundlesFolder) {
+    if (isStoredBundlesFolder) return @"Stored";
+    if (!downloadInFlight && [ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch) return @"Checksum mismatch";
     switch (entry.doctorStatus) {
         case ModAssetLibraryDoctorStatusUploading: {
             unsigned long long bytesSent = (unsigned long long)MAX((int64_t)0, entry.doctorUploadProgress);
@@ -2908,7 +2910,8 @@ UIView *zs_make_mods_entry_info_panel(ModAssetLibraryEntry *entry, BOOL download
     }
 
     BOOL isCarra2Entry = !entry.isAssetBundle && entry.zipCacheHash1.length > 0;
-    if (entry.isAssetBundle || isCarra2Entry) {
+    BOOL checksumMismatch = !isStoredBundlesFolder && !downloadInFlight && [ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch;
+    if (entry.isAssetBundle || isCarra2Entry || checksumMismatch) {
         NSString *statusText = zs_doctor_status_text_for_entry(entry, downloadInFlight, isStoredBundlesFolder);
         UILabel *statusLabel = [[UILabel alloc] init];
         statusLabel.text = [NSString stringWithFormat:@"Status: %@", statusText];
