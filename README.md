@@ -20,7 +20,7 @@ Need some help, have a bug to report or want to suggest new features? [Join the 
 
 <p align="center">
   <img src="assets/demo/demo.JPG" width="100%" />
-  <img src="assets/demo/demo_2.JPG" width="100%" />
+  <img src="assets/demo/demo_2.jpg" width="100%" />
   <img src="assets/demo/profile_demo.jpg" width="100%" />
 </p>
 
