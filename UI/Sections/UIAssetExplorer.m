@@ -32,6 +32,7 @@
 }
 
 - (void)zs_exitSelectMode {
+    [ZSAssetExplorer cancelNameIndexBuild];
     self.selectModeLookupToken += 1;
     self.selectModeSelection = nil;
     [self.selectModeOverlay removeFromSuperview];

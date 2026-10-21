@@ -819,14 +819,22 @@ static NSData *ZSAEReadBundleRange(ZSAEBundle *bundle, uint64_t start, uint64_t 
     }
     uint8_t *out = result.mutableBytes;
     const ZSAEBlock *blocks = bundle.blockData.bytes;
+    uint8_t *scratch = NULL;
+    size_t scratchCapacity = 0;
 
     for (uint32_t i = 0; i < bundle.blockCount; i++) {
         const ZSAEBlock *block = &blocks[i];
+        if (block->uncompressedOffset >= end) break;
         uint64_t blockEnd = block->uncompressedOffset + block->uncompressedSize;
-        if (blockEnd <= start || block->uncompressedOffset >= end) continue;
+        if (blockEnd <= start) continue;
 
-        NSMutableData *decompressed = [NSMutableData dataWithLength:block->uncompressedSize];
-        if (!decompressed || !ZSAEDecodeBlock(bundle.fileData, block, decompressed.mutableBytes, error)) {
+        if (block->uncompressedSize > scratchCapacity) {
+            free(scratch);
+            scratch = malloc(block->uncompressedSize);
+            scratchCapacity = scratch ? block->uncompressedSize : 0;
+        }
+        if (!scratch || !ZSAEDecodeBlock(bundle.fileData, block, scratch, error)) {
+            free(scratch);
             if (error && !*error) *error = ZSAEError(ZSAssetExplorerErrorBundleMalformed, @"Couldn't read the texture's stream data.");
             return nil;
         }
@@ -834,9 +842,10 @@ static NSData *ZSAEReadBundleRange(ZSAEBundle *bundle, uint64_t start, uint64_t 
         uint64_t copyStart = MAX(start, block->uncompressedOffset);
         uint64_t copyEnd = MIN(end, blockEnd);
         memcpy(out + (copyStart - start),
-               (const uint8_t *)decompressed.bytes + (copyStart - block->uncompressedOffset),
+               scratch + (copyStart - block->uncompressedOffset),
                (size_t)(copyEnd - copyStart));
     }
+    free(scratch);
     return result;
 }
 
@@ -7463,6 +7472,8 @@ static NSMutableDictionary<NSString *, NSDictionary *> *ZSAEIndexStore(void) {
 static const NSInteger kZSAEIndexVersion = 2;
 
 static BOOL gZSAEIndexBuilding = NO;
+static BOOL gZSAEIndexCancel = NO;
+static const size_t kZSAEIndexMinAvailableBytes = 350u << 20;
 
 static void ZSAESaveIndex(void) {
     NSString *path = ZSAEIndexPath();
@@ -7525,19 +7536,21 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
             j++;
         }
 
-        NSData *blob = ZSAEReadBundleRange(bundle, groupStart, groupEnd - groupStart, NULL);
-        if (blob) {
-            const uint8_t *bytes = blob.bytes;
-            for (NSUInteger k = i; k < j; k++) {
-                uint64_t offset = cabNode.offset + dataOffset + wanted[k].byteStart - groupStart;
-                uint64_t available = MIN((uint64_t)wanted[k].objectSize, (uint64_t)260);
-                if (offset + available > blob.length || available < 5) continue;
-                int32_t nameLength = ZSAEReadI32LEBytes(bytes + offset);
-                if (nameLength <= 0 || (uint64_t)nameLength > available - 4) continue;
-                NSString *name = [[NSString alloc] initWithBytes:bytes + offset + 4 length:(NSUInteger)nameLength encoding:NSUTF8StringEncoding];
-                if (name.length == 0) continue;
-                ZSAEIndexRecord record = { ZSAEHashName(name), wanted[k].pathID, wanted[k].classID, 0 };
-                [records appendBytes:&record length:sizeof(record)];
+        @autoreleasepool {
+            NSData *blob = ZSAEReadBundleRange(bundle, groupStart, groupEnd - groupStart, NULL);
+            if (blob) {
+                const uint8_t *bytes = blob.bytes;
+                for (NSUInteger k = i; k < j; k++) {
+                    uint64_t offset = cabNode.offset + dataOffset + wanted[k].byteStart - groupStart;
+                    uint64_t available = MIN((uint64_t)wanted[k].objectSize, (uint64_t)260);
+                    if (offset + available > blob.length || available < 5) continue;
+                    int32_t nameLength = ZSAEReadI32LEBytes(bytes + offset);
+                    if (nameLength <= 0 || (uint64_t)nameLength > available - 4) continue;
+                    NSString *name = [[NSString alloc] initWithBytes:bytes + offset + 4 length:(NSUInteger)nameLength encoding:NSUTF8StringEncoding];
+                    if (name.length == 0) continue;
+                    ZSAEIndexRecord record = { ZSAEHashName(name), wanted[k].pathID, wanted[k].classID, 0 };
+                    [records appendBytes:&record length:sizeof(record)];
+                }
             }
         }
         i = j;
@@ -8123,10 +8136,17 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
     }
 }
 
++ (void)cancelNameIndexBuild {
+    @synchronized (ZSAEIndexLock()) {
+        if (gZSAEIndexBuilding) gZSAEIndexCancel = YES;
+    }
+}
+
 + (void)buildNameIndexWithProgress:(void (^)(NSUInteger, NSUInteger))progress completion:(void (^)(BOOL))completion {
     @synchronized (ZSAEIndexLock()) {
         if (gZSAEIndexBuilding) return;
         gZSAEIndexBuilding = YES;
+        gZSAEIndexCancel = NO;
     }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
@@ -8135,8 +8155,18 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
         NSUInteger total = bundles.count;
         NSMutableSet<NSString *> *liveCABs = [NSMutableSet setWithCapacity:total];
         NSUInteger done = 0;
+        BOOL interrupted = NO;
 
         for (ZSAssetExplorerBundle *bundle in bundles) {
+            BOOL cancelled = NO;
+            @synchronized (ZSAEIndexLock()) {
+                cancelled = gZSAEIndexCancel;
+            }
+            size_t availableMemory = os_proc_available_memory();
+            if (cancelled || (availableMemory > 0 && availableMemory < kZSAEIndexMinAvailableBytes)) {
+                interrupted = YES;
+                break;
+            }
             @autoreleasepool {
                 [liveCABs addObject:bundle.cabIdentifier];
                 NSString *signature = ZSAEFileSignature(bundle.filePath);
@@ -8176,7 +8206,7 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
             }
         }
 
-        BOOL success = total > 0;
+        BOOL success = total > 0 && !interrupted;
         if (success) {
             @synchronized (ZSAEIndexLock()) {
                 NSMutableDictionary *store = ZSAEIndexStore();
@@ -8184,12 +8214,15 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
                     if (![liveCABs containsObject:cab]) [store removeObjectForKey:cab];
                 }
             }
+        }
+        if (total > 0) {
             ZSAESaveIndex();
             ZSAESaveNameCache();
         }
 
         @synchronized (ZSAEIndexLock()) {
             gZSAEIndexBuilding = NO;
+            gZSAEIndexCancel = NO;
         }
         if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(success); });
     });

@@ -81,6 +81,7 @@ typedef NSString * _Nullable (^ZSAssetExplorerLiveDebugProvider)(NSTimeInterval 
 + (BOOL)isNameIndexBuilding;
 + (NSUInteger)indexedBundleCount;
 + (void)buildNameIndexWithProgress:(nullable void (^)(NSUInteger done, NSUInteger total))progress completion:(nullable void (^)(BOOL success))completion;
++ (void)cancelNameIndexBuild;
 + (NSArray<ZSAssetLocation *> *)locationsForAssetName:(NSString *)name classIDs:(NSArray<NSNumber *> *)classIDs;
 + (BOOL)loadBundleIntoMemoryAtPath:(NSString *)path error:(NSError **)error;
 + (void)unloadBundleAtPath:(NSString *)path;
