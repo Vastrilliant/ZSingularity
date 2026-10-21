@@ -8,46 +8,55 @@
 </div>
 
 ---
-**ZSingularity** is a jailed iOS tweak for **Limbus Company** that gives you direct, fine-grained control over the game's graphical and performance settings by hooking into public classes exposed in Assembly-CSharp — settings the game's own menu never lets you touch.
-
-Alongside that, it brings a **cosmetic mod loader** to iOS — a feature that's historically been desktop-only. Modded asset bundles are transcoded locally on-device and installed directly after processing.
+**ZSingularity** is a jailed iOS tweak for **Limbus Company** that unlocks several graphical settings, QoL features, visual mods and much more.
 
 Need some help, have a bug to report or want to suggest new features? [Join the Discord Server!](https://discord.gg/nRmztE2unw)
 
 >[!WARNING]
 >ZSingularity is purely a cosmetic / performance mod ONLY, it will not and will never contain anything that might potentially give the player an in-game advantage.
 
+>[!NOTE]
+>ZSingularity is built for iOS only. **Android and Windows ports are not planned.**
+
 <p align="center">
-  <img src="assets/demo/settings_demo.jpg" width="40.18%" />
-  <img src="assets/demo/mods_demo.jpg" width="50%" />
-  <img src="assets/demo/profile_demo.jpg" width="91.2%" />
+  <img src="assets/demo/demo.JPG" width="100%" />
+  <img src="assets/demo/demo_2.JPG" width="100%" />
+  <img src="assets/demo/profile_demo.jpg" width="100%" />
 </p>
 
 ## Features
 
-Adjust various graphical settings such as: 
+### Graphical Settings
 
-- FPS
-- Render Scale 
-- Anti-Aliasing 
-- MSAA
-- Texture MIP
-- Particles 
-- Bloom 
-- Motion Blur
+Tweak the game's visuals far beyond what its settings menu allows.
 
-And many Quality-Of-Life settings that aim to give you a better experience 
+- **Framerate:** independent caps for menus and combat, unlock up to 120FPS of smooth gameplay on ProMotion devices
+- **Render Scaling:** fine-grained resolution scaling control
+- **Hidden Post FX:** bloom, motion blur, tonemapping, chromatic aberration, lens distortion, vignette, film grain, saturation and white balance
+- **Hidden URP (Universal Render Pipeline) settings:** anti-aliasing mode & quality (FXAA, SMAA, TAA), MSAA, dithering, texture mip limit and memoryless render textures
+- **Particle effects:** override render mode, alignment, sorting and size limits, cap particle counts, or turn them off entirely
 
-ZSingularity also features a **full fledged Mod Loader & Asset manager** optimized for mobile, load and bookkeep your mods with ease
+### Memory Management
 
-Supported Mods:
-- __data Unity asset bundles
-- assets.bank FMOD audio banks
-- Lunartique.zip mod format
-- .carra2 mod format
-- Announcer mods
-- Translation mods
-- Custom Fonts
+- **Bypass the memory usage limit** using `xpc_shmem`, bringing down the barrier to entry from iDevices with 6GB of ram down to just 3GB
+- **Extensive memory usage analysis** to see exactly where your memory goes
+- **One-tap memory cleanup** to free cached data the game no longer needs
+
+### Visual Mods
+
+- **Install & run every supported mod format:** `__data` Unity asset bundles, `.assets.bank` FMOD sound banks, `.carra2` and Lunartique formats
+- Custom Unity asset bundles are processed on-device and re-targeted for iOS allowing Limbus to load them
+
+### Custom Localization Manager
+
+- **Support for custom translation mods**
+- Brings the game's desktop-only Custom Localize Manager to iOS: ZSingularity patches the game so it reads language packs from the app's Documents folder in `NSDirectory/Documents/Lang/`
+
+### Miscellaneous
+
+- **Custom greeting text** on your player card
+- **Hide UID** to keep it out of your screenshots and videos
+- **Asset Explorer:** browse the game's asset bundles, sound banks and localization files, with a full-fledged **Texture2D & Sprite previewer**
 
 ## Installation
 
