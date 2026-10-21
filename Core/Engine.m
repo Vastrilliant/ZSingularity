@@ -1162,6 +1162,7 @@ static void zs_schedule_particle_apply(void) {
     self.targetFPS = expected;
     zs_set_application_target_fps((int32_t)expected);
     zs_reapply_all_settings_except_experimental();
+    zs_schedule_font_apply();
 }
 
 - (void)retirePollTimers {
@@ -1183,6 +1184,7 @@ static void zs_schedule_particle_apply(void) {
     self.targetFPS = expected;
     zs_set_application_target_fps((int32_t)expected);
     zs_reapply_all_settings_except_experimental();
+    zs_schedule_font_apply();
 
     uint64_t token = ++settleGeneration;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1208,6 +1210,7 @@ static void zs_schedule_particle_apply(void) {
 
     if (haveBattleState && isBattle && !wasInBattle) scheduleParticles = YES;
     if (scheduleParticles) zs_schedule_particle_apply();
+    if (scheduleParticles) zs_schedule_font_apply();
 
     if (haveBattleState && wasInBattle && !isBattle && g_autoClearPortraitCacheOnBattleExit) {
         zs_clear_guide_portrait_cache();

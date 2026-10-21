@@ -3790,6 +3790,12 @@ static void *g_zsCustomFontTitle;
 static void *g_zsCustomFontContext;
 static void *g_zsCustomFontCJK;
 static NSString *g_zsCustomFontSignature;
+static BOOL g_zsFontLogQuiet;
+static double g_zsFontLastQuietSummary;
+static NSUInteger g_zsFontQuietRepeats;
+static const double kZSFontQuietSummaryInterval = 30.0;
+
+#define ZSFontLog(fmt, ...) do { if (!g_zsFontLogQuiet) ZLog(fmt, ##__VA_ARGS__); } while (0)
 
 static void *zs_custom_localize_manager_class(void) {
     return mt_class("ProjectMoon.CustomLocalization", "CustomLocalizeManager", "Assembly-CSharp");
@@ -3831,7 +3837,7 @@ static NSString *zs_legacy_custom_font_directory(void) {
 static NSString *zs_custom_font_directory(void) {
     NSString *fontsDir = [ZSModsPaths modsFontsDirectory];
     if (!fontsDir) {
-        ZLog(@"[ZSFont] no Documents directory available");
+        ZSFontLog(@"[ZSFont] no Documents directory available");
         return nil;
     }
     [ZSModsPaths migrateLegacyDirectoryAtPath:zs_legacy_custom_font_directory() toPath:fontsDir];
@@ -3861,13 +3867,13 @@ static BOOL zs_custom_localize_static_bool(const char *methodName, BOOL *outValu
     void *managerClass = zs_custom_localize_manager_class();
     const void *method = mt_method(managerClass, methodName, 0);
     if (!method || !outValue) {
-        ZLog(@"[ZSFont] static bool %s unavailable (class=%p method=%p)", methodName, managerClass, method);
+        ZSFontLog(@"[ZSFont] static bool %s unavailable (class=%p method=%p)", methodName, managerClass, method);
         return NO;
     }
     void *exc = NULL;
     void *boxed = [IL2CppBridge invokeMethod:method onInstance:NULL args:NULL outException:&exc];
     if (exc || !boxed) {
-        ZLog(@"[ZSFont] static bool %s failed: %@", methodName, zs_describe_exception(exc));
+        ZSFontLog(@"[ZSFont] static bool %s failed: %@", methodName, zs_describe_exception(exc));
         return NO;
     }
     *outValue = *(uint8_t *)((uint8_t *)boxed + kZSIl2CppObjectHeaderSize) != 0;
@@ -3877,11 +3883,11 @@ static BOOL zs_custom_localize_static_bool(const char *methodName, BOOL *outValu
 static void *zs_load_custom_font(NSString *path) {
     void *managerClass = zs_custom_localize_manager_class();
     const void *tryLoadMethod = mt_method(managerClass, "TryLoadFont", 5);
-    ZLog(@"[ZSFont] TryLoadFont resolve: managerClass=%p method=%p", managerClass, tryLoadMethod);
+    ZSFontLog(@"[ZSFont] TryLoadFont resolve: managerClass=%p method=%p", managerClass, tryLoadMethod);
     if (!tryLoadMethod) return NULL;
 
     NSDictionary *attributes = [NSFileManager.defaultManager attributesOfItemAtPath:path error:nil];
-    ZLog(@"[ZSFont] TryLoadFont input: path=%@ size=%llu exists=%d sampling=%d padding=%d atlas=%d",
+    ZSFontLog(@"[ZSFont] TryLoadFont input: path=%@ size=%llu exists=%d sampling=%d padding=%d atlas=%d",
          path, attributes.fileSize, (int)[NSFileManager.defaultManager fileExistsAtPath:path],
          kZSCustomFontSamplingPointSize, kZSCustomFontPadding, kZSCustomFontAtlasSize);
 
@@ -3894,12 +3900,12 @@ static void *zs_load_custom_font(NSString *path) {
     void *exc = NULL;
     void *result = [IL2CppBridge invokeMethod:tryLoadMethod onInstance:NULL args:args outException:&exc];
     if (exc || !result) {
-        ZLog(@"[ZSFont] TryLoadFont invoke failed: result=%p exception=%@", result, zs_describe_exception(exc));
+        ZSFontLog(@"[ZSFont] TryLoadFont invoke failed: result=%p exception=%@", result, zs_describe_exception(exc));
         return NULL;
     }
 
     BOOL loaded = *(uint8_t *)((uint8_t *)result + kZSIl2CppObjectHeaderSize) != 0;
-    ZLog(@"[ZSFont] TryLoadFont returned loaded=%d output=%p alive=%d", loaded, output, output ? (int)ZSUID_UnityObjectIsAlive(output) : -1);
+    ZSFontLog(@"[ZSFont] TryLoadFont returned loaded=%d output=%p alive=%d", loaded, output, output ? (int)ZSUID_UnityObjectIsAlive(output) : -1);
     if (!loaded || !output) return NULL;
     return output;
 }
@@ -3931,46 +3937,46 @@ static BOOL zs_read_custom_localize_fonts_via_get(void **titleFont, void **conte
     int32_t initedOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"<IsInited>k__BackingField"];
     int32_t existOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"_isDataExist"];
     if (!getMethod || titleOffset < 0 || contextOffset < 0) {
-        ZLog(@"[ZSFont] Get() unavailable: method=%p titleOffset=%d contextOffset=%d", getMethod, titleOffset, contextOffset);
+        ZSFontLog(@"[ZSFont] Get() unavailable: method=%p titleOffset=%d contextOffset=%d", getMethod, titleOffset, contextOffset);
         return NO;
     }
     void *exc = NULL;
     void *boxed = [IL2CppBridge invokeMethod:getMethod onInstance:NULL args:NULL outException:&exc];
     if (exc || !boxed) {
-        ZLog(@"[ZSFont] Get() failed: result=%p exception=%@", boxed, zs_describe_exception(exc));
+        ZSFontLog(@"[ZSFont] Get() failed: result=%p exception=%@", boxed, zs_describe_exception(exc));
         return NO;
     }
     void *title = *(void **)((uint8_t *)boxed + titleOffset);
     void *context = *(void **)((uint8_t *)boxed + contextOffset);
     int inited = initedOffset >= 0 ? *((uint8_t *)boxed + initedOffset) : -1;
     int exists = existOffset >= 0 ? *((uint8_t *)boxed + existOffset) : -1;
-    ZLog(@"[ZSFont] Get() -> boxed=%p inited=%d dataExist=%d title=%p context=%p", boxed, inited, exists, title, context);
+    ZSFontLog(@"[ZSFont] Get() -> boxed=%p inited=%d dataExist=%d title=%p context=%p", boxed, inited, exists, title, context);
     if (titleFont) *titleFont = title;
     if (contextFont) *contextFont = context;
     return YES;
 }
 
 static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont, NSString *directory) {
-    ZLog(@"[ZSFont] install: begin title=%p context=%p directory=%@", titleFont, contextFont, directory);
+    ZSFontLog(@"[ZSFont] install: begin title=%p context=%p directory=%@", titleFont, contextFont, directory);
 
     void *managerClass = zs_custom_localize_manager_class();
     void *resultClass = zs_custom_localize_result_class();
-    ZLog(@"[ZSFont] install[1] classes: manager=%p searchResult=%p", managerClass, resultClass);
+    ZSFontLog(@"[ZSFont] install[1] classes: manager=%p searchResult=%p", managerClass, resultClass);
     if (!managerClass || !resultClass) return NO;
 
     BOOL isRunning = NO;
     BOOL haveRunning = zs_custom_localize_static_bool("IsRunning", &isRunning);
-    ZLog(@"[ZSFont] install[2] class init via IsRunning: ok=%d value=%d", haveRunning, isRunning);
+    ZSFontLog(@"[ZSFont] install[2] class init via IsRunning: ok=%d value=%d", haveRunning, isRunning);
 
     const void *ctorMethod = mt_method(resultClass, ".ctor", 4);
     const void *isDataExistMethod = mt_method(resultClass, "IsDataExist", 0);
     void *dataField = [IL2CppBridge fieldNamed:"_data" onClass:managerClass];
     int32_t dataExistOffset = [IL2CppBridge fieldOffsetOnClass:resultClass name:"_isDataExist"];
-    ZLog(@"[ZSFont] install[3] resolve: ctor=%p isDataExist=%p _data field=%p _isDataExist offset=%d", ctorMethod, isDataExistMethod, dataField, dataExistOffset);
+    ZSFontLog(@"[ZSFont] install[3] resolve: ctor=%p isDataExist=%p _data field=%p _isDataExist offset=%d", ctorMethod, isDataExistMethod, dataField, dataExistOffset);
     if (!ctorMethod || !dataField || dataExistOffset < 0) return NO;
 
     void *boxedResult = [IL2CppBridge newObjectForClass:resultClass];
-    ZLog(@"[ZSFont] install[4] newObject: %p", boxedResult);
+    ZSFontLog(@"[ZSFont] install[4] newObject: %p", boxedResult);
     if (!boxedResult) return NO;
 
     void *unboxedResult = (uint8_t *)boxedResult + kZSIl2CppObjectHeaderSize;
@@ -3979,39 +3985,39 @@ static BOOL zs_install_custom_localize_result(void *titleFont, void *contextFont
     void *ctorArgs[4] = { titleFont, contextFont, directoryStr, keyStr };
     void *ctorExc = NULL;
     [IL2CppBridge invokeMethod:ctorMethod onInstance:unboxedResult args:ctorArgs outException:&ctorExc];
-    ZLog(@"[ZSFont] install[5] ctor: exception=%@ header=%@ struct=%@", zs_describe_exception(ctorExc), zs_hex_string(boxedResult, kZSIl2CppObjectHeaderSize), zs_hex_string(unboxedResult, 0x30));
+    ZSFontLog(@"[ZSFont] install[5] ctor: exception=%@ header=%@ struct=%@", zs_describe_exception(ctorExc), zs_hex_string(boxedResult, kZSIl2CppObjectHeaderSize), zs_hex_string(unboxedResult, 0x30));
     if (ctorExc) return NO;
 
     if (isDataExistMethod) {
         void *existExc = NULL;
         void *existBoxed = [IL2CppBridge invokeMethod:isDataExistMethod onInstance:unboxedResult args:NULL outException:&existExc];
         BOOL exists = !existExc && existBoxed && *(uint8_t *)((uint8_t *)existBoxed + kZSIl2CppObjectHeaderSize) != 0;
-        ZLog(@"[ZSFont] install[6] IsDataExist after ctor: %d (exception=%@)", exists, zs_describe_exception(existExc));
+        ZSFontLog(@"[ZSFont] install[6] IsDataExist after ctor: %d (exception=%@)", exists, zs_describe_exception(existExc));
         if (!exists) {
             *((uint8_t *)boxedResult + dataExistOffset) = 1;
-            ZLog(@"[ZSFont] install[6] forced _isDataExist=1");
+            ZSFontLog(@"[ZSFont] install[6] forced _isDataExist=1");
         }
     }
 
     uint8_t before[256] = {0};
     [IL2CppBridge copyStaticFieldValue:dataField toBuffer:before];
-    ZLog(@"[ZSFont] install[7] _data before: %@", zs_hex_string(before, 0x30));
+    ZSFontLog(@"[ZSFont] install[7] _data before: %@", zs_hex_string(before, 0x30));
 
     [IL2CppBridge setStaticFieldValue:dataField fromBuffer:unboxedResult];
 
     uint8_t after[256] = {0};
     [IL2CppBridge copyStaticFieldValue:dataField toBuffer:after];
-    ZLog(@"[ZSFont] install[8] _data after:  %@", zs_hex_string(after, 0x30));
+    ZSFontLog(@"[ZSFont] install[8] _data after:  %@", zs_hex_string(after, 0x30));
 
     void *rawTitle = NULL;
     void *rawContext = NULL;
     BOOL rawOk = zs_read_custom_localize_fonts(&rawTitle, &rawContext);
-    ZLog(@"[ZSFont] install[9] raw readback ok=%d title=%p context=%p (expected %p / %p)", rawOk, rawTitle, rawContext, titleFont, contextFont);
+    ZSFontLog(@"[ZSFont] install[9] raw readback ok=%d title=%p context=%p (expected %p / %p)", rawOk, rawTitle, rawContext, titleFont, contextFont);
 
     void *getTitle = NULL;
     void *getContext = NULL;
     BOOL getOk = zs_read_custom_localize_fonts_via_get(&getTitle, &getContext);
-    ZLog(@"[ZSFont] install[10] Get() readback ok=%d match=%d", getOk, getOk && getTitle == titleFont && getContext == contextFont);
+    ZSFontLog(@"[ZSFont] install[10] Get() readback ok=%d match=%d", getOk, getOk && getTitle == titleFont && getContext == contextFont);
 
     BOOL rawMatch = rawOk && rawTitle == titleFont && rawContext == contextFont;
     BOOL getMatch = getOk && getTitle == titleFont && getContext == contextFont;
@@ -4023,14 +4029,14 @@ static void *zs_load_font_manager_data(void) {
     void *resourcesClass = mt_class("UnityEngine", "Resources", "UnityEngine.CoreModule");
     const void *loadMethod = mt_method(resourcesClass, "Load", 2);
     void *typeObj = zs_type_object(fontManagerClass);
-    ZLog(@"[ZSFont] FontManager load: class=%p resources=%p load=%p typeObj=%p", fontManagerClass, resourcesClass, loadMethod, typeObj);
+    ZSFontLog(@"[ZSFont] FontManager load: class=%p resources=%p load=%p typeObj=%p", fontManagerClass, resourcesClass, loadMethod, typeObj);
     if (!loadMethod || !typeObj) return NULL;
 
     void *resourcePathStr = [IL2CppBridge il2CppStringFromNSString:@"Font/FontSet/FontManagerScriptableObject"];
     void *loadArgs[2] = { resourcePathStr, typeObj };
     void *exc = NULL;
     void *fontManagerData = [IL2CppBridge invokeMethod:loadMethod onInstance:NULL args:loadArgs outException:&exc];
-    ZLog(@"[ZSFont] FontManager load result=%p exception=%@", fontManagerData, zs_describe_exception(exc));
+    ZSFontLog(@"[ZSFont] FontManager load result=%p exception=%@", fontManagerData, zs_describe_exception(exc));
     return exc ? NULL : fontManagerData;
 }
 
@@ -4112,14 +4118,14 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
     void *fontAssetClass = zs_tmp_font_asset_class();
     const void *getFallbackMethod = mt_method(fontAssetClass, "get_fallbackFontAssetTable", 0);
     if (!fontAssetClass || !getFallbackMethod) {
-        ZLog(@"[ZSFont] fallback-patch skipped: class=%p getter=%p", fontAssetClass, getFallbackMethod);
+        ZSFontLog(@"[ZSFont] fallback-patch skipped: class=%p getter=%p", fontAssetClass, getFallbackMethod);
         return;
     }
 
     NSUInteger count = 0;
     void *fontAssets = zs_resources_find_all_for_class(fontAssetClass, &count);
     if (!fontAssets) {
-        ZLog(@"[ZSFont] fallback-patch skipped: no live TMP_FontAsset instances");
+        ZSFontLog(@"[ZSFont] fallback-patch skipped: no live TMP_FontAsset instances");
         return;
     }
 
@@ -4202,7 +4208,7 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
         zs_append_font_group(contextListObj, neutralGroup);
         zs_append_font_group(contextListObj, titleGroup);
     }
-    ZLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p families title=%lu context=%lu neutral=%lu",
+    ZSFontLog(@"[ZSFont] fallback-patch: patched %lu/%lu live TMP_FontAsset instance(s), cjk=%p families title=%lu context=%lu neutral=%lu",
          (unsigned long)patched, (unsigned long)count, cjkFont,
          (unsigned long)titleGroup.count, (unsigned long)contextGroup.count, (unsigned long)neutralGroup.count);
 }
@@ -4210,14 +4216,14 @@ static void zs_append_custom_fallback_to_loaded_font_assets(void *titleFont, voi
 static void zs_refresh_font_consumers(void *fontManagerData) {
     void *fontManagerClass = mt_class("UtilityUI", "FontManagerScriptableObject", "Assembly-CSharp");
     const void *setFallbackMethod = mt_method(fontManagerClass, "SetFallbackFontsByLanguage", 1);
-    ZLog(@"[ZSFont] refresh: fontManagerData=%p setFallback=%p", fontManagerData, setFallbackMethod);
+    ZSFontLog(@"[ZSFont] refresh: fontManagerData=%p setFallback=%p", fontManagerData, setFallbackMethod);
     if (fontManagerData && setFallbackMethod) {
         for (int32_t language = 0; language < kZSFontLanguageCount; language++) {
             int32_t languageValue = language;
             void *langArgs[1] = { &languageValue };
             void *fallbackExc = NULL;
             [IL2CppBridge invokeMethod:setFallbackMethod onInstance:fontManagerData args:langArgs outException:&fallbackExc];
-            ZLog(@"[ZSFont] SetFallbackFontsByLanguage(%d) exception=%@", language, zs_describe_exception(fallbackExc));
+            ZSFontLog(@"[ZSFont] SetFallbackFontsByLanguage(%d) exception=%@", language, zs_describe_exception(fallbackExc));
         }
     }
 
@@ -4229,13 +4235,13 @@ static void zs_refresh_font_consumers(void *fontManagerData) {
         void *setterClass = mt_class("UtilityUI", setterClassNames[i], "Assembly-CSharp");
         const void *updateMethod = mt_method(setterClass, "UpdateTMP", 0);
         if (!setterClass || !updateMethod) {
-            ZLog(@"[ZSFont] refresh %s skipped: class=%p UpdateTMP=%p", setterClassNames[i], setterClass, updateMethod);
+            ZSFontLog(@"[ZSFont] refresh %s skipped: class=%p UpdateTMP=%p", setterClassNames[i], setterClass, updateMethod);
             continue;
         }
         NSUInteger setterCount = 0;
         void *setterArray = zs_resources_find_all_for_class(setterClass, &setterCount);
         if (!setterArray) {
-            ZLog(@"[ZSFont] refresh %s skipped: no instance array", setterClassNames[i]);
+            ZSFontLog(@"[ZSFont] refresh %s skipped: no instance array", setterClassNames[i]);
             continue;
         }
         NSUInteger failures = 0;
@@ -4246,7 +4252,7 @@ static void zs_refresh_font_consumers(void *fontManagerData) {
             [IL2CppBridge invokeMethod:updateMethod onInstance:setterInstance args:NULL outException:&updateExc];
             if (updateExc) failures++;
         }
-        ZLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)setterCount, setterClassNames[i], (unsigned long)failures);
+        ZSFontLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)setterCount, setterClassNames[i], (unsigned long)failures);
     }
 
     const char *langRefreshClassNames[] = { "TextMeshProLanguageSetterManager", "TextMeshProChildrenSetter" };
@@ -4255,13 +4261,13 @@ static void zs_refresh_font_consumers(void *fontManagerData) {
         void *langRefreshClass = mt_class("UtilityUI", langRefreshClassNames[i], "Assembly-CSharp");
         const void *langRefreshMethod = mt_method(langRefreshClass, langRefreshMethodNames[i], 1);
         if (!langRefreshClass || !langRefreshMethod) {
-            ZLog(@"[ZSFont] refresh %s.%s skipped: class=%p method=%p", langRefreshClassNames[i], langRefreshMethodNames[i], langRefreshClass, langRefreshMethod);
+            ZSFontLog(@"[ZSFont] refresh %s.%s skipped: class=%p method=%p", langRefreshClassNames[i], langRefreshMethodNames[i], langRefreshClass, langRefreshMethod);
             continue;
         }
         NSUInteger langRefreshCount = 0;
         void *langRefreshArray = zs_resources_find_all_for_class(langRefreshClass, &langRefreshCount);
         if (!langRefreshArray) {
-            ZLog(@"[ZSFont] refresh %s skipped: no instance array", langRefreshClassNames[i]);
+            ZSFontLog(@"[ZSFont] refresh %s skipped: no instance array", langRefreshClassNames[i]);
             continue;
         }
         NSUInteger failures = 0;
@@ -4276,7 +4282,7 @@ static void zs_refresh_font_consumers(void *fontManagerData) {
                 if (langRefreshExc) failures++;
             }
         }
-        ZLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)langRefreshCount, langRefreshClassNames[i], (unsigned long)failures);
+        ZSFontLog(@"[ZSFont] refreshed %lu live %s instance(s), %lu exception(s)", (unsigned long)langRefreshCount, langRefreshClassNames[i], (unsigned long)failures);
     }
 
     void *duiStyleManagerClass = mt_class("DUI.StyleLibs", "DUIStyleManager", "Assembly-CSharp");
@@ -4292,9 +4298,9 @@ static void zs_refresh_font_consumers(void *fontManagerData) {
             [IL2CppBridge invokeMethod:onSceneChangedMethod onInstance:duiInstance args:NULL outException:&duiExc];
             if (duiExc) failures++;
         }
-        ZLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s), %lu exception(s)", (unsigned long)duiCount, (unsigned long)failures);
+        ZSFontLog(@"[ZSFont] refreshed %lu live DUIStyleManager instance(s), %lu exception(s)", (unsigned long)duiCount, (unsigned long)failures);
     } else {
-        ZLog(@"[ZSFont] refresh DUIStyleManager skipped: class=%p OnSceneChanged=%p", duiStyleManagerClass, onSceneChangedMethod);
+        ZSFontLog(@"[ZSFont] refresh DUIStyleManager skipped: class=%p OnSceneChanged=%p", duiStyleManagerClass, onSceneChangedMethod);
     }
 }
 
@@ -4303,7 +4309,7 @@ static void zs_log_custom_localize_state(void *fontManagerData, void *titleFont,
     BOOL isUsing = NO;
     BOOL haveRunning = zs_custom_localize_static_bool("IsRunning", &isRunning);
     BOOL haveUsing = zs_custom_localize_static_bool("IsUsing", &isUsing);
-    ZLog(@"[ZSFont] CustomLocalizeManager IsRunning=%d IsUsing=%d", haveRunning ? isRunning : -1, haveUsing ? isUsing : -1);
+    ZSFontLog(@"[ZSFont] CustomLocalizeManager IsRunning=%d IsUsing=%d", haveRunning ? isRunning : -1, haveUsing ? isUsing : -1);
 
     void *getTitle = NULL;
     void *getContext = NULL;
@@ -4314,7 +4320,7 @@ static void zs_log_custom_localize_state(void *fontManagerData, void *titleFont,
     const void *getFontAssetMethod = mt_method(fontManagerClass, "GetFontAsset", 2);
     int32_t fontAssetOffset = [IL2CppBridge fieldOffsetOnClass:fontAssetStructClass name:"fontAsset"];
     if (!fontManagerData || !getFontAssetMethod || fontAssetOffset < 0) {
-        ZLog(@"[ZSFont] slot check skipped: data=%p method=%p offset=%d", fontManagerData, getFontAssetMethod, fontAssetOffset);
+        ZSFontLog(@"[ZSFont] slot check skipped: data=%p method=%p offset=%d", fontManagerData, getFontAssetMethod, fontAssetOffset);
         return;
     }
 
@@ -4331,19 +4337,19 @@ static void zs_log_custom_localize_state(void *fontManagerData, void *titleFont,
             void *boxed = [IL2CppBridge invokeMethod:getFontAssetMethod onInstance:fontManagerData args:args outException:&exc];
             total++;
             if (exc || !boxed) {
-                ZLog(@"[ZSFont] slot %s/%s: GetFontAsset failed exception=%@", typeNames[type], languageNames[language], zs_describe_exception(exc));
+                ZSFontLog(@"[ZSFont] slot %s/%s: GetFontAsset failed exception=%@", typeNames[type], languageNames[language], zs_describe_exception(exc));
                 continue;
             }
             void *resolved = *(void **)((uint8_t *)boxed + fontAssetOffset);
             BOOL isCustom = resolved == titleFont || resolved == contextFont;
             if (isCustom) matched++;
-            ZLog(@"[ZSFont] slot %s/%s: fontAsset=%p custom=%d", typeNames[type], languageNames[language], resolved, isCustom);
+            ZSFontLog(@"[ZSFont] slot %s/%s: fontAsset=%p custom=%d", typeNames[type], languageNames[language], resolved, isCustom);
         }
     }
-    ZLog(@"[ZSFont] FontManager primary slots resolving to the custom font: %d/%d", matched, total);
+    ZSFontLog(@"[ZSFont] FontManager primary slots resolving to the custom font: %d/%d", matched, total);
 }
 
-static void zs_apply_custom_font_if_present(void) {
+static void zs_apply_custom_font_impl(void) {
     NSString *fontsDir = zs_custom_font_directory();
     if (!fontsDir) return;
 
@@ -4352,14 +4358,14 @@ static void zs_apply_custom_font_if_present(void) {
     NSString *cjkPath = zs_assigned_font_path(ZSFontRoleKanjiHanzi);
     NSString *titlePath = assignedTitlePath ?: assignedContextPath ?: cjkPath;
     NSString *contextPath = assignedContextPath ?: assignedTitlePath ?: cjkPath;
-    ZLog(@"[ZSFont] apply: directory=%@ assigned title=%@ context=%@ cjk=%@", fontsDir,
+    ZSFontLog(@"[ZSFont] apply: directory=%@ assigned title=%@ context=%@ cjk=%@", fontsDir,
          assignedTitlePath.lastPathComponent ?: @"(none)", assignedContextPath.lastPathComponent ?: @"(none)", cjkPath.lastPathComponent ?: @"(none)");
     if (!titlePath || !contextPath) return;
 
     NSMutableArray<NSString *> *signatureInputs = [NSMutableArray arrayWithObjects:titlePath, contextPath, nil];
     if (cjkPath) [signatureInputs addObject:cjkPath];
     NSString *signature = zs_custom_font_signature(signatureInputs);
-    ZLog(@"[ZSFont] apply: title=%@ context=%@ cjk=%@", titlePath.lastPathComponent, contextPath.lastPathComponent, cjkPath.lastPathComponent ?: @"(none)");
+    ZSFontLog(@"[ZSFont] apply: title=%@ context=%@ cjk=%@", titlePath.lastPathComponent, contextPath.lastPathComponent, cjkPath.lastPathComponent ?: @"(none)");
 
     BOOL cjkCachedUsable = !cjkPath || (g_zsCustomFontCJK && ZSUID_UnityObjectIsAlive(g_zsCustomFontCJK));
     BOOL cachedFontsUsable = g_zsCustomFontTitle && g_zsCustomFontContext &&
@@ -4370,57 +4376,76 @@ static void zs_apply_custom_font_if_present(void) {
     void *currentTitle = NULL;
     void *currentContext = NULL;
     BOOL haveCurrent = zs_read_custom_localize_fonts(&currentTitle, &currentContext);
-    ZLog(@"[ZSFont] apply: cachedUsable=%d cached=%p/%p current(haveCurrent=%d)=%p/%p",
+    ZSFontLog(@"[ZSFont] apply: cachedUsable=%d cached=%p/%p current(haveCurrent=%d)=%p/%p",
          cachedFontsUsable, g_zsCustomFontTitle, g_zsCustomFontContext, haveCurrent, currentTitle, currentContext);
     BOOL alreadyInstalled = cachedFontsUsable && haveCurrent && currentTitle == g_zsCustomFontTitle && currentContext == g_zsCustomFontContext;
-    if (alreadyInstalled) return;
 
     void *titleFont = g_zsCustomFontTitle;
     void *contextFont = g_zsCustomFontContext;
     void *cjkFont = g_zsCustomFontCJK;
 
-    if (!cachedFontsUsable) {
-        titleFont = zs_load_custom_font(titlePath);
-        if (!titleFont) {
-            ZLog(@"[ZSFont] apply: aborting, title font failed to load");
-            return;
-        }
-        contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
-        if (!contextFont) {
-            ZLog(@"[ZSFont] apply: aborting, context font failed to load");
-            return;
-        }
-        cjkFont = NULL;
-        if (cjkPath) {
-            if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
-            else if ([cjkPath isEqualToString:contextPath]) cjkFont = contextFont;
-            else {
-                cjkFont = zs_load_custom_font(cjkPath);
-                if (!cjkFont) ZLog(@"[ZSFont] apply: CJK font failed to load, continuing without it");
+    if (!alreadyInstalled) {
+        g_zsFontLogQuiet = NO;
+        if (!cachedFontsUsable) {
+            titleFont = zs_load_custom_font(titlePath);
+            if (!titleFont) {
+                ZSFontLog(@"[ZSFont] apply: aborting, title font failed to load");
+                return;
+            }
+            contextFont = [contextPath isEqualToString:titlePath] ? titleFont : zs_load_custom_font(contextPath);
+            if (!contextFont) {
+                ZSFontLog(@"[ZSFont] apply: aborting, context font failed to load");
+                return;
+            }
+            cjkFont = NULL;
+            if (cjkPath) {
+                if ([cjkPath isEqualToString:titlePath]) cjkFont = titleFont;
+                else if ([cjkPath isEqualToString:contextPath]) cjkFont = contextFont;
+                else {
+                    cjkFont = zs_load_custom_font(cjkPath);
+                    if (!cjkFont) ZSFontLog(@"[ZSFont] apply: CJK font failed to load, continuing without it");
+                }
             }
         }
+
+        g_zsCustomFontTitle = titleFont;
+        g_zsCustomFontContext = contextFont;
+        g_zsCustomFontCJK = cjkFont;
+        g_zsCustomFontSignature = signature;
+
+        if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
+            g_zsCustomFontTitle = NULL;
+            g_zsCustomFontContext = NULL;
+            g_zsCustomFontCJK = NULL;
+            g_zsCustomFontSignature = nil;
+            ZSFontLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
+            return;
+        }
+
+        ZSFontLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
+    } else {
+        ZSFontLog(@"[ZSFont] apply: already installed, refreshing consumers for the current scene");
     }
-
-    g_zsCustomFontTitle = titleFont;
-    g_zsCustomFontContext = contextFont;
-    g_zsCustomFontCJK = cjkFont;
-    g_zsCustomFontSignature = signature;
-
-    if (!zs_install_custom_localize_result(titleFont, contextFont, fontsDir)) {
-        g_zsCustomFontTitle = NULL;
-        g_zsCustomFontContext = NULL;
-        g_zsCustomFontCJK = NULL;
-        g_zsCustomFontSignature = nil;
-        ZLog(@"[ZSFont] failed to install custom fonts into CustomLocalizeManager");
-        return;
-    }
-
-    ZLog(@"[ZSFont] installed %@ (title) and %@ (context) into CustomLocalizeManager", titlePath.lastPathComponent, contextPath.lastPathComponent);
 
     void *fontManagerData = zs_load_font_manager_data();
     zs_refresh_font_consumers(fontManagerData);
     zs_append_custom_fallback_to_loaded_font_assets(titleFont, contextFont, cjkFont, fontManagerData);
     zs_log_custom_localize_state(fontManagerData, titleFont, contextFont);
+}
+
+static void zs_apply_custom_font_if_present(void) {
+    g_zsFontLogQuiet = g_zsCustomFontTitle != NULL;
+    zs_apply_custom_font_impl();
+    BOOL stayedQuiet = g_zsFontLogQuiet;
+    g_zsFontLogQuiet = NO;
+    if (!stayedQuiet) return;
+
+    g_zsFontQuietRepeats++;
+    double now = CACurrentMediaTime();
+    if (now - g_zsFontLastQuietSummary < kZSFontQuietSummaryInterval) return;
+    ZLog(@"[ZSFont] apply: already installed, %lu repeat refresh(es) with detailed logging suppressed", (unsigned long)g_zsFontQuietRepeats);
+    g_zsFontQuietRepeats = 0;
+    g_zsFontLastQuietSummary = now;
 }
 
 static const double kFontApplyDelaySeconds = 2.0;
