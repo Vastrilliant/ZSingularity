@@ -167,6 +167,52 @@ static void uncaught_exception_handler(NSException *exception) {
     }
 }
 
+#pragma mark - std::terminate capture (uncaught NSException, handler-independent)
+
+extern void __cxa_rethrow(void) __attribute__((noreturn));
+
+static void (*g_previousTerminate)(void) = NULL;
+static volatile int g_terminateHandling = 0;
+
+static void zs_terminate_handler(void) {
+    if (__sync_lock_test_and_set(&g_terminateHandling, 1)) {
+        abort();
+    }
+    @try {
+        __cxa_rethrow();
+    } @catch (NSException *exception) {
+        NSString *log = [NSString stringWithFormat:
+            @"\n=== ZCrashLogger: uncaught NSException ===\n%s" "time: %lld\nname: %@\nreason: %@\ncallStackSymbols:\n%@\n=== end ===\n",
+            g_reportHeader, (long long)time(NULL),
+            exception.name, exception.reason, [exception.callStackSymbols componentsJoinedByString:@"\n"]];
+        const char *utf8 = log.UTF8String;
+        if (utf8) {
+            safe_write(utf8, strlen(utf8));
+            safe_sync();
+        }
+    }
+    // The exception object is gone after the catch; nothing left for the
+    // previous handler to inspect, so finish the abort here (the SIGABRT
+    // handler still writes its own backtrace section).
+    abort();
+}
+
+static void zs_install_terminate_handler(void) {
+    typedef void (*terminate_fn)(void);
+    typedef terminate_fn (*set_terminate_fn)(terminate_fn);
+    typedef terminate_fn (*get_terminate_fn)(void);
+    static set_terminate_fn setter;
+    static get_terminate_fn getter;
+    if (!setter) {
+        setter = (set_terminate_fn)dlsym(RTLD_DEFAULT, "_ZSt13set_terminatePFvvE");
+        getter = (get_terminate_fn)dlsym(RTLD_DEFAULT, "_ZSt13get_terminatev");
+    }
+    if (!setter) return;
+    if (getter && getter() == zs_terminate_handler) return;
+    terminate_fn previous = setter(zs_terminate_handler);
+    if (previous != zs_terminate_handler) g_previousTerminate = previous;
+}
+
 static void install_handlers(void) {
     struct sigaction action;
     memset(&action, 0, sizeof(action));
@@ -183,6 +229,8 @@ static void install_handlers(void) {
         g_previousActions[sig] = current;
         sigaction(sig, &action, NULL);
     }
+
+    zs_install_terminate_handler();
 
     NSUncaughtExceptionHandler *currentExceptionHandler = NSGetUncaughtExceptionHandler();
     if (currentExceptionHandler != &uncaught_exception_handler) {
