@@ -4,6 +4,7 @@
 #import "IL2CppIntrospection.h"
 #import "UnityBundleTools.h"
 #import <CoreFoundation/CoreFoundation.h>
+#import <QuartzCore/QuartzCore.h>
 #import <compression.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <sys/stat.h>
