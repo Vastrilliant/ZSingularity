@@ -8,6 +8,7 @@
 #import <mach/mach.h>
 #import <mach/vm_region.h>
 #import <dlfcn.h>
+#import <unistd.h>
 #import <mach-o/dyld.h>
 
 typedef struct {
@@ -26,6 +27,9 @@ static NSMutableArray<dispatch_block_t> *g_readyBlocks;
 static NSMutableArray<ZSSceneChangedBlock> *g_sceneBlocks;
 static void (*g_origInternalSceneLoaded)(ZSHookScene, int32_t, const void *);
 static IMP g_origStartUnity;
+static BOOL g_keyboardGuardInstalled;
+static IMP g_origKeyboardInitialize;
+static int g_keyboardInitializeCalls;
 
 static const NSTimeInterval kZSHookFallbackGraceSeconds = 5.0;
 static const NSTimeInterval kZSHookFallbackIntervalSeconds = 0.5;
@@ -221,7 +225,49 @@ static void zs_hook_start_unity(id self, SEL selector, id application) {
     zs_hooks_nudge();
 }
 
+static void zs_hook_keyboard_initialize(id self, SEL selector) {
+    os_unfair_lock_lock(&g_hookLock);
+    int call = ++g_keyboardInitializeCalls;
+    IMP original = g_origKeyboardInitialize;
+    os_unfair_lock_unlock(&g_hookLock);
+
+    NSArray<NSString *> *stack = [NSThread callStackSymbols];
+    NSUInteger count = MIN((NSUInteger)12, stack.count);
+    ZLog(@"[ZSHook] KeyboardDelegate.Initialize call #%d pid=%d\n%@", call, getpid(),
+         [[stack subarrayWithRange:NSMakeRange(0, count)] componentsJoinedByString:@"\n"]);
+
+    if (!original) return;
+    @try {
+        ((void (*)(id, SEL))original)(self, selector);
+    } @catch (NSException *exception) {
+        if (![exception.name isEqualToString:NSInternalInconsistencyException]) @throw;
+        ZLog(@"[ZSHook] suppressed duplicate KeyboardDelegate.Initialize (call #%d): %@", call, exception.reason);
+    }
+}
+
+static void zs_hook_install_keyboard_guard(void) {
+    os_unfair_lock_lock(&g_hookLock);
+    if (g_keyboardGuardInstalled) {
+        os_unfair_lock_unlock(&g_hookLock);
+        return;
+    }
+    Class cls = NSClassFromString(@"KeyboardDelegate");
+    IMP original = NULL;
+    BOOL ok = NO;
+    if (cls) {
+        ok = zs_hook_swizzle_instance(object_getClass(cls), NSSelectorFromString(@"Initialize"),
+                                      (IMP)zs_hook_keyboard_initialize, &original);
+    }
+    if (ok) {
+        if (original) g_origKeyboardInitialize = original;
+        g_keyboardGuardInstalled = YES;
+    }
+    os_unfair_lock_unlock(&g_hookLock);
+    if (ok) ZLog(@"[ZSHook] KeyboardDelegate.Initialize guarded");
+}
+
 static void zs_hook_install_start_unity(void) {
+    zs_hook_install_keyboard_guard();
     os_unfair_lock_lock(&g_hookLock);
     BOOL done = g_startHookInstalled;
     os_unfair_lock_unlock(&g_hookLock);
@@ -267,6 +313,7 @@ static void zs_hook_start_fallback(void) {
 static void zs_hook_image_added(const struct mach_header *header, intptr_t slide) {
     (void)header;
     (void)slide;
+    zs_hook_install_keyboard_guard();
     dispatch_async(dispatch_get_main_queue(), ^{
         zs_hook_install_start_unity();
     });
