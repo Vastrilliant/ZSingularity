@@ -320,6 +320,8 @@ typedef NS_ENUM(NSInteger, ModAssetLibraryIntegrity) {
 
 + (ModAssetLibraryIntegrity)integrityForEntry:(ModAssetLibraryEntry *)entry;
 
++ (NSUInteger)syncStoredBundlesWithLiveBundleAtPath:(NSString *)liveBundlePath;
+
 + (NSArray<ModAssetLibraryEntry *> *)activeModdedEntries;
 
 + (NSSet<NSString *> *)moddedBundleCABs;

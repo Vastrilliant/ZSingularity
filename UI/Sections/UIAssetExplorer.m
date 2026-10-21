@@ -1980,6 +1980,7 @@ static dispatch_queue_t zs_asset_explorer_live_queue(void) {
             [ZSAssetExplorer unloadBundleAtPath:bundlePath];
             ok = [ZTTextureSwapper swapTexturePathID:pathID inBundleAtPath:bundlePath withImageAtPath:path error:&error];
             [NSFileManager.defaultManager removeItemAtPath:path error:nil];
+            if (ok) [ModAssetLibrary syncStoredBundlesWithLiveBundleAtPath:bundlePath];
             [ZSAssetExplorer unloadBundleAtPath:bundlePath];
             [ZSAssetExplorer loadBundleIntoMemoryAtPath:bundlePath error:nil];
             if (ok) assets = [ZSAssetExplorer assetsForBundleAtPath:bundlePath error:nil];

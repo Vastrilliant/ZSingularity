@@ -2548,6 +2548,61 @@ static BOOL MALPackChecksumMatch(NSString *packPath, NSString *languageDir) {
     return match ? ModAssetLibraryIntegrityVerified : ModAssetLibraryIntegrityMismatch;
 }
 
++ (NSUInteger)syncStoredBundlesWithLiveBundleAtPath:(NSString *)liveBundlePath {
+    if (liveBundlePath.length == 0) return 0;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm fileExistsAtPath:liveBundlePath]) return 0;
+    NSString *liveResolved = liveBundlePath.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+
+    NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
+    for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
+
+    NSUInteger synced = 0;
+    for (NSString *folder in allFolders) {
+        if ([self mal_folderIsStored:folder]) continue;
+        NSArray<ModAssetLibraryEntry *> *entries = [self entriesInFolder:folder error:nil];
+        BOOL folderChanged = NO;
+        for (ModAssetLibraryEntry *entry in entries) {
+            if (!entry.isAssetBundle || entry.path.length == 0) continue;
+            NSString *entryLive = [self mal_livePathForEntry:entry];
+            if (entryLive.length == 0) continue;
+            if (![entryLive.stringByResolvingSymlinksInPath.stringByStandardizingPath isEqualToString:liveResolved]) continue;
+            if (zs_mods_files_have_identical_sha256(entry.path, liveBundlePath)) continue;
+
+            NSString *tmpPath = [entry.path stringByAppendingFormat:@".sync-%@", NSUUID.UUID.UUIDString];
+            NSError *copyErr = nil;
+            if (![fm copyItemAtPath:liveBundlePath toPath:tmpPath error:&copyErr]) {
+                ZLog(@"[ModAssetLibrary] couldn't stage live bundle for %@: %@", entry.fileName, copyErr.localizedDescription);
+                continue;
+            }
+            NSURL *resultURL = nil;
+            NSError *replaceErr = nil;
+            if (![fm replaceItemAtURL:[NSURL fileURLWithPath:entry.path]
+                        withItemAtURL:[NSURL fileURLWithPath:tmpPath]
+                       backupItemName:nil
+                              options:0
+                     resultingItemURL:&resultURL
+                                error:&replaceErr]) {
+                ZLog(@"[ModAssetLibrary] couldn't replace stored bundle %@: %@", entry.fileName, replaceErr.localizedDescription);
+                [fm removeItemAtPath:tmpPath error:nil];
+                continue;
+            }
+            NSDictionary *attrs = [fm attributesOfItemAtPath:entry.path error:nil];
+            if (attrs) entry.byteSize = attrs.fileSize;
+            folderChanged = YES;
+            synced++;
+            ZLog(@"[ModAssetLibrary] synced stored bundle %@ with live bundle after texture swap", entry.fileName);
+        }
+        if (folderChanged) {
+            NSError *writeErr = nil;
+            if (![self mal_writeEntries:entries toFolder:folder error:&writeErr]) {
+                ZLog(@"[ModAssetLibrary] couldn't update manifest for \"%@\": %@", folder, writeErr.localizedDescription);
+            }
+        }
+    }
+    return synced;
+}
+
 + (NSArray<ModAssetLibraryEntry *> *)activeModdedEntries {
     NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
     for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
