@@ -2086,6 +2086,7 @@ static ZSLRJob *g_zslrJobs[ZSLR_MAX_WORKERS];
 static TexCompStatus g_zslrStatus;
 static volatile BOOL g_zslrCancel = NO;
 static double g_zslrWarningUntil = 0;
+static id g_zslrWarningObserver;
 static BOOL g_zslrHoldPaused = NO;
 static NSUInteger g_zslrMaxWorkers = 1;
 static int g_zslrLastState = -1;
@@ -2382,20 +2383,38 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         instance = [TexComp new];
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
-                                                        object:nil
-                                                         queue:nil
-                                                    usingBlock:^(NSNotification *note) {
-            os_unfair_lock_lock(&g_zslrLock);
-            g_zslrWarningUntil = CACurrentMediaTime() + kTexCompWarningPause;
-            BOOL running = g_zslrStatus.running;
-            os_unfair_lock_unlock(&g_zslrLock);
-            malloc_zone_pressure_relief(NULL, 0);
-            ZLog(@"[TexComp] memory warning received (available %lld MB), workers paused for %.0fs%@", (long long)(zslr_available_memory() / (1024 * 1024)),
-                 kTexCompWarningPause, running ? @"" : @" (idle)");
-        }];
     });
     return instance;
+}
+
++ (void)installWarningObserver {
+    os_unfair_lock_lock(&g_zslrLock);
+    BOOL installed = g_zslrWarningObserver != nil;
+    os_unfair_lock_unlock(&g_zslrLock);
+    if (installed) return;
+    id observer = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
+                                                                  object:nil
+                                                                   queue:nil
+                                                              usingBlock:^(NSNotification *note) {
+        os_unfair_lock_lock(&g_zslrLock);
+        BOOL running = g_zslrStatus.running;
+        if (running) g_zslrWarningUntil = CACurrentMediaTime() + kTexCompWarningPause;
+        os_unfair_lock_unlock(&g_zslrLock);
+        if (!running) return;
+        malloc_zone_pressure_relief(NULL, 0);
+        ZLog(@"[TexComp] memory warning received (available %lld MB), workers paused for %.0fs", (long long)(zslr_available_memory() / (1024 * 1024)), kTexCompWarningPause);
+    }];
+    os_unfair_lock_lock(&g_zslrLock);
+    g_zslrWarningObserver = observer;
+    os_unfair_lock_unlock(&g_zslrLock);
+}
+
++ (void)removeWarningObserver {
+    os_unfair_lock_lock(&g_zslrLock);
+    id observer = g_zslrWarningObserver;
+    g_zslrWarningObserver = nil;
+    os_unfair_lock_unlock(&g_zslrLock);
+    if (observer) [NSNotificationCenter.defaultCenter removeObserver:observer];
 }
 
 + (NSString *)stagingDirectory {
@@ -2840,6 +2859,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
     memset(g_zslrWorkerDone, 0, sizeof(g_zslrWorkerDone));
     g_zslrMaxWorkers = kTexCompMaxWorkers;
     os_unfair_lock_unlock(&g_zslrLock);
+    [TexComp installWarningObserver];
     ZLog(@"[TexComp] %@ requested at ASTC %ux%u, available memory %lld MB", mode == TexCompModeScan ? @"scan" : @"transcode", zslr_block(), zslr_block(), (long long)(zslr_available_memory() / (1024 * 1024)));
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2963,6 +2983,7 @@ static int zslr_codec_transcode(void *user, const uint8_t *src, size_t srcLen, u
         TexCompStatus finalStatus = g_zslrStatus;
         NSUInteger noStream = g_zslrNoStream;
         os_unfair_lock_unlock(&g_zslrLock);
+        [TexComp removeWarningObserver];
         ZLog(@"[TexComp] finished in %.1fs, %lu bundle(s) had no .resS node: %@", CACurrentMediaTime() - runStart, (unsigned long)noStream, [[TexComp shared] summary]);
         if (completion) dispatch_async(dispatch_get_main_queue(), ^{ completion(finalStatus); });
     });
