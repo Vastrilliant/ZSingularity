@@ -8,6 +8,8 @@ typedef NS_ENUM(NSInteger, ZSHookID) {
     ZSHookIDFrameRate,
     ZSHookIDGreeting,
     ZSHookIDTips,
+    ZSHookIDUID,
+    ZSHookIDPostFX,
     ZSHookIDCount
 };
 
@@ -15,6 +17,7 @@ typedef void (^ZSSceneChangedBlock)(int32_t state, int32_t previousState);
 
 BOOL zs_hook_swizzle_instance(Class cls, SEL selector, IMP replacement, IMP _Nullable * _Nullable original);
 BOOL zs_hook_il2cpp_named(const char *namespaze, const char *className, const char *assemblyContains, const char *methodName, int argCount, void *replacement, void * _Nullable * _Nullable original);
+BOOL zs_hook_site_named(const char *namespaze, const char *className, const char *assemblyContains, const char *methodName, int argCount, void *replacement, void * _Nullable * _Nullable original);
 BOOL zs_hook_il2cpp_method(const void *method, void *replacement, void * _Nullable * _Nullable original);
 
 void zs_hook_mark_armed(ZSHookID hook);

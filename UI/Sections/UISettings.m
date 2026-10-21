@@ -1,5 +1,6 @@
 #import "UIInternal.h"
 #import "Docs.h"
+#import "Hook.h"
 
 @implementation UserInterface (Settings)
 
@@ -1258,16 +1259,23 @@ static BOOL zs_keep_alive_background_mode_declared(void) {
 #pragma mark Post FX continuous reapply
 
 - (void)startPostFXReapply {
+    zs_postfx_set_active(YES);
+    if (zs_hook_is_armed(ZSHookIDPostFX)) return;
     if (self.postFXReapplyTimer) return;
     self.postFXReapplyTimer = [NSTimer timerWithTimeInterval:kPostFXReapplyInterval
                                                        repeats:YES
                                                          block:^(NSTimer *timer) {
+        if (zs_hook_is_armed(ZSHookIDPostFX)) {
+            [timer invalidate];
+            return;
+        }
         zs_reapply_post_fx();
     }];
     [[NSRunLoop mainRunLoop] addTimer:self.postFXReapplyTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)stopPostFXReapply {
+    zs_postfx_set_active(NO);
     [self.postFXReapplyTimer invalidate];
     self.postFXReapplyTimer = nil;
 }

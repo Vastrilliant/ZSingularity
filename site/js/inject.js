@@ -3,6 +3,7 @@ import { readZip, dataRange, rawBlob, readEntryBytes, inflateChunks, crc32, crc3
 import { patchMachO, ChunkedBuffer } from "./macho.js";
 import { findIapSite } from "./iap.js";
 import { findLocalizeSite } from "./localize.js";
+import { findHookSites } from "./hooks.js";
 import { patchFramework } from "./framework.js";
 
 const TRUE_KEYS = [
@@ -122,9 +123,11 @@ export async function inject(ipa, payload, opts = {}) {
   let fw = null;
   let iapStatus = "skipped";
   let localizeStatus = "skipped";
+  let hooksStatus = "skipped";
   const finders = [];
   if (opts.patchIap !== false) finders.push({ id: "iap", find: findIapSite });
   if (opts.patchLocalize !== false) finders.push({ id: "localize", find: findLocalizeSite });
+  if (opts.patchHooks !== false) finders.push({ id: "hooks", find: findHookSites });
   if (finders.length) {
     const fwEntry = zip.entries.find((e) => e.name === appDir + UNITY_FRAMEWORK);
     if (!fwEntry) {
@@ -137,6 +140,10 @@ export async function inject(ipa, payload, opts = {}) {
         localizeStatus = "no-framework";
         warnings.push("UnityFramework was not found, so the Custom Localize Manager was not enabled.");
       }
+      if (opts.patchHooks !== false) {
+        hooksStatus = "no-framework";
+        warnings.push("UnityFramework was not found, so the event hook sites were not installed.");
+      }
     } else {
       progress("Patching framework", 0);
       log("Framework: " + fwEntry.name + " \u00b7 method " + fwEntry.method + " \u00b7 " + fwEntry.csize + " compressed / " + fwEntry.usize + " uncompressed bytes");
@@ -148,6 +155,8 @@ export async function inject(ipa, payload, opts = {}) {
       for (const res of r.results) {
         if (res.id === "iap") {
           iapStatus = reportPatch(res, "Purchase popup", "This game build's purchase code did not match the expected layout (" + res.status + "), so the launch purchase error popup was not suppressed.", log, warnings);
+        } else if (res.id === "hooks") {
+          hooksStatus = reportHooks(res, log, warnings);
         } else {
           localizeStatus = reportPatch(res, "Custom localize path", "This game build's localization path code did not match the expected layout (" + res.status + "), so the Custom Localize Manager was not enabled.", log, warnings);
         }
@@ -229,6 +238,7 @@ export async function inject(ipa, payload, opts = {}) {
     embeddedAppex: !!appex,
     iapStatus,
     localizeStatus,
+    hooksStatus,
     warnings,
   };
 }
@@ -244,6 +254,22 @@ function reportPatch(res, label, warnText, log, warnings) {
   }
   log(label + " patch not applied: " + res.status + (res.count ? " (" + res.count + " matches)" : ""));
   warnings.push(warnText);
+  return res.status;
+}
+
+function reportHooks(res, log, warnings) {
+  const applied = res.applied || [];
+  const already = res.already || [];
+  const problems = res.problems || [];
+  for (const n of applied) log("Event hook site installed: " + n);
+  for (const n of already) log("Event hook site already present: " + n);
+  if (problems.length) {
+    for (const p of problems) log("Event hook site skipped: " + p);
+    warnings.push("Some event hook sites were skipped (" + problems.join("; ") + "), so the features depending on them keep using their fallback.");
+  }
+  if (res.status === "patch") return "patched";
+  if (res.status === "already") return "already";
+  if (!problems.length) warnings.push("No event hook sites were installed (" + res.status + ").");
   return res.status;
 }
 

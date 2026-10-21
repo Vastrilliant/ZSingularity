@@ -24,7 +24,7 @@
 #import "UnityBundleTools.h"
 #import "Mods.h"
 #import "DonatedHeap.h"
-#import "ZSHook.h"
+#import "Hook.h"
 
 #pragma mark - ZSScripts
 
@@ -5189,6 +5189,11 @@ static void ZSUID_RedactColdTargets(void) {
 }
 
 - (void)hotFieldTick {
+    if (zs_hook_is_armed(ZSHookIDUID)) {
+        [self.hotFieldLink invalidate];
+        self.hotFieldLink = nil;
+        return;
+    }
     ZSUID_HotFieldTick();
 }
 
@@ -5212,6 +5217,8 @@ static ZSLifeFn gZSLifeOrigLoginStart;
 static BOOL gZSLifeGreetingComplete;
 static BOOL gZSLifeTipsComplete;
 static BOOL gZSLifeAllInstalled;
+static BOOL gZSSiteTipInstalled;
+static void ZSSite_InstallAll(void);
 
 static BOOL ZSLife_SetFieldText(void *obj, const char *fieldName, NSString *text) {
     if (!obj || text.length == 0) return NO;
@@ -5282,7 +5289,7 @@ static void ZSLife_LoadingStart(void *self, void *a1, void *a2, void *a3, void *
     if (gZSLifeOrigLoadingStart) gZSLifeOrigLoadingStart(self, a1, a2, a3, a4, a5);
     if (gZSLifeTipsComplete) zs_hook_mark_armed(ZSHookIDTips);
     if (ZSCombatTip_Pool().count == 0) return;
-    NSString *pick = ZSCombatTip_PickRandom();
+    NSString *pick = (gZSSiteTipInstalled && gZSCombatTipChosen.length) ? gZSCombatTipChosen : ZSCombatTip_PickRandom();
     if (pick.length == 0) return;
     gZSCombatTipChosen = pick;
     ZSLife_SetFieldText(self, "_hintTxt", pick);
@@ -5322,6 +5329,7 @@ static ZSLifeHook gZSLifeHooks[] = {
 };
 
 static void ZSLife_InstallAll(void) {
+    ZSSite_InstallAll();
     if (gZSLifeAllInstalled) return;
     BOOL all = YES;
     for (size_t i = 0; i < sizeof(gZSLifeHooks) / sizeof(gZSLifeHooks[0]); i++) {
@@ -5337,6 +5345,122 @@ static void ZSLife_InstallAll(void) {
     gZSLifeGreetingComplete = gZSLifeHooks[0].installed;
     gZSLifeTipsComplete = gZSLifeHooks[1].installed;
     gZSLifeAllInstalled = all;
+}
+
+static BOOL gZSSitesUIDComplete;
+static BOOL gZSSiteTipInstalled;
+static BOOL gZSPostFXActive;
+static BOOL gZSPostFXInHook;
+static CFTimeInterval gZSPostFXLastRun;
+
+void zs_postfx_set_active(BOOL active) {
+    gZSPostFXActive = active;
+}
+
+static void ZSSite_UID(void *obj, const char *field) {
+    if (gZSSitesUIDComplete) zs_hook_mark_armed(ZSHookIDUID);
+    ZSLife_UIDForTarget(obj, field);
+}
+
+static void ZSSite_UIDPopup(void *obj, const char *field) {
+    ZSSite_UID(obj, field);
+    if (!UIDRedactor.isEnabled) return;
+    ZSUID_RedactColdTargets();
+    ZSLife_Settle(^{
+        if (UIDRedactor.isEnabled) ZSUID_RedactColdTargets();
+    });
+}
+
+#define ZS_SITE_HOOK(NAME, BODY) \
+static ZSLifeFn gZSSiteOrig_##NAME; \
+static void ZSSiteHook_##NAME(void *s, void *a1, void *a2, void *a3, void *a4, void *a5) { \
+    if (gZSSiteOrig_##NAME) gZSSiteOrig_##NAME(s, a1, a2, a3, a4, a5); \
+    BODY \
+}
+
+ZS_SITE_HOOK(UpdateUserInfo, ZSSite_UID(s, "tmp_id");)
+ZS_SITE_HOOK(SetIntroductionText, ZSLife_GreetingForCard(s);)
+ZS_SITE_HOOK(SetHintText, {
+    if (ZSCombatTip_Pool().count == 0) return;
+    NSString *pick = ZSCombatTip_PickRandom();
+    if (pick.length == 0) return;
+    gZSCombatTipChosen = pick;
+    ZSLife_SetFieldText(s, "_hintTxt", pick);
+})
+ZS_SITE_HOOK(VolumeUpdate, {
+    zs_hook_mark_armed(ZSHookIDPostFX);
+    if (gZSPostFXActive && !gZSPostFXInHook && NSThread.isMainThread) {
+        CFTimeInterval now = CACurrentMediaTime();
+        if (now - gZSPostFXLastRun >= 1.0) {
+            gZSPostFXLastRun = now;
+            gZSPostFXInHook = YES;
+            zs_reapply_post_fx();
+            gZSPostFXInHook = NO;
+        }
+    }
+})
+ZS_SITE_HOOK(SettingsOpen, ZSSite_UID(s, "tmp_accountInfo");)
+ZS_SITE_HOOK(SettingsReload, ZSSite_UID(s, "tmp_accountInfo");)
+ZS_SITE_HOOK(PopupSetPublicId, ZSSite_UIDPopup(s, "tmp_uid");)
+ZS_SITE_HOOK(PopupSetDataOpen, ZSSite_UIDPopup(s, "tmp_uid");)
+ZS_SITE_HOOK(StageItemSetData, ZSSite_UID(s, "tmp_uid");)
+ZS_SITE_HOOK(SelectItemSetData, ZSSite_UID(s, "tmp_publicId");)
+ZS_SITE_HOOK(AskPanelSetData, ZSSite_UID(s, "tmp_id");)
+ZS_SITE_HOOK(LoginSetInfo, ZSSite_UID(s, "tmp_loginAccount");)
+
+typedef struct {
+    const char *namespaze;
+    const char *className;
+    const char *methodName;
+    int argCount;
+    void *replacement;
+    void **original;
+    BOOL uidGroup;
+    BOOL installed;
+} ZSSiteHook;
+
+#define ZS_SITE(NS, CLS, METHOD, ARGC, NAME, UID) \
+    { NS, CLS, METHOD, ARGC, (void *)ZSSiteHook_##NAME, (void **)&gZSSiteOrig_##NAME, UID, NO }
+
+static ZSSiteHook gZSSites[] = {
+    ZS_SITE("MainUI", "LowerControlUIPanel", "UpdateUserInfo", 1, UpdateUserInfo, YES),
+    ZS_SITE("MainUI", "UserInfoCard", "SetIntroductionText", 2, SetIntroductionText, NO),
+    ZS_SITE("", "LoadingSceneManager", "SetHintText", 0, SetHintText, NO),
+    ZS_SITE("UnityEngine.Rendering", "VolumeManager", "Update", 3, VolumeUpdate, NO),
+    ZS_SITE("MainUI", "SettingsPanelEtc", "Open", 0, SettingsOpen, YES),
+    ZS_SITE("MainUI", "SettingsPanelEtc", "ReloadUI", 0, SettingsReload, YES),
+    ZS_SITE("MainUI", "ShowIntegrateCodeUIPopup", "SetPublicId", 1, PopupSetPublicId, YES),
+    ZS_SITE("MainUI", "ShowIntegrateCodeUIPopup", "SetDataOpen", 2, PopupSetDataOpen, YES),
+    ZS_SITE("", "StageStatisticPopupSlotScrollViewItem", "SetData", 1, StageItemSetData, YES),
+    ZS_SITE("MainUI", "SelectIntegrateAccountItemObject", "SetData", 1, SelectItemSetData, YES),
+    ZS_SITE("MainUI", "AskBeforeConfirmIntegratePanel", "SetData", 1, AskPanelSetData, YES),
+    ZS_SITE("", "LoginSceneManager", "SetLoginInfo", 0, LoginSetInfo, YES),
+};
+
+static BOOL gZSSitesLogged[sizeof(gZSSites) / sizeof(gZSSites[0])];
+
+static void ZSSite_InstallAll(void) {
+    BOOL uidAll = YES;
+    for (size_t i = 0; i < sizeof(gZSSites) / sizeof(gZSSites[0]); i++) {
+        ZSSiteHook *site = &gZSSites[i];
+        if (!site->installed) {
+            site->installed = zs_hook_site_named(site->namespaze, site->className, "Assembly-CSharp",
+                                                 site->methodName, site->argCount,
+                                                 site->replacement, site->original);
+            if (!site->installed && !strcmp(site->className, "VolumeManager")) {
+                site->installed = zs_hook_site_named(site->namespaze, site->className, "Unity.RenderPipelines.Core.Runtime",
+                                                     site->methodName, site->argCount,
+                                                     site->replacement, site->original);
+            }
+            if (site->installed && !gZSSitesLogged[i]) {
+                gZSSitesLogged[i] = YES;
+                ZLog(@"[ZSHook] patched site %s.%s hooked", site->className, site->methodName);
+            }
+        }
+        if (site->uidGroup && !site->installed) uidAll = NO;
+    }
+    gZSSitesUIDComplete = uidAll;
+    gZSSiteTipInstalled = gZSSites[2].installed;
 }
 
 static void ZSLife_SceneChanged(int32_t state, int32_t previous) {

@@ -1,4 +1,4 @@
-#import "ZSHook.h"
+#import "Hook.h"
 #import "Engine.h"
 #import "IL2CppIntrospection.h"
 #import "ZTweakLog.h"
@@ -81,6 +81,60 @@ BOOL zs_hook_il2cpp_named(const char *namespaze, const char *className, const ch
     const void *method = [IL2CppBridge methodOnClass:klass name:methodName argCount:argCount];
     if (!method) return NO;
     return zs_hook_il2cpp_method(method, replacement, original);
+}
+
+static BOOL zs_hook_decode_site(const void *function, uintptr_t *outCave, void ***outSlot) {
+    const uint32_t *entry = (const uint32_t *)function;
+    uint32_t e0 = entry[0], e1 = entry[1], e2 = entry[2];
+    if ((e0 & 0x9F00001F) != 0x90000010) return NO;
+    if ((e1 & 0xFFC003FF) != 0x91000210) return NO;
+    if (e2 != 0xD61F0200) return NO;
+
+    int64_t imm = (int64_t)((((e0 >> 5) & 0x7FFFF) << 2) | ((e0 >> 29) & 3));
+    if (imm & (1 << 20)) imm -= (1 << 21);
+    uintptr_t cave = (((uintptr_t)function & ~(uintptr_t)0xFFF) + (uintptr_t)(imm << 12)) + ((e1 >> 10) & 0xFFF);
+
+    const uint32_t *c = (const uint32_t *)cave;
+    uint32_t c0 = c[0], c1 = c[1];
+    if ((c0 & 0x9F00001F) != 0x90000010) return NO;
+    if ((c1 & 0xFFC003FF) != 0xF9400210) return NO;
+    if (c[2] != 0xB4000050 || c[3] != 0xD61F0200) return NO;
+
+    int64_t simm = (int64_t)((((c0 >> 5) & 0x7FFFF) << 2) | ((c0 >> 29) & 3));
+    if (simm & (1 << 20)) simm -= (1 << 21);
+    uintptr_t slot = (((cave & ~(uintptr_t)0xFFF) + (uintptr_t)(simm << 12))) + (((c1 >> 10) & 0xFFF) << 3);
+
+    *outCave = cave;
+    *outSlot = (void **)slot;
+    return YES;
+}
+
+BOOL zs_hook_patched_method(const void *method, void *replacement, void **original) {
+    if (!method || !replacement) return NO;
+    void *function = __atomic_load_n((void **)method, __ATOMIC_ACQUIRE);
+    if (!function) return NO;
+
+    uintptr_t cave = 0;
+    void **slot = NULL;
+    if (!zs_hook_decode_site(function, &cave, &slot)) return NO;
+    if (!zs_hook_address_writable(slot)) {
+        ZLog(@"[ZSHook] hook slot %p is not writable, site skipped", slot);
+        return NO;
+    }
+
+    void *continuation = (void *)(cave + 16);
+    if (original) *original = continuation;
+    __atomic_store_n(slot, replacement, __ATOMIC_RELEASE);
+    return YES;
+}
+
+BOOL zs_hook_site_named(const char *namespaze, const char *className, const char *assemblyContains,
+                        const char *methodName, int argCount, void *replacement, void **original) {
+    void *klass = [IL2CppBridge classNamed:className inNamespace:namespaze assemblyContains:assemblyContains];
+    if (!klass) return NO;
+    const void *method = [IL2CppBridge methodOnClass:klass name:methodName argCount:argCount];
+    if (!method) return NO;
+    return zs_hook_patched_method(method, replacement, original);
 }
 
 void zs_hook_mark_armed(ZSHookID hook) {

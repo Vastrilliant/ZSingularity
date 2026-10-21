@@ -1,3 +1,4 @@
+#import "Rebind.h"
 #import "Diagnostics.h"
 #import "ZTweakLog.h"
 #import "Version.h"
@@ -239,6 +240,68 @@ static void install_handlers(void) {
     }
 }
 
+static int (*g_realSigaction)(int, const struct sigaction *, struct sigaction *);
+static sig_t (*g_realSignal)(int, sig_t);
+static void (*g_realSetExceptionHandler)(NSUncaughtExceptionHandler *);
+static NSUncaughtExceptionHandler *(*g_realGetExceptionHandler)(void);
+
+static BOOL is_handled_signal(int sig) {
+    for (int i = 0; i < kHandledSignalCount; i++) {
+        if (kHandledSignals[i] == sig) return YES;
+    }
+    return NO;
+}
+
+static int zs_hook_sigaction(int sig, const struct sigaction *act, struct sigaction *oact) {
+    if (!is_handled_signal(sig) || !g_realSigaction) {
+        return g_realSigaction ? g_realSigaction(sig, act, oact) : -1;
+    }
+    struct sigaction previous = g_previousActions[sig];
+    if (oact) *oact = previous;
+    if (act) g_previousActions[sig] = *act;
+    return 0;
+}
+
+static sig_t zs_hook_signal(int sig, sig_t handler) {
+    if (!is_handled_signal(sig) || !g_realSignal) {
+        return g_realSignal ? g_realSignal(sig, handler) : SIG_ERR;
+    }
+    struct sigaction previous = g_previousActions[sig];
+    struct sigaction replacement;
+    memset(&replacement, 0, sizeof(replacement));
+    replacement.sa_handler = handler;
+    g_previousActions[sig] = replacement;
+    return (previous.sa_flags & SA_SIGINFO) ? SIG_DFL : previous.sa_handler;
+}
+
+static void zs_hook_set_exception_handler(NSUncaughtExceptionHandler *handler) {
+    if (handler == &uncaught_exception_handler) {
+        if (g_realSetExceptionHandler) g_realSetExceptionHandler(handler);
+        return;
+    }
+    g_previousExceptionHandler = handler;
+}
+
+static NSUncaughtExceptionHandler *zs_hook_get_exception_handler(void) {
+    return g_previousExceptionHandler;
+}
+
+static void install_rebinds(void) {
+    g_realSigaction = dlsym(RTLD_DEFAULT, "sigaction");
+    g_realSignal = dlsym(RTLD_DEFAULT, "signal");
+    g_realSetExceptionHandler = dlsym(RTLD_DEFAULT, "NSSetUncaughtExceptionHandler");
+    g_realGetExceptionHandler = dlsym(RTLD_DEFAULT, "NSGetUncaughtExceptionHandler");
+    if (!g_realSigaction || !g_realSignal) return;
+
+    ZSRebindEntry entries[] = {
+        { "sigaction", (void *)zs_hook_sigaction },
+        { "signal", (void *)zs_hook_signal },
+        { "NSSetUncaughtExceptionHandler", (void *)zs_hook_set_exception_handler },
+        { "NSGetUncaughtExceptionHandler", (void *)zs_hook_get_exception_handler },
+    };
+    zs_rebind_install(entries, sizeof(entries) / sizeof(entries[0]));
+}
+
 static NSString *zs_documents_path(void) {
     return NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
 }
@@ -350,10 +413,16 @@ static NSString *zs_documents_path(void) {
                               dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
                               100 * NSEC_PER_MSEC,
                               10 * NSEC_PER_MSEC);
+    install_rebinds();
     __block int reinstallTicks = 0;
     dispatch_source_set_event_handler(g_reinstallTimer, ^{
         install_handlers();
         if (++reinstallTicks == 300) {
+            if (zs_rebind_applied_count() > 0) {
+                dispatch_source_cancel(g_reinstallTimer);
+                ZLog(@"[ZCrashLogger] signal and exception handler installs are intercepted, reinstall timer stopped");
+                return;
+            }
             dispatch_source_set_timer(g_reinstallTimer,
                                       dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
                                       5 * NSEC_PER_SEC,

@@ -2,7 +2,7 @@
 #import "ZTweakLog.h"
 #import "Engine.h"
 #import "Mods.h"
-#import "ZSHook.h"
+#import "Hook.h"
 
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>

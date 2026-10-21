@@ -158,6 +158,7 @@ void zs_set_file_index_snapshot(NSDictionary * _Nullable snapshot);
 void zs_reapply_all_settings(void);
 
 void zs_reapply_post_fx(void);
+void zs_postfx_set_active(BOOL active);
 
 #pragma mark - Experimental settings
 
