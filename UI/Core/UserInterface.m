@@ -1,4 +1,5 @@
 #import "UIInternal.h"
+#import "ZSHook.h"
 
 static const NSTimeInterval kSaveDebounceInterval = 0.4;
 
@@ -3379,14 +3380,36 @@ __attribute__((constructor))
 static void graphics_debug_overlay_init(void) {
     [[UserInterface shared] zs_bootstrapSyslogCaptureIfNeeded];
 
-    __block NSTimer *installTimer;
-    installTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+    __block BOOL finished = NO;
+    void (^attempt)(void) = ^{
+        if (finished) return;
         [[UserInterface shared] installIfNeeded];
-        if ([UserInterface shared].installed) {
-            zs_dump_glass_effect_instance_info();
-            [timer invalidate];
-            dispatch_async(dispatch_get_main_queue(), ^{ zs_prompt_info_plist_restart_if_needed(); });
-        }
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:installTimer forMode:NSRunLoopCommonModes];
+        if (![UserInterface shared].installed) return;
+        finished = YES;
+        zs_dump_glass_effect_instance_info();
+        dispatch_async(dispatch_get_main_queue(), ^{ zs_prompt_info_plist_restart_if_needed(); });
+    };
+
+    zs_on_unity_ready(attempt);
+
+    for (NSNotificationName name in @[UIWindowDidBecomeKeyNotification,
+                                      UIWindowDidBecomeVisibleNotification,
+                                      UIApplicationDidBecomeActiveNotification]) {
+        [[NSNotificationCenter defaultCenter] addObserverForName:name
+                                                          object:nil
+                                                           queue:NSOperationQueue.mainQueue
+                                                      usingBlock:^(NSNotification *note) {
+            attempt();
+        }];
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (finished) return;
+        ZLog(@"[UserInterface] launch events did not install the panel opener within 5s, falling back to polling");
+        NSTimer *installTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *timer) {
+            attempt();
+            if (finished) [timer invalidate];
+        }];
+        [[NSRunLoop mainRunLoop] addTimer:installTimer forMode:NSRunLoopCommonModes];
+    });
 }

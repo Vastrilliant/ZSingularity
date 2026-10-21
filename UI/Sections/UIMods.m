@@ -1005,7 +1005,6 @@ static ModAssetLibraryEntry *zs_mods_entry_placeholder_for_path(NSString *path) 
     return placeholder;
 }
 
-static const NSTimeInterval kDoctorPollInterval = 6.0;
 
 - (void)zs_modsLibraryEntryDispatchTapped:(UIButton *)sender {
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -1232,24 +1231,7 @@ static const NSTimeInterval kDoctorPollInterval = 6.0;
     [self zs_rebuildModsLibrary];
 }
 
-#pragma mark Mods (doctor pipeline) - 6s poll loop
-
-- (void)zs_armDoctorPollTimerForEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName {
-    ZLog(@"[Mods Library] arming %.0fs doctor poll timer for %@.", kDoctorPollInterval, entryPath.lastPathComponent);
-    if (!self.doctorPollTimers) self.doctorPollTimers = [NSMutableDictionary dictionary];
-    [self.doctorPollTimers[entryPath] invalidate];
-
-    __weak typeof(self) weakSelf = self;
-    NSTimer *timer = [NSTimer timerWithTimeInterval:kDoctorPollInterval
-                                              repeats:YES
-                                                block:^(NSTimer *timer) {
-        [weakSelf zs_pollDoctorRunForEntryPath:entryPath inFolder:folderName];
-    }];
-    [[NSRunLoop mainRunLoop] addTimer:timer forMode:NSRunLoopCommonModes];
-    self.doctorPollTimers[entryPath] = timer;
-
-    [self zs_pollDoctorRunForEntryPath:entryPath inFolder:folderName];
-}
+#pragma mark Mods (doctor pipeline) - legacy poll cleanup
 
 - (void)zs_stopDoctorPollTimerForEntryPath:(NSString *)entryPath {
     NSTimer *timer = self.doctorPollTimers[entryPath];

@@ -32,7 +32,6 @@
 - (void)zs_doctorHandleUploadProgress:(int64_t)bytesSent totalBytesExpected:(int64_t)totalBytesExpected forEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName;
 - (void)zs_doctorDispatchCompletedForEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName handle:(ZTranscoderHandle *)handle error:(NSError *)error;
 - (void)zs_doctorFailEntryAtPath:(NSString *)entryPath inFolder:(NSString *)folderName error:(NSError *)error;
-- (void)zs_armDoctorPollTimerForEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName;
 - (void)zs_stopDoctorPollTimerForEntryPath:(NSString *)entryPath;
 - (void)zs_pollAllActiveDoctorEntriesImmediately;
 - (void)zs_pollDoctorRunForEntryPath:(NSString *)entryPath inFolder:(NSString *)folderName;

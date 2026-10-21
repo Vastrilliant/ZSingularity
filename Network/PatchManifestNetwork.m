@@ -2,6 +2,7 @@
 #import "ZTweakLog.h"
 #import "Engine.h"
 #import "Mods.h"
+#import "ZSHook.h"
 
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
@@ -85,14 +86,30 @@ static void PMRearmIfLeftLogin(void) {
     });
 }
 
+static void PMStopRearmTimer(void);
+static BOOL gRearmSceneSubscribed;
+
 static void PMStartRearmTimer(void) {
-    if (gRearmTimer) return;
+    if (!gRearmSceneSubscribed) {
+        gRearmSceneSubscribed = YES;
+        zs_on_scene_changed(^(int32_t state, int32_t previous) {
+            (void)state;
+            (void)previous;
+            PMRearmIfLeftLogin();
+            PMStopRearmTimer();
+        });
+    }
+    if (gRearmTimer || zs_hook_is_armed(ZSHookIDSceneLoaded)) return;
     gRearmTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(gRearmTimer,
                               dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                               2 * NSEC_PER_SEC,
                               NSEC_PER_SEC / 2);
     dispatch_source_set_event_handler(gRearmTimer, ^{
+        if (zs_hook_is_armed(ZSHookIDSceneLoaded)) {
+            PMStopRearmTimer();
+            return;
+        }
         PMRearmIfLeftLogin();
     });
     dispatch_resume(gRearmTimer);
@@ -479,31 +496,41 @@ static void PMNetworkConstructor(void) {
     ZLog(@"[PatchManifestNetwork] constructor fired - dylib loaded and this file is running");
 }
 
-static const int kPMPollIntervalUsec = 200 * 1000;
-static const int kPMMaxPollAttempts = 150;
+static const NSTimeInterval kPMInstallFallbackSeconds = 30.0;
+static BOOL gPMInstallAttempted;
 
-static void *PMBackgroundWorker(void *arg) {
-    (void)arg;
-
-    for (int attempt = 0; attempt < kPMMaxPollAttempts; attempt++) {
-        if (NSClassFromString(@"UnityWebRequestDelegate")) {
-            [PatchManifestNetwork install];
-            return NULL;
-        }
-        usleep(kPMPollIntervalUsec);
-    }
-
-    ZLog(@"[PatchManifestNetwork] UnityWebRequestDelegate never appeared after %ds of polling; "
-          @"running one-shot diagnostic scan", (kPMMaxPollAttempts * kPMPollIntervalUsec) / 1000000);
+static void PMTryInstall(void) {
+    if (gPMInstallAttempted) return;
+    if (!NSClassFromString(@"UnityWebRequestDelegate")) return;
+    gPMInstallAttempted = YES;
     [PatchManifestNetwork install];
-    return NULL;
+}
+
+static void PMImageAdded(const struct mach_header *header, intptr_t slide) {
+    (void)header;
+    (void)slide;
+    if (__atomic_load_n(&gPMInstallAttempted, __ATOMIC_ACQUIRE)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PMTryInstall();
+    });
 }
 
 __attribute__((constructor))
 static void PMNetworkConstructor2(void) {
-    ZLog(@"[PatchManifestNetwork] constructor fired - starting poll thread");
-    pthread_t t;
-    pthread_create(&t, NULL, PMBackgroundWorker, NULL);
-    pthread_detach(t);
+    ZLog(@"[PatchManifestNetwork] constructor fired - waiting for UnityWebRequestDelegate via image and launch events");
+    _dyld_register_func_for_add_image(PMImageAdded);
+    zs_on_unity_ready(^{
+        PMTryInstall();
+    });
+    dispatch_async(dispatch_get_main_queue(), ^{
+        PMTryInstall();
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kPMInstallFallbackSeconds * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (gPMInstallAttempted) return;
+        gPMInstallAttempted = YES;
+        ZLog(@"[PatchManifestNetwork] UnityWebRequestDelegate never appeared after %.0fs; "
+              @"running one-shot diagnostic scan", kPMInstallFallbackSeconds);
+        [PatchManifestNetwork install];
+    });
 }
-

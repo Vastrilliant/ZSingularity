@@ -24,6 +24,7 @@
 #import "UnityBundleTools.h"
 #import "Mods.h"
 #import "DonatedHeap.h"
+#import "ZSHook.h"
 
 #pragma mark - ZSScripts
 
@@ -1079,6 +1080,10 @@ static void zs_schedule_particle_apply(void) {
 @property (nonatomic, assign) BOOL reducedPanelFPS;
 @property (nonatomic, strong) NSTimer *battleStatePollTimer;
 @property (nonatomic, strong) NSTimer *fpsPollTimer;
+- (NSInteger)desiredFPS;
+- (void)enforceDesiredFPS;
+- (void)retirePollTimers;
+- (void)handleSceneChanged;
 - (void)applyMenuFPS:(NSInteger)fps;
 - (void)applyCombatFPS:(NSInteger)fps;
 - (NSInteger)panelFPS;
@@ -1100,7 +1105,8 @@ static void zs_schedule_particle_apply(void) {
 }
 
 - (BOOL)start {
-    if (!self.battleStatePollTimer) {
+    BOOL eventDriven = zs_hook_is_armed(ZSHookIDSceneLoaded);
+    if (!eventDriven && !self.battleStatePollTimer) {
         self.battleStatePollTimer = [NSTimer timerWithTimeInterval:0.5
                                                               target:self
                                                             selector:@selector(battleStatePoll)
@@ -1109,7 +1115,7 @@ static void zs_schedule_particle_apply(void) {
         [[NSRunLoop mainRunLoop] addTimer:self.battleStatePollTimer forMode:NSRunLoopCommonModes];
     }
 
-    if (!self.fpsPollTimer) {
+    if (!eventDriven && !self.fpsPollTimer) {
         self.fpsPollTimer = [NSTimer timerWithTimeInterval:1.0
                                                       target:self
                                                     selector:@selector(fpsPollTick)
@@ -1122,18 +1128,31 @@ static void zs_schedule_particle_apply(void) {
 }
 
 - (void)fpsPollTick {
+    if (zs_hook_is_armed(ZSHookIDSceneLoaded)) {
+        [self retirePollTimers];
+        return;
+    }
+    [self enforceDesiredFPS];
+}
+
+- (NSInteger)desiredFPS {
+    if (self.panelOpen) return [self panelFPS];
+    int32_t sceneState = 0;
+    if (ZSGlobalScene_Current(&sceneState)) {
+        return sceneState == kSceneStateBattle ? self.combatFPS : self.menuFPS;
+    }
+    return self.isInBattle ? self.combatFPS : self.menuFPS;
+}
+
+- (void)enforceDesiredFPS {
     CADisplayLink *link = zs_refresh_unity_display_link();
     if (!link) return;
 
-    NSInteger expected;
-    if (self.panelOpen) {
-        expected = [self panelFPS];
-    } else {
+    if (!self.panelOpen) {
         int32_t sceneState = 0;
         if (!ZSGlobalScene_Current(&sceneState)) return;
-        BOOL isBattle = (sceneState == kSceneStateBattle);
-        expected = isBattle ? self.combatFPS : self.menuFPS;
     }
+    NSInteger expected = [self desiredFPS];
 
     NSInteger current = link.preferredFramesPerSecond;
     if (current == expected) return;
@@ -1143,6 +1162,34 @@ static void zs_schedule_particle_apply(void) {
     zs_set_application_target_fps((int32_t)expected);
     zs_reapply_all_settings_except_experimental();
     zs_schedule_font_apply();
+}
+
+- (void)retirePollTimers {
+    if (!self.battleStatePollTimer && !self.fpsPollTimer) return;
+    [self.battleStatePollTimer invalidate];
+    [self.fpsPollTimer invalidate];
+    self.battleStatePollTimer = nil;
+    self.fpsPollTimer = nil;
+    ZLog(@"[ZSScripts] scene events are live - scene-state and frame-rate poll timers retired");
+}
+
+- (void)handleSceneChanged {
+    static uint64_t settleGeneration;
+
+    [self retirePollTimers];
+    [self battleStatePoll];
+
+    NSInteger expected = [self desiredFPS];
+    self.targetFPS = expected;
+    zs_set_application_target_fps((int32_t)expected);
+    zs_reapply_all_settings_except_experimental();
+    zs_schedule_font_apply();
+
+    uint64_t token = ++settleGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (token != settleGeneration) return;
+        zs_reapply_all_settings_except_experimental();
+    });
 }
 
 - (void)battleStatePoll {
@@ -1400,15 +1447,82 @@ static void *background_worker(void *arg) {
     return NULL;
 }
 
+static IMP g_origDisplayLinkSetRange;
+static IMP g_origMetalDisplayLinkSetRange;
+static const void *g_unityFrameworkBase;
+
+static BOOL zs_caller_is_unity_framework(void *address) {
+    Dl_info info;
+    if (!address || !dladdr(address, &info) || !info.dli_fbase) return NO;
+    if (!g_unityFrameworkBase) {
+        void *symbol = dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
+        Dl_info symbolInfo;
+        if (symbol && dladdr(symbol, &symbolInfo)) g_unityFrameworkBase = symbolInfo.dli_fbase;
+    }
+    return g_unityFrameworkBase && info.dli_fbase == g_unityFrameworkBase;
+}
+
+static void zs_forward_frame_rate_range(id link, SEL selector, CAFrameRateRange range, IMP original, void *caller) {
+    if (!original) return;
+    CAFrameRateRange effective = range;
+    if (zs_caller_is_unity_framework(caller)) {
+        zs_hook_mark_armed(ZSHookIDFrameRate);
+        FPS120Controller *controller = [FPS120Controller shared];
+        NSInteger expected = [controller desiredFPS];
+        if (expected > 0) {
+            float fps = (float)expected;
+            effective = CAFrameRateRangeMake(fps, fps, fps);
+            controller.targetFPS = expected;
+        }
+    }
+    ((void (*)(id, SEL, CAFrameRateRange))original)(link, selector, effective);
+}
+
+static void zs_display_link_set_range(id link, SEL selector, CAFrameRateRange range) {
+    zs_forward_frame_rate_range(link, selector, range, g_origDisplayLinkSetRange, __builtin_return_address(0));
+}
+
+static void zs_metal_display_link_set_range(id link, SEL selector, CAFrameRateRange range) {
+    zs_forward_frame_rate_range(link, selector, range, g_origMetalDisplayLinkSetRange, __builtin_return_address(0));
+}
+
+static void zs_install_frame_rate_hooks(void) {
+    SEL selector = @selector(setPreferredFrameRateRange:);
+    Class displayLink = NSClassFromString(@"CADisplayLink");
+    if (displayLink && zs_hook_swizzle_instance(displayLink, selector, (IMP)zs_display_link_set_range, &g_origDisplayLinkSetRange)) {
+        ZLog(@"[ZSScripts] CADisplayLink frame-rate range hook installed");
+    }
+    Class metalDisplayLink = NSClassFromString(@"CAMetalDisplayLink");
+    if (metalDisplayLink && zs_hook_swizzle_instance(metalDisplayLink, selector, (IMP)zs_metal_display_link_set_range, &g_origMetalDisplayLinkSetRange)) {
+        ZLog(@"[ZSScripts] CAMetalDisplayLink frame-rate range hook installed");
+    }
+}
+
 __attribute__((constructor))
 static void fps120_init(void) {
-    ZLog(@"dylib loaded - starting background worker");
+    ZLog(@"dylib loaded - installing frame-rate hook and scene events");
 
     zs_ensure_settings_loaded_from_disk();
+    zs_install_frame_rate_hooks();
 
-    pthread_t t;
-    pthread_create(&t, NULL, background_worker, NULL);
-    pthread_detach(t);
+    zs_on_unity_ready(^{
+        BOOL started = [[FPS120Controller shared] start];
+        ZLog(@"FPS120Controller started on Unity ready (display link %@)", started ? @"found" : @"not yet available");
+    });
+
+    zs_on_scene_changed(^(int32_t state, int32_t previous) {
+        (void)state;
+        (void)previous;
+        [[FPS120Controller shared] handleSceneChanged];
+    });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (zs_hook_is_armed(ZSHookIDSceneLoaded)) return;
+        ZLog(@"no scene event after 10s - starting the legacy polling worker");
+        pthread_t t;
+        pthread_create(&t, NULL, background_worker, NULL);
+        pthread_detach(t);
+    });
 }
 
 #pragma mark - IL2CPP helpers
@@ -1960,6 +2074,8 @@ static void zs_poll_application_memory_usage(void) {
     int32_t tier = 0;
     if (!mt_get_static_int("UnityEngine", "Application", "CoreModule", "get_memoryUsage", &tier)) {
         g_memoryUsageMethodConfirmedMissing = YES;
+        [g_memoryUsagePollTimer invalidate];
+        g_memoryUsagePollTimer = nil;
         return;
     }
     if (tier == g_lastMemoryUsageTier) return;
@@ -4374,29 +4490,11 @@ static void ZSCustomGreeting_Tick(void) {
 
 @end
 
-static void *ZSCustomGreetingPatcher_WaitForUnityThenInstall(void *arg) {
-    (void)arg;
-
-    __block BOOL unityReady = NO;
-    while (!unityReady) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            id appController = [[UIApplication sharedApplication] delegate];
-            if (appController && find_unity_view(appController)) unityReady = YES;
-        });
-        if (!unityReady) usleep(200 * 1000);
-    }
-
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [ZSCustomGreetingPatcher install];
-    });
-    return NULL;
-}
-
 __attribute__((constructor))
 static void ZSCustomGreetingPatcherConstructor(void) {
-    pthread_t t;
-    pthread_create(&t, NULL, ZSCustomGreetingPatcher_WaitForUnityThenInstall, NULL);
-    pthread_detach(t);
+    zs_on_unity_ready(^{
+        [ZSCustomGreetingPatcher install];
+    });
 }
 
 #pragma mark - Custom Combat Tips
@@ -4591,29 +4689,11 @@ static void ZSCombatTip_Tick(void) {
 
 @end
 
-static void *ZSCombatTipPatcher_WaitForUnityThenInstall(void *arg) {
-    (void)arg;
-
-    __block BOOL unityReady = NO;
-    while (!unityReady) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            id appController = [[UIApplication sharedApplication] delegate];
-            if (appController && find_unity_view(appController)) unityReady = YES;
-        });
-        if (!unityReady) usleep(200 * 1000);
-    }
-
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [ZSCombatTipPatcher install];
-    });
-    return NULL;
-}
-
 __attribute__((constructor))
 static void ZSCombatTipPatcherConstructor(void) {
-    pthread_t t;
-    pthread_create(&t, NULL, ZSCombatTipPatcher_WaitForUnityThenInstall, NULL);
-    pthread_detach(t);
+    zs_on_unity_ready(^{
+        [ZSCombatTipPatcher install];
+    });
 }
 
 #pragma mark - UID Redactor
@@ -5102,29 +5182,11 @@ static void ZSUID_RedactColdTargets(void) {
 
 @end
 
-static void *UIDRedactor_WaitForUnityThenInstall(void *arg) {
-    (void)arg;
-
-    __block BOOL unityReady = NO;
-    while (!unityReady) {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            id appController = [[UIApplication sharedApplication] delegate];
-            if (appController && find_unity_view(appController)) unityReady = YES;
-        });
-        if (!unityReady) usleep(200 * 1000);
-    }
-
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        [UIDRedactor install];
-    });
-    return NULL;
-}
-
 __attribute__((constructor))
 static void UIDRedactorConstructor(void) {
-    pthread_t t;
-    pthread_create(&t, NULL, UIDRedactor_WaitForUnityThenInstall, NULL);
-    pthread_detach(t);
+    zs_on_unity_ready(^{
+        [UIDRedactor install];
+    });
 }
 
 

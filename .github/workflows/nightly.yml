@@ -196,6 +196,7 @@ jobs:
             Mods/Dumper/ScriptDump.m \
             Core/DumpTypeRegistry.m \
             Core/Engine.m \
+            Core/ZSHook.m \
             Core/RamBypass/RamDonor.m \
             Core/RamBypass/DonatedHeap.m \
             Diagnostics/Diagnostics.m \
