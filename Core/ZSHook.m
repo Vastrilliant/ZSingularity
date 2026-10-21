@@ -20,6 +20,7 @@ static BOOL g_unityReady;
 static BOOL g_sceneHookInstalled;
 static BOOL g_startHookInstalled;
 static BOOL g_fallbackStarted;
+static BOOL g_unityStarted;
 static int32_t g_lastSceneState = -1;
 static NSMutableArray<dispatch_block_t> *g_readyBlocks;
 static NSMutableArray<ZSSceneChangedBlock> *g_sceneBlocks;
@@ -158,6 +159,10 @@ static void zs_hook_fire_ready(void) {
 }
 
 static void zs_hook_tick(void) {
+    os_unfair_lock_lock(&g_hookLock);
+    BOOL safe = g_unityStarted || g_fallbackStarted;
+    os_unfair_lock_unlock(&g_hookLock);
+    if (!safe) return;
     zs_hook_install_il2cpp();
     if (zs_unity_view()) zs_hook_fire_ready();
 }
@@ -201,6 +206,9 @@ void zs_on_scene_changed(ZSSceneChangedBlock block) {
 
 static void zs_hook_start_unity(id self, SEL selector, id application) {
     if (g_origStartUnity) ((void (*)(id, SEL, id))g_origStartUnity)(self, selector, application);
+    os_unfair_lock_lock(&g_hookLock);
+    g_unityStarted = YES;
+    os_unfair_lock_unlock(&g_hookLock);
     zs_hooks_nudge();
 }
 
