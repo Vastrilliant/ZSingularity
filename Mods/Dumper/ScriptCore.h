@@ -1004,6 +1004,7 @@ typedef struct {
     uint32_t nGmp, nInvoker, nRevp;
     uint64_t unresolved, cgm, crAddr;
     uint32_t nUnresolved, nCgm, candidates;
+    bool cgmOwned;
     bool haveMR, haveCR, crHasAdj, haveCGM;
 } ZR;
 
@@ -1196,6 +1197,41 @@ static bool zr_find_code_registration_modules(const ZImg *img, uint32_t imageCou
         }
     }
     return false;
+}
+
+static bool zr_scan_modules(const ZImg *img, ZR *r) {
+    size_t cap = 1024, n = 0;
+    uint64_t *list = (uint64_t *)malloc(cap * 8);
+    if (!list) return false;
+    const uint64_t *lo, *hi;
+    for (int k = 0; zi_data_section(img, k, &lo, &hi); k++) {
+        if (!lo) continue;
+        for (const uint64_t *q = lo; q + 4 <= hi; q++) {
+            uint64_t cnt = q[1];
+            if (cnt == 0 || cnt > 4000000 || !zi_in_img(img, q[0], 4) || !zi_in_img(img, q[2], cnt * 8)) continue;
+            char nm[100];
+            if (!zc_rd(q[0], nm, 99)) continue;
+            nm[99] = 0;
+            size_t l = strnlen(nm, 99);
+            if (l < 5 || l > 80 || strcasecmp(nm + l - 4, ".dll") != 0) continue;
+            bool pr = true;
+            for (size_t i = 0; i < l; i++) if ((unsigned char)nm[i] < 0x20 || (unsigned char)nm[i] > 0x7e) { pr = false; break; }
+            if (!pr) continue;
+            uint64_t first[4] = {0, 0, 0, 0};
+            if (!zc_rd(q[2], first, cnt < 4 ? cnt * 8 : 32)) continue;
+            bool good = true;
+            for (uint64_t i = 0; i < (cnt < 4 ? cnt : 4); i++) if (first[i] && !zi_is_text_ptr(img, first[i])) good = false;
+            if (!good) continue;
+            if (n == cap) { cap *= 2; list = (uint64_t *)realloc(list, cap * 8); if (!list) return false; }
+            list[n++] = (uint64_t)(uintptr_t)q;
+        }
+    }
+    if (!n) { free(list); return false; }
+    r->cgm = (uint64_t)(uintptr_t)list;
+    r->nCgm = (uint32_t)n;
+    r->haveCGM = true;
+    r->cgmOwned = true;
+    return true;
 }
 
 static void zr_find_modules(const ZImg *img, ZR *r) {
@@ -1766,7 +1802,8 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
         if (gmp && r.nGmp && !zc_rd(r.gmp, gmp, (size_t)r.nGmp * 8)) { free(gmp); gmp = NULL; }
         zh_log(h, "code registration: generic pointers %u, invokers %u, reverse wrappers %u, unresolved calls %u, code gen modules %u", r.nGmp, r.nInvoker, r.nRevp, r.nUnresolved, r.nCgm);
     }
-    if (r.haveCGM && c->a.method_get_token) {
+    if (!r.haveCGM && zr_scan_modules(img, &r)) zh_log(h, "code gen modules located by scanning: %u", r.nCgm);
+    for (int pass = 0; pass < 2 && r.haveCGM && c->a.method_get_token; pass++) {
         uint32_t resolved = 0;
         for (uint32_t m = 0; m < r.nCgm; m++) {
             uint64_t mod = zc_rd64(r.cgm + 8ull * m);
@@ -1784,6 +1821,7 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
                 if (strcasecmp(an, mn) == 0) { ai = k; break; }
             }
             if (ai == UINT32_MAX) continue;
+            if (cnt > 4000000) continue;
             uint64_t *ptrs = (uint64_t *)malloc((size_t)cnt * 8);
             if (!ptrs || !zc_rd(arr, ptrs, (size_t)cnt * 8)) { free(ptrs); continue; }
             for (uint32_t d = 0; d < c->defCount; d++) {
@@ -1795,7 +1833,10 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
             }
             free(ptrs);
         }
-        zh_log(h, "method pointers resolved through code gen modules: %u", resolved);
+        zh_log(h, "method pointers resolved through code gen modules: %u (of %u modules)", resolved, r.nCgm);
+        if (resolved > 0 || r.cgmOwned) break;
+        r.haveCGM = false;
+        if (zr_scan_modules(img, &r)) zh_log(h, "code gen modules located by scanning: %u", r.nCgm);
     }
 
     int32_t *defHead = NULL, *defTail = NULL, *entNext = NULL;
@@ -2049,7 +2090,7 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
     zb_free(&nameB); zb_free(&sigB); zb_free(&tsigB); zb_free(&typeB); zb_free(&methB);
     free(addrs.v); free(usages.v); free(gmap.e);
     free(defHead); free(defTail); free(entNext); free(entSpec);
-    free(specMethodDef); free(specClassInst); free(specMethodInst); free(specRva); free(gmp);
+    free(specMethodDef); free(specClassInst); free(specMethodInst); free(specRva); free(gmp); if (r.cgmOwned) free((void *)(uintptr_t)r.cgm);
     return ok;
 }
 
