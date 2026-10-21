@@ -225,6 +225,11 @@ void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSString **o
 
 #pragma mark Syslog full-screen viewer
 
+static const CGFloat kZSSyslogCommandRowHeight = 24;
+static const CGFloat kZSSyslogCommandVerticalPadding = 4;
+static const CGFloat kZSSyslogCommandHorizontalPadding = 10;
+static const CGFloat kZSSyslogCommandKeyboardMargin = 8;
+
 - (void)zs_buildSyslogFullScreenPanelIfNeeded {
     if (self.syslogFullScreenOverlay) return;
     if (!self.extendedContentClip) return;
@@ -410,30 +415,63 @@ void zs_parseSyslogLineHeader(NSString *line, NSString **outHeader, NSString **o
 
     UIVisualEffectView *commandDropdown = [[UIVisualEffectView alloc] initWithEffect:zs_make_glass_effect(NO)];
     commandDropdown.translatesAutoresizingMaskIntoConstraints = NO;
-    commandDropdown.layer.cornerRadius = 12;
+    commandDropdown.layer.cornerRadius = 10;
     commandDropdown.layer.cornerCurve = kCACornerCurveContinuous;
     commandDropdown.clipsToBounds = YES;
     commandDropdown.hidden = YES;
+    commandDropdown.alpha = 0;
+    commandDropdown.userInteractionEnabled = NO;
     [overlay addSubview:commandDropdown];
     self.syslogCommandDropdown = commandDropdown;
+
+    UIScrollView *commandScroll = [[UIScrollView alloc] init];
+    commandScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    commandScroll.showsVerticalScrollIndicator = NO;
+    commandScroll.showsHorizontalScrollIndicator = NO;
+    commandScroll.alwaysBounceVertical = NO;
+    commandScroll.bounces = NO;
+    commandScroll.panGestureRecognizer.maximumNumberOfTouches = 1;
+    [commandDropdown.contentView addSubview:commandScroll];
+    self.syslogCommandScroll = commandScroll;
 
     UIStackView *commandStack = [[UIStackView alloc] init];
     commandStack.translatesAutoresizingMaskIntoConstraints = NO;
     commandStack.axis = UILayoutConstraintAxisVertical;
-    commandStack.spacing = 2;
-    [commandDropdown.contentView addSubview:commandStack];
+    commandStack.spacing = 0;
+    [commandScroll addSubview:commandStack];
     self.syslogCommandStack = commandStack;
 
-    [NSLayoutConstraint activateConstraints:@[
-        [commandStack.topAnchor constraintEqualToAnchor:commandDropdown.contentView.topAnchor constant:6],
-        [commandStack.bottomAnchor constraintEqualToAnchor:commandDropdown.contentView.bottomAnchor constant:-6],
-        [commandStack.leadingAnchor constraintEqualToAnchor:commandDropdown.contentView.leadingAnchor constant:12],
-        [commandStack.trailingAnchor constraintEqualToAnchor:commandDropdown.contentView.trailingAnchor constant:-12],
+    NSLayoutConstraint *commandHeight = [commandDropdown.heightAnchor constraintEqualToConstant:0];
+    self.syslogCommandHeightConstraint = commandHeight;
 
-        [commandDropdown.topAnchor constraintEqualToAnchor:searchContainer.bottomAnchor constant:6],
+    [NSLayoutConstraint activateConstraints:@[
+        [commandScroll.topAnchor constraintEqualToAnchor:commandDropdown.contentView.topAnchor],
+        [commandScroll.bottomAnchor constraintEqualToAnchor:commandDropdown.contentView.bottomAnchor],
+        [commandScroll.leadingAnchor constraintEqualToAnchor:commandDropdown.contentView.leadingAnchor],
+        [commandScroll.trailingAnchor constraintEqualToAnchor:commandDropdown.contentView.trailingAnchor],
+
+        [commandStack.topAnchor constraintEqualToAnchor:commandScroll.contentLayoutGuide.topAnchor constant:kZSSyslogCommandVerticalPadding],
+        [commandStack.bottomAnchor constraintEqualToAnchor:commandScroll.contentLayoutGuide.bottomAnchor constant:-kZSSyslogCommandVerticalPadding],
+        [commandStack.leadingAnchor constraintEqualToAnchor:commandScroll.contentLayoutGuide.leadingAnchor constant:kZSSyslogCommandHorizontalPadding],
+        [commandStack.trailingAnchor constraintEqualToAnchor:commandScroll.contentLayoutGuide.trailingAnchor constant:-kZSSyslogCommandHorizontalPadding],
+        [commandStack.widthAnchor constraintEqualToAnchor:commandScroll.frameLayoutGuide.widthAnchor constant:-2 * kZSSyslogCommandHorizontalPadding],
+
+        [commandDropdown.topAnchor constraintEqualToAnchor:searchContainer.bottomAnchor constant:4],
+        [commandDropdown.leadingAnchor constraintEqualToAnchor:searchContainer.leadingAnchor],
         [commandDropdown.trailingAnchor constraintEqualToAnchor:searchContainer.trailingAnchor],
-        [commandDropdown.widthAnchor constraintGreaterThanOrEqualToAnchor:searchContainer.widthAnchor],
+        commandHeight,
     ]];
+
+    if (self.syslogKeyboardObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self.syslogKeyboardObserver];
+    }
+    __weak typeof(self) weakKeyboardSelf = self;
+    self.syslogKeyboardObserver = [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardWillChangeFrameNotification
+                                                                                    object:nil
+                                                                                     queue:NSOperationQueue.mainQueue
+                                                                                usingBlock:^(NSNotification *note) {
+        [weakKeyboardSelf zs_syslogKeyboardWillChangeFrame:note];
+    }];
 }
 
 static NSArray<NSDictionary<NSString *, NSString *> *> *zs_syslog_commands(void) {
@@ -474,16 +512,86 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     return [self zs_syslogMatchingCommands].count > 0;
 }
 
+- (CGFloat)zs_syslogCommandDropdownHeightForKeyboardFrame:(CGRect)hostKeyboardFrame {
+    UIView *overlay = self.syslogFullScreenOverlay;
+    UIView *dropdown = self.syslogCommandDropdown;
+    UIStackView *stack = self.syslogCommandStack;
+    if (!overlay || !dropdown || !stack) return 0;
+
+    CGFloat desired = stack.arrangedSubviews.count * kZSSyslogCommandRowHeight + 2 * kZSSyslogCommandVerticalPadding;
+    [overlay layoutIfNeeded];
+
+    CGFloat limit = CGRectGetHeight(overlay.bounds) - overlay.safeAreaInsets.bottom;
+    UIView *host = zs_ui_host_view();
+    if (host && !CGRectIsEmpty(hostKeyboardFrame)) {
+        CGRect keyboardInOverlay = [overlay convertRect:hostKeyboardFrame fromView:host];
+        limit = MIN(limit, CGRectGetMinY(keyboardInOverlay));
+    }
+
+    CGFloat available = floor(limit - CGRectGetMinY(dropdown.frame) - kZSSyslogCommandKeyboardMargin);
+    CGFloat height = MAX(0, MIN(desired, available));
+    self.syslogCommandScroll.scrollEnabled = desired > height + 0.5;
+    return height;
+}
+
+- (void)zs_syslogKeyboardWillChangeFrame:(NSNotification *)note {
+    UIView *dropdown = self.syslogCommandDropdown;
+    UIView *overlay = self.syslogFullScreenOverlay;
+    NSLayoutConstraint *heightConstraint = self.syslogCommandHeightConstraint;
+    NSValue *endValue = note.userInfo[UIKeyboardFrameEndUserInfoKey];
+    UIView *host = zs_ui_host_view();
+    if (!dropdown || !overlay || !heightConstraint || !host || !endValue) return;
+    if (dropdown.hidden || !dropdown.userInteractionEnabled) return;
+
+    CGRect endFrame = [host convertRect:endValue.CGRectValue fromView:nil];
+    CGFloat inset = CGRectGetHeight(host.bounds) - CGRectGetMinY(endFrame);
+    CGRect keyboardFrame = (inset >= 8 && !CGRectIsEmpty(endFrame)) ? endFrame : CGRectZero;
+
+    NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    NSInteger curve = [note.userInfo[UIKeyboardAnimationCurveUserInfoKey] integerValue];
+    CGFloat target = [self zs_syslogCommandDropdownHeightForKeyboardFrame:keyboardFrame];
+
+    [UIView animateWithDuration:duration
+                          delay:0
+                        options:(UIViewAnimationOptions)(curve << 16) | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        heightConstraint.constant = target;
+        [overlay layoutIfNeeded];
+    } completion:nil];
+}
+
+- (void)zs_collapseSyslogCommandDropdown {
+    UIVisualEffectView *dropdown = self.syslogCommandDropdown;
+    NSLayoutConstraint *heightConstraint = self.syslogCommandHeightConstraint;
+    UIView *overlay = self.syslogFullScreenOverlay;
+    if (!dropdown || !heightConstraint || !overlay) return;
+    if (dropdown.hidden && !dropdown.userInteractionEnabled) return;
+
+    dropdown.userInteractionEnabled = NO;
+    [UIView animateWithDuration:0.18
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        heightConstraint.constant = 0;
+        dropdown.alpha = 0;
+        [overlay layoutIfNeeded];
+    } completion:^(BOOL finished) {
+        if (!dropdown.userInteractionEnabled) dropdown.hidden = YES;
+    }];
+}
+
 - (void)zs_updateSyslogCommandDropdown {
     UIVisualEffectView *dropdown = self.syslogCommandDropdown;
     UIStackView *stack = self.syslogCommandStack;
-    if (!dropdown || !stack) return;
+    NSLayoutConstraint *heightConstraint = self.syslogCommandHeightConstraint;
+    UIView *overlay = self.syslogFullScreenOverlay;
+    if (!dropdown || !stack || !heightConstraint || !overlay) return;
 
     NSArray<NSDictionary<NSString *, NSString *> *> *matches = (self.syslogSearchField.isFirstResponder || self.syslogCommandBrowseActive) ? [self zs_syslogMatchingCommands] : @[];
     NSString *trimmed = [[self.syslogSearchField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
     BOOL hasArguments = [trimmed rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound;
     if (matches.count == 0 || hasArguments || (matches.count == 1 && [trimmed isEqualToString:matches.firstObject[@"name"]])) {
-        dropdown.hidden = YES;
+        [self zs_collapseSyslogCommandDropdown];
         return;
     }
 
@@ -495,27 +603,46 @@ static BOOL zs_syslog_command_takes_arguments(NSString *name) {
     for (NSDictionary<NSString *, NSString *> *command in matches) {
         NSMutableAttributedString *title = [[NSMutableAttributedString alloc] initWithString:command[@"name"]
                                                                                    attributes:@{
-            NSFontAttributeName: zs_mono_font(12, UIFontWeightSemibold),
+            NSFontAttributeName: zs_mono_font(11, UIFontWeightSemibold),
             NSForegroundColorAttributeName: zs_accent_green_color(),
         }];
         [title appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  " stringByAppendingString:command[@"desc"]]
                                                                       attributes:@{
-            NSFontAttributeName: zs_mono_font(10, UIFontWeightRegular),
+            NSFontAttributeName: zs_mono_font(9, UIFontWeightRegular),
             NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.55],
         }]];
 
         UILabel *row = [[UILabel alloc] init];
         row.attributedText = title;
+        row.numberOfLines = 1;
+        row.lineBreakMode = NSLineBreakByTruncatingTail;
         row.userInteractionEnabled = YES;
         row.translatesAutoresizingMaskIntoConstraints = NO;
-        [row.heightAnchor constraintEqualToConstant:28].active = YES;
+        [row.heightAnchor constraintEqualToConstant:kZSSyslogCommandRowHeight].active = YES;
         objc_setAssociatedObject(row, "zs_commandName", command[@"name"], OBJC_ASSOCIATION_COPY);
         [row addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(zs_syslogCommandRowTapped:)]];
         [stack addArrangedSubview:row];
     }
 
-    [self.syslogFullScreenOverlay bringSubviewToFront:dropdown];
-    dropdown.hidden = NO;
+    BOOL wasVisible = !dropdown.hidden && dropdown.userInteractionEnabled;
+    [overlay bringSubviewToFront:dropdown];
+    dropdown.userInteractionEnabled = YES;
+    if (!wasVisible) {
+        dropdown.hidden = NO;
+        dropdown.alpha = 0;
+        heightConstraint.constant = 0;
+        [overlay layoutIfNeeded];
+    }
+
+    CGFloat target = [self zs_syslogCommandDropdownHeightForKeyboardFrame:self.zs_lastKeyboardFrame];
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+        heightConstraint.constant = target;
+        dropdown.alpha = 1;
+        [overlay layoutIfNeeded];
+    } completion:nil];
 }
 
 - (void)zs_syslogCommandRowTapped:(UITapGestureRecognizer *)gesture {

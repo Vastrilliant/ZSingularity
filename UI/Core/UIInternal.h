@@ -299,6 +299,9 @@ static const CGFloat kZSSyslogFullScreenLeftInset = kPanelPadding * 1.5;
 @property (nonatomic, strong) UIButton *syslogSlashButton;
 @property (nonatomic, assign) BOOL syslogCommandBrowseActive;
 @property (nonatomic, strong) UIStackView *syslogCommandStack;
+@property (nonatomic, strong) UIScrollView *syslogCommandScroll;
+@property (nonatomic, strong) NSLayoutConstraint *syslogCommandHeightConstraint;
+@property (nonatomic, strong) id syslogKeyboardObserver;
 
 @property (nonatomic, strong) ZSCapsuleSlider *normalFpsSlider;
 @property (nonatomic, strong) UILabel *normalFpsValueLabel;
