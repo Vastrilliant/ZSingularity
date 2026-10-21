@@ -294,12 +294,23 @@ static NSString *zs_documents_path(void) {
 
     g_reinstallTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
                                               dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    // Unity / LiveContainer replace the uncaught-exception handler during
+    // launch, which is why crashes showed up as a bare SIGABRT with no
+    // exception name or reason. Re-claim it every 100ms for the first 30s
+    // (the launch window), then back off to every 5s.
     dispatch_source_set_timer(g_reinstallTimer,
-                              dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                              5 * NSEC_PER_SEC,
-                              1 * NSEC_PER_SEC);
+                              dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                              100 * NSEC_PER_MSEC,
+                              10 * NSEC_PER_MSEC);
+    __block int reinstallTicks = 0;
     dispatch_source_set_event_handler(g_reinstallTimer, ^{
         install_handlers();
+        if (++reinstallTicks == 300) {
+            dispatch_source_set_timer(g_reinstallTimer,
+                                      dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                                      5 * NSEC_PER_SEC,
+                                      1 * NSEC_PER_SEC);
+        }
     });
     dispatch_resume(g_reinstallTimer);
 
