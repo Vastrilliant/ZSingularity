@@ -129,6 +129,7 @@ typedef struct {
     const char *(*method_get_param_name)(const void *, uint32_t);
     uint32_t (*method_get_flags)(const void *, uint32_t *);
     char *(*type_get_name)(const void *);
+    bool (*type_is_byref)(const void *);
     void (*memory_free)(void *);
 } ZA;
 
@@ -156,6 +157,7 @@ static bool za_resolve(ZA *a) {
     ZA_RESOLVE(a, method_get_param_name);
     ZA_RESOLVE(a, method_get_flags);
     ZA_RESOLVE(a, type_get_name);
+    ZA_RESOLVE(a, type_is_byref);
     a->memory_free = (void (*)(void *))dlsym(RTLD_DEFAULT, "il2cpp_free");
     return a->domain_get && a->domain_get_assemblies && a->assembly_get_image && a->image_get_class_count && a->image_get_class &&
            a->class_get_name && a->class_get_namespace && a->class_get_methods && a->class_get_type && a->method_get_name &&
@@ -163,7 +165,7 @@ static bool za_resolve(ZA *a) {
 }
 
 typedef struct { char name[17]; uint64_t vmaddr, vmsize, fileoff, filesize; } ZSeg;
-typedef struct { char seg[17]; char sect[17]; uint64_t addr, size; uint32_t flags; } ZSect;
+typedef struct { char seg[17]; char sect[17]; uint64_t addr, size; uint32_t flags; uint32_t offset; } ZSect;
 
 typedef struct {
     uintptr_t header;
@@ -202,7 +204,7 @@ static bool zi_load(ZImg *img, const void *base) {
                     ZSect *s = &img->sects[img->nsects++];
                     memcpy(s->seg, sec[k].segname, 16); s->seg[16] = 0;
                     memcpy(s->sect, sec[k].sectname, 16); s->sect[16] = 0;
-                    s->addr = sec[k].addr; s->size = sec[k].size; s->flags = sec[k].flags;
+                    s->addr = sec[k].addr; s->size = sec[k].size; s->flags = sec[k].flags; s->offset = sec[k].offset;
                 }
             }
         }
@@ -328,21 +330,161 @@ enum {
     ZT_SZARRAY, ZT_MVAR
 };
 
+#define ZM_TD_SIZE 88
+
+typedef struct {
+    const uint8_t *p;
+    size_t size;
+    uint32_t version;
+    uint32_t strLitOff, strLitSize, strDataOff, strDataSize;
+    uint32_t strOff, strSize;
+    uint32_t fieldsOff, fieldsSize;
+    uint32_t gpOff, gpSize;
+    uint32_t gcOff, gcSize;
+    uint32_t tdOff, tdSize;
+    uint32_t fieldRefOff, fieldRefSize;
+    bool tables;
+} ZMeta;
+
+static bool zm_range_ok(const ZMeta *m, uint32_t off, uint32_t size) {
+    return (uint64_t)off + size <= m->size;
+}
+
+static bool zm_open(ZMeta *m, const char *path, void **mapping, size_t *mapSize) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < 256) { close(fd); return false; }
+    void *mp = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mp == MAP_FAILED) return false;
+    *mapping = mp;
+    *mapSize = (size_t)st.st_size;
+    m->p = (const uint8_t *)mp;
+    m->size = (size_t)st.st_size;
+    uint32_t h[48];
+    memcpy(h, m->p, sizeof h);
+    if (h[0] != 0xFAB11BAF) return false;
+    m->version = h[1];
+    m->strLitOff = h[2]; m->strLitSize = h[3]; m->strDataOff = h[4]; m->strDataSize = h[5];
+    if ((uint64_t)m->strLitOff + m->strLitSize > m->size || (uint64_t)m->strDataOff + m->strDataSize > m->size) return false;
+    m->tables = false;
+    if (m->version >= 27) {
+        m->strOff = h[6]; m->strSize = h[7];
+        m->fieldsOff = h[24]; m->fieldsSize = h[25];
+        m->gpOff = h[26]; m->gpSize = h[27];
+        m->gcOff = h[30]; m->gcSize = h[31];
+        m->tdOff = h[40]; m->tdSize = h[41];
+        m->fieldRefOff = h[46]; m->fieldRefSize = h[47];
+        m->tables = zm_range_ok(m, m->strOff, m->strSize) && zm_range_ok(m, m->fieldsOff, m->fieldsSize) &&
+                    zm_range_ok(m, m->gpOff, m->gpSize) && zm_range_ok(m, m->gcOff, m->gcSize) &&
+                    zm_range_ok(m, m->tdOff, m->tdSize) && zm_range_ok(m, m->fieldRefOff, m->fieldRefSize);
+    }
+    return true;
+}
+
+static uint32_t zm_string_count(const ZMeta *m) { return m->strLitSize / 8; }
+
+static bool zm_string(const ZMeta *m, uint32_t idx, const uint8_t **bytes, uint32_t *len) {
+    if (idx >= zm_string_count(m)) return false;
+    uint32_t e[2];
+    memcpy(e, m->p + m->strLitOff + (size_t)idx * 8, 8);
+    if ((uint64_t)e[1] + e[0] > m->strDataSize) return false;
+    *bytes = m->p + m->strDataOff + e[1];
+    *len = e[0];
+    return true;
+}
+
+static uint32_t zm_rd32(const ZMeta *m, uint64_t off) {
+    uint32_t v = 0;
+    if (off + 4 <= m->size) memcpy(&v, m->p + off, 4);
+    return v;
+}
+
+static uint32_t zm_rd16(const ZMeta *m, uint64_t off) {
+    uint16_t v = 0;
+    if (off + 2 <= m->size) memcpy(&v, m->p + off, 2);
+    return v;
+}
+
+static const char *zm_cstr(const ZMeta *m, uint32_t idx) {
+    if (!m->tables || idx >= m->strSize) return NULL;
+    return (const char *)(m->p + m->strOff + idx);
+}
+
+static uint32_t zm_td_count(const ZMeta *m) { return m->tables ? m->tdSize / ZM_TD_SIZE : 0; }
+
+static uint64_t zm_td_off(const ZMeta *m, uint32_t td) { return (uint64_t)m->tdOff + (uint64_t)td * ZM_TD_SIZE; }
+
+static int32_t zm_td_container(const ZMeta *m, uint32_t td) { return (int32_t)zm_rd32(m, zm_td_off(m, td) + 24); }
+
+static uint32_t zm_td_field_start(const ZMeta *m, uint32_t td) { return zm_rd32(m, zm_td_off(m, td) + 32); }
+
+static uint32_t zm_td_method_start(const ZMeta *m, uint32_t td) { return zm_rd32(m, zm_td_off(m, td) + 36); }
+
+static uint32_t zm_td_method_count(const ZMeta *m, uint32_t td) { return zm_rd16(m, zm_td_off(m, td) + 64); }
+
+static void zm_container_params(const ZMeta *m, int32_t gci, ZB *out) {
+    if (gci < 0 || (uint64_t)(gci + 1) * 16 > m->gcSize) return;
+    uint64_t g = (uint64_t)m->gcOff + (uint64_t)gci * 16;
+    uint32_t argc = zm_rd32(m, g + 4), start = zm_rd32(m, g + 12);
+    if (argc == 0 || argc > 64) return;
+    zb_putc(out, '<');
+    for (uint32_t i = 0; i < argc; i++) {
+        if (i) zb_puts(out, ", ");
+        uint64_t pi = (uint64_t)start + i;
+        const char *n = (pi + 1) * 16 <= m->gpSize ? zm_cstr(m, zm_rd32(m, (uint64_t)m->gpOff + pi * 16 + 4)) : NULL;
+        zb_puts(out, n ? n : "T");
+    }
+    zb_putc(out, '>');
+}
+
+static bool zm_gp_num(const ZMeta *m, uint64_t index, uint32_t *num) {
+    if (!m->tables || (index + 1) * 16 > m->gpSize) return false;
+    *num = zm_rd16(m, (uint64_t)m->gpOff + index * 16 + 12);
+    return true;
+}
+
+static uint32_t zm_field_ref_count(const ZMeta *m) { return m->tables ? m->fieldRefSize / 8 : 0; }
+
+static bool zm_field_ref(const ZMeta *m, uint32_t idx, uint32_t *typeIndex, uint32_t *fieldIndex) {
+    if (idx >= zm_field_ref_count(m)) return false;
+    uint64_t o = (uint64_t)m->fieldRefOff + (uint64_t)idx * 8;
+    *typeIndex = zm_rd32(m, o);
+    *fieldIndex = zm_rd32(m, o + 4);
+    return true;
+}
+
+static const char *zm_field_name(const ZMeta *m, uint64_t fieldDefIndex) {
+    if (!m->tables || (fieldDefIndex + 1) * 12 > m->fieldsSize) return NULL;
+    return zm_cstr(m, zm_rd32(m, (uint64_t)m->fieldsOff + fieldDefIndex * 12));
+}
+
 typedef struct {
     ZA a;
     ZImg *img;
+    const ZMeta *meta;
+    bool tdMap;
+    bool byrefBit29;
     void **cls;
     uint32_t td;
     bool handleMode;
     uint64_t h0, stride;
     char **nameNs;
     char **nameNoNs;
+    char **structBase;
+    char **structName;
     uint32_t *clsMethodStart;
     uint32_t defCount;
     const void **defMethod;
     uint32_t *defClass;
     uint64_t *defRva;
 } ZC;
+
+typedef struct {
+    uint64_t cls, mth;
+    bool has;
+} ZCtx;
 
 static const char *zc_prim_cs(int t) {
     switch (t) {
@@ -369,25 +511,27 @@ static const char *zc_prim_cs(int t) {
     }
 }
 
-static const char *zc_prim_clr(int t) {
+static const char *zc_prim_struct(int t) {
     switch (t) {
-        case ZT_BOOLEAN: return "System.Boolean";
-        case ZT_CHAR: return "System.Char";
-        case ZT_I1: return "System.SByte";
-        case ZT_U1: return "System.Byte";
-        case ZT_I2: return "System.Int16";
-        case ZT_U2: return "System.UInt16";
-        case ZT_I4: return "System.Int32";
-        case ZT_U4: return "System.UInt32";
-        case ZT_I8: return "System.Int64";
-        case ZT_U8: return "System.UInt64";
-        case ZT_R4: return "System.Single";
-        case ZT_R8: return "System.Double";
-        case ZT_STRING: return "System.String";
-        case ZT_OBJECT: return "System.Object";
-        case ZT_I: return "System.IntPtr";
-        case ZT_U: return "System.UIntPtr";
-        default: return NULL;
+        case ZT_VOID: return "System_Void";
+        case ZT_BOOLEAN: return "System_Boolean";
+        case ZT_CHAR: return "System_Char";
+        case ZT_I1: return "System_SByte";
+        case ZT_U1: return "System_Byte";
+        case ZT_I2: return "System_Int16";
+        case ZT_U2: return "System_UInt16";
+        case ZT_I4: return "System_Int32";
+        case ZT_U4: return "System_UInt32";
+        case ZT_I8: return "System_Int64";
+        case ZT_U8: return "System_UInt64";
+        case ZT_R4: return "System_Single";
+        case ZT_R8: return "System_Double";
+        case ZT_STRING: return "System_String";
+        case ZT_OBJECT: return "System_Object";
+        case ZT_I: return "System_IntPtr";
+        case ZT_U: return "System_UIntPtr";
+        case ZT_TYPEDBYREF: return "System_TypedReference";
+        default: return "System_Object";
     }
 }
 
@@ -419,6 +563,11 @@ static void zc_typedef_name(ZC *c, uint32_t idx, bool ns, ZB *out) {
     zb_puts(out, cache[idx]);
 }
 
+static void zc_typedef_name_gp(ZC *c, uint32_t idx, bool ns, ZB *out) {
+    zc_typedef_name(c, idx, ns, out);
+    if (c->tdMap && idx < c->td) zm_container_params(c->meta, zm_td_container(c->meta, idx), out);
+}
+
 static bool zc_td_from_data(ZC *c, uint64_t data, uint32_t *idx) {
     if (!c->handleMode) {
         if (data >= c->td) return false;
@@ -432,6 +581,22 @@ static bool zc_td_from_data(ZC *c, uint64_t data, uint32_t *idx) {
     if (d >= c->td) return false;
     *idx = (uint32_t)d;
     return true;
+}
+
+static bool zc_gc_td(ZC *c, uint64_t gc, uint32_t *idx) {
+    uint64_t v = zc_rd64(gc);
+    if (zc_td_from_data(c, v, idx)) return true;
+    ZType t;
+    if (v && zc_rd(v, &t, sizeof t)) {
+        int ty = (int)((t.bits >> 16) & 0xFF);
+        if ((ty == ZT_CLASS || ty == ZT_VALUETYPE) && zc_td_from_data(c, t.data, idx)) return true;
+    }
+    return false;
+}
+
+static bool zc_type_byref(const ZC *c, uint64_t tptr, const ZType *t) {
+    if (c->a.type_is_byref) return c->a.type_is_byref((const void *)(uintptr_t)tptr);
+    return ((t->bits >> (c->byrefBit29 ? 29 : 30)) & 1) != 0;
 }
 
 static void zc_type_name(ZC *c, uint64_t tptr, bool ns, int depth, ZB *out);
@@ -476,12 +641,12 @@ static void zc_type_name(ZC *c, uint64_t tptr, bool ns, int depth, ZB *out) {
         }
         case ZT_CLASS:
         case ZT_VALUETYPE:
-            if (zc_td_from_data(c, t.data, &idx)) zc_typedef_name(c, idx, ns, out);
+            if (zc_td_from_data(c, t.data, &idx)) zc_typedef_name_gp(c, idx, ns, out);
             else zb_puts(out, "?");
             return;
         case ZT_GENERICINST: {
             uint64_t gc = t.data;
-            if (zc_td_from_data(c, zc_rd64(gc), &idx)) zc_typedef_name(c, idx, ns, out);
+            if (zc_gc_td(c, gc, &idx)) zc_typedef_name(c, idx, ns, out);
             else zb_puts(out, "?");
             zc_inst_args(c, zc_rd64(gc + 8), depth, out);
             return;
@@ -500,22 +665,204 @@ static void zc_type_name(ZC *c, uint64_t tptr, bool ns, int depth, ZB *out) {
 }
 
 static void zc_fix(ZB *b, size_t from) {
-    for (size_t i = from; i < b->n; i++) {
-        char ch = b->p[i];
-        bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
-        if (!ok) b->p[i] = '_';
+    size_t w = from;
+    for (size_t i = from; i < b->n;) {
+        unsigned char ch = (unsigned char)b->p[i];
+        if (ch < 0x80) {
+            bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_';
+            b->p[w++] = ok ? (char)ch : '_';
+            i++;
+            continue;
+        }
+        size_t len = 1;
+        int units = 1;
+        if (ch >= 0xC2 && ch <= 0xDF) len = 2;
+        else if (ch >= 0xE0 && ch <= 0xEF) len = 3;
+        else if (ch >= 0xF0 && ch <= 0xF4) { len = 4; units = 2; }
+        if (i + len > b->n) { len = 1; units = 1; }
+        for (int u = 0; u < units; u++) b->p[w++] = '_';
+        i += len;
     }
+    b->n = w;
+    if (b->p) b->p[w] = 0;
 }
 
-static void zc_ctype(ZC *c, uint64_t tptr, int depth, ZB *out);
+static bool zc_name_in(const char *s, const char *const *list, size_t n) {
+    for (size_t i = 0; i < n; i++) if (strcmp(s, list[i]) == 0) return true;
+    return false;
+}
 
-static void zc_elem_clr_name(ZC *c, uint64_t tptr, int depth, ZB *out) {
+static void zc_fixname(const char *s, ZB *out) {
+    static const char *const kw[] = {"klass", "monitor", "register", "_cs", "auto", "friend", "template", "flat", "default", "_ds", "interrupt",
+        "unsigned", "signed", "asm", "if", "case", "break", "continue", "do", "new", "_", "short", "union", "class", "namespace"};
+    static const char *const sp[] = {"inline", "near", "far"};
+    size_t from = out->n;
+    if (zc_name_in(s, kw, sizeof kw / sizeof kw[0])) {
+        zb_putc(out, '_');
+        zb_puts(out, s);
+    } else if (zc_name_in(s, sp, sizeof sp / sizeof sp[0])) {
+        zb_putc(out, '_');
+        zb_puts(out, s);
+        zb_putc(out, '_');
+    } else {
+        if (s[0] >= '0' && s[0] <= '9') zb_putc(out, '_');
+        zb_puts(out, s);
+    }
+    zc_fix(out, from);
+}
+
+typedef struct {
+    char **keys;
+    size_t cap;
+} ZStrSet;
+
+static bool zss_init(ZStrSet *s, size_t want) {
+    size_t cap = 1024;
+    while (cap < want * 2) cap *= 2;
+    s->keys = (char **)calloc(cap, sizeof(char *));
+    s->cap = cap;
+    return s->keys != NULL;
+}
+
+static bool zss_add(ZStrSet *s, const char *key) {
+    uint64_t h = 1469598103934665603ull;
+    for (const unsigned char *p = (const unsigned char *)key; *p; p++) { h ^= *p; h *= 1099511628211ull; }
+    size_t i = (size_t)h & (s->cap - 1);
+    while (s->keys[i]) {
+        if (strcmp(s->keys[i], key) == 0) return false;
+        i = (i + 1) & (s->cap - 1);
+    }
+    s->keys[i] = strdup(key);
+    return true;
+}
+
+static void zss_free(ZStrSet *s) {
+    if (s->keys) for (size_t i = 0; i < s->cap; i++) free(s->keys[i]);
+    free(s->keys);
+    s->keys = NULL;
+}
+
+static void zc_build_struct_names(ZC *c) {
+    c->structBase = (char **)calloc(c->td + 1, sizeof(char *));
+    c->structName = (char **)calloc(c->td + 1, sizeof(char *));
+    ZStrSet set;
+    if (!c->structBase || !c->structName || !zss_init(&set, (size_t)c->td + 16)) return;
+    ZB t, f, u;
+    zb_init(&t); zb_init(&f); zb_init(&u);
+    for (uint32_t i = 0; i < c->td; i++) {
+        zb_reset(&t); zb_reset(&f);
+        zc_typedef_name_gp(c, i, true, &t);
+        zc_fixname(t.p ? t.p : "", &f);
+        const char *base = f.p ? f.p : "";
+        c->structBase[i] = strdup(base);
+        if (zss_add(&set, base)) {
+            c->structName[i] = strdup(base);
+            continue;
+        }
+        for (int k = 1;; k++) {
+            zb_reset(&u);
+            zb_printf(&u, "%s_%d", base, k);
+            if (zss_add(&set, u.p)) { c->structName[i] = strdup(u.p); break; }
+        }
+    }
+    zb_free(&t); zb_free(&f); zb_free(&u);
+    zss_free(&set);
+}
+
+static void zc_replace_into(const char *s, const char *from, const char *to, ZB *out) {
+    size_t fl = strlen(from);
+    if (!fl) { zb_puts(out, s); return; }
+    const char *p = s, *q;
+    while ((q = strstr(p, from))) {
+        zb_putn(out, p, (size_t)(q - p));
+        zb_puts(out, to);
+        p = q + fl;
+    }
+    zb_puts(out, p);
+}
+
+static bool zc_ctx_arg(ZC *c, uint64_t inst, uint32_t num, uint64_t *tptr) {
+    if (!inst) return false;
+    uint32_t argc = zc_rd32(inst);
+    uint64_t argv = zc_rd64(inst + 8);
+    if (num >= argc || argc > 64 || !argv) return false;
+    *tptr = zc_rd64(argv + 8ull * num);
+    (void)c;
+    return *tptr != 0;
+}
+
+static bool zc_gp_num(ZC *c, const ZType *t, uint32_t *num) {
+    if (t->data >= 0x100000) {
+        uint16_t v;
+        if (!zc_rd(t->data + 12, &v, 2)) return false;
+        *num = v;
+        return true;
+    }
+    return c->meta ? zm_gp_num(c->meta, t->data, num) : false;
+}
+
+static bool zc_resolve_var(ZC *c, const ZType *t, int ty, const ZCtx *ctx, uint64_t *out) {
+    if (!ctx || !ctx->has) return false;
+    uint32_t num;
+    if (!zc_gp_num(c, t, &num)) return false;
+    uint64_t inst = ctx->cls;
+    if (ty == ZT_MVAR && !(ctx->mth == 0 && ctx->cls != 0)) inst = ctx->mth;
+    return zc_ctx_arg(c, inst, num, out);
+}
+
+static bool zc_resolve_var_struct(ZC *c, const ZType *t, int ty, const ZCtx *ctx, uint64_t *out) {
+    if (!ctx || !ctx->has) return false;
+    uint32_t num;
+    if (!zc_gp_num(c, t, &num)) return false;
+    return zc_ctx_arg(c, ty == ZT_MVAR ? ctx->mth : ctx->cls, num, out);
+}
+
+static void zc_struct_name(ZC *c, uint64_t tptr, const ZCtx *ctx, int depth, ZB *out);
+
+static void zc_generic_struct_name(ZC *c, uint64_t tptr, uint64_t gc, ZB *out) {
+    uint32_t idx;
+    if (!zc_gc_td(c, gc, &idx) || !c->structName || !c->structName[idx]) { zb_puts(out, "System_Object"); return; }
+    ZB inst, fixed;
+    zb_init(&inst); zb_init(&fixed);
+    zc_type_name(c, tptr, true, 0, &inst);
+    zc_fixname(inst.p ? inst.p : "", &fixed);
+    zc_replace_into(c->structName[idx], c->structBase[idx], fixed.p ? fixed.p : "", out);
+    zb_free(&inst); zb_free(&fixed);
+}
+
+static void zc_struct_name(ZC *c, uint64_t tptr, const ZCtx *ctx, int depth, ZB *out) {
     ZType t;
-    if (!zc_rd(tptr, &t, sizeof t)) { zb_puts(out, "Il2CppObject"); return; }
+    if (depth > 8 || !tptr || !zc_rd(tptr, &t, sizeof t)) { zb_puts(out, "System_Object"); return; }
     int ty = (int)((t.bits >> 16) & 0xFF);
-    const char *clr = zc_prim_clr(ty);
-    if (clr) { zb_puts(out, clr); return; }
-    zc_type_name(c, tptr, true, depth + 1, out);
+    uint32_t idx;
+    uint64_t arg;
+    switch (ty) {
+        case ZT_PTR:
+            zc_struct_name(c, t.data, NULL, depth + 1, out);
+            return;
+        case ZT_SZARRAY:
+            zc_struct_name(c, t.data, ctx, depth + 1, out);
+            zb_puts(out, "_array");
+            return;
+        case ZT_ARRAY:
+            zc_struct_name(c, zc_rd64(t.data), ctx, depth + 1, out);
+            zb_puts(out, "_array");
+            return;
+        case ZT_GENERICINST:
+            zc_generic_struct_name(c, tptr, t.data, out);
+            return;
+        case ZT_VAR:
+        case ZT_MVAR:
+            if (zc_resolve_var_struct(c, &t, ty, ctx, &arg)) zc_struct_name(c, arg, NULL, depth + 1, out);
+            else zb_puts(out, "System_Object");
+            return;
+        case ZT_CLASS:
+        case ZT_VALUETYPE:
+        default:
+            if (zc_td_from_data(c, t.data, &idx) && c->structName && c->structName[idx]) zb_puts(out, c->structName[idx]);
+            else zb_puts(out, zc_prim_struct(ty));
+            return;
+    }
 }
 
 static bool zc_enum_underlying(ZC *c, uint32_t idx, uint64_t *base) {
@@ -527,11 +874,12 @@ static bool zc_enum_underlying(ZC *c, uint32_t idx, uint64_t *base) {
     return true;
 }
 
-static void zc_ctype(ZC *c, uint64_t tptr, int depth, ZB *out) {
+static void zc_ctype(ZC *c, uint64_t tptr, const ZCtx *ctx, int depth, ZB *out) {
     ZType t;
     if (depth > 8 || !tptr || !zc_rd(tptr, &t, sizeof t)) { zb_puts(out, "Il2CppObject*"); return; }
     int ty = (int)((t.bits >> 16) & 0xFF);
-    bool byref = ((t.bits >> 30) & 1) != 0;
+    uint32_t idx;
+    uint64_t arg;
     switch (ty) {
         case ZT_VOID: zb_puts(out, "void"); break;
         case ZT_BOOLEAN: zb_puts(out, "bool"); break;
@@ -548,64 +896,65 @@ static void zc_ctype(ZC *c, uint64_t tptr, int depth, ZB *out) {
         case ZT_R8: zb_puts(out, "double"); break;
         case ZT_I: zb_puts(out, "intptr_t"); break;
         case ZT_U: zb_puts(out, "uintptr_t"); break;
-        case ZT_OBJECT: zb_puts(out, "Il2CppObject*"); break;
+        case ZT_OBJECT:
+        case ZT_TYPEDBYREF: zb_puts(out, "Il2CppObject*"); break;
         case ZT_STRING: zb_puts(out, "System_String_o*"); break;
         case ZT_PTR:
-            zc_ctype(c, t.data, depth + 1, out);
+            zc_ctype(c, t.data, NULL, depth + 1, out);
             zb_putc(out, '*');
             break;
         case ZT_FNPTR: zb_puts(out, "void*"); break;
         case ZT_SZARRAY:
-        case ZT_ARRAY: {
-            size_t from = out->n;
-            uint64_t elem = ty == ZT_ARRAY ? zc_rd64(t.data) : t.data;
-            zc_elem_clr_name(c, elem, depth, out);
-            zc_fix(out, from);
-            zb_puts(out, "_array*");
+        case ZT_ARRAY:
+            zc_struct_name(c, tptr, ctx, depth + 1, out);
+            zb_putc(out, '*');
             break;
-        }
         case ZT_CLASS:
         case ZT_VALUETYPE:
-        case ZT_GENERICINST: {
-            uint32_t idx;
-            bool valueType = ty == ZT_VALUETYPE;
-            uint64_t handle = ty == ZT_GENERICINST ? zc_rd64(t.data) : t.data;
-            if (!zc_td_from_data(c, handle, &idx)) { zb_puts(out, "Il2CppObject*"); break; }
-            if (ty == ZT_GENERICINST) valueType = c->a.class_is_valuetype && c->a.class_is_valuetype(c->cls[idx]);
-            uint64_t under;
-            if (ty != ZT_GENERICINST && valueType && zc_enum_underlying(c, idx, &under)) {
-                zc_ctype(c, under, depth + 1, out);
-                break;
+            if (!zc_td_from_data(c, t.data, &idx) || !c->structName || !c->structName[idx]) { zb_puts(out, "Il2CppObject*"); break; }
+            if (ty == ZT_VALUETYPE) {
+                if (zc_enum_underlying(c, idx, &arg)) { zc_ctype(c, arg, NULL, depth + 1, out); break; }
+                zb_puts(out, c->structName[idx]);
+                zb_puts(out, "_o");
+            } else {
+                zb_puts(out, c->structName[idx]);
+                zb_puts(out, "_o*");
             }
-            size_t from = out->n;
-            zc_type_name(c, tptr, true, depth + 1, out);
-            zc_fix(out, from);
+            break;
+        case ZT_GENERICINST: {
+            if (!zc_gc_td(c, t.data, &idx)) { zb_puts(out, "Il2CppObject*"); break; }
+            bool valueType = c->a.class_is_valuetype && c->a.class_is_valuetype(c->cls[idx]);
+            if (valueType && zc_enum_underlying(c, idx, &arg)) { zc_ctype(c, arg, NULL, depth + 1, out); break; }
+            zc_generic_struct_name(c, tptr, t.data, out);
             zb_puts(out, valueType ? "_o" : "_o*");
             break;
         }
+        case ZT_VAR:
+        case ZT_MVAR:
+            if (zc_resolve_var(c, &t, ty, ctx, &arg)) zc_ctype(c, arg, NULL, depth + 1, out);
+            else zb_puts(out, "Il2CppObject*");
+            break;
         default:
             zb_puts(out, "Il2CppObject*");
             break;
     }
-    if (byref) zb_putc(out, '*');
 }
 
-static char zc_tchar(ZC *c, uint64_t tptr, int depth) {
+static void zc_ctype_sig(ZC *c, uint64_t tptr, const ZCtx *ctx, ZB *out) {
     ZType t;
-    if (depth > 4 || !tptr || !zc_rd(tptr, &t, sizeof t)) return 'i';
-    if ((t.bits >> 30) & 1) return 'i';
-    int ty = (int)((t.bits >> 16) & 0xFF);
-    switch (ty) {
+    zc_ctype(c, tptr, ctx, 0, out);
+    if (tptr && zc_rd(tptr, &t, sizeof t) && zc_type_byref(c, tptr, &t)) zb_putc(out, '*');
+}
+
+static char zc_tchar(ZC *c, uint64_t tptr) {
+    ZType t;
+    if (!tptr || !zc_rd(tptr, &t, sizeof t)) return 'i';
+    if (zc_type_byref(c, tptr, &t)) return 'i';
+    switch ((int)((t.bits >> 16) & 0xFF)) {
         case ZT_VOID: return 'v';
         case ZT_I8: case ZT_U8: return 'j';
         case ZT_R4: return 'f';
         case ZT_R8: return 'd';
-        case ZT_VALUETYPE: {
-            uint32_t idx;
-            uint64_t under;
-            if (zc_td_from_data(c, t.data, &idx) && zc_enum_underlying(c, idx, &under)) return zc_tchar(c, under, depth + 1);
-            return 'i';
-        }
         default: return 'i';
     }
 }
@@ -617,7 +966,9 @@ typedef struct {
     uint32_t gmtStride;
     uint64_t gmp, adj, invoker, revp;
     uint32_t nGmp, nInvoker, nRevp;
-    bool haveMR, haveCR;
+    uint64_t unresolved, cgm, crAddr;
+    uint32_t nUnresolved, nCgm;
+    bool haveMR, haveCR, crHasAdj, haveCGM;
 } ZR;
 
 static bool zr_ptr_array_ok(const ZImg *img, uint64_t addr, uint64_t count, bool needText) {
@@ -703,10 +1054,47 @@ static bool zr_find_code_registration(const ZImg *img, ZR *r, uint32_t maxMethod
                 r->revp = q[-1];
             }
             r->haveCR = true;
+            r->crAddr = (uint64_t)(uintptr_t)q;
+            r->crHasAdj = variantA;
             return true;
         }
     }
     return false;
+}
+
+static bool zr_valid_modules(const ZImg *img, uint64_t arr, uint64_t count) {
+    if (!arr || count == 0 || count > 4096 || !zi_in_img(img, arr, count * 8)) return false;
+    uint64_t n = count < 8 ? count : 8;
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t m = zc_rd64(arr + 8 * i);
+        if (!m || !zi_in_img(img, m, 24)) return false;
+        uint64_t name = zc_rd64(m);
+        unsigned char nb[3] = {0, 0, 0};
+        if (!name || !zc_rd(name, nb, 3)) return false;
+        for (int k = 0; k < 3; k++) if (nb[k] < 0x20 || nb[k] > 0x7e) return false;
+        uint64_t mc = zc_rd64(m + 8), mp = zc_rd64(m + 16);
+        if (mc > 4000000 || (mc && !zi_in_img(img, mp, mc * 8))) return false;
+    }
+    return true;
+}
+
+static void zr_find_modules(const ZImg *img, ZR *r) {
+    if (!r->haveCR || !r->crAddr) return;
+    uint64_t q = r->crAddr;
+    uint64_t first = r->crHasAdj ? 5 : 4;
+    uint64_t uc = zc_rd64(q + 8 * first), up = zc_rd64(q + 8 * (first + 1));
+    if (uc > 0 && uc < 1000000 && zr_ptr_array_ok(img, up, uc, true)) { r->nUnresolved = (uint32_t)uc; r->unresolved = up; }
+    static const uint64_t extras[2] = {0, 2};
+    for (int e = 0; e < 2; e++) {
+        uint64_t at = first + 2 + extras[e] + 4;
+        uint64_t count = zc_rd64(q + 8 * at), arr = zc_rd64(q + 8 * (at + 1));
+        if (zr_valid_modules(img, arr, count)) {
+            r->nCgm = (uint32_t)count;
+            r->cgm = arr;
+            r->haveCGM = true;
+            return;
+        }
+    }
 }
 
 typedef struct {
@@ -727,33 +1115,6 @@ static void zu_push(ZU64 *a, uint64_t x) {
 static int zu_cmp(const void *x, const void *y) {
     uint64_t a = *(const uint64_t *)x, b = *(const uint64_t *)y;
     return a < b ? -1 : (a > b ? 1 : 0);
-}
-
-typedef struct {
-    uint64_t *slots;
-    size_t cap;
-    size_t count;
-} ZSet;
-
-static bool zset_init(ZSet *s, size_t want) {
-    size_t cap = 1024;
-    while (cap < want * 2) cap *= 2;
-    s->slots = (uint64_t *)calloc(cap, 8);
-    s->cap = cap;
-    s->count = 0;
-    return s->slots != NULL;
-}
-
-static bool zset_add(ZSet *s, uint64_t key) {
-    key += 1;
-    size_t h = (size_t)((key * 0x9E3779B97F4A7C15ull) >> 20) & (s->cap - 1);
-    while (s->slots[h]) {
-        if (s->slots[h] == key) return false;
-        h = (h + 1) & (s->cap - 1);
-    }
-    s->slots[h] = key;
-    s->count++;
-    return true;
 }
 
 typedef struct {
@@ -910,69 +1271,6 @@ static void zo_addresses(ZOut *o, const uint64_t *v, size_t n) {
     }
 }
 
-typedef struct {
-    const uint8_t *p;
-    size_t size;
-    uint32_t version;
-    uint32_t strLitOff, strLitSize, strDataOff, strDataSize;
-} ZMeta;
-
-static bool zm_open(ZMeta *m, const char *path, void **mapping, size_t *mapSize) {
-    int fd = open(path, O_RDONLY);
-    if (fd < 0) return false;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || st.st_size < 256) { close(fd); return false; }
-    void *mp = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-    if (mp == MAP_FAILED) return false;
-    *mapping = mp;
-    *mapSize = (size_t)st.st_size;
-    m->p = (const uint8_t *)mp;
-    m->size = (size_t)st.st_size;
-    uint32_t h[8];
-    memcpy(h, m->p, sizeof h);
-    if (h[0] != 0xFAB11BAF) return false;
-    m->version = h[1];
-    m->strLitOff = h[2]; m->strLitSize = h[3]; m->strDataOff = h[4]; m->strDataSize = h[5];
-    if ((uint64_t)m->strLitOff + m->strLitSize > m->size || (uint64_t)m->strDataOff + m->strDataSize > m->size) return false;
-    return true;
-}
-
-static uint32_t zm_string_count(const ZMeta *m) { return m->strLitSize / 8; }
-
-static bool zm_string(const ZMeta *m, uint32_t idx, const uint8_t **bytes, uint32_t *len) {
-    if (idx >= zm_string_count(m)) return false;
-    uint32_t e[2];
-    memcpy(e, m->p + m->strLitOff + (size_t)idx * 8, 8);
-    if ((uint64_t)e[1] + e[0] > m->strDataSize) return false;
-    *bytes = m->p + m->strDataOff + e[1];
-    *len = e[0];
-    return true;
-}
-
-static bool zm_find_string_slots(const ZImg *img, uint32_t count, uint64_t *baseRt) {
-    if (!img->file || count == 0) return false;
-    const uint64_t tag = 5ull << 29;
-    for (int i = 0; i < img->nsegs; i++) {
-        const ZSeg *s = &img->segs[i];
-        if (strncmp(s->name, "__DATA", 6) != 0 || s->filesize < (uint64_t)count * 8) continue;
-        if (s->fileoff + s->filesize + img->fileBase > img->fileSize) continue;
-        const uint64_t *q = (const uint64_t *)(img->file + img->fileBase + s->fileoff);
-        uint64_t n = s->filesize / 8;
-        for (uint64_t j = 0; j + count <= n; j++) {
-            if (q[j] != tag) continue;
-            if (q[j + count - 1] != tag + count - 1) continue;
-            uint64_t step = count > 64 ? count / 64 : 1;
-            bool ok = true;
-            for (uint64_t k = 0; k < count && ok; k += step) ok = q[j + k] == tag + k;
-            if (!ok) continue;
-            *baseRt = (uint64_t)((int64_t)s->vmaddr + img->slide) + j * 8;
-            return true;
-        }
-    }
-    return false;
-}
-
 #define ZS_PROGRESS(h, stage, f) do { if ((h)->progress) (h)->progress((h)->ud, (stage), (f)); } while (0)
 #define ZS_CANCELLED(h) ((h)->cancelled && (h)->cancelled((h)->ud))
 
@@ -981,38 +1279,34 @@ static void zs_push_addr(ZU64 *addrs, const ZImg *img, uint64_t ptr) {
     zu_push(addrs, ptr - (uint64_t)img->header);
 }
 
-static void zs_method_signature(ZC *c, const void *method, uint32_t defClassIdx, const char *typeFixedName, const char *methodNameFull, bool generic, uint64_t rva, ZB *sig, ZB *tsig) {
+static void zs_method_signature(ZC *c, const void *method, uint32_t defClassIdx, const char *fullName, const ZCtx *ctx, uint64_t thisType, uint64_t rva, bool generic, ZB *sig, ZB *tsig) {
     ZA *a = &c->a;
     uint32_t flags = a->method_get_flags(method, NULL);
     bool isStatic = (flags & 0x10) != 0;
     uint64_t ret = (uint64_t)(uintptr_t)a->method_get_return_type(method);
     uint32_t pc = a->method_get_param_count(method);
-    zc_ctype(c, ret, 0, sig);
+    zc_ctype_sig(c, ret, ctx, sig);
     zb_putc(sig, ' ');
-    size_t from = sig->n;
-    zb_puts(sig, typeFixedName);
-    zb_puts(sig, "__");
-    zb_puts(sig, methodNameFull);
-    zc_fix(sig, from);
+    zc_fixname(fullName, sig);
     zb_puts(sig, " (");
-    zb_putc(tsig, zc_tchar(c, ret, 0));
+    zb_putc(tsig, zc_tchar(c, ret));
     bool first = true;
     if (!isStatic) {
-        uint64_t selfType = (uint64_t)(uintptr_t)a->class_get_type(c->cls[defClassIdx]);
-        zc_ctype(c, selfType, 0, sig);
+        uint64_t selfType = thisType ? thisType : (uint64_t)(uintptr_t)a->class_get_type(c->cls[defClassIdx]);
+        zc_ctype(c, selfType, NULL, 0, sig);
         zb_puts(sig, " __this");
-        zb_putc(tsig, 'i');
+        zb_putc(tsig, zc_tchar(c, selfType));
         first = false;
     }
     for (uint32_t i = 0; i < pc; i++) {
         if (!first) zb_puts(sig, ", ");
         first = false;
         uint64_t pt = (uint64_t)(uintptr_t)a->method_get_param(method, i);
-        zc_ctype(c, pt, 0, sig);
+        zc_ctype_sig(c, pt, ctx, sig);
         const char *pn = a->method_get_param_name ? a->method_get_param_name(method, i) : NULL;
         zb_putc(sig, ' ');
-        zb_puts(sig, pn ? pn : "");
-        zb_putc(tsig, zc_tchar(c, pt, 0));
+        zc_fixname(pn ? pn : "", sig);
+        zb_putc(tsig, zc_tchar(c, pt));
     }
     if (!first) zb_puts(sig, ", ");
     if (generic) zb_printf(sig, "const MethodInfo_%llX* method);", (unsigned long long)rva);
@@ -1093,10 +1387,205 @@ static void zs_setup_handles(ZC *c, const ZHooks *h) {
     zh_log(h, "typedef handles: base 0x%llx stride %llu", (unsigned long long)d0, (unsigned long long)c->stride);
 }
 
+static void zs_validate_meta(ZC *c, const ZMeta *meta, bool metaOk, const ZHooks *h) {
+    c->meta = metaOk ? meta : NULL;
+    c->tdMap = false;
+    c->byrefBit29 = metaOk && meta->version >= 29;
+    if (!metaOk || !meta->tables) return;
+    uint32_t n = zm_td_count(meta);
+    if (n != c->td || (meta->tdSize % ZM_TD_SIZE) != 0) {
+        zh_log(h, "metadata typedef table (%u) does not match runtime classes (%u); generic names unavailable", n, c->td);
+        return;
+    }
+    uint32_t badName = 0, badMethods = 0;
+    for (uint32_t i = 0; i < c->td; i++) {
+        const char *mn = zm_cstr(meta, zm_rd32(meta, zm_td_off(meta, i)));
+        const char *cn = c->cls[i] ? c->a.class_get_name(c->cls[i]) : NULL;
+        if (!mn || !cn || strcmp(mn, cn) != 0) badName++;
+        if (zm_td_method_start(meta, i) != c->clsMethodStart[i] || zm_td_method_count(meta, i) != c->clsMethodStart[i + 1] - c->clsMethodStart[i]) badMethods++;
+    }
+    c->tdMap = badName == 0;
+    zh_log(h, "metadata typedefs %u, name mismatches %u, method range mismatches %u", n, badName, badMethods);
+}
+
+typedef struct {
+    uint32_t kind, idx;
+    uint64_t rva;
+} ZUsage;
+
+typedef struct {
+    ZUsage *v;
+    size_t n, cap;
+} ZUsageVec;
+
+static void zuv_push(ZUsageVec *a, uint32_t kind, uint32_t idx, uint64_t rva) {
+    if (a->n == a->cap) {
+        size_t cap = a->cap ? a->cap * 2 : 8192;
+        ZUsage *p = (ZUsage *)realloc(a->v, cap * sizeof(ZUsage));
+        if (!p) return;
+        a->v = p; a->cap = cap;
+    }
+    a->v[a->n].kind = kind;
+    a->v[a->n].idx = idx;
+    a->v[a->n].rva = rva;
+    a->n++;
+}
+
+static bool zs_section_is_token_data(const ZSect *s) {
+    uint32_t type = s->flags & 0xFF;
+    if (type == S_ZEROFILL || type == S_GB_ZEROFILL || type == S_THREAD_LOCAL_ZEROFILL) return false;
+    return strcmp(s->sect, "__const") == 0 || strcmp(s->sect, "__cstring") == 0 || strcmp(s->sect, "__data") == 0;
+}
+
+static bool zs_section_bytes(const ZImg *img, const ZSect *s, const uint8_t **bytes, uint8_t **owned) {
+    *owned = NULL;
+    uint64_t at = (uint64_t)s->offset + img->fileBase;
+    if (img->file && s->offset && at + s->size <= img->fileSize) {
+        *bytes = img->file + at;
+        return true;
+    }
+    if (s->size == 0 || s->size > ((uint64_t)1 << 31)) return false;
+    uint8_t *buf = (uint8_t *)calloc(1, (size_t)s->size);
+    if (!buf) return false;
+    uint64_t base = (uint64_t)((int64_t)s->addr + img->slide);
+    for (uint64_t off = 0; off < s->size; off += 1 << 20) {
+        size_t n = (size_t)((s->size - off) < (1 << 20) ? (s->size - off) : (1 << 20));
+        zc_rd(base + off, buf + off, n);
+    }
+    *bytes = buf;
+    *owned = buf;
+    return true;
+}
+
+static bool zs_scan_usages(ZC *c, const ZMeta *meta, const ZR *r, const ZHooks *h, ZUsageVec *out) {
+    ZImg *img = c->img;
+    uint32_t strCount = zm_string_count(meta);
+    uint32_t nTypes = r->haveMR ? r->nTypes : 0;
+    uint32_t nSpecs = r->haveMR ? r->nSpecs : 0;
+    uint32_t nFieldRefs = zm_field_ref_count(meta);
+    int sections = 0, done = 0;
+    for (int i = 0; i < img->nsects; i++) if (zs_section_is_token_data(&img->sects[i])) sections++;
+    for (int i = 0; i < img->nsects; i++) {
+        const ZSect *sc = &img->sects[i];
+        if (!zs_section_is_token_data(sc)) continue;
+        const uint8_t *bytes;
+        uint8_t *owned;
+        if (!zs_section_bytes(img, sc, &bytes, &owned)) { done++; continue; }
+        uint64_t slots = sc->size / 8;
+        for (uint64_t k = 0; k < slots; k++) {
+            uint64_t v;
+            memcpy(&v, bytes + k * 8, 8);
+            if (v >= 0xFFFFFFFFull) continue;
+            uint32_t enc = (uint32_t)v;
+            uint32_t kind = enc >> 29;
+            if (kind < 1 || kind > 6 || !(enc & 1)) continue;
+            uint32_t idx = (enc & 0x1FFFFFFEu) >> 1;
+            bool ok = false;
+            switch (kind) {
+                case 1: case 2: ok = idx < nTypes; break;
+                case 3: ok = idx < c->defCount; break;
+                case 4: ok = idx < nFieldRefs; break;
+                case 5: ok = idx < strCount; break;
+                case 6: ok = idx < nSpecs; break;
+            }
+            if (!ok) continue;
+            zuv_push(out, kind, idx, sc->addr + k * 8 - img->textVM);
+            if ((k & 0xFFFFF) == 0 && ZS_CANCELLED(h)) { free(owned); return false; }
+        }
+        free(owned);
+        done++;
+        ZS_PROGRESS(h, "Scanning metadata usages", (double)done / (double)(sections ? sections : 1));
+        if (ZS_CANCELLED(h)) return false;
+    }
+    return true;
+}
+
+static void zs_scan_legacy_usages(ZC *c, const ZMeta *meta, const ZR *r, ZUsageVec *out) {
+    ZImg *img = c->img;
+    if (!r->haveMR || r->nUsages == 0 || !r->usages || !img->file || !zi_in_img(img, r->usages, r->nUsages * 8)) return;
+    uint32_t strCount = zm_string_count(meta);
+    const uint64_t *arr = (const uint64_t *)(uintptr_t)r->usages;
+    for (uint64_t i = 0; i < r->nUsages; i++) {
+        uint64_t slot = arr[i], tok;
+        if (!zi_file_u64(img, slot, &tok) || (tok >> 32)) continue;
+        uint32_t kind = (uint32_t)((tok >> 29) & 7), idx = (uint32_t)(tok & 0x1FFFFFFF);
+        if (kind == 5 && idx < strCount) zuv_push(out, 5, idx, slot - (uint64_t)img->header);
+    }
+}
+
+typedef struct {
+    uint64_t inst, type;
+    uint32_t td;
+    bool used;
+} ZGEnt;
+
+typedef struct {
+    ZGEnt *e;
+    size_t cap;
+} ZGMap;
+
+static size_t zg_slot(const ZGMap *m, uint32_t td, uint64_t inst) {
+    uint64_t h = (inst * 0x9E3779B97F4A7C15ull) ^ ((uint64_t)td * 0xC2B2AE3D27D4EB4Full);
+    return (size_t)(h >> 17) & (m->cap - 1);
+}
+
+static void zg_put(ZGMap *m, uint32_t td, uint64_t inst, uint64_t type) {
+    size_t i = zg_slot(m, td, inst);
+    while (m->e[i].used && !(m->e[i].td == td && m->e[i].inst == inst)) i = (i + 1) & (m->cap - 1);
+    m->e[i].used = true; m->e[i].td = td; m->e[i].inst = inst; m->e[i].type = type;
+}
+
+static uint64_t zg_get(const ZGMap *m, uint32_t td, uint64_t inst) {
+    if (!m->e) return 0;
+    size_t i = zg_slot(m, td, inst);
+    while (m->e[i].used) {
+        if (m->e[i].td == td && m->e[i].inst == inst) return m->e[i].type;
+        i = (i + 1) & (m->cap - 1);
+    }
+    return 0;
+}
+
+static void zg_build(ZC *c, const ZR *r, ZGMap *m) {
+    size_t cap = 1024;
+    while (cap < (size_t)r->nTypes * 2) cap *= 2;
+    m->e = (ZGEnt *)calloc(cap, sizeof(ZGEnt));
+    m->cap = m->e ? cap : 0;
+    if (!m->e) return;
+    for (uint32_t i = 0; i < r->nTypes; i++) {
+        uint64_t tp = zc_rd64(r->types + 8ull * i);
+        ZType t;
+        if (!tp || !zc_rd(tp, &t, sizeof t)) continue;
+        if ((int)((t.bits >> 16) & 0xFF) != ZT_GENERICINST) continue;
+        uint32_t td;
+        if (!zc_gc_td(c, t.data, &td)) continue;
+        zg_put(m, td, zc_rd64(t.data + 8), tp);
+    }
+}
+
+static bool zc_type_td(ZC *c, uint64_t tptr, uint32_t *idx) {
+    ZType t;
+    if (!tptr || !zc_rd(tptr, &t, sizeof t)) return false;
+    if ((int)((t.bits >> 16) & 0xFF) == ZT_GENERICINST) return zc_gc_td(c, t.data, idx);
+    return zc_td_from_data(c, t.data, idx);
+}
+
+static void zs_spec_names(ZC *c, const ZR *r, const uint32_t *specMethodDef, const int32_t *specClassInst, const int32_t *specMethodInst, uint32_t spec, ZB *typeName, ZB *methodName) {
+    uint32_t def = specMethodDef[spec];
+    zc_typedef_name(c, c->defClass[def], true, typeName);
+    if (specClassInst[spec] >= 0 && (uint32_t)specClassInst[spec] < r->nGenericInsts)
+        zc_inst_args(c, zc_rd64(r->genericInsts + 8ull * (uint32_t)specClassInst[spec]), 0, typeName);
+    const char *mn = c->a.method_get_name(c->defMethod[def]);
+    zb_puts(methodName, mn ? mn : "");
+    if (specMethodInst[spec] >= 0 && (uint32_t)specMethodInst[spec] < r->nGenericInsts)
+        zc_inst_args(c, zc_rd64(r->genericInsts + 8ull * (uint32_t)specMethodInst[spec]), 0, methodName);
+}
+
 static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scriptPath, const char *stringPath, const ZFlags *fl, const ZHooks *h, ZStats *st) {
     ZImg *img = c->img;
     memset(st, 0, sizeof *st);
     zs_setup_handles(c, h);
+    zs_validate_meta(c, meta, metaOk, h);
+    zc_build_struct_names(c);
     ZR r;
     memset(&r, 0, sizeof r);
     if (zr_find_metadata_registration(img, c->td, &r)) {
@@ -1112,8 +1601,7 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
     uint64_t *gmp = NULL;
     if (r.haveMR) {
         uint32_t maxMI = 0;
-        uint32_t sampleN = r.nGmt;
-        for (uint32_t i = 0; i < sampleN; i++) {
+        for (uint32_t i = 0; i < r.nGmt; i++) {
             uint32_t e[2];
             if (!zc_rd(r.gmt + (uint64_t)i * r.gmtStride, e, 8)) break;
             if (e[1] > maxMI && e[1] < 20000000) maxMI = e[1];
@@ -1122,15 +1610,16 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
             st->codeRegistrationFound = true;
             gmp = (uint64_t *)malloc((size_t)r.nGmp * 8);
             if (gmp && !zc_rd(r.gmp, gmp, (size_t)r.nGmp * 8)) { free(gmp); gmp = NULL; }
-            zh_log(h, "code registration: generic pointers %u, invokers %u, reverse wrappers %u", r.nGmp, r.nInvoker, r.nRevp);
+            zr_find_modules(img, &r);
+            zh_log(h, "code registration: generic pointers %u, invokers %u, reverse wrappers %u, unresolved calls %u, code gen modules %u", r.nGmp, r.nInvoker, r.nRevp, r.nUnresolved, r.haveCGM ? r.nCgm : 0);
         } else {
             zh_log(h, "code registration not found; generic method pointers unavailable");
         }
-        specMethodDef = (uint32_t *)malloc((size_t)r.nSpecs * 4);
-        specClassInst = (int32_t *)malloc((size_t)r.nSpecs * 4);
-        specMethodInst = (int32_t *)malloc((size_t)r.nSpecs * 4);
-        specRva = (uint64_t *)calloc(r.nSpecs, 8);
-        uint32_t *raw = (uint32_t *)malloc((size_t)r.nSpecs * 12);
+        specMethodDef = (uint32_t *)malloc((size_t)r.nSpecs * 4 + 4);
+        specClassInst = (int32_t *)malloc((size_t)r.nSpecs * 4 + 4);
+        specMethodInst = (int32_t *)malloc((size_t)r.nSpecs * 4 + 4);
+        specRva = (uint64_t *)calloc((size_t)r.nSpecs + 1, 8);
+        uint32_t *raw = (uint32_t *)malloc((size_t)r.nSpecs * 12 + 12);
         if (raw && specMethodDef && specClassInst && specMethodInst && specRva && zc_rd(r.specs, raw, (size_t)r.nSpecs * 12)) {
             for (uint32_t i = 0; i < r.nSpecs; i++) {
                 specMethodDef[i] = raw[i * 3];
@@ -1144,226 +1633,216 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
         free(raw);
     }
 
+    int32_t *defHead = NULL, *defTail = NULL, *entNext = NULL;
+    uint32_t *entSpec = NULL;
+    uint32_t entCount = 0;
     ZU64 addrs = {0};
-    ZSet seen;
-    zset_init(&seen, 1 << 20);
-    ZOut out = {0};
-    bool wantScript = fl->scriptMethods || fl->metadataUsages || fl->addresses || fl->genericMethods;
-    bool ok = true;
-    if (wantScript) {
-        if (!zo_open(&out, scriptPath, !fl->minify)) { zh_log(h, "could not create script.json"); ok = false; }
-    }
-    ZB nameB, sigB, tsigB, tmp, fixedB;
-    zb_init(&nameB); zb_init(&sigB); zb_init(&tsigB); zb_init(&tmp); zb_init(&fixedB);
-    bool firstSection = true;
-
-    if (ok && wantScript) {
-        zo_section_open(&out, firstSection, "ScriptMethod");
-        firstSection = false;
-        bool first = true;
-        if (fl->scriptMethods) {
-            for (uint32_t d = 0; d < c->defCount && ok; d++) {
-                uint64_t rva = c->defRva[d];
-                if (!rva) continue;
-                zs_push_addr(&addrs, img, rva + (uint64_t)img->header);
-                if (!zset_add(&seen, rva)) continue;
-                zb_reset(&nameB); zb_reset(&sigB); zb_reset(&tsigB); zb_reset(&fixedB);
-                uint32_t ci = c->defClass[d];
-                zc_typedef_name(c, ci, true, &nameB);
-                size_t tl = nameB.n;
-                zb_puts(&fixedB, nameB.p);
-                const char *mn = c->a.method_get_name(c->defMethod[d]);
-                zb_puts(&nameB, "$$");
-                zb_puts(&nameB, mn ? mn : "");
-                zc_fix(&fixedB, 0);
-                (void)tl;
-                zs_method_signature(c, c->defMethod[d], ci, fixedB.p, mn ? mn : "", false, rva, &sigB, &tsigB);
-                zo_method_entry(&out, first, rva, nameB.p, sigB.p, tsigB.p);
-                first = false;
-                st->methods++;
-                if ((d & 0x3FFF) == 0) ZS_PROGRESS(h, "Writing methods", (double)d / (double)(c->defCount ? c->defCount : 1));
-                if (ZS_CANCELLED(h)) { ok = false; break; }
-            }
-        } else {
-            for (uint32_t d = 0; d < c->defCount; d++) if (c->defRva[d]) zs_push_addr(&addrs, img, c->defRva[d] + (uint64_t)img->header);
-        }
-        if (ok && r.haveMR && gmp) {
-            for (uint32_t k = 0; k < r.nGmt && ok; k++) {
+    if (r.haveMR && gmp && st->codeRegistrationFound) {
+        defHead = (int32_t *)malloc((size_t)(c->defCount + 1) * 4);
+        defTail = (int32_t *)malloc((size_t)(c->defCount + 1) * 4);
+        entNext = (int32_t *)malloc((size_t)r.nGmt * 4 + 4);
+        entSpec = (uint32_t *)malloc((size_t)r.nGmt * 4 + 4);
+        if (defHead && defTail && entNext && entSpec) {
+            for (uint32_t i = 0; i <= c->defCount; i++) { defHead[i] = -1; defTail[i] = -1; }
+            for (uint32_t k = 0; k < r.nGmt; k++) {
                 uint32_t e[2];
                 if (!zc_rd(r.gmt + (uint64_t)k * r.gmtStride, e, 8)) break;
                 uint32_t spec = e[0], mi = e[1];
                 if (spec >= r.nSpecs || mi >= r.nGmp) continue;
                 uint64_t ptr = gmp[mi];
                 if (!ptr || !zi_is_text_ptr(img, ptr)) continue;
-                uint64_t rva = ptr - (uint64_t)img->header;
-                specRva[spec] = rva;
-                zs_push_addr(&addrs, img, ptr);
-                if (!fl->genericMethods) continue;
-                if (!zset_add(&seen, rva)) continue;
+                specRva[spec] = ptr - (uint64_t)img->header;
                 uint32_t def = specMethodDef[spec];
                 if (def >= c->defCount) continue;
-                uint32_t ci = c->defClass[def];
-                zb_reset(&nameB); zb_reset(&sigB); zb_reset(&tsigB); zb_reset(&fixedB);
-                zc_typedef_name(c, ci, true, &nameB);
-                if (specClassInst[spec] >= 0 && (uint32_t)specClassInst[spec] < r.nGenericInsts)
-                    zc_inst_args(c, zc_rd64(r.genericInsts + 8ull * (uint32_t)specClassInst[spec]), 0, &nameB);
-                zb_puts(&fixedB, nameB.p);
-                zc_fix(&fixedB, 0);
+                entSpec[entCount] = spec;
+                entNext[entCount] = -1;
+                if (defTail[def] >= 0) entNext[defTail[def]] = (int32_t)entCount; else defHead[def] = (int32_t)entCount;
+                defTail[def] = (int32_t)entCount;
+                entCount++;
+            }
+        }
+    }
+
+    ZGMap gmap = {0};
+    ZOut out = {0};
+    bool wantScript = fl->scriptMethods || fl->metadataUsages || fl->addresses || fl->genericMethods;
+    bool ok = true;
+    if (wantScript) {
+        if (!zo_open(&out, scriptPath, !fl->minify)) { zh_log(h, "could not create script.json"); ok = false; }
+    }
+    ZB nameB, sigB, tsigB, typeB, methB;
+    zb_init(&nameB); zb_init(&sigB); zb_init(&tsigB); zb_init(&typeB); zb_init(&methB);
+    bool firstSection = true;
+
+    if (ok && wantScript) {
+        if (fl->genericMethods && entCount) zg_build(c, &r, &gmap);
+        zo_section_open(&out, firstSection, "ScriptMethod");
+        firstSection = false;
+        bool first = true;
+        for (uint32_t d = 0; d < c->defCount && ok; d++) {
+            uint64_t rva = c->defRva[d];
+            if (rva && fl->scriptMethods) {
+                zb_reset(&nameB); zb_reset(&sigB); zb_reset(&tsigB);
+                uint32_t ci = c->defClass[d];
+                zc_typedef_name_gp(c, ci, true, &nameB);
+                const char *mn = c->a.method_get_name(c->defMethod[d]);
                 zb_puts(&nameB, "$$");
-                size_t mstart = nameB.n;
-                const char *mn = c->a.method_get_name(c->defMethod[def]);
                 zb_puts(&nameB, mn ? mn : "");
-                if (specMethodInst[spec] >= 0 && (uint32_t)specMethodInst[spec] < r.nGenericInsts)
-                    zc_inst_args(c, zc_rd64(r.genericInsts + 8ull * (uint32_t)specMethodInst[spec]), 0, &nameB);
-                zs_method_signature(c, c->defMethod[def], ci, fixedB.p, nameB.p + mstart, true, rva, &sigB, &tsigB);
+                zs_method_signature(c, c->defMethod[d], ci, nameB.p, NULL, 0, rva, false, &sigB, &tsigB);
                 zo_method_entry(&out, first, rva, nameB.p, sigB.p, tsigB.p);
                 first = false;
-                st->genericMethods++;
-                if ((k & 0x3FFF) == 0) ZS_PROGRESS(h, "Writing generic methods", (double)k / (double)r.nGmt);
-                if (ZS_CANCELLED(h)) { ok = false; break; }
+                st->methods++;
             }
+            if (fl->genericMethods && defHead) {
+                for (int32_t e = defHead[d]; e >= 0; e = entNext[e]) {
+                    uint32_t spec = entSpec[e];
+                    uint64_t grva = specRva[spec];
+                    uint32_t ci = c->defClass[d];
+                    zb_reset(&nameB); zb_reset(&sigB); zb_reset(&tsigB); zb_reset(&typeB); zb_reset(&methB);
+                    zs_spec_names(c, &r, specMethodDef, specClassInst, specMethodInst, spec, &typeB, &methB);
+                    zb_puts(&nameB, typeB.p ? typeB.p : "");
+                    zb_puts(&nameB, "$$");
+                    zb_puts(&nameB, methB.p ? methB.p : "");
+                    ZCtx ctx = {0, 0, true};
+                    if (specClassInst[spec] >= 0 && (uint32_t)specClassInst[spec] < r.nGenericInsts) ctx.cls = zc_rd64(r.genericInsts + 8ull * (uint32_t)specClassInst[spec]);
+                    if (specMethodInst[spec] >= 0 && (uint32_t)specMethodInst[spec] < r.nGenericInsts) ctx.mth = zc_rd64(r.genericInsts + 8ull * (uint32_t)specMethodInst[spec]);
+                    uint64_t thisType = specClassInst[spec] >= 0 ? zg_get(&gmap, ci, ctx.cls) : 0;
+                    zs_method_signature(c, c->defMethod[d], ci, nameB.p, &ctx, thisType, grva, true, &sigB, &tsigB);
+                    zo_method_entry(&out, first, grva, nameB.p, sigB.p, tsigB.p);
+                    first = false;
+                    st->genericMethods++;
+                }
+            }
+            if ((d & 0x3FFF) == 0) ZS_PROGRESS(h, "Writing methods", (double)d / (double)(c->defCount ? c->defCount : 1));
+            if (ZS_CANCELLED(h)) { ok = false; break; }
         }
         zo_section_close(&out, first);
     }
 
-    ZU64 strIdx = {0}, strRva = {0};
-    uint64_t strBase = 0;
-    bool haveStrBase = false;
-    uint32_t strCount = metaOk ? zm_string_count(meta) : 0;
-    if (ok && metaOk && (fl->stringLiterals || fl->scriptMethods)) {
-        if (r.haveMR && r.nUsages > 0 && r.usages && img->file) {
-            uint64_t n = r.nUsages;
-            if (zi_in_img(img, r.usages, n * 8)) {
-                const uint64_t *arr = (const uint64_t *)(uintptr_t)r.usages;
-                for (uint64_t i = 0; i < n; i++) {
-                    uint64_t slot = arr[i], tok;
-                    if (!zi_file_u64(img, slot, &tok)) continue;
-                    if (((tok >> 29) & 7) != 5 || (tok >> 32)) continue;
-                    zu_push(&strIdx, tok & 0x1FFFFFFF);
-                    zu_push(&strRva, slot - (uint64_t)img->header);
-                }
-                st->usagesFound = strIdx.n > 0;
-            }
+    ZUsageVec usages = {0};
+    bool needUsages = ok && metaOk && (fl->stringLiterals || fl->scriptMethods || fl->metadataUsages);
+    if (needUsages) {
+        if (meta->version >= 27) {
+            if (!zs_scan_usages(c, meta, &r, h, &usages)) ok = false;
+        } else {
+            zs_scan_legacy_usages(c, meta, &r, &usages);
         }
-        if (!st->usagesFound && zm_find_string_slots(img, strCount, &strBase)) {
-            haveStrBase = true;
-            zh_log(h, "string literal slots located by token scan");
-        }
+        for (size_t i = 0; i < usages.n; i++) if (usages.v[i].kind == 5) st->strings++;
+        st->usagesFound = usages.n > 0;
+        zh_log(h, "metadata usage slots: %zu (strings %llu)", usages.n, (unsigned long long)st->strings);
     }
 
-    ZU64 order = {0};
     if (ok && wantScript && fl->scriptMethods && metaOk) {
         zo_section_open(&out, false, "ScriptString");
         bool first = true;
-        if (st->usagesFound) {
-            for (size_t i = 0; i < strIdx.n; i++) zu_push(&order, (strIdx.v[i] << 32) | i);
-            qsort(order.v, order.n, 8, zu_cmp);
-            uint64_t prev = ~0ull;
-            for (size_t i = 0; i < order.n; i++) {
-                uint32_t idx = (uint32_t)(order.v[i] >> 32);
-                if (idx == prev) continue;
-                prev = idx;
-                size_t at = (size_t)(order.v[i] & 0xFFFFFFFFu);
-                const uint8_t *b; uint32_t len;
-                if (!zm_string(meta, idx, &b, &len)) continue;
-                zo_string_entry(&out, first, strRva.v[at], b, len);
-                first = false;
-                st->strings++;
-            }
-        } else if (haveStrBase) {
-            for (uint32_t idx = 0; idx < strCount; idx++) {
-                const uint8_t *b; uint32_t len;
-                if (!zm_string(meta, idx, &b, &len)) continue;
-                zo_string_entry(&out, first, strBase - (uint64_t)img->header + 8ull * idx, b, len);
-                first = false;
-                st->strings++;
-            }
+        for (size_t i = 0; i < usages.n; i++) {
+            if (usages.v[i].kind != 5) continue;
+            const uint8_t *b; uint32_t len;
+            if (!zm_string(meta, usages.v[i].idx, &b, &len)) continue;
+            zo_string_entry(&out, first, usages.v[i].rva, b, len);
+            first = false;
         }
         zo_section_close(&out, first);
     }
 
     if (ok && wantScript && fl->metadataUsages) {
-        bool haveUsage = r.haveMR && r.nUsages > 0 && r.usages && img->file && zi_in_img(img, r.usages, r.nUsages * 8);
         ZOut *o = &out;
-        const uint64_t *arr = haveUsage ? (const uint64_t *)(uintptr_t)r.usages : NULL;
         zo_section_open(o, false, "ScriptMetadata");
         bool first = true;
-        if (arr) {
-            for (uint64_t i = 0; i < r.nUsages && ok; i++) {
-                uint64_t tok;
-                if (!zi_file_u64(img, arr[i], &tok) || (tok >> 32)) continue;
-                uint32_t kind = (uint32_t)((tok >> 29) & 7), idx = (uint32_t)(tok & 0x1FFFFFFF);
-                if ((kind != 1 && kind != 2) || idx >= r.nTypes) continue;
-                uint64_t tp = zc_rd64(r.types + 8ull * idx);
-                zb_reset(&nameB); zb_reset(&fixedB);
+        for (size_t i = 0; i < usages.n && ok; i++) {
+            const ZUsage *u = &usages.v[i];
+            if (u->kind != 1 && u->kind != 2 && u->kind != 4) continue;
+            zb_reset(&nameB); zb_reset(&sigB);
+            if (u->kind == 4) {
+                uint32_t ti, fi, td;
+                if (!zm_field_ref(meta, u->idx, &ti, &fi) || !r.haveMR || ti >= r.nTypes || !c->tdMap) continue;
+                uint64_t tp = zc_rd64(r.types + 8ull * ti);
+                if (!zc_type_td(c, tp, &td)) continue;
+                const char *fnm = zm_field_name(meta, (uint64_t)zm_td_field_start(meta, td) + fi);
+                zb_puts(&nameB, "Field$");
                 zc_type_name(c, tp, true, 0, &nameB);
-                uint64_t rva = arr[i] - (uint64_t)img->header;
-                if (kind == 1) {
-                    zb_puts(&fixedB, nameB.p);
-                    zc_fix(&fixedB, 0);
-                    zb_puts(&fixedB, "_c*");
+                zb_putc(&nameB, '.');
+                zb_puts(&nameB, fnm ? fnm : "");
+                zo_metadata_entry(o, first, u->rva, nameB.p, NULL);
+            } else {
+                uint64_t tp = zc_rd64(r.types + 8ull * u->idx);
+                zc_type_name(c, tp, true, 0, &nameB);
+                if (u->kind == 1) {
                     zb_puts(&nameB, "_TypeInfo");
-                    zo_metadata_entry(o, first, rva, nameB.p, fixedB.p);
+                    zc_struct_name(c, tp, NULL, 0, &sigB);
+                    if (sigB.n >= 6 && strcmp(sigB.p + sigB.n - 6, "_array") == 0) {
+                        zb_reset(&sigB);
+                        zb_puts(&sigB, "Il2CppClass*");
+                    } else {
+                        zb_reset(&tsigB);
+                        zc_fixname(sigB.p ? sigB.p : "", &tsigB);
+                        zb_puts(&tsigB, "_c*");
+                        zb_reset(&sigB);
+                        zb_puts(&sigB, tsigB.p);
+                    }
+                    zo_metadata_entry(o, first, u->rva, nameB.p, sigB.p);
                 } else {
                     zb_puts(&nameB, "_var");
-                    zo_metadata_entry(o, first, rva, nameB.p, "Il2CppType*");
+                    zo_metadata_entry(o, first, u->rva, nameB.p, "Il2CppType*");
                 }
-                first = false;
-                st->metadata++;
-                if ((i & 0x3FFF) == 0) ZS_PROGRESS(h, "Writing metadata usages", (double)i / (double)r.nUsages);
-                if (ZS_CANCELLED(h)) { ok = false; break; }
             }
+            first = false;
+            st->metadata++;
+            if ((i & 0x3FFF) == 0) ZS_PROGRESS(h, "Writing metadata usages", (double)i / (double)(usages.n ? usages.n : 1));
+            if (ZS_CANCELLED(h)) { ok = false; break; }
         }
         zo_section_close(o, first);
 
         zo_section_open(o, false, "ScriptMetadataMethod");
         first = true;
-        if (arr) {
-            for (uint64_t i = 0; i < r.nUsages && ok; i++) {
-                uint64_t tok;
-                if (!zi_file_u64(img, arr[i], &tok) || (tok >> 32)) continue;
-                uint32_t kind = (uint32_t)((tok >> 29) & 7), idx = (uint32_t)(tok & 0x1FFFFFFF);
-                uint64_t methodAddr = 0;
-                zb_reset(&nameB);
-                zb_puts(&nameB, "Method$");
-                if (kind == 3) {
-                    if (idx >= c->defCount) continue;
-                    zc_typedef_name(c, c->defClass[idx], true, &nameB);
-                    const char *mn = c->a.method_get_name(c->defMethod[idx]);
-                    zb_putc(&nameB, '.');
-                    zb_puts(&nameB, mn ? mn : "");
-                    methodAddr = c->defRva[idx];
-                } else if (kind == 6) {
-                    if (!r.haveMR || idx >= r.nSpecs || specMethodDef[idx] >= c->defCount) continue;
-                    uint32_t def = specMethodDef[idx];
-                    zc_typedef_name(c, c->defClass[def], true, &nameB);
-                    if (specClassInst[idx] >= 0 && (uint32_t)specClassInst[idx] < r.nGenericInsts)
-                        zc_inst_args(c, zc_rd64(r.genericInsts + 8ull * (uint32_t)specClassInst[idx]), 0, &nameB);
-                    const char *mn = c->a.method_get_name(c->defMethod[def]);
-                    zb_putc(&nameB, '.');
-                    zb_puts(&nameB, mn ? mn : "");
-                    if (specMethodInst[idx] >= 0 && (uint32_t)specMethodInst[idx] < r.nGenericInsts)
-                        zc_inst_args(c, zc_rd64(r.genericInsts + 8ull * (uint32_t)specMethodInst[idx]), 0, &nameB);
-                    methodAddr = specRva ? specRva[idx] : 0;
-                } else {
-                    continue;
-                }
-                zb_puts(&nameB, "()");
-                zo_metadata_method_entry(o, first, arr[i] - (uint64_t)img->header, nameB.p, methodAddr);
-                first = false;
-                st->metadataMethods++;
-                if (ZS_CANCELLED(h)) { ok = false; break; }
+        for (size_t i = 0; i < usages.n && ok; i++) {
+            const ZUsage *u = &usages.v[i];
+            if (u->kind != 3 && u->kind != 6) continue;
+            uint64_t methodAddr = 0;
+            zb_reset(&nameB);
+            zb_puts(&nameB, "Method$");
+            if (u->kind == 3) {
+                zc_typedef_name_gp(c, c->defClass[u->idx], true, &nameB);
+                const char *mn = c->a.method_get_name(c->defMethod[u->idx]);
+                zb_putc(&nameB, '.');
+                zb_puts(&nameB, mn ? mn : "");
+                methodAddr = c->defRva[u->idx];
+            } else {
+                if (!r.haveMR || specMethodDef[u->idx] >= c->defCount) continue;
+                zb_reset(&typeB); zb_reset(&methB);
+                zs_spec_names(c, &r, specMethodDef, specClassInst, specMethodInst, u->idx, &typeB, &methB);
+                zb_puts(&nameB, typeB.p ? typeB.p : "");
+                zb_putc(&nameB, '.');
+                zb_puts(&nameB, methB.p ? methB.p : "");
+                methodAddr = specRva[u->idx];
             }
+            zb_puts(&nameB, "()");
+            zo_metadata_method_entry(o, first, u->rva, nameB.p, methodAddr);
+            first = false;
+            st->metadataMethods++;
+            if (ZS_CANCELLED(h)) { ok = false; break; }
         }
         zo_section_close(o, first);
     }
 
     if (ok && wantScript && fl->addresses) {
+        if (r.haveCGM) {
+            for (uint32_t m = 0; m < r.nCgm; m++) {
+                uint64_t mod = zc_rd64(r.cgm + 8ull * m);
+                uint64_t cnt = zc_rd64(mod + 8), arr = zc_rd64(mod + 16);
+                if (!mod || !arr || cnt == 0 || cnt > 4000000 || !zi_in_img(img, arr, cnt * 8)) continue;
+                uint64_t *buf = (uint64_t *)malloc((size_t)cnt * 8);
+                if (buf && zc_rd(arr, buf, (size_t)cnt * 8)) for (uint64_t i = 0; i < cnt; i++) zs_push_addr(&addrs, img, buf[i]);
+                free(buf);
+            }
+        } else {
+            for (uint32_t d = 0; d < c->defCount; d++) if (c->defRva[d]) zs_push_addr(&addrs, img, c->defRva[d] + (uint64_t)img->header);
+        }
         if (r.haveCR) {
             if (gmp) for (uint32_t i = 0; i < r.nGmp; i++) zs_push_addr(&addrs, img, gmp[i]);
             for (uint32_t i = 0; i < r.nInvoker && r.invoker; i++) zs_push_addr(&addrs, img, zc_rd64(r.invoker + 8ull * i));
             for (uint32_t i = 0; i < r.nRevp && r.revp; i++) zs_push_addr(&addrs, img, zc_rd64(r.revp + 8ull * i));
-            if (r.adj) for (uint32_t i = 0; i < r.nGmp; i++) zs_push_addr(&addrs, img, zc_rd64(r.adj + 8ull * i));
+            for (uint32_t i = 0; i < r.nUnresolved && r.unresolved; i++) zs_push_addr(&addrs, img, zc_rd64(r.unresolved + 8ull * i));
         }
         qsort(addrs.v, addrs.n, 8, zu_cmp);
         size_t u = 0;
@@ -1382,52 +1861,40 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
     if (ok && fl->stringLiterals && metaOk) {
         ZOut so = {0};
         if (zo_open(&so, stringPath, !fl->minify)) {
-            zb_puts(&so.line, so.pretty ? "[" : "[");
+            zb_putc(&so.line, '[');
             bool first = true;
-            if (st->usagesFound) {
-                uint64_t prev = ~0ull;
-                for (size_t i = 0; i < order.n; i++) {
-                    uint32_t idx = (uint32_t)(order.v[i] >> 32);
-                    if (idx == prev) continue;
-                    prev = idx;
-                    size_t at = (size_t)(order.v[i] & 0xFFFFFFFFu);
-                    const uint8_t *b; uint32_t len;
-                    if (!zm_string(meta, idx, &b, &len)) continue;
-                    zo_sep(&so, first);
-                    first = false;
-                    zb_puts(&so.line, so.pretty ? "  {\n    \"value\": \"" : "{\"value\":\"");
-                    zs_json_escape_into(&so.line, b, len);
-                    zb_printf(&so.line, so.pretty ? "\",\n    \"address\": \"0x%llX\"\n  }" : "\",\"address\":\"0x%llX\"}", (unsigned long long)strRva.v[at]);
-                    if (so.line.n > (1 << 20)) zo_flush(&so);
-                }
-            } else if (haveStrBase) {
-                for (uint32_t idx = 0; idx < strCount; idx++) {
-                    const uint8_t *b; uint32_t len;
-                    if (!zm_string(meta, idx, &b, &len)) continue;
-                    zo_sep(&so, first);
-                    first = false;
-                    zb_puts(&so.line, so.pretty ? "  {\n    \"value\": \"" : "{\"value\":\"");
-                    zs_json_escape_into(&so.line, b, len);
-                    zb_printf(&so.line, so.pretty ? "\",\n    \"address\": \"0x%llX\"\n  }" : "\",\"address\":\"0x%llX\"}", (unsigned long long)(strBase - (uint64_t)img->header + 8ull * idx));
-                    if (so.line.n > (1 << 20)) zo_flush(&so);
-                }
+            for (size_t i = 0; i < usages.n; i++) {
+                if (usages.v[i].kind != 5) continue;
+                const uint8_t *b; uint32_t len;
+                if (!zm_string(meta, usages.v[i].idx, &b, &len)) continue;
+                zo_sep(&so, first);
+                first = false;
+                zb_puts(&so.line, so.pretty ? "  {\n    \"value\": \"" : "{\"value\":\"");
+                zs_json_escape_into(&so.line, b, len);
+                zb_printf(&so.line, so.pretty ? "\",\n    \"address\": \"0x%llX\"\n  }" : "\",\"address\":\"0x%llX\"}", (unsigned long long)usages.v[i].rva);
+                if (so.line.n > (1 << 20)) zo_flush(&so);
             }
-            zb_puts(&so.line, so.pretty ? "\n]" : "]");
+            zb_puts(&so.line, (so.pretty && !first) ? "\n]" : "]");
             zo_close(&so);
         } else {
             zh_log(h, "could not create stringliteral.json");
         }
     }
 
-    zb_free(&nameB); zb_free(&sigB); zb_free(&tsigB); zb_free(&tmp); zb_free(&fixedB);
-    free(addrs.v); free(strIdx.v); free(strRva.v); free(order.v); free(seen.slots);
+    zb_free(&nameB); zb_free(&sigB); zb_free(&tsigB); zb_free(&typeB); zb_free(&methB);
+    free(addrs.v); free(usages.v); free(gmap.e);
+    free(defHead); free(defTail); free(entNext); free(entSpec);
     free(specMethodDef); free(specClassInst); free(specMethodInst); free(specRva); free(gmp);
     return ok;
 }
 
 static void zc_release(ZC *c) {
-    if (c->nameNs) for (uint32_t i = 0; i < c->td; i++) free(c->nameNs[i]);
-    if (c->nameNoNs) for (uint32_t i = 0; i < c->td; i++) free(c->nameNoNs[i]);
-    free(c->nameNs); free(c->nameNoNs); free(c->cls); free(c->clsMethodStart);
+    for (uint32_t i = 0; i < c->td; i++) {
+        if (c->nameNs) free(c->nameNs[i]);
+        if (c->nameNoNs) free(c->nameNoNs[i]);
+        if (c->structBase) free(c->structBase[i]);
+        if (c->structName) free(c->structName[i]);
+    }
+    free(c->nameNs); free(c->nameNoNs); free(c->structBase); free(c->structName); free(c->cls); free(c->clsMethodStart);
     free((void *)c->defMethod); free(c->defClass); free(c->defRva);
 }
