@@ -29,6 +29,7 @@
 #pragma mark - ZSScripts
 
 static void ZSCustomGreeting_HotFieldInvalidate(void);
+static void ZSCustomGreeting_Tick(void);
 static void ZSUID_HotFieldInvalidate(void);
 static void ZSCombatTip_HotFieldInvalidate(void);
 BOOL ZSGlobalScene_Current(int32_t *outState);
@@ -4321,6 +4322,7 @@ void zs_set_custom_greeting_text(NSString *text) {
     gZSCustomGreetingTextCacheLoaded = YES;
 
     ZSCustomGreeting_HotFieldInvalidate();
+    dispatch_async(dispatch_get_main_queue(), ^{ ZSCustomGreeting_Tick(); });
 }
 
 static void *gZSGreetingCardClass;
@@ -4485,6 +4487,11 @@ static void ZSCustomGreeting_Tick(void) {
 }
 
 - (void)tick {
+    if (zs_hook_is_armed(ZSHookIDGreeting)) {
+        [self.displayLink invalidate];
+        self.displayLink = nil;
+        return;
+    }
     ZSCustomGreeting_Tick();
 }
 
@@ -4684,6 +4691,11 @@ static void ZSCombatTip_Tick(void) {
 }
 
 - (void)tick {
+    if (zs_hook_is_armed(ZSHookIDTips)) {
+        [self.displayLink invalidate];
+        self.displayLink = nil;
+        return;
+    }
     ZSCombatTip_Tick();
 }
 
@@ -5189,6 +5201,167 @@ static void UIDRedactorConstructor(void) {
     });
 }
 
+
+#pragma mark - Lifecycle hooks
+
+typedef void (*ZSLifeFn)(void *, void *, void *, void *, void *, void *);
+
+static ZSLifeFn gZSLifeOrigCardOnEnable;
+static ZSLifeFn gZSLifeOrigLoadingStart;
+static ZSLifeFn gZSLifeOrigLoginStart;
+static BOOL gZSLifeGreetingComplete;
+static BOOL gZSLifeTipsComplete;
+static BOOL gZSLifeAllInstalled;
+
+static BOOL ZSLife_SetFieldText(void *obj, const char *fieldName, NSString *text) {
+    if (!obj || text.length == 0) return NO;
+    if (!ZSUID_UnityObjectIsAlive(obj)) return NO;
+
+    void *klass = [IL2CppBridge classOfInstance:obj];
+    if (!klass) return NO;
+
+    void *field = [IL2CppBridge fieldNamed:fieldName onClass:klass];
+    if (!field) return NO;
+
+    void *tmp = NULL;
+    if (![IL2CppBridge copyInstanceFieldValue:field onInstance:obj toBuffer:&tmp] || !tmp) return NO;
+
+    void *tmpClass = [IL2CppBridge classOfInstance:tmp];
+    if (!tmpClass) return NO;
+
+    const void *setText = [IL2CppBridge methodOnClass:tmpClass name:"set_text" argCount:1];
+    if (!setText) return NO;
+
+    void *converted = [IL2CppBridge il2CppStringFromNSString:text];
+    if (!converted) return NO;
+
+    void *args[1] = { converted };
+    void *exc = NULL;
+    [IL2CppBridge invokeMethod:setText onInstance:tmp args:args outException:&exc];
+    return exc == NULL;
+}
+
+static void ZSLife_Settle(void (^deferred)(void)) {
+    static const double kDelays[] = { 0.25, 1.0 };
+    for (size_t i = 0; i < sizeof(kDelays) / sizeof(kDelays[0]); i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kDelays[i] * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), deferred);
+    }
+}
+
+static void ZSLife_GreetingForCard(void *card) {
+    NSString *text = zs_custom_greeting_text();
+    if (text.length == 0 || !card) return;
+    if (!ZSUID_UnityObjectIsAlive(card)) return;
+
+    void *klass = [IL2CppBridge classOfInstance:card];
+    if (!klass) return;
+    if (!ZSCustomGreeting_InstanceIsSelfCard(card, klass)) return;
+    ZSLife_SetFieldText(card, "tmp_introduction", text);
+}
+
+static void ZSLife_UIDForTarget(void *obj, const char *fieldName) {
+    if (!obj || !UIDRedactor.isEnabled) return;
+    if (!ZSUID_UnityObjectIsAlive(obj)) return;
+    ZSUID_RedactTMPField(obj, fieldName);
+}
+
+static void ZSLife_CardOnEnable(void *self, void *a1, void *a2, void *a3, void *a4, void *a5) {
+    if (gZSLifeOrigCardOnEnable) gZSLifeOrigCardOnEnable(self, a1, a2, a3, a4, a5);
+    if (gZSLifeGreetingComplete) zs_hook_mark_armed(ZSHookIDGreeting);
+    ZSLife_GreetingForCard(self);
+    ZSLife_UIDForTarget(self, "tmp_publicIdAlphabet");
+    ZSLife_Settle(^{
+        ZSCustomGreeting_HotFieldInvalidate();
+        ZSCustomGreeting_Tick();
+        if (UIDRedactor.isEnabled) ZSUID_RedactColdTargets();
+    });
+}
+
+static void ZSLife_LoadingStart(void *self, void *a1, void *a2, void *a3, void *a4, void *a5) {
+    if (gZSLifeOrigLoadingStart) gZSLifeOrigLoadingStart(self, a1, a2, a3, a4, a5);
+    if (gZSLifeTipsComplete) zs_hook_mark_armed(ZSHookIDTips);
+    if (ZSCombatTip_Pool().count == 0) return;
+    NSString *pick = ZSCombatTip_PickRandom();
+    if (pick.length == 0) return;
+    gZSCombatTipChosen = pick;
+    ZSLife_SetFieldText(self, "_hintTxt", pick);
+    ZSLife_Settle(^{
+        if (!gZSCombatTipManagerClass) {
+            gZSCombatTipManagerClass = [IL2CppBridge classNamed:"LoadingSceneManager"
+                                                     inNamespace:""
+                                                assemblyContains:"Assembly-CSharp"];
+        }
+        void *manager = ZSCustomGreeting_FindActiveInstance(gZSCombatTipManagerClass);
+        ZSLife_SetFieldText(manager, "_hintTxt", pick);
+    });
+}
+
+static void ZSLife_LoginStart(void *self, void *a1, void *a2, void *a3, void *a4, void *a5) {
+    if (gZSLifeOrigLoginStart) gZSLifeOrigLoginStart(self, a1, a2, a3, a4, a5);
+    ZSLife_UIDForTarget(self, "tmp_loginAccount");
+    ZSLife_Settle(^{
+        if (UIDRedactor.isEnabled) ZSUID_RedactColdTargets();
+    });
+}
+
+typedef struct {
+    const char *namespaze;
+    const char *className;
+    const char *methodName;
+    int argCount;
+    void *replacement;
+    void **original;
+    BOOL installed;
+} ZSLifeHook;
+
+static ZSLifeHook gZSLifeHooks[] = {
+    { "MainUI", "UserInfoCard",       "OnEnable", 0, (void *)ZSLife_CardOnEnable,   (void **)&gZSLifeOrigCardOnEnable,  NO },
+    { "",       "LoadingSceneManager", "Start",    0, (void *)ZSLife_LoadingStart,   (void **)&gZSLifeOrigLoadingStart,  NO },
+    { "",       "LoginSceneManager",   "Start",    0, (void *)ZSLife_LoginStart,     (void **)&gZSLifeOrigLoginStart,    NO },
+};
+
+static void ZSLife_InstallAll(void) {
+    if (gZSLifeAllInstalled) return;
+    BOOL all = YES;
+    for (size_t i = 0; i < sizeof(gZSLifeHooks) / sizeof(gZSLifeHooks[0]); i++) {
+        ZSLifeHook *hook = &gZSLifeHooks[i];
+        if (!hook->installed) {
+            hook->installed = zs_hook_il2cpp_named(hook->namespaze, hook->className, "Assembly-CSharp",
+                                                   hook->methodName, hook->argCount,
+                                                   hook->replacement, hook->original);
+            if (hook->installed) ZLog(@"[ZSHook] %s.%s hooked", hook->className, hook->methodName);
+        }
+        if (!hook->installed) all = NO;
+    }
+    gZSLifeGreetingComplete = gZSLifeHooks[0].installed;
+    gZSLifeTipsComplete = gZSLifeHooks[1].installed;
+    gZSLifeAllInstalled = all;
+}
+
+static void ZSLife_SceneChanged(int32_t state, int32_t previous) {
+    (void)previous;
+    (void)state;
+    ZSLife_InstallAll();
+    if (!UIDRedactor.isEnabled) return;
+    static const double kDelays[] = { 0.5, 2.0 };
+    for (size_t i = 0; i < sizeof(kDelays) / sizeof(kDelays[0]); i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kDelays[i] * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (UIDRedactor.isEnabled) ZSUID_RedactColdTargets();
+        });
+    }
+}
+
+__attribute__((constructor))
+static void ZSLifeHooksConstructor(void) {
+    zs_on_unity_ready(^{
+        ZSLife_InstallAll();
+        zs_on_scene_changed(^(int32_t state, int32_t previous) {
+            ZSLife_SceneChanged(state, previous);
+        });
+    });
+}
 
 #pragma mark - Asset picking
 

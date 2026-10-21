@@ -70,6 +70,15 @@ BOOL zs_hook_il2cpp_method(const void *method, void *replacement, void **origina
     return YES;
 }
 
+BOOL zs_hook_il2cpp_named(const char *namespaze, const char *className, const char *assemblyContains,
+                          const char *methodName, int argCount, void *replacement, void **original) {
+    void *klass = [IL2CppBridge classNamed:className inNamespace:namespaze assemblyContains:assemblyContains];
+    if (!klass) return NO;
+    const void *method = [IL2CppBridge methodOnClass:klass name:methodName argCount:argCount];
+    if (!method) return NO;
+    return zs_hook_il2cpp_method(method, replacement, original);
+}
+
 void zs_hook_mark_armed(ZSHookID hook) {
     if (hook < 0 || hook >= ZSHookIDCount) return;
     BOOL first = NO;
