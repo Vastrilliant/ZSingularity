@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdarg.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -130,6 +131,8 @@ typedef struct {
     uint32_t (*method_get_flags)(const void *, uint32_t *);
     char *(*type_get_name)(const void *);
     bool (*type_is_byref)(const void *);
+    const char *(*image_get_name)(const void *);
+    uint32_t (*method_get_token)(const void *);
     void (*memory_free)(void *);
 } ZA;
 
@@ -158,6 +161,8 @@ static bool za_resolve(ZA *a) {
     ZA_RESOLVE(a, method_get_flags);
     ZA_RESOLVE(a, type_get_name);
     ZA_RESOLVE(a, type_is_byref);
+    ZA_RESOLVE(a, image_get_name);
+    ZA_RESOLVE(a, method_get_token);
     a->memory_free = (void (*)(void *))dlsym(RTLD_DEFAULT, "il2cpp_free");
     return a->domain_get && a->domain_get_assemblies && a->assembly_get_image && a->image_get_class_count && a->image_get_class &&
            a->class_get_name && a->class_get_namespace && a->class_get_methods && a->class_get_type && a->method_get_name &&
@@ -263,6 +268,15 @@ static bool zi_is_data_ptr(const ZImg *img, uint64_t addr) {
     return false;
 }
 
+static bool zi_is_data_addr(const ZImg *img, uint64_t addr) {
+    for (int i = 0; i < img->nsegs; i++) {
+        if (strncmp(img->segs[i].name, "__DATA", 6) != 0) continue;
+        uint64_t lo = (uint64_t)((int64_t)img->segs[i].vmaddr + img->slide);
+        if (addr >= lo && addr + 4 <= lo + img->segs[i].vmsize) return true;
+    }
+    return false;
+}
+
 static bool zi_text_range(const ZImg *img, uint64_t *lo, uint64_t *hi) {
     for (int i = 0; i < img->nsects; i++) {
         if (strcmp(img->sects[i].seg, "__TEXT") == 0 && strcmp(img->sects[i].sect, "__text") == 0) {
@@ -343,7 +357,8 @@ typedef struct {
     uint32_t gcOff, gcSize;
     uint32_t tdOff, tdSize;
     uint32_t fieldRefOff, fieldRefSize;
-    bool tables;
+    uint32_t strCountV;
+    bool tables, v38;
 } ZMeta;
 
 static bool zm_range_ok(const ZMeta *m, uint32_t off, uint32_t size) {
@@ -366,10 +381,18 @@ static bool zm_open(ZMeta *m, const char *path, void **mapping, size_t *mapSize)
     memcpy(h, m->p, sizeof h);
     if (h[0] != 0xFAB11BAF) return false;
     m->version = h[1];
-    m->strLitOff = h[2]; m->strLitSize = h[3]; m->strDataOff = h[4]; m->strDataSize = h[5];
-    if ((uint64_t)m->strLitOff + m->strLitSize > m->size || (uint64_t)m->strDataOff + m->strDataSize > m->size) return false;
+    m->v38 = m->version >= 38;
     m->tables = false;
-    if (m->version >= 27) {
+    if (m->v38) {
+        m->strLitOff = h[2]; m->strLitSize = h[3]; m->strCountV = h[4];
+        m->strDataOff = h[5]; m->strDataSize = h[6];
+        if (m->strCountV == 0 || m->strLitSize / m->strCountV != 4) return false;
+    } else {
+        m->strLitOff = h[2]; m->strLitSize = h[3]; m->strDataOff = h[4]; m->strDataSize = h[5];
+        m->strCountV = m->strLitSize / 8;
+    }
+    if ((uint64_t)m->strLitOff + m->strLitSize > m->size || (uint64_t)m->strDataOff + m->strDataSize > m->size) return false;
+    if (m->version >= 27 && !m->v38) {
         m->strOff = h[6]; m->strSize = h[7];
         m->fieldsOff = h[24]; m->fieldsSize = h[25];
         m->gpOff = h[26]; m->gpSize = h[27];
@@ -383,10 +406,20 @@ static bool zm_open(ZMeta *m, const char *path, void **mapping, size_t *mapSize)
     return true;
 }
 
-static uint32_t zm_string_count(const ZMeta *m) { return m->strLitSize / 8; }
+static uint32_t zm_string_count(const ZMeta *m) { return m->strCountV; }
 
 static bool zm_string(const ZMeta *m, uint32_t idx, const uint8_t **bytes, uint32_t *len) {
     if (idx >= zm_string_count(m)) return false;
+    if (m->v38) {
+        uint32_t a = 0, b = 0;
+        memcpy(&a, m->p + m->strLitOff + (size_t)idx * 4, 4);
+        if (idx + 1 >= m->strCountV) { *bytes = m->p + m->strDataOff; *len = 0; return true; }
+        memcpy(&b, m->p + m->strLitOff + (size_t)(idx + 1) * 4, 4);
+        if (b < a || (uint64_t)b > m->strDataSize) return false;
+        *bytes = m->p + m->strDataOff + a;
+        *len = b - a;
+        return true;
+    }
     uint32_t e[2];
     memcpy(e, m->p + m->strLitOff + (size_t)idx * 8, 8);
     if ((uint64_t)e[1] + e[0] > m->strDataSize) return false;
@@ -475,6 +508,9 @@ typedef struct {
     char **structBase;
     char **structName;
     uint32_t *clsMethodStart;
+    uint32_t *clsAsm;
+    char **asmName;
+    uint32_t asmCount;
     uint32_t defCount;
     const void **defMethod;
     uint32_t *defClass;
@@ -967,7 +1003,7 @@ typedef struct {
     uint64_t gmp, adj, invoker, revp;
     uint32_t nGmp, nInvoker, nRevp;
     uint64_t unresolved, cgm, crAddr;
-    uint32_t nUnresolved, nCgm;
+    uint32_t nUnresolved, nCgm, candidates;
     bool haveMR, haveCR, crHasAdj, haveCGM;
 } ZR;
 
@@ -991,13 +1027,13 @@ static bool zr_find_metadata_registration(const ZImg *img, uint32_t td, ZR *r) {
         if (!lo) continue;
         for (const uint64_t *q = lo + 12; q + 4 <= hi; q++) {
             if (*q != td) continue;
-            if (!zi_is_data_ptr(img, q[1])) continue;
+            if (!zi_is_data_addr(img, q[1])) continue;
             if (q[2] > 0x4000000) continue;
-            if (q[2] && !zi_is_data_ptr(img, q[3])) continue;
+            if (q[2] && !zi_is_data_addr(img, q[3])) continue;
             const uint64_t *s = q - 12;
             bool ok = true;
             for (int i = 0; i < 12 && ok; i += 2) {
-                if (s[i] == 0 || s[i] > 0x4000000 || !zi_is_data_ptr(img, s[i + 1])) ok = false;
+                if (s[i] == 0 || s[i] > 0x4000000 || !zi_is_data_addr(img, s[i + 1])) ok = false;
             }
             if (!ok || s[6] < td) continue;
             if (!zr_ptr_array_ok(img, s[7], s[6] < 64 ? s[6] : 64, false)) continue;
@@ -1006,6 +1042,24 @@ static bool zr_find_metadata_registration(const ZImg *img, uint32_t td, ZR *r) {
             r->nTypes = (uint32_t)s[6]; r->types = s[7];
             r->nSpecs = (uint32_t)s[8]; r->specs = s[9];
             r->nUsages = q[2]; r->usages = q[3];
+            r->haveMR = true;
+            return true;
+        }
+    }
+    for (int k = 0; zi_data_section(img, k, &lo, &hi); k++) {
+        if (!lo) continue;
+        for (const uint64_t *q = lo + 10; q + 4 <= hi; q++) {
+            if (q[0] != td || q[2] != td) continue;
+            if (!zi_is_data_addr(img, q[3]) || !zr_ptr_array_ok(img, q[3], td < 64 ? td : 64, false)) continue;
+            r->candidates++;
+            const uint64_t *b = q - 10;
+            if (b[6] < td || b[6] > 0x4000000 || !zr_ptr_array_ok(img, b[7], b[6] < 64 ? b[6] : 64, false)) continue;
+            if (!zi_in_img(img, b[3], 8) || !zi_in_img(img, b[5], 4) || !zi_in_img(img, b[9], 4)) continue;
+            r->nGenericInsts = (uint32_t)b[2]; r->genericInsts = b[3];
+            r->nGmt = (uint32_t)b[4]; r->gmt = b[5];
+            r->nTypes = (uint32_t)b[6]; r->types = b[7];
+            r->nSpecs = (uint32_t)b[8]; r->specs = b[9];
+            r->nUsages = b[14]; r->usages = b[15];
             r->haveMR = true;
             return true;
         }
@@ -1076,6 +1130,72 @@ static bool zr_valid_modules(const ZImg *img, uint64_t arr, uint64_t count) {
         if (mc > 4000000 || (mc && !zi_in_img(img, mp, mc * 8))) return false;
     }
     return true;
+}
+
+static size_t zr_refs(const ZImg *img, uint64_t target, uint64_t lowTarget, uint64_t *out, size_t cap, uint64_t countAt) {
+    size_t n = 0;
+    const uint64_t *lo, *hi;
+    for (int k = 0; zi_data_section(img, k, &lo, &hi); k++) {
+        if (!lo) continue;
+        for (const uint64_t *q = lo; q < hi; q++) {
+            uint64_t v = *q;
+            if (v > target || v < lowTarget) continue;
+            if ((target - v) & 7) continue;
+            if (countAt && (q == lo || q[-1] != countAt)) continue;
+            if (n < cap) out[n] = (uint64_t)(uintptr_t)q;
+            n++;
+        }
+    }
+    return n < cap ? n : cap;
+}
+
+static bool zr_find_code_registration_modules(const ZImg *img, uint32_t imageCount, ZR *r) {
+    static const char key[] = "mscorlib.dll";
+    for (int si = 0; si < img->nsects; si++) {
+        const ZSect *sc = &img->sects[si];
+        if (strcmp(sc->sect, "__cstring") != 0) continue;
+        const char *base = (const char *)(uintptr_t)((int64_t)sc->addr + img->slide);
+        for (uint64_t off = 0; off + sizeof key <= sc->size; off++) {
+            if (memcmp(base + off, key, sizeof key) != 0) continue;
+            uint64_t str = (uint64_t)(uintptr_t)(base + off);
+            uint64_t r1[8], r2[8], r3[64];
+            size_t n1 = zr_refs(img, str, str, r1, 8, 0);
+            for (size_t a = 0; a < n1; a++) {
+                size_t n2 = zr_refs(img, r1[a], r1[a], r2, 8, 0);
+                for (size_t b = 0; b < n2; b++) {
+                    for (uint32_t delta = 0; delta <= 3; delta++) {
+                        for (int sign = 0; sign < 2; sign++) {
+                            if (delta == 0 && sign) continue;
+                            uint32_t cnt = sign ? imageCount + delta : imageCount - delta;
+                            if (!cnt || (!sign && delta > imageCount)) continue;
+                            uint64_t low = r2[b] >= 8ull * (cnt - 1) ? r2[b] - 8ull * (cnt - 1) : 0;
+                            size_t n3 = zr_refs(img, r2[b], low, r3, 64, cnt);
+                            for (size_t c3 = 0; c3 < n3; c3++) {
+                                uint64_t at = r3[c3];
+                                uint64_t crBase = at - 8 * 16;
+                                if (!zi_in_img(img, crBase, 8 * 17)) continue;
+                                uint64_t arr = zc_rd64(at);
+                                if (!zr_valid_modules(img, arr, cnt)) continue;
+                                r->crAddr = crBase;
+                                r->nRevp = (uint32_t)zc_rd64(crBase); r->revp = zc_rd64(crBase + 8);
+                                r->nGmp = (uint32_t)zc_rd64(crBase + 16); r->gmp = zc_rd64(crBase + 24);
+                                r->adj = zc_rd64(crBase + 32);
+                                r->nInvoker = (uint32_t)zc_rd64(crBase + 40); r->invoker = zc_rd64(crBase + 48);
+                                r->nUnresolved = (uint32_t)zc_rd64(crBase + 56); r->unresolved = zc_rd64(crBase + 64);
+                                r->nCgm = cnt; r->cgm = arr;
+                                r->haveCR = true; r->haveCGM = true; r->crHasAdj = true;
+                                if (r->nRevp > 1000000 || !zr_ptr_array_ok(img, r->revp, r->nRevp < 64 ? r->nRevp : 64, true)) { r->nRevp = 0; r->revp = 0; }
+                                if (r->nUnresolved > 1000000 || !zr_ptr_array_ok(img, r->unresolved, r->nUnresolved < 64 ? r->nUnresolved : 64, true)) { r->nUnresolved = 0; r->unresolved = 0; }
+                                if (r->nGmp > 20000000 || !zr_ptr_array_ok(img, r->gmp, r->nGmp < 64 ? r->nGmp : 64, true)) { r->nGmp = 0; r->gmp = 0; }
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 static void zr_find_modules(const ZImg *img, ZR *r) {
@@ -1325,13 +1445,18 @@ static bool zs_enumerate(ZC *c, const ZHooks *h) {
         if (img) total += a->image_get_class_count(img);
     }
     c->cls = (void **)calloc(total + 1, sizeof(void *));
-    if (!c->cls) return false;
+    c->clsAsm = (uint32_t *)calloc(total + 1, sizeof(uint32_t));
+    c->asmName = (char **)calloc(asmCount + 1, sizeof(char *));
+    c->asmCount = (uint32_t)asmCount;
+    if (!c->cls || !c->clsAsm || !c->asmName) return false;
     uint32_t n = 0;
     for (size_t i = 0; i < asmCount; i++) {
         const void *img = a->assembly_get_image(asms[i]);
         if (!img) continue;
         size_t cc = a->image_get_class_count(img);
-        for (size_t k = 0; k < cc; k++) c->cls[n++] = (void *)a->image_get_class(img, k);
+        const char *in = a->image_get_name ? a->image_get_name(img) : NULL;
+        c->asmName[i] = strdup(in ? in : "");
+        for (size_t k = 0; k < cc; k++) { c->clsAsm[n] = (uint32_t)i; c->cls[n++] = (void *)a->image_get_class(img, k); }
     }
     c->td = n;
     c->nameNs = (char **)calloc(n + 1, sizeof(char *));
@@ -1599,6 +1724,8 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
     int32_t *specClassInst = NULL, *specMethodInst = NULL;
     uint64_t *specRva = NULL;
     uint64_t *gmp = NULL;
+    bool crByModules = zr_find_code_registration_modules(img, c->asmCount, &r);
+    if (crByModules) zh_log(h, "code registration located through module table: %u modules", r.nCgm);
     if (r.haveMR) {
         uint32_t maxMI = 0;
         for (uint32_t i = 0; i < r.nGmt; i++) {
@@ -1606,11 +1733,11 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
             if (!zc_rd(r.gmt + (uint64_t)i * r.gmtStride, e, 8)) break;
             if (e[1] > maxMI && e[1] < 20000000) maxMI = e[1];
         }
-        if (zr_find_code_registration(img, &r, maxMI)) {
+        if (crByModules || zr_find_code_registration(img, &r, maxMI)) {
             st->codeRegistrationFound = true;
             gmp = (uint64_t *)malloc((size_t)r.nGmp * 8);
             if (gmp && !zc_rd(r.gmp, gmp, (size_t)r.nGmp * 8)) { free(gmp); gmp = NULL; }
-            zr_find_modules(img, &r);
+            if (!r.haveCGM) zr_find_modules(img, &r);
             zh_log(h, "code registration: generic pointers %u, invokers %u, reverse wrappers %u, unresolved calls %u, code gen modules %u", r.nGmp, r.nInvoker, r.nRevp, r.nUnresolved, r.haveCGM ? r.nCgm : 0);
         } else {
             zh_log(h, "code registration not found; generic method pointers unavailable");
@@ -1631,6 +1758,44 @@ static bool zs_generate(ZC *c, const ZMeta *meta, bool metaOk, const char *scrip
             zh_log(h, "method specs could not be read");
         }
         free(raw);
+    }
+
+    if (!r.haveMR && r.haveCR) {
+        st->codeRegistrationFound = true;
+        gmp = (uint64_t *)malloc((size_t)r.nGmp * 8 + 8);
+        if (gmp && r.nGmp && !zc_rd(r.gmp, gmp, (size_t)r.nGmp * 8)) { free(gmp); gmp = NULL; }
+        zh_log(h, "code registration: generic pointers %u, invokers %u, reverse wrappers %u, unresolved calls %u, code gen modules %u", r.nGmp, r.nInvoker, r.nRevp, r.nUnresolved, r.nCgm);
+    }
+    if (r.haveCGM && c->a.method_get_token) {
+        uint32_t resolved = 0;
+        for (uint32_t m = 0; m < r.nCgm; m++) {
+            uint64_t mod = zc_rd64(r.cgm + 8ull * m);
+            uint64_t nameP = zc_rd64(mod), cnt = zc_rd64(mod + 8) & 0xFFFFFFFFull, arr = zc_rd64(mod + 16);
+            char mn[128] = {0};
+            if (!nameP || !arr || !cnt || !zc_rd(nameP, mn, 127)) continue;
+            size_t ml = strlen(mn);
+            if (ml > 4 && strcasecmp(mn + ml - 4, ".dll") == 0) mn[ml - 4] = 0;
+            uint32_t ai = UINT32_MAX;
+            for (uint32_t k = 0; k < c->asmCount; k++) {
+                char an[128];
+                strncpy(an, c->asmName[k], 127); an[127] = 0;
+                size_t al = strlen(an);
+                if (al > 4 && strcasecmp(an + al - 4, ".dll") == 0) an[al - 4] = 0;
+                if (strcasecmp(an, mn) == 0) { ai = k; break; }
+            }
+            if (ai == UINT32_MAX) continue;
+            uint64_t *ptrs = (uint64_t *)malloc((size_t)cnt * 8);
+            if (!ptrs || !zc_rd(arr, ptrs, (size_t)cnt * 8)) { free(ptrs); continue; }
+            for (uint32_t d = 0; d < c->defCount; d++) {
+                if (c->clsAsm[c->defClass[d]] != ai) continue;
+                uint32_t rid = c->a.method_get_token(c->defMethod[d]) & 0xFFFFFF;
+                if (!rid || rid > cnt) continue;
+                uint64_t pv = ptrs[rid - 1];
+                if (pv && zi_is_text_ptr(img, pv) && !c->defRva[d]) { c->defRva[d] = pv - (uint64_t)img->header; resolved++; }
+            }
+            free(ptrs);
+        }
+        zh_log(h, "method pointers resolved through code gen modules: %u", resolved);
     }
 
     int32_t *defHead = NULL, *defTail = NULL, *entNext = NULL;
@@ -1895,6 +2060,8 @@ static void zc_release(ZC *c) {
         if (c->structBase) free(c->structBase[i]);
         if (c->structName) free(c->structName[i]);
     }
+    if (c->asmName) for (uint32_t i = 0; i < c->asmCount; i++) free(c->asmName[i]);
+    free(c->asmName); free(c->clsAsm);
     free(c->nameNs); free(c->nameNoNs); free(c->structBase); free(c->structName); free(c->cls); free(c->clsMethodStart);
     free((void *)c->defMethod); free(c->defClass); free(c->defRva);
 }
