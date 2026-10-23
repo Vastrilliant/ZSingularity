@@ -131,12 +131,6 @@ static NSString *PMNormalizedPath(NSString *path) {
 
 static NSSet<NSString *> *PMReplacedAssetPaths(void) {
     NSMutableSet<NSString *> *paths = [NSMutableSet set];
-    for (NSString *path in [BankTransplant documentsRelativePathsOfSwappedBanks]) {
-        [paths addObject:PMNormalizedPath(path)];
-    }
-    for (NSString *path in [LocalizationTransplant documentsRelativePathsOfSwappedFiles]) {
-        [paths addObject:PMNormalizedPath(path)];
-    }
     for (NSString *path in [ModAssetLibrary moddedManifestRelativePaths]) {
         [paths addObject:PMNormalizedPath(path)];
     }

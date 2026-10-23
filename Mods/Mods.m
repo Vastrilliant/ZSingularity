@@ -2476,14 +2476,15 @@ static NSString *MALAbsolutePathForHomeRelative(NSString *path) {
 
 static NSString *MALManifestRelativePath(NSString *homeRelativePath) {
     if (homeRelativePath.length == 0) return nil;
-    NSString *padded = [@"/" stringByAppendingString:homeRelativePath];
-    NSRange assetsRange = [padded rangeOfString:@"/Assets/"];
-    if (assetsRange.location == NSNotFound) return nil;
-    NSString *relative = [padded substringFromIndex:assetsRange.location + 1];
-    NSStringCompareOptions anchored = NSCaseInsensitiveSearch | NSAnchoredSearch;
-    if ([relative rangeOfString:kBTMobileBuildsRelativePath options:anchored].location == NSNotFound &&
-        [relative rangeOfString:kLTLocalizeRelativePath options:anchored].location == NSNotFound) return nil;
-    return relative;
+    NSString *normalized = [homeRelativePath stringByReplacingOccurrencesOfString:@"\\" withString:@"/"];
+    for (NSString *anchor in @[kBTMobileBuildsRelativePath, kLTLocalizeRelativePath]) {
+        NSRange range = [normalized rangeOfString:anchor options:NSCaseInsensitiveSearch];
+        if (range.location == NSNotFound) continue;
+        NSString *relative = [normalized substringFromIndex:range.location];
+        while (relative.length > 1 && [relative hasSuffix:@"/"]) relative = [relative substringToIndex:relative.length - 1];
+        return relative;
+    }
+    return nil;
 }
 
 static NSMutableDictionary<NSString *, NSNumber *> *g_malChecksumCache;
@@ -2637,25 +2638,34 @@ static BOOL MALPackChecksumMatch(NSString *packPath, NSString *languageDir) {
 + (NSArray<NSString *> *)moddedManifestRelativePaths {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableOrderedSet<NSString *> *paths = [NSMutableOrderedSet orderedSet];
-    for (ModAssetLibraryEntry *entry in [self activeModdedEntries]) {
-        if (entry.isAssetBundle) continue;
 
-        if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
-            NSString *languageRelative = MALManifestRelativePath(entry.livePathDescription);
-            if (languageRelative.length == 0) continue;
-            NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:entry.path];
-            for (NSString *child in enumerator) {
-                if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
-                [paths addObject:[languageRelative stringByAppendingPathComponent:child]];
+    NSMutableArray<NSString *> *allFolders = [NSMutableArray array];
+    for (NSString *folder in [self folderNames]) [self mal_collectFolderNamesFrom:folder into:allFolders];
+
+    for (NSString *folder in allFolders) {
+        if ([self mal_folderIsStored:folder]) continue;
+        for (ModAssetLibraryEntry *entry in [self entriesInFolder:folder error:nil] ?: @[]) {
+            if (entry.isAssetBundle) continue;
+            if (entry.fontRole != ZSFontRoleNone || [ZSModsPaths fontKindForFileName:entry.fileName] != ZSFontKindUnknown) continue;
+
+            if (entry.localizationKind == ModAssetLibraryLocalizationKindPack) {
+                NSString *languageRelative = MALManifestRelativePath(entry.livePathDescription);
+                if (languageRelative.length == 0 || entry.path.length == 0) continue;
+                NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:entry.path];
+                for (NSString *child in enumerator) {
+                    if ([child.lastPathComponent isEqualToString:@".DS_Store"] || [child.lastPathComponent hasPrefix:@"._"]) continue;
+                    if (![enumerator.fileAttributes.fileType isEqualToString:NSFileTypeRegular]) continue;
+                    [paths addObject:[languageRelative stringByAppendingPathComponent:child]];
+                }
+                continue;
             }
-            continue;
-        }
 
-        NSString *relative = MALManifestRelativePath(entry.livePathDescription);
-        if (relative.length == 0 && [entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
-            relative = [kBTMobileBuildsRelativePath stringByAppendingPathComponent:entry.fileName];
+            NSString *relative = MALManifestRelativePath(entry.livePathDescription);
+            if (relative.length == 0 && [entry.fileName.pathExtension caseInsensitiveCompare:@"bank"] == NSOrderedSame) {
+                relative = [kBTMobileBuildsRelativePath stringByAppendingPathComponent:entry.fileName];
+            }
+            if (relative.length > 0) [paths addObject:relative];
         }
-        if (relative.length > 0) [paths addObject:relative];
     }
     return paths.array;
 }

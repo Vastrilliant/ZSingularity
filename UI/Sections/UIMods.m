@@ -111,6 +111,39 @@ static NSString *zs_mods_library_folder_info(NSDictionary<NSString *, id> *folde
     return [parts componentsJoinedByString:@"  •  "];
 }
 
+static UIColor *zs_mods_mismatch_red_color(void) {
+    return [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1.0];
+}
+
+static BOOL zs_mods_library_folder_has_mismatch(NSString *folder) {
+    if (folder.length == 0 || zs_mods_folder_is_or_within_stored_bundles(folder)) return NO;
+    for (ModAssetLibraryEntry *entry in [ModAssetLibrary entriesInFolder:folder error:nil] ?: @[]) {
+        if ([ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch) return YES;
+    }
+    for (NSString *subFolder in [ModAssetLibrary subFolderNamesInFolder:folder] ?: @[]) {
+        if (zs_mods_library_folder_has_mismatch(subFolder)) return YES;
+    }
+    return NO;
+}
+
+static NSAttributedString *zs_mods_library_detail_attributed(NSString *plain, NSString *redTag) {
+    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+    style.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    NSDictionary *baseAttributes = @{
+        NSFontAttributeName: zs_mono_font(9, UIFontWeightRegular),
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:1 alpha:0.42],
+        NSParagraphStyleAttributeName: style,
+    };
+    NSMutableAttributedString *result = [[NSMutableAttributedString alloc] initWithString:plain ?: @"" attributes:baseAttributes];
+    if (redTag.length > 0) {
+        if (result.length > 0) [result appendAttributedString:[[NSAttributedString alloc] initWithString:@"  \u2022  " attributes:baseAttributes]];
+        NSMutableDictionary *redAttributes = [baseAttributes mutableCopy];
+        redAttributes[NSForegroundColorAttributeName] = zs_mods_mismatch_red_color();
+        [result appendAttributedString:[[NSAttributedString alloc] initWithString:redTag attributes:redAttributes]];
+    }
+    return result;
+}
+
 static const NSInteger kZSModsLibrarySortName = 0;
 static const NSInteger kZSModsLibrarySortSize = 1;
 static const NSInteger kZSModsLibrarySortDate = 2;
@@ -206,7 +239,13 @@ static const NSInteger kZSModsLibrarySortKind = 3;
     self.glyph.tintColor = blue;
     self.badge.text = nil;
     self.titleLabel.text = folderRow[@"title"];
-    self.detailLabel.text = zs_mods_library_folder_item_count(folderRow);
+    if ([folderRow[@"mismatch"] boolValue]) {
+        self.detailLabel.text = @"Checksum mismatch";
+        self.detailLabel.textColor = zs_mods_mismatch_red_color();
+    } else {
+        self.detailLabel.text = zs_mods_library_folder_item_count(folderRow);
+        self.detailLabel.textColor = [UIColor colorWithWhite:1 alpha:0.42];
+    }
     [self setNeedsLayout];
 }
 
@@ -219,7 +258,13 @@ static const NSInteger kZSModsLibrarySortKind = 3;
     NSString *extension = entry.fileName.pathExtension.uppercaseString;
     self.badge.text = extension.length > 0 && extension.length <= 8 ? extension : nil;
     self.titleLabel.text = zs_mods_library_entry_title(entry);
-    self.detailLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
+    if ([ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch) {
+        self.detailLabel.text = @"Checksum mismatch";
+        self.detailLabel.textColor = zs_mods_mismatch_red_color();
+    } else {
+        self.detailLabel.text = [NSByteCountFormatter stringFromByteCount:(long long)entry.byteSize countStyle:NSByteCountFormatterCountStyleFile];
+        self.detailLabel.textColor = [UIColor colorWithWhite:1 alpha:0.42];
+    }
     [self setNeedsLayout];
 }
 
@@ -3849,6 +3894,7 @@ static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
             @"size": @(folderSize),
             @"count": @(folderCount),
             @"modified": folderModified ?: NSNull.null,
+            @"mismatch": @(!isStoredRoot && zs_mods_library_folder_has_mismatch(folder)),
         }];
     }
     self.modsLibraryDisplayedFolders = folderRows;
@@ -4300,6 +4346,11 @@ static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
     [self.assetExplorerSearchField resignFirstResponder];
     UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [haptic impactOccurred];
+    NSString *openFolder = self.modsLibrarySelectedFolder;
+    if (openFolder.length > 0 && !zs_mods_folder_is_or_within_stored_bundles(openFolder)) {
+        [self zs_presentModImportPickerForFolder:openFolder];
+        return;
+    }
     [self loadModsTapped];
 }
 
@@ -4384,7 +4435,8 @@ static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
         NSString *folderRemark = folderRow[@"remark"];
         NSString *folderInfo = zs_mods_library_folder_info(folderRow, NO);
         libraryCell.textLabel.text = folderRow[@"title"];
-        libraryCell.detailTextLabel.text = folderRemark.length > 0 ? [NSString stringWithFormat:@"%@  •  %@", folderRemark, folderInfo] : folderInfo;
+        NSString *folderDetail = folderRemark.length > 0 ? [NSString stringWithFormat:@"%@  •  %@", folderRemark, folderInfo] : folderInfo;
+        libraryCell.detailTextLabel.attributedText = zs_mods_library_detail_attributed(folderDetail, [folderRow[@"mismatch"] boolValue] ? @"Checksum mismatch" : nil);
         libraryCell.accessoryView = nil;
         UIImageSymbolConfiguration *folderSymbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
         libraryCell.imageView.image = [UIImage systemImageNamed:@"folder.fill" withConfiguration:folderSymbolConfig];
@@ -4401,8 +4453,9 @@ static BOOL zs_mods_lz4hc_compress_bundle(NSString *path, NSError **error) {
     if (entry.remark.length > 0 && entry.fileName.length > 0) [detailParts addObject:entry.fileName];
     if (self.modsLibrarySelectedFolder.length == 0 && entry.currentFolder.length > 0) [detailParts addObject:entry.currentFolder];
     [detailParts addObject:size];
-    [detailParts addObject:status.length > 0 ? status : (kind.length > 0 ? kind : @"File")];
-    libraryCell.detailTextLabel.text = [detailParts componentsJoinedByString:@"  •  "];
+    BOOL checksumMismatch = ![self.doctorDownloadInFlightPaths containsObject:entry.path] && [ModAssetLibrary integrityForEntry:entry] == ModAssetLibraryIntegrityMismatch;
+    if (!checksumMismatch) [detailParts addObject:status.length > 0 ? status : (kind.length > 0 ? kind : @"File")];
+    libraryCell.detailTextLabel.attributedText = zs_mods_library_detail_attributed([detailParts componentsJoinedByString:@"  •  "], checksumMismatch ? @"Checksum mismatch" : nil);
     NSString *symbol = zs_mods_library_entry_symbol(entry);
     UIImageSymbolConfiguration *symbolConfig = [UIImageSymbolConfiguration configurationWithPointSize:12 weight:UIImageSymbolWeightRegular];
     libraryCell.imageView.image = [UIImage systemImageNamed:symbol withConfiguration:symbolConfig];
