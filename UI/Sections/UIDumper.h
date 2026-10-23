@@ -10,6 +10,7 @@
 - (void)zs_closeDumperFullScreenPanelTapped;
 - (void)zs_dumperOptionChanged:(UISwitch *)toggle;
 - (void)zs_dumperRunTapped;
+- (void)zs_dumperDiffTapped;
 - (void)zs_dumperShareTapped;
 - (void)zs_dumperResetTapped;
 - (void)zs_dumperSyncControls;

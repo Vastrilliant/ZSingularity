@@ -10,6 +10,7 @@
 #include <string.h>
 #import "ZTweakLog.h"
 #import "ScriptDump.h"
+#import "BinaryDiff.h"
 
 typedef void *(*zs_domain_get_fn)(void);
 typedef void **(*zs_domain_get_assemblies_fn)(const void *, size_t *);
@@ -1035,6 +1036,61 @@ static NSString * const kZSDumpOptionsKey = @"ZSDumperOptions";
 
 + (void)dumpIL2CPPToDocumentsWithCompletion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
     [self dumpWithOptions:[ZSDumpOptions savedOptions] progress:nil log:nil completion:completion];
+}
+
++ (void)diffBinariesWithIPAAtURL:(NSURL *)ipaURL
+                        progress:(ZSDumpProgress)progress
+                             log:(ZSDumpLog)logf
+                      completion:(void (^)(NSURL * _Nullable, NSError * _Nullable))completion {
+    [gRuntimeLock lock];
+    if (gRunning) {
+        [gRuntimeLock unlock];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(nil, zs_dump_error(7, @"An IL2CPP dump is already running."));
+        });
+        return;
+    }
+    gRunning = YES;
+    gCancel = NO;
+    [gRuntimeLock unlock];
+
+    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *framework = zs_unity_framework_path();
+    NSString *metadata = zs_global_metadata_path();
+    NSThread *worker = [[NSThread alloc] initWithBlock:^{
+        @autoreleasepool {
+            NSError *error = nil;
+            NSDictionary *summary = nil;
+            NSURL *url = documents.length
+                ? [ZSBinaryDiff diffIPAAtURL:ipaURL
+                          installedFramework:framework
+                           installedMetadata:metadata
+                                  outputRoot:documents
+                                    progress:progress
+                                         log:logf
+                                   cancelled:^BOOL{ return gCancel; }
+                                     summary:&summary
+                                       error:&error]
+                : nil;
+            if (!url && !error) error = zs_dump_error(4, @"The app Documents directory could not be resolved.");
+            [gRuntimeLock lock];
+            gRunning = NO;
+            [gRuntimeLock unlock];
+            if (error) ZLog(@"[ZSDumper] binary diff failed: %@", error.localizedDescription);
+            else ZLog(@"[ZSDumper] binary diff completed: %@", url.path);
+            if (!error) {
+                gLastOutput = url;
+                gLastSummary = @{@"diff": summary ?: @{}};
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (completion) completion(url, error);
+            });
+        }
+    }];
+    worker.name = @"ZSingularity.ZSDumper.Diff";
+    worker.stackSize = kZSDumpThreadStackSize;
+    worker.qualityOfService = NSQualityOfServiceUtility;
+    [worker start];
 }
 
 + (void)dumpWithOptions:(ZSDumpOptions *)options

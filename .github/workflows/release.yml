@@ -238,6 +238,7 @@ jobs:
             Core/IL2CppIntrospection.m \
             Mods/Dumper/Dumper.m \
             Mods/Dumper/ScriptDump.m \
+            Mods/Dumper/BinaryDiff.m \
             Core/DumpTypeRegistry.m \
             Core/Engine.m \
             Core/Hook.m \

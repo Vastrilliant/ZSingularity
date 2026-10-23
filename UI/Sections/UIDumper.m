@@ -26,6 +26,18 @@ static UILabel *zs_dumper_caption(NSString *text) {
     return label;
 }
 
+@interface ZSDumperPickerDelegate : NSObject <UIDocumentPickerDelegate>
+@property (nonatomic, copy) void (^picked)(NSURL *url);
+@end
+
+@implementation ZSDumperPickerDelegate
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    if (urls.firstObject && self.picked) self.picked(urls.firstObject);
+}
+
+@end
+
 @implementation UserInterface (Dumper)
 
 - (void)dumperTapped {
@@ -108,13 +120,16 @@ static UILabel *zs_dumper_caption(NSString *text) {
 
     UIButton *runButton = zs_make_grouped_action_button(@"Run Dump", zs_accent_green_color());
     [runButton addTarget:self action:@selector(zs_dumperRunTapped) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *diffButton = zs_make_grouped_action_button(@"Diff Binaries vs IPA", [UIColor colorWithRed:1.0 green:0.72 blue:0.3 alpha:1.0]);
+    [diffButton addTarget:self action:@selector(zs_dumperDiffTapped) forControlEvents:UIControlEventTouchUpInside];
     UIButton *shareButton = zs_make_grouped_action_button(@"Share Output Folder", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [shareButton addTarget:self action:@selector(zs_dumperShareTapped) forControlEvents:UIControlEventTouchUpInside];
     UIButton *resetButton = zs_make_grouped_action_button(@"Reset Options", [UIColor colorWithWhite:0.75 alpha:1]);
     [resetButton addTarget:self action:@selector(zs_dumperResetTapped) forControlEvents:UIControlEventTouchUpInside];
     ui[@"run"] = runButton;
+    ui[@"diff"] = diffButton;
     ui[@"share"] = shareButton;
-    [stack addArrangedSubview:zs_make_grouped_action_card(@[runButton, shareButton, resetButton])];
+    [stack addArrangedSubview:zs_make_grouped_action_card(@[runButton, diffButton, shareButton, resetButton])];
 
     UILabel *stageLabel = [[UILabel alloc] init];
     stageLabel.translatesAutoresizingMaskIntoConstraints = NO;
@@ -256,6 +271,9 @@ static UILabel *zs_dumper_caption(NSString *text) {
         cfg.title = running ? @"Cancel Dump" : @"Run Dump";
         run.configuration = cfg;
     }
+    UIButton *diff = ui[@"diff"];
+    diff.enabled = !running;
+    diff.alpha = diff.enabled ? 1 : 0.4;
     UIButton *share = ui[@"share"];
     BOOL haveOutput = [ZSDumper lastOutputURL] != nil;
     share.enabled = haveOutput && !running;
@@ -339,6 +357,93 @@ static UILabel *zs_dumper_caption(NSString *text) {
                                                 script[@"methods"], script[@"genericMethods"], script[@"strings"], script[@"metadata"], script[@"metadataMethods"], script[@"addresses"]]];
                 if (![script[@"registrationFound"] boolValue]) [strongSelf zs_dumperAppendLog:@"Metadata registration not located: generic methods and metadata slots were skipped."];
                 else if (![script[@"codeRegistrationFound"] boolValue]) [strongSelf zs_dumperAppendLog:@"Code registration not located: generic method pointers were skipped."];
+            }
+        }
+        [strongSelf zs_dumperSyncControls];
+    }];
+    [self zs_dumperSyncControls];
+}
+
+- (void)zs_dumperDiffTapped {
+    if ([ZSDumper isRunning]) return;
+    UIImpactFeedbackGenerator *haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleMedium];
+    [haptic impactOccurred];
+    UTType *ipaType = [UTType typeWithFilenameExtension:@"ipa" conformingToType:UTTypeData] ?: UTTypeData;
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[ipaType] asCopy:NO];
+    picker.allowsMultipleSelection = NO;
+    __weak typeof(self) weakSelf = self;
+    ZSDumperPickerDelegate *delegate = [ZSDumperPickerDelegate new];
+    delegate.picked = ^(NSURL *url) {
+        [weakSelf zs_dumperRunDiffWithIPAURL:url];
+    };
+    picker.delegate = delegate;
+    self.dumperUI[@"diffPickerDelegate"] = delegate;
+    UIViewController *presenter = zs_key_window().rootViewController;
+    while (presenter.presentedViewController) presenter = presenter.presentedViewController;
+    if (!presenter) {
+        [self zs_dumperAppendLog:@"No view controller available to present the file picker."];
+        return;
+    }
+    [presenter presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)zs_dumperRunDiffWithIPAURL:(NSURL *)url {
+    if ([ZSDumper isRunning]) return;
+    if ([url.pathExtension caseInsensitiveCompare:@"ipa"] != NSOrderedSame) {
+        [self zs_dumperAppendLog:@"Pick an .ipa file."];
+        return;
+    }
+    BOOL accessing = [url startAccessingSecurityScopedResource];
+    UITextView *log = self.dumperUI[@"log"];
+    log.text = @"";
+    UIProgressView *progressView = self.dumperUI[@"progress"];
+    UILabel *stageLabel = self.dumperUI[@"stage"];
+    progressView.progress = 0;
+    stageLabel.text = @"Starting";
+    [self zs_dumperAppendLog:[NSString stringWithFormat:@"Diffing against %@", url.lastPathComponent]];
+    __weak typeof(self) weakSelf = self;
+    [ZSDumper diffBinariesWithIPAAtURL:url
+                              progress:^(NSString *stage, double fraction) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            UIProgressView *bar = strongSelf.dumperUI[@"progress"];
+            UILabel *label = strongSelf.dumperUI[@"stage"];
+            label.text = stage;
+            [bar setProgress:(float)MAX(0, MIN(1, fraction)) animated:NO];
+        });
+    }
+                                   log:^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf zs_dumperAppendLog:line];
+        });
+    }
+                            completion:^(NSURL *outputURL, NSError *error) {
+        if (accessing) [url stopAccessingSecurityScopedResource];
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        UINotificationFeedbackGenerator *done = [UINotificationFeedbackGenerator new];
+        UILabel *label = strongSelf.dumperUI[@"stage"];
+        UIProgressView *bar = strongSelf.dumperUI[@"progress"];
+        if (error) {
+            [done notificationOccurred:UINotificationFeedbackTypeError];
+            label.text = @"Failed";
+            [strongSelf zs_dumperAppendLog:[NSString stringWithFormat:@"Failed: %@", error.localizedDescription]];
+        } else {
+            [done notificationOccurred:UINotificationFeedbackTypeSuccess];
+            label.text = @"Complete";
+            bar.progress = 1;
+            NSDictionary *diff = [ZSDumper lastSummary][@"diff"];
+            [strongSelf zs_dumperAppendLog:[NSString stringWithFormat:@"Saved to %@", outputURL.path]];
+            NSArray<NSArray<NSString *> *> *names = @[@[@"unityFramework", @"UnityFramework"], @[@"globalMetadata", @"global-metadata.dat"]];
+            for (NSArray<NSString *> *pair in names) {
+                NSDictionary *entry = [diff[pair[0]] isKindOfClass:[NSDictionary class]] ? diff[pair[0]] : nil;
+                if (!entry) continue;
+                if ([entry[@"changed"] boolValue]) {
+                    [strongSelf zs_dumperAppendLog:[NSString stringWithFormat:@"%@: +%@ added, -%@ removed", pair[1], entry[@"added"], entry[@"removed"]]];
+                } else {
+                    [strongSelf zs_dumperAppendLog:[NSString stringWithFormat:@"%@: unchanged", pair[1]]];
+                }
             }
         }
         [strongSelf zs_dumperSyncControls];

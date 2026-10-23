@@ -27,6 +27,10 @@ typedef void (^ZSDumpLog)(NSString *line);
                progress:(nullable ZSDumpProgress)progress
                     log:(nullable ZSDumpLog)log
              completion:(void (^ _Nullable)(NSURL * _Nullable outputURL, NSError * _Nullable error))completion;
++ (void)diffBinariesWithIPAAtURL:(NSURL *)ipaURL
+                        progress:(nullable ZSDumpProgress)progress
+                             log:(nullable ZSDumpLog)log
+                      completion:(void (^ _Nullable)(NSURL * _Nullable outputURL, NSError * _Nullable error))completion;
 + (void)cancel;
 + (BOOL)isRunning;
 + (nullable NSDictionary *)lastSummary;
