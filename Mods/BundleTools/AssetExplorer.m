@@ -7,6 +7,9 @@
 #import <unistd.h>
 #import <os/proc.h>
 #import <sys/stat.h>
+#import <dlfcn.h>
+#import "IL2CppIntrospection.h"
+#import "ZTweakLog.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -5324,7 +5327,993 @@ static ZSAssetExplorerVisual *ZSAEBuildTimelineVisual(ZSAEContext *context, ZSAE
     return visual;
 }
 
-static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourVisual(ZSAEContext *context, ZSAEObject *object, int64_t pathID, NSError **error) {
+#pragma mark - Engine preview
+
+static __thread BOOL gZSEThumbnailMode;
+
+typedef const char *(*ZSEClassStringFn)(void *);
+typedef const void *(*ZSEClassImageFn)(void *);
+typedef const char *(*ZSEImageNameFn)(const void *);
+typedef void *(*ZSEClassParentFn)(void *);
+typedef uint32_t (*ZSEGCNewFn)(void *, int32_t);
+typedef void (*ZSEGCFreeFn)(uint32_t);
+
+static ZSEClassStringFn zseClassName;
+static ZSEClassStringFn zseClassNamespace;
+static ZSEClassImageFn zseClassImage;
+static ZSEImageNameFn zseImageName;
+static ZSEClassParentFn zseClassParent;
+static ZSEGCNewFn zseGCNew;
+static ZSEGCFreeFn zseGCFree;
+
+static BOOL ZSEResolve(void) {
+    static BOOL done = NO;
+    static BOOL ok = NO;
+    if (done) return ok;
+    done = YES;
+    if (![IL2CppBridge resolveSymbols]) return NO;
+    zseClassName = (ZSEClassStringFn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_name");
+    zseClassNamespace = (ZSEClassStringFn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_namespace");
+    zseClassImage = (ZSEClassImageFn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_image");
+    zseImageName = (ZSEImageNameFn)dlsym(RTLD_DEFAULT, "il2cpp_image_get_name");
+    zseClassParent = (ZSEClassParentFn)dlsym(RTLD_DEFAULT, "il2cpp_class_get_parent");
+    zseGCNew = (ZSEGCNewFn)dlsym(RTLD_DEFAULT, "il2cpp_gchandle_new");
+    zseGCFree = (ZSEGCFreeFn)dlsym(RTLD_DEFAULT, "il2cpp_gchandle_free");
+    ok = zseClassName && zseClassNamespace && zseClassImage && zseImageName && zseClassParent && zseGCNew && zseGCFree;
+    return ok;
+}
+
+static void *ZSEClass(const char *namespaze, const char *name) {
+    static NSMutableDictionary<NSString *, NSValue *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *key = [NSString stringWithFormat:@"%s.%s", namespaze, name];
+    NSValue *hit = cache[key];
+    if (hit) return hit.pointerValue;
+    void *klass = [IL2CppBridge classNamed:name inNamespace:namespaze assemblyContains:"UnityEngine"];
+    cache[key] = [NSValue valueWithPointer:klass];
+    return klass;
+}
+
+static void *ZSEU(const char *name) {
+    return ZSEClass("UnityEngine", name);
+}
+
+static const void *ZSEMethod(void *klass, const char *name, NSArray<NSString *> *params) {
+    if (!klass || !name) return NULL;
+    static NSMutableDictionary<NSString *, NSValue *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    NSString *key = [NSString stringWithFormat:@"%p|%s|%@", klass, name, [params componentsJoinedByString:@","]];
+    NSValue *hit = cache[key];
+    if (hit) return hit.pointerValue;
+
+    const void *found = NULL;
+    void *cursor = klass;
+    for (int depth = 0; cursor && !found && depth < 16; depth++) {
+        void *iterator = NULL;
+        const void *method = NULL;
+        while ((method = [IL2CppBridge nextMethodOnClass:cursor iterator:&iterator])) {
+            const char *methodName = [IL2CppBridge nameOfMethod:method];
+            if (!methodName || strcmp(methodName, name) != 0) continue;
+            if ([IL2CppBridge paramCountOfMethod:method] != params.count) continue;
+            BOOL match = YES;
+            for (uint32_t i = 0; i < params.count && match; i++) {
+                NSString *expected = params[i];
+                if ([expected isEqualToString:@"*"]) continue;
+                const void *type = [IL2CppBridge paramTypeForMethod:method index:i];
+                void *paramClass = type ? [IL2CppBridge classFromType:type] : NULL;
+                const char *actual = paramClass ? zseClassName(paramClass) : NULL;
+                match = actual && strcmp(actual, expected.UTF8String) == 0;
+            }
+            if (match) {
+                found = method;
+                break;
+            }
+        }
+        cursor = zseClassParent(cursor);
+    }
+    cache[key] = [NSValue valueWithPointer:(void *)found];
+    return found;
+}
+
+static void *ZSEInvoke(const void *method, void *target, void **args, BOOL *threw) {
+    if (!method) {
+        if (threw) *threw = YES;
+        return NULL;
+    }
+    void *exception = NULL;
+    void *result = [IL2CppBridge invokeMethod:method onInstance:target args:args outException:&exception];
+    if (threw) *threw = exception != NULL;
+    return exception ? NULL : result;
+}
+
+static void *ZSECall(void *klass, const char *name, NSArray<NSString *> *types, void *target, void **args) {
+    return ZSEInvoke(ZSEMethod(klass, name, types), target, args, NULL);
+}
+
+static BOOL ZSECallOK(void *klass, const char *name, NSArray<NSString *> *types, void *target, void **args) {
+    const void *method = ZSEMethod(klass, name, types);
+    if (!method) return NO;
+    BOOL threw = NO;
+    ZSEInvoke(method, target, args, &threw);
+    return !threw;
+}
+
+static BOOL ZSEUnboxBool(void *boxed) {
+    return boxed ? *(uint8_t *)((uint8_t *)boxed + 16) != 0 : NO;
+}
+
+static void ZSESetBool(void *klass, const char *name, void *target, BOOL value) {
+    uint8_t flag = value ? 1 : 0;
+    void *args[] = { &flag };
+    ZSECallOK(klass, name, @[@"Boolean"], target, args);
+}
+
+static void ZSESetFloat(void *klass, const char *name, void *target, float value) {
+    void *args[] = { &value };
+    ZSECallOK(klass, name, @[@"Single"], target, args);
+}
+
+static void ZSESetInt(void *klass, const char *name, void *target, int32_t value) {
+    void *args[] = { &value };
+    ZSECallOK(klass, name, @[@"Int32"], target, args);
+}
+
+static void ZSESetEnum(void *klass, const char *name, void *target, int32_t value) {
+    void *args[] = { &value };
+    ZSECallOK(klass, name, @[@"*"], target, args);
+}
+
+static void ZSESetVector3(void *klass, const char *name, void *target, float x, float y, float z) {
+    float vector[3] = { x, y, z };
+    void *args[] = { vector };
+    ZSECallOK(klass, name, @[@"Vector3"], target, args);
+}
+
+static void ZSESetColor(void *klass, const char *name, void *target, float r, float g, float b, float a) {
+    float color[4] = { r, g, b, a };
+    void *args[] = { color };
+    ZSECallOK(klass, name, @[@"Color"], target, args);
+}
+
+static void ZSESetRef(void *klass, const char *name, NSString *typeName, void *target, void *value) {
+    void *args[] = { value };
+    ZSECallOK(klass, name, @[typeName], target, args);
+}
+
+static NSString *ZSEObjectName(void *object) {
+    void *string = ZSECall(ZSEU("Object"), "get_name", @[], object, NULL);
+    return string ? [IL2CppBridge nsStringFromIl2CppString:string] : nil;
+}
+
+static NSUInteger ZSEArrayLength(void *array) {
+    return array ? (NSUInteger)*(uint64_t *)((uint8_t *)array + 0x18) : 0;
+}
+
+static void *ZSEArrayItem(void *array, NSUInteger index) {
+    return *(void **)((uint8_t *)array + 0x20 + index * sizeof(void *));
+}
+
+static NSString *ZSEClassFullName(void *klass) {
+    if (!klass) return @"";
+    const char *name = zseClassName(klass);
+    const char *namespaze = zseClassNamespace(klass);
+    if (!name) return @"";
+    if (namespaze && namespaze[0]) return [NSString stringWithFormat:@"%s.%s", namespaze, name];
+    return [NSString stringWithUTF8String:name];
+}
+
+static BOOL ZSEKeepBehaviour(void *behaviour) {
+    void *klass = [IL2CppBridge classOfInstance:behaviour];
+    if (!klass) return NO;
+    const void *image = zseClassImage(klass);
+    const char *imageName = image ? zseImageName(image) : NULL;
+    if (imageName) {
+        static NSArray<NSString *> *allowed;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            allowed = @[@"UnityEngine", @"Unity.TextMeshPro", @"Unity.RenderPipelines", @"Unity.2D", @"spine-unity", @"RubyTextMeshPro", @"Coffee"];
+        });
+        NSString *imageString = [NSString stringWithUTF8String:imageName];
+        for (NSString *prefix in allowed) {
+            if ([imageString hasPrefix:prefix]) return YES;
+        }
+    }
+    static NSSet<NSString *> *bases;
+    static dispatch_once_t baseOnce;
+    dispatch_once(&baseOnce, ^{
+        bases = [NSSet setWithObjects:@"UnityEngine.UI.Graphic", @"TMPro.TMP_Text", @"Spine.Unity.SkeletonRenderer", nil];
+    });
+    void *cursor = zseClassParent(klass);
+    for (int depth = 0; cursor && depth < 24; depth++) {
+        if ([bases containsObject:ZSEClassFullName(cursor)]) return YES;
+        cursor = zseClassParent(cursor);
+    }
+    return NO;
+}
+
+static CGRect ZSEOpaqueBounds(CGImageRef image) {
+    size_t width = CGImageGetWidth(image);
+    size_t height = CGImageGetHeight(image);
+    if (width == 0 || height == 0) return CGRectNull;
+    NSMutableData *pixels = [NSMutableData dataWithLength:width * height * 4];
+    if (!pixels) return CGRectNull;
+    CGColorSpaceRef space = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(pixels.mutableBytes, width, height, 8, width * 4, space, kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(space);
+    if (!context) return CGRectNull;
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), image);
+    CGContextRelease(context);
+    const uint8_t *bytes = pixels.bytes;
+    size_t minX = width, minY = height, maxX = 0, maxY = 0;
+    BOOL any = NO;
+    for (size_t y = 0; y < height; y++) {
+        const uint8_t *row = bytes + y * width * 4;
+        for (size_t x = 0; x < width; x++) {
+            if (row[x * 4 + 3] <= 2) continue;
+            any = YES;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+    return any ? CGRectMake(minX, minY, maxX - minX + 1, maxY - minY + 1) : CGRectNull;
+}
+
+static NSArray<UIImage *> *ZSECropImages(NSArray<UIImage *> *images) {
+    CGRect union_ = CGRectNull;
+    for (UIImage *image in images) {
+        if (!image.CGImage) continue;
+        CGRect bounds = ZSEOpaqueBounds(image.CGImage);
+        if (CGRectIsNull(bounds)) continue;
+        union_ = CGRectIsNull(union_) ? bounds : CGRectUnion(union_, bounds);
+    }
+    if (CGRectIsNull(union_)) return nil;
+    CGFloat pad = 12;
+    UIImage *first = images.firstObject;
+    CGFloat width = CGImageGetWidth(first.CGImage);
+    CGFloat height = CGImageGetHeight(first.CGImage);
+    CGRect padded = CGRectInset(union_, -pad, -pad);
+    padded = CGRectIntersection(padded, CGRectMake(0, 0, width, height));
+    padded = CGRectIntegral(padded);
+    NSMutableArray<UIImage *> *result = [NSMutableArray array];
+    for (UIImage *image in images) {
+        CGImageRef cropped = image.CGImage ? CGImageCreateWithImageInRect(image.CGImage, padded) : NULL;
+        if (!cropped) continue;
+        [result addObject:[UIImage imageWithCGImage:cropped scale:1 orientation:UIImageOrientationUp]];
+        CGImageRelease(cropped);
+    }
+    return result.count > 0 ? result : nil;
+}
+
+@interface ZSEJob : NSObject
+@property (nonatomic, copy) NSArray<NSString *> *bundlePaths;
+@property (nonatomic, copy) NSArray<NSString *> *bundleNames;
+@property (nonatomic, copy) NSString *assetPath;
+@property (nonatomic, copy) NSString *rootName;
+@property (nonatomic, assign) BOOL userInterface;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *handles;
+@property (nonatomic, strong) NSMutableArray<NSValue *> *bundles;
+@property (nonatomic, strong) NSMutableArray<NSNumber *> *owned;
+@property (nonatomic, strong) NSMutableArray<NSString *> *log;
+@property (nonatomic, copy) NSArray<UIImage *> *images;
+@property (nonatomic, copy) NSArray<NSString *> *pageLabels;
+@property (nonatomic, strong) dispatch_semaphore_t done;
+@property (atomic, assign) BOOL cancelled;
+@property (nonatomic, assign) BOOL finished;
+@end
+
+@implementation ZSEJob
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _handles = [NSMutableArray array];
+        _bundles = [NSMutableArray array];
+        _owned = [NSMutableArray array];
+        _log = [NSMutableArray array];
+        _done = dispatch_semaphore_create(0);
+    }
+    return self;
+}
+
+- (void)note:(NSString *)line {
+    @synchronized (self.log) {
+        [self.log addObject:line];
+    }
+}
+
+- (NSArray<NSString *> *)logLines {
+    @synchronized (self.log) {
+        return [self.log copy];
+    }
+}
+
+- (void *)pin:(void *)object {
+    if (!object || !zseGCNew) return object;
+    uint32_t handle = zseGCNew(object, 0);
+    [self.handles addObject:@(handle)];
+    return object;
+}
+
+- (BOOL)runAndWait {
+    if ([NSThread isMainThread]) {
+        [self note:@"engine: preview must be requested off the main thread"];
+        return NO;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self start];
+    });
+    long timedOut = dispatch_semaphore_wait(self.done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(75 * NSEC_PER_SEC)));
+    if (timedOut) {
+        self.cancelled = YES;
+        [self note:@"engine: timed out waiting for Unity"];
+        return NO;
+    }
+    return self.images.count > 0;
+}
+
+- (void)start {
+    if (self.cancelled) {
+        [self finish];
+        return;
+    }
+    if (!ZSEResolve()) {
+        [self note:@"engine: il2cpp API unavailable"];
+        [self finish];
+        return;
+    }
+    if (!ZSEU("AssetBundle") || !ZSEU("GameObject") || !ZSEU("Camera")) {
+        [self note:@"engine: required Unity classes are missing"];
+        [self finish];
+        return;
+    }
+    [self loadBundleAtIndex:0];
+}
+
+- (void)finish {
+    if (self.finished) return;
+    self.finished = YES;
+    void *bundleClass = ZSEU("AssetBundle");
+    for (NSInteger i = (NSInteger)self.bundles.count - 1; i >= 0; i--) {
+        if (![self.owned[(NSUInteger)i] boolValue]) continue;
+        void *bundle = self.bundles[(NSUInteger)i].pointerValue;
+        if (!bundle) continue;
+        ZSESetBool(bundleClass, "Unload", bundle, YES);
+    }
+    for (NSNumber *handle in self.handles) {
+        if (zseGCFree) zseGCFree(handle.unsignedIntValue);
+    }
+    [self.handles removeAllObjects];
+    dispatch_semaphore_signal(self.done);
+}
+
+- (void)fail:(NSString *)message {
+    [self note:message];
+    [self finish];
+}
+
+- (void *)findLoadedBundleNamed:(NSString *)name {
+    void *bundleClass = ZSEU("AssetBundle");
+    void *array = ZSECall(bundleClass, "GetAllLoadedAssetBundles_Native", @[], NULL, NULL);
+    if (!array) return NULL;
+    [self pin:array];
+    NSUInteger count = ZSEArrayLength(array);
+    for (NSUInteger i = 0; i < count; i++) {
+        void *bundle = ZSEArrayItem(array, i);
+        if (!bundle) continue;
+        NSString *loadedName = ZSEObjectName(bundle);
+        if ([loadedName isEqualToString:name]) return [self pin:bundle];
+    }
+    return NULL;
+}
+
+- (void)pollOperation:(void *)operation deadline:(CFAbsoluteTime)deadline completion:(void (^)(BOOL ready))completion {
+    if (self.cancelled) {
+        completion(NO);
+        return;
+    }
+    void *klass = [IL2CppBridge classOfInstance:operation];
+    void *boxed = ZSECall(klass, "get_isDone", @[], operation, NULL);
+    if (ZSEUnboxBool(boxed)) {
+        completion(YES);
+        return;
+    }
+    if (CFAbsoluteTimeGetCurrent() > deadline) {
+        completion(NO);
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.04 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self pollOperation:operation deadline:deadline completion:completion];
+    });
+}
+
+- (void)loadBundleAtIndex:(NSUInteger)index {
+    if (self.cancelled) {
+        [self finish];
+        return;
+    }
+    if (index >= self.bundlePaths.count) {
+        [self loadAsset];
+        return;
+    }
+    NSString *path = self.bundlePaths[index];
+    NSString *name = self.bundleNames[index];
+    BOOL isTarget = index + 1 == self.bundlePaths.count;
+
+    void *loaded = name.length > 0 ? [self findLoadedBundleNamed:name] : NULL;
+    if (loaded) {
+        [self.bundles addObject:[NSValue valueWithPointer:loaded]];
+        [self.owned addObject:@NO];
+        [self note:[NSString stringWithFormat:@"engine: %@ already loaded by the game", name]];
+        [self loadBundleAtIndex:index + 1];
+        return;
+    }
+
+    void *bundleClass = ZSEU("AssetBundle");
+    void *pathString = [IL2CppBridge il2CppStringFromNSString:path];
+    void *args[] = { pathString };
+    void *request = ZSECall(bundleClass, "LoadFromFileAsync", @[@"String"], NULL, args);
+    if (!request) {
+        [self.bundles addObject:[NSValue valueWithPointer:NULL]];
+        [self.owned addObject:@NO];
+        if (isTarget) {
+            [self fail:@"engine: LoadFromFileAsync failed for the target bundle"];
+            return;
+        }
+        [self note:[NSString stringWithFormat:@"engine: LoadFromFileAsync failed for dependency %lu", (unsigned long)index]];
+        [self loadBundleAtIndex:index + 1];
+        return;
+    }
+    [self pin:request];
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 12;
+    [self pollOperation:request deadline:deadline completion:^(BOOL ready) {
+        void *bundle = NULL;
+        if (ready) {
+            void *requestClass = [IL2CppBridge classOfInstance:request];
+            bundle = ZSECall(requestClass, "get_assetBundle", @[], request, NULL);
+        }
+        if (bundle) {
+            [self pin:bundle];
+            [self.bundles addObject:[NSValue valueWithPointer:bundle]];
+            [self.owned addObject:@YES];
+        } else {
+            [self.bundles addObject:[NSValue valueWithPointer:NULL]];
+            [self.owned addObject:@NO];
+            [self note:[NSString stringWithFormat:@"engine: bundle %lu/%lu didn't load (%@)", (unsigned long)(index + 1), (unsigned long)self.bundlePaths.count, ready ? @"Unity refused it" : @"timed out"]];
+            if (isTarget) {
+                [self finish];
+                return;
+            }
+        }
+        [self loadBundleAtIndex:index + 1];
+    }];
+}
+
+- (void)loadAsset {
+    void *bundle = self.bundles.lastObject.pointerValue;
+    if (!bundle) {
+        [self fail:@"engine: target bundle unavailable"];
+        return;
+    }
+    void *bundleClass = ZSEU("AssetBundle");
+    void *nameString = [IL2CppBridge il2CppStringFromNSString:self.assetPath];
+    void *type = [IL2CppBridge reflectionTypeForClass:ZSEU("GameObject")];
+    void *args[] = { nameString, type };
+    void *request = ZSECall(bundleClass, "LoadAssetAsync", @[@"String", @"Type"], bundle, args);
+    if (!request) {
+        [self fail:@"engine: LoadAssetAsync failed"];
+        return;
+    }
+    [self pin:request];
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 20;
+    [self pollOperation:request deadline:deadline completion:^(BOOL ready) {
+        void *prefab = NULL;
+        if (ready) {
+            void *requestClass = [IL2CppBridge classOfInstance:request];
+            prefab = ZSECall(requestClass, "get_asset", @[], request, NULL);
+        }
+        if (!prefab) {
+            [self fail:[NSString stringWithFormat:@"engine: asset '%@' %@", self.assetPath, ready ? @"loaded as null" : @"timed out loading"]];
+            return;
+        }
+        [self pin:prefab];
+        [self renderPrefab:prefab];
+        [self finish];
+    }];
+}
+
+- (NSArray<NSValue *> *)componentsIn:(void *)gameObject typeName:(const char *)typeName inactive:(BOOL)inactive {
+    void *klass = ZSEU(typeName);
+    if (!klass || !gameObject) return @[];
+    void *type = [IL2CppBridge reflectionTypeForClass:klass];
+    uint8_t flag = inactive ? 1 : 0;
+    void *args[] = { type, &flag };
+    void *array = ZSECall(ZSEU("GameObject"), "GetComponentsInChildren", @[@"Type", @"Boolean"], gameObject, args);
+    if (!array) return @[];
+    [self pin:array];
+    NSUInteger count = ZSEArrayLength(array);
+    NSMutableArray<NSValue *> *items = [NSMutableArray arrayWithCapacity:count];
+    for (NSUInteger i = 0; i < count; i++) {
+        void *item = ZSEArrayItem(array, i);
+        if (item) [items addObject:[NSValue valueWithPointer:item]];
+    }
+    return items;
+}
+
+- (void *)newGameObjectNamed:(NSString *)name {
+    void *goClass = ZSEU("GameObject");
+    void *object = [IL2CppBridge newObjectForClass:goClass];
+    if (!object) return NULL;
+    [self pin:object];
+    void *nameString = [IL2CppBridge il2CppStringFromNSString:name];
+    void *args[] = { nameString };
+    BOOL threw = NO;
+    ZSEInvoke(ZSEMethod(goClass, ".ctor", @[@"String"]), object, args, &threw);
+    return threw ? NULL : object;
+}
+
+- (void *)addComponent:(const char *)typeName to:(void *)gameObject {
+    void *klass = ZSEU(typeName);
+    if (!klass || !gameObject) return NULL;
+    void *type = [IL2CppBridge reflectionTypeForClass:klass];
+    void *args[] = { type };
+    void *component = ZSECall(ZSEU("GameObject"), "AddComponent", @[@"Type"], gameObject, args);
+    return [self pin:component];
+}
+
+- (void *)transformOf:(void *)gameObject {
+    return [self pin:ZSECall(ZSEU("GameObject"), "get_transform", @[], gameObject, NULL)];
+}
+
+- (void)destroyImmediate:(void *)object {
+    if (!object) return;
+    uint8_t allow = 0;
+    void *args[] = { object, &allow };
+    ZSECall(ZSEU("Object"), "DestroyImmediate", @[@"Object", @"Boolean"], NULL, args);
+}
+
+- (NSData *)renderCamera:(void *)camera width:(int32_t)width height:(int32_t)height {
+    void *cameraClass = ZSEU("Camera");
+    void *textureClass = ZSEU("Texture2D");
+    void *rtClass = ZSEU("RenderTexture");
+    int32_t w = width, h = height, depth = 24;
+    void *rtArgs[] = { &w, &h, &depth };
+    void *rt = ZSECall(rtClass, "GetTemporary", @[@"Int32", @"Int32", @"Int32"], NULL, rtArgs);
+    if (!rt) return nil;
+    [self pin:rt];
+
+    ZSESetRef(cameraClass, "set_targetTexture", @"RenderTexture", camera, rt);
+    ZSECallOK(cameraClass, "Render", @[], camera, NULL);
+    ZSESetRef(rtClass, "set_active", @"RenderTexture", NULL, rt);
+
+    NSData *png = nil;
+    void *texture = [IL2CppBridge newObjectForClass:textureClass];
+    if (texture) {
+        [self pin:texture];
+        int32_t format = 4;
+        uint8_t mips = 0;
+        void *ctorArgs[] = { &w, &h, &format, &mips };
+        BOOL threw = NO;
+        ZSEInvoke(ZSEMethod(textureClass, ".ctor", @[@"Int32", @"Int32", @"TextureFormat", @"Boolean"]), texture, ctorArgs, &threw);
+        if (!threw) {
+            float rect[4] = { 0, 0, (float)w, (float)h };
+            int32_t zero = 0;
+            void *readArgs[] = { rect, &zero, &zero };
+            if (ZSECallOK(textureClass, "ReadPixels", @[@"Rect", @"Int32", @"Int32"], texture, readArgs)) {
+                void *encodeArgs[] = { texture };
+                void *bytes = ZSECall(ZSEU("ImageConversion"), "EncodeToPNG", @[@"Texture2D"], NULL, encodeArgs);
+                NSUInteger length = ZSEArrayLength(bytes);
+                if (bytes && length > 0 && length < (64u << 20)) png = [NSData dataWithBytes:(uint8_t *)bytes + 0x20 length:length];
+            }
+        }
+        [self destroyImmediate:texture];
+    }
+
+    ZSESetRef(rtClass, "set_active", @"RenderTexture", NULL, NULL);
+    ZSESetRef(cameraClass, "set_targetTexture", @"RenderTexture", camera, NULL);
+    void *releaseArgs[] = { rt };
+    ZSECallOK(rtClass, "ReleaseTemporary", @[@"RenderTexture"], NULL, releaseArgs);
+    return png;
+}
+
+- (BOOL)accumulateBoundsOf:(void *)root min:(float *)minimum max:(float *)maximum has3D:(BOOL *)has3D count:(NSUInteger *)count {
+    NSArray<NSValue *> *renderers = [self componentsIn:root typeName:"Renderer" inactive:NO];
+    void *rendererClass = ZSEU("Renderer");
+    for (NSValue *value in renderers) {
+        void *renderer = value.pointerValue;
+        void *boxed = ZSECall(rendererClass, "get_bounds", @[], renderer, NULL);
+        if (!boxed) continue;
+        const float *b = (const float *)((uint8_t *)boxed + 16);
+        float lo[3], hi[3];
+        BOOL valid = YES;
+        for (int axis = 0; axis < 3; axis++) {
+            float center = b[axis];
+            float extent = b[3 + axis];
+            if (!isfinite(center) || !isfinite(extent) || fabsf(center) > 1e5f || extent > 1e5f) valid = NO;
+            lo[axis] = center - extent;
+            hi[axis] = center + extent;
+        }
+        if (!valid) continue;
+        for (int axis = 0; axis < 3; axis++) {
+            if (lo[axis] < minimum[axis]) minimum[axis] = lo[axis];
+            if (hi[axis] > maximum[axis]) maximum[axis] = hi[axis];
+        }
+        (*count)++;
+        NSString *className = ZSEClassFullName([IL2CppBridge classOfInstance:renderer]);
+        if ([className isEqualToString:@"UnityEngine.MeshRenderer"] || [className isEqualToString:@"UnityEngine.SkinnedMeshRenderer"]) *has3D = YES;
+    }
+    return *count > 0;
+}
+
+- (void)simulate:(NSArray<NSValue *> *)systems time:(float)time {
+    void *psClass = ZSEU("ParticleSystem");
+    for (NSValue *value in systems) {
+        float t = time;
+        uint8_t children = 0, restart = 1, fixed = 1;
+        void *args[] = { &t, &children, &restart, &fixed };
+        ZSECall(psClass, "Simulate", @[@"Single", @"Boolean", @"Boolean", @"Boolean"], value.pointerValue, args);
+    }
+}
+
+- (void)renderPrefab:(void *)prefab {
+    void *goClass = ZSEU("GameObject");
+    void *cameraClass = ZSEU("Camera");
+    void *transformClass = ZSEU("Transform");
+    void *objectClass = ZSEU("Object");
+    void *componentClass = ZSEU("Component");
+    void *canvasClass = ZSEU("Canvas");
+    if (!goClass || !cameraClass || !transformClass || !objectClass || !componentClass) {
+        [self note:@"engine: core Unity classes missing"];
+        return;
+    }
+
+    void *root = [self newGameObjectNamed:@"ZSPreviewRoot"];
+    if (!root) {
+        [self note:@"engine: couldn't create the preview root"];
+        return;
+    }
+    void *cameraObject = NULL;
+    void *lightObject = NULL;
+
+    ZSESetBool(goClass, "SetActive", root, NO);
+    void *rootTransform = [self transformOf:root];
+    void *parentTransform = rootTransform;
+    void *canvasComponent = NULL;
+
+    if (self.userInterface && canvasClass) {
+        void *canvasObject = [self newGameObjectNamed:@"ZSPreviewCanvas"];
+        canvasComponent = canvasObject ? [self addComponent:"Canvas" to:canvasObject] : NULL;
+        if (canvasObject && canvasComponent) {
+            void *canvasTransform = [self transformOf:canvasObject];
+            uint8_t keep = 0;
+            void *parentArgs[] = { rootTransform, &keep };
+            ZSECall(transformClass, "SetParent", @[@"Transform", @"Boolean"], canvasTransform, parentArgs);
+            parentTransform = canvasTransform;
+        }
+    }
+
+    uint8_t worldSpace = 0;
+    void *instantiateArgs[] = { prefab, parentTransform, &worldSpace };
+    void *instance = ZSECall(objectClass, "Instantiate", @[@"Object", @"Transform", @"Boolean"], NULL, instantiateArgs);
+    if (!instance) {
+        [self note:@"engine: Instantiate returned null"];
+        [self destroyImmediate:root];
+        return;
+    }
+    [self pin:instance];
+
+    NSUInteger removed = 0;
+    NSUInteger kept = 0;
+    NSArray<NSValue *> *behaviours = [self componentsIn:root typeName:"MonoBehaviour" inactive:YES];
+    for (NSValue *value in behaviours) {
+        void *behaviour = value.pointerValue;
+        if (ZSEKeepBehaviour(behaviour)) {
+            kept++;
+            continue;
+        }
+        [self destroyImmediate:behaviour];
+        removed++;
+    }
+    NSUInteger strayCount = 0;
+    for (NSString *typeName in @[@"Camera", @"AudioSource", @"AudioListener"]) {
+        NSArray<NSValue *> *strays = [self componentsIn:root typeName:typeName.UTF8String inactive:YES];
+        for (NSValue *value in strays) {
+            [self destroyImmediate:value.pointerValue];
+            strayCount++;
+        }
+    }
+    [self note:[NSString stringWithFormat:@"engine: kept %lu scripts, removed %lu game scripts and %lu cameras/audio", (unsigned long)kept, (unsigned long)removed, (unsigned long)strayCount]];
+
+    NSArray<NSValue *> *transforms = [self componentsIn:root typeName:"Transform" inactive:YES];
+    for (NSValue *value in transforms) {
+        void *owner = ZSECall(componentClass, "get_gameObject", @[], value.pointerValue, NULL);
+        if (owner) ZSESetInt(goClass, "set_layer", owner, 30);
+    }
+
+    ZSESetBool(goClass, "SetActive", root, YES);
+
+    NSArray<NSValue *> *systems = [self componentsIn:root typeName:"ParticleSystem" inactive:NO];
+
+    cameraObject = [self newGameObjectNamed:@"ZSPreviewCamera"];
+    void *camera = cameraObject ? [self addComponent:"Camera" to:cameraObject] : NULL;
+    if (!camera) {
+        [self note:@"engine: couldn't create the preview camera"];
+        [self destroyImmediate:root];
+        [self destroyImmediate:cameraObject];
+        return;
+    }
+    void *cameraTransform = [self transformOf:cameraObject];
+    ZSESetEnum(cameraClass, "set_clearFlags", camera, 2);
+    ZSESetColor(cameraClass, "set_backgroundColor", camera, 0, 0, 0, 0);
+    ZSESetInt(cameraClass, "set_cullingMask", camera, (int32_t)(1u << 30));
+    ZSESetBool(cameraClass, "set_allowHDR", camera, NO);
+    ZSESetBool(cameraClass, "set_allowMSAA", camera, NO);
+    ZSESetBool(cameraClass, "set_enabled", camera, NO);
+
+    void *lightClass = ZSEU("Light");
+    lightObject = lightClass ? [self newGameObjectNamed:@"ZSPreviewLight"] : NULL;
+    void *light = lightObject ? [self addComponent:"Light" to:lightObject] : NULL;
+    if (light) {
+        ZSESetEnum(lightClass, "set_type", light, 1);
+        ZSESetFloat(lightClass, "set_intensity", light, 1.2f);
+        ZSESetVector3(transformClass, "set_eulerAngles", [self transformOf:lightObject], 40, -30, 0);
+    }
+
+    NSMutableArray<NSData *> *frames = [NSMutableArray array];
+    NSMutableArray<NSString *> *labels = [NSMutableArray array];
+    int32_t width = 1024, height = 1024;
+
+    if (self.userInterface && canvasComponent) {
+        width = 1920;
+        height = 1080;
+        ZSESetEnum(canvasClass, "set_renderMode", canvasComponent, 1);
+        ZSESetRef(canvasClass, "set_worldCamera", @"Camera", canvasComponent, camera);
+        ZSESetFloat(canvasClass, "set_planeDistance", canvasComponent, 10);
+        ZSESetBool(cameraClass, "set_orthographic", camera, YES);
+        ZSESetFloat(cameraClass, "set_orthographicSize", camera, 5);
+        ZSESetFloat(cameraClass, "set_nearClipPlane", camera, 0.1f);
+        ZSESetFloat(cameraClass, "set_farClipPlane", camera, 100);
+        ZSESetVector3(transformClass, "set_position", cameraTransform, 0, 0, -10);
+        ZSESetVector3(transformClass, "set_eulerAngles", cameraTransform, 0, 0, 0);
+        ZSECall(canvasClass, "ForceUpdateCanvases", @[], NULL, NULL);
+        NSData *png = [self renderCamera:camera width:width height:height];
+        if (png) {
+            [frames addObject:png];
+            [labels addObject:@"Render"];
+        }
+    } else {
+        float minimum[3] = { INFINITY, INFINITY, INFINITY };
+        float maximum[3] = { -INFINITY, -INFINITY, -INFINITY };
+        BOOL has3D = NO;
+        NSUInteger rendererCount = 0;
+        NSArray<NSNumber *> *times = systems.count > 0 ? @[@0.5, @1.5, @3.0] : @[@0];
+        for (NSNumber *time in times) {
+            if (systems.count > 0) [self simulate:systems time:time.floatValue];
+            [self accumulateBoundsOf:root min:minimum max:maximum has3D:&has3D count:&rendererCount];
+        }
+        if (rendererCount == 0) {
+            [self note:@"engine: the prefab has no renderers"];
+        } else {
+            float center[3], radius = 0;
+            for (int axis = 0; axis < 3; axis++) {
+                center[axis] = (minimum[axis] + maximum[axis]) * 0.5f;
+                float half = (maximum[axis] - minimum[axis]) * 0.5f;
+                radius += half * half;
+            }
+            radius = MAX(sqrtf(radius), 0.25f);
+            float fov = 25;
+            float distance = radius / sinf(fov * (float)M_PI / 360.0f) * 1.1f;
+            ZSESetFloat(cameraClass, "set_fieldOfView", camera, fov);
+            ZSESetFloat(cameraClass, "set_nearClipPlane", camera, MAX(distance - radius * 2, 0.01f));
+            ZSESetFloat(cameraClass, "set_farClipPlane", camera, distance + radius * 2);
+            NSArray<NSNumber *> *sides = (has3D && systems.count == 0) ? @[@1, @-1] : @[@1];
+            for (NSNumber *side in sides) {
+                float direction = side.floatValue;
+                ZSESetVector3(transformClass, "set_position", cameraTransform, center[0], center[1], center[2] - distance * direction);
+                ZSESetVector3(transformClass, "set_eulerAngles", cameraTransform, 0, direction > 0 ? 0 : 180, 0);
+                for (NSNumber *time in times) {
+                    if (systems.count > 0) [self simulate:systems time:time.floatValue];
+                    NSData *png = [self renderCamera:camera width:width height:height];
+                    if (!png) continue;
+                    [frames addObject:png];
+                    if (systems.count > 0) [labels addObject:[NSString stringWithFormat:@"t = %.1fs", time.floatValue]];
+                    else [labels addObject:direction > 0 ? @"Render" : @"Back"];
+                }
+            }
+        }
+    }
+
+    [self destroyImmediate:cameraObject];
+    [self destroyImmediate:lightObject];
+    [self destroyImmediate:root];
+
+    if (frames.count == 0) {
+        [self note:@"engine: the camera produced no image"];
+        return;
+    }
+    NSMutableArray<UIImage *> *decoded = [NSMutableArray array];
+    for (NSData *png in frames) {
+        UIImage *image = [UIImage imageWithData:png];
+        if (image) [decoded addObject:image];
+    }
+    NSArray<UIImage *> *cropped = decoded.count == frames.count ? ZSECropImages(decoded) : nil;
+    if (cropped.count != labels.count) {
+        [self note:@"engine: the render was empty"];
+        return;
+    }
+    self.images = cropped;
+    self.pageLabels = labels;
+    [self note:[NSString stringWithFormat:@"engine: rendered %lu page%@", (unsigned long)cropped.count, cropped.count == 1 ? @"" : @"s"]];
+}
+
+@end
+
+static ZSAEObject *ZSEBundleObject(ZSAEContext *context, NSString *path) {
+    ZSAESession *session = context.sessions[path];
+    if (!session) {
+        session = ZSAEOpenSession(path, NULL);
+        if (!session) return nil;
+        context.sessions[path] = session;
+    }
+    NSArray<ZSAssetExplorerAsset *> *assets = nil;
+    if (!ZSAEParseSerializedFile(session.serializedData, &assets, INT64_MIN, NULL, NULL, NULL, NULL, NULL)) return nil;
+    for (ZSAssetExplorerAsset *asset in assets) {
+        if (asset.classID == 142) return ZSAEReadObject(session, asset.pathID, NULL);
+    }
+    return nil;
+}
+
+static NSString *ZSEPathForCAB(ZSAEContext *context, NSString *cab) {
+    if (!context.cachedBundles) context.cachedBundles = [ZSAssetExplorer cachedBundles:nil] ?: @[];
+    for (ZSAssetExplorerBundle *candidate in context.cachedBundles) {
+        if ([candidate.cabIdentifier caseInsensitiveCompare:cab] == NSOrderedSame) return candidate.filePath;
+    }
+    return nil;
+}
+
+static void ZSECollectBundles(ZSAEContext *context, NSString *path, NSMutableArray<NSString *> *ordered, NSMutableSet<NSString *> *seen, NSMutableDictionary<NSString *, NSString *> *names) {
+    if ([seen containsObject:path] || ordered.count >= 64) return;
+    [seen addObject:path];
+    ZSAEObject *bundleObject = ZSEBundleObject(context, path);
+    names[path] = ZSAEString(bundleObject.fields[@"m_Name"]) ?: @"";
+    for (NSString *external in bundleObject.externals) {
+        NSString *dependency = ZSEPathForCAB(context, external.lastPathComponent);
+        if (dependency.length > 0) ZSECollectBundles(context, dependency, ordered, seen, names);
+    }
+    [ordered addObject:path];
+}
+
+static ZSEJob *ZSEPlanJob(ZSAEContext *context, ZSAEObject *object, NSMutableArray<NSString *> *log) {
+    NSString *bundlePath = object.session.bundlePath;
+    if (bundlePath.length == 0) {
+        [log addObject:@"engine: the bundle path is unknown"];
+        return nil;
+    }
+    ZSAEObject *gameObject = ZSAEResolvePPtr(context, object, object.fields[@"m_GameObject"], NULL);
+    if (!gameObject) {
+        [log addObject:@"engine: the owner GameObject couldn't be read"];
+        return nil;
+    }
+
+    ZSAEObject *transform = nil;
+    for (id entry in ZSAEArray(gameObject.fields[@"m_Component"])) {
+        NSDictionary *pair = ZSAEDict(entry);
+        id pointer = pair[@"component"] ?: pair[@"second"];
+        if (!pointer) continue;
+        ZSAEObject *component = ZSAEResolvePPtr(context, gameObject, pointer, NULL);
+        if (component && (component.classID == 4 || component.classID == 224)) {
+            transform = component;
+            break;
+        }
+    }
+    if (!transform) {
+        [log addObject:@"engine: the owner GameObject has no Transform"];
+        return nil;
+    }
+
+    ZSAEObject *rootTransform = transform;
+    for (int depth = 0; depth < 64; depth++) {
+        NSDictionary *father = ZSAEDict(rootTransform.fields[@"m_Father"]);
+        if (!father || ZSAEInt(father[@"m_PathID"]) == 0) break;
+        ZSAEObject *parent = ZSAEResolvePPtr(context, rootTransform, father, NULL);
+        if (!parent) break;
+        rootTransform = parent;
+    }
+    ZSAEObject *rootObject = ZSAEResolvePPtr(context, rootTransform, rootTransform.fields[@"m_GameObject"], NULL);
+    if (!rootObject || rootObject.session != object.session) {
+        [log addObject:@"engine: the prefab root couldn't be found in this bundle"];
+        return nil;
+    }
+    NSString *rootName = ZSAEString(rootObject.fields[@"m_Name"]) ?: @"";
+
+    ZSAEObject *bundleObject = ZSEBundleObject(context, bundlePath);
+    if (!bundleObject) {
+        [log addObject:@"engine: the bundle's AssetBundle object couldn't be read"];
+        return nil;
+    }
+    NSString *assetPath = nil;
+    NSString *nameMatch = nil;
+    for (id entry in ZSAEArray(bundleObject.fields[@"m_Container"])) {
+        NSDictionary *pair = ZSAEDict(entry);
+        NSString *key = ZSAEString(pair[@"first"]);
+        NSDictionary *asset = ZSAEDict(ZSAEDict(pair[@"second"])[@"asset"]);
+        if (!key) continue;
+        if (ZSAEInt(asset[@"m_FileID"]) == 0 && ZSAEInt(asset[@"m_PathID"]) == rootObject.pathID) {
+            assetPath = key;
+            break;
+        }
+        if (!nameMatch && rootName.length > 0 && [key.lastPathComponent.stringByDeletingPathExtension caseInsensitiveCompare:rootName] == NSOrderedSame && [key.pathExtension.lowercaseString isEqualToString:@"prefab"]) {
+            nameMatch = key;
+        }
+    }
+    if (!assetPath && nameMatch) {
+        assetPath = nameMatch;
+        [log addObject:@"engine: root matched to the container by name"];
+    }
+    if (!assetPath) {
+        [log addObject:[NSString stringWithFormat:@"engine: root '%@' isn't a container entry (nested prefab?)", rootName]];
+        return nil;
+    }
+
+    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary dictionary];
+    ZSECollectBundles(context, bundlePath, ordered, [NSMutableSet set], names);
+    if (ordered.count == 0 || ![ordered.lastObject isEqualToString:bundlePath]) {
+        [ordered removeObject:bundlePath];
+        [ordered addObject:bundlePath];
+    }
+    NSMutableArray<NSString *> *orderedNames = [NSMutableArray array];
+    for (NSString *path in ordered) [orderedNames addObject:names[path] ?: @""];
+
+    ZSEJob *job = [ZSEJob new];
+    job.bundlePaths = ordered;
+    job.bundleNames = orderedNames;
+    job.assetPath = assetPath;
+    job.rootName = rootName;
+    job.userInterface = rootTransform.classID == 224;
+    [log addObject:[NSString stringWithFormat:@"engine: %lu bundle%@ to load, asset %@", (unsigned long)ordered.count, ordered.count == 1 ? @"" : @"s", assetPath]];
+    return job;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildEngineMonoBehaviourVisual(ZSAEContext *context, ZSAEObject *object, NSString **outLog) {
+    if (gZSEThumbnailMode) return nil;
+    NSDictionary *ownerPointer = ZSAEDict(object.fields[@"m_GameObject"]);
+    if (!ownerPointer || ZSAEInt(ownerPointer[@"m_PathID"]) == 0) return nil;
+
+    NSMutableArray<NSString *> *log = [NSMutableArray array];
+    ZSEJob *job = ZSEPlanJob(context, object, log);
+    if (!job) {
+        if (outLog) *outLog = ZSAEDebugJoin(log);
+        return nil;
+    }
+    BOOL ok = [job runAndWait];
+    [log addObjectsFromArray:[job logLines]];
+    NSString *logText = ZSAEDebugJoin(log);
+    ZLog(@"[AssetExplorer] %@", logText);
+    if (!ok) {
+        if (outLog) *outLog = logText;
+        return nil;
+    }
+
+    ZSAEObject *script = ZSAEResolvePPtr(context, object, object.fields[@"m_Script"], NULL);
+    NSString *className = ZSAEString(script.fields[@"m_ClassName"]);
+    NSArray<UIImage *> *images = job.images;
+    ZSAssetExplorerVisual *visual = [ZSAssetExplorerVisual new];
+    visual.name = job.rootName;
+    visual.summary = [NSString stringWithFormat:@"%@  •  %@  •  engine render", className.length > 0 ? className : @"MonoBehaviour", job.rootName.length > 0 ? job.rootName : @"prefab"];
+    visual.pageLabels = job.pageLabels;
+    visual.debugText = logText;
+    visual.imageProvider = ^UIImage *(NSInteger page, NSError **providerError) {
+        if (page < 0 || page >= (NSInteger)images.count) return nil;
+        return images[(NSUInteger)page];
+    };
+    return visual;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourStaticVisual(ZSAEContext *context, ZSAEObject *object, int64_t pathID, NSError **error) {
     NSDictionary *fields = object.fields;
     ZSAssetExplorerVisual *timelineVisual = ZSAEBuildTimelineVisual(context, object, pathID);
     if (timelineVisual) return timelineVisual;
@@ -5380,6 +6369,15 @@ static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourVisual(ZSAEContext *context,
         return ZSAEImageFromRGBA(rgba, record.width, record.height);
     };
     return visual;
+}
+
+static ZSAssetExplorerVisual *ZSAEBuildMonoBehaviourVisual(ZSAEContext *context, ZSAEObject *object, int64_t pathID, NSError **error) {
+    NSString *engineLog = nil;
+    ZSAssetExplorerVisual *engineVisual = ZSAEBuildEngineMonoBehaviourVisual(context, object, &engineLog);
+    if (engineVisual) return engineVisual;
+    ZSAssetExplorerVisual *fallback = ZSAEBuildMonoBehaviourStaticVisual(context, object, pathID, error);
+    if (fallback && engineLog.length > 0 && fallback.debugText.length == 0) fallback.debugText = engineLog;
+    return fallback;
 }
 
 static BOOL ZSAEIsImageClass(int32_t classID) {
@@ -7835,9 +8833,12 @@ static NSData *ZSAEScanIndexRecords(NSString *path) {
         ZSAssetExplorerTexture *texture = [self zs_textureForPathID:pathID inBundleAtPath:path maxDimension:maxDimension error:error];
         image = texture.image;
     } else {
+        gZSEThumbnailMode = YES;
         ZSAssetExplorerVisual *visual = [self visualForPathID:pathID classID:classID inBundleAtPath:path error:error];
-        if (!visual || visual.text.length > 0) return nil;
-        image = [visual imageAtPage:0 error:error];
+        BOOL usable = visual && visual.text.length == 0;
+        if (usable) image = [visual imageAtPage:0 error:error];
+        gZSEThumbnailMode = NO;
+        if (!usable) return nil;
     }
     if (!image) return nil;
     CGFloat longest = MAX(image.size.width, image.size.height);
