@@ -18,24 +18,12 @@ TARGET_HEX = [
     "35fffc48940000009000001339786a683707fc28900000009100000094000000"
     "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08"
     "f9400100b5fffb4094000000",
-    "d10183ffa90167faa9025ff8a90357f6a9044ff4a9057bfd910003fdaa0203f3"
-    "aa0103f4900000153954bea8370002a89000000891000108aa0003f6aa0803e0"
-    "9400000090000000910000009400000090000000910000009400000090000000"
-    "9100000094000000900000009100000094000000aa1603e0528000283914bea8"
-    "b4000a40d280000194000000b40009e090000017910002f79000001891000318"
-    "900000199100033990000016910002d6f9400008a95b8509d63f0120aa0003f5"
-    "b9000ff4f94002e0910003e194000000aa0003e2f9400300aa1503e1aa1303e3"
-    "d280000494000000f9400328b940e50934000389d280000194000000f94002c0"
-    "b940e408340004089000001339786a6836000428f94002c0b940e408340004c8"
-    "f9405c08f9400100b40005009000000891000108f9400101d2800002d2800003"
-    "94000000a9457bfda9444ff4a94357f6a9425ff8a94167fa910003ffd65f03c0"
-    "aa0003f3aa0803e094000000aa1303e0d280000194000000f94002c0b940e408"
-    "35fffc48940000009000001339786a683707fc28900000009100000094000000"
-    "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08"
-    "f9400100b5fffb4094000000",
 ]
 
 SITE_INDEX = 80
+ANCHOR_AT = 1
+ANCHOR_LEN = 4
+MAX_MISMATCH = 6
 NOP = 0xD503201F
 NOP_BYTES = struct.pack("<I", NOP)
 ARM64 = 0x0100000C
@@ -53,6 +41,8 @@ def mask_word(w):
     if (w & 0x9F000000) == 0x90000000:
         return w & 0x9F00001F
     if (w & 0xFF800000) == 0x91000000:
+        return w & 0xFFC003FF
+    if (w & 0x3B000000) == 0x39000000:
         return w & 0xFFC003FF
     return w
 
@@ -93,34 +83,30 @@ def text_range(buf):
 
 
 def find_sites(buf, start, size):
-    targets = [hex_words(h) for h in TARGET_HEX]
-    masked = [[mask_word(w) for w in t] for t in targets]
-    length = len(targets[0])
+    fp = hex_words(TARGET_HEX[0])
+    masked = [mask_word(w) for w in fp]
+    length = len(fp)
     end = start + size - (size % 4)
-    hits = [[] for _ in targets]
-    anchors = [struct.pack("<I", t[0]) for t in targets]
-    for t, anchor in enumerate(anchors):
-        pos = start
-        while True:
-            pos = buf.find(anchor, pos, end)
-            if pos < 0:
-                break
-            if (pos - start) % 4 != 0 or pos + length * 4 > end:
-                pos += 1
-                continue
-            words = struct.unpack_from("<%dI" % length, buf, pos)
-            fp = masked[t]
-            ok = True
-            for k in range(length):
-                if k == SITE_INDEX:
-                    continue
-                if mask_word(words[k]) != fp[k]:
-                    ok = False
+    anchor = struct.pack("<I", fp[ANCHOR_AT])
+    hits = []
+    pos = start
+    while True:
+        pos = buf.find(anchor, pos + 1 if pos > start else start, end)
+        if pos < 0:
+            break
+        base = pos - ANCHOR_AT * 4
+        if base < start or (base - start) % 4 != 0 or base + length * 4 > end:
+            continue
+        words = struct.unpack_from("<%dI" % length, buf, base)
+        miss = 0
+        for k in range(length):
+            if k != SITE_INDEX and mask_word(words[k]) != masked[k]:
+                miss += 1
+                if miss > MAX_MISMATCH:
                     break
-            if ok:
-                hits[t].append((pos + SITE_INDEX * 4, words[SITE_INDEX]))
-            pos += 4
-    return hits
+        if miss <= MAX_MISMATCH:
+            hits.append((base + SITE_INDEX * 4, words[SITE_INDEX]))
+    return [hits]
 
 
 def main():
@@ -138,20 +124,17 @@ def main():
             patches = []
             already = 0
             status = "missing"
-            for h in hits:
-                if not h:
-                    continue
-                if len(h) > 1:
-                    status = "ambiguous"
-                    continue
-                offset, word = h[0]
-                if word == NOP:
-                    already += 1
-                    continue
-                if word >> 26 != BL_OPCODE:
-                    status = "unexpected"
-                    continue
-                patches.append(offset)
+            found = hits[0]
+            if len(found) > 4:
+                status = "ambiguous"
+            else:
+                for offset, word in found:
+                    if word == NOP:
+                        already += 1
+                    elif word >> 26 != BL_OPCODE:
+                        status = "unexpected"
+                    else:
+                        patches.append(offset)
             for offset in patches:
                 buf[offset:offset + 4] = NOP_BYTES
             buf.flush()

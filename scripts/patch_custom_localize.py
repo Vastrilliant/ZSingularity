@@ -15,6 +15,9 @@ FINGERPRINT_HEX = (
 )
 
 SITE_INDEX = 23
+ANCHOR_AT = 1
+ANCHOR_LEN = 3
+MAX_MISMATCH = 6
 GETTER_WORDS = 60
 ICALL_ADRP_INDEX = 26
 ICALL_ADD_INDEX = 27
@@ -33,7 +36,7 @@ def mask_word(w):
         return w & 0x9F00001F
     if (w & 0xFF800000) == 0x91000000:
         return w & 0xFFC003FF
-    if (w & 0x3F000000) == 0x39000000:
+    if (w & 0x3B000000) == 0x39000000:
         return w & 0xFFC003FF
     return w
 
@@ -79,28 +82,33 @@ def text_segment(buf):
 
 def find_sites(buf, seg, fingerprint):
     length = len(fingerprint)
-    anchor = struct.pack("<4I", *fingerprint[:4])
+    anchor = struct.pack("<%dI" % ANCHOR_LEN, *fingerprint[ANCHOR_AT:ANCHOR_AT + ANCHOR_LEN])
     start = seg["start"]
     end = start + seg["size"] - (seg["size"] % 4)
-    hits = []
+    found = []
     pos = start
     while True:
         pos = buf.find(anchor, pos, end)
         if pos < 0:
             break
-        if (pos - start) % 4 != 0 or pos + length * 4 > end:
+        base = pos - ANCHOR_AT * 4
+        if base < start or (pos - start) % 4 != 0 or base + length * 4 > end:
             pos += 1
             continue
-        words = struct.unpack_from("<%dI" % length, buf, pos)
-        ok = True
-        for k in range(4, length):
+        words = struct.unpack_from("<%dI" % length, buf, base)
+        miss = 0
+        for k in range(length):
             if mask_word(words[k]) != fingerprint[k]:
-                ok = False
-                break
-        if ok:
-            hits.append(pos)
+                miss += 1
+                if miss > MAX_MISMATCH:
+                    break
+        if miss <= MAX_MISMATCH:
+            found.append((miss, base))
         pos += 4
-    return hits
+    if not found:
+        return []
+    best = min(m for m, _ in found)
+    return [b for m, b in found if m == best]
 
 
 def bl_target(buf, site):

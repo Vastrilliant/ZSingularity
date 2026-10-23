@@ -94,7 +94,7 @@ function maskWord(w) {
   if (top === 37 || top === 5) return (w & 0xfc000000) >>> 0;
   if (((w & 0x9f000000) >>> 0) === 0x90000000) return (w & 0x9f00001f) >>> 0;
   if (((w & 0xff800000) >>> 0) === 0x91000000) return (w & 0xffc003ff) >>> 0;
-  if (((w & 0x3f000000) >>> 0) === 0x39000000) return (w & 0xffc003ff) >>> 0;
+  if (((w & 0x3b000000) >>> 0) === 0x39000000) return (w & 0xffc003ff) >>> 0;
   return w >>> 0;
 }
 
@@ -143,35 +143,42 @@ async function findPersistentGetter(read, range, getter) {
   return found;
 }
 
-function matchAt(m, i, fp, wild) {
-  for (let k = 1; k < fp.length; k++) {
-    if (wild && wild.includes(k)) continue;
-    if (m[i + k] !== fp[k]) return false;
-  }
-  return true;
+function tolFor(len) {
+  return Math.min(6, Math.floor(len / 16));
 }
 
 async function scanAll(read, range, specs, onProgress) {
-  const hits = specs.map(() => []);
+  const raw = specs.map(() => []);
   const longest = Math.max(...specs.map((s) => s.fp.length));
   const end = range.start + (range.size - (range.size % 4));
   for (let pos = range.start; pos + 4 <= end; pos += PIECE) {
     const len = Math.min(PIECE + longest * 4, end - pos);
-    const raw = await read(pos, len);
-    const u = wordsOf(raw);
+    const buf = await read(pos, len);
+    const u = wordsOf(buf);
     const m = new Uint32Array(u.length);
     for (let i = 0; i < u.length; i++) m[i] = maskWord(u[i]);
     const lim = Math.min(PIECE >> 2, u.length);
     for (let i = 0; i < lim; i++) {
       for (let s = 0; s < specs.length; s++) {
         const sp = specs[s];
-        if (m[i] !== sp.fp[0] || i + sp.fp.length > m.length) continue;
-        if (matchAt(m, i, sp.fp, sp.wild)) hits[s].push(pos + i * 4);
+        const fp = sp.fp;
+        if (i + fp.length > m.length) continue;
+        if (m[i + 1] !== fp[1] || m[i + 2] !== fp[2]) continue;
+        let miss = 0;
+        for (let k = 0; k < fp.length; k++) {
+          if (sp.wild && sp.wild.includes(k)) continue;
+          if (m[i + k] !== fp[k] && ++miss > sp.tol) break;
+        }
+        if (miss <= sp.tol) raw[s].push({ offset: pos + i * 4, miss });
       }
     }
     if (onProgress) onProgress(Math.min(1, (pos - range.start + len) / range.size));
   }
-  return hits;
+  return raw.map((h) => {
+    if (!h.length) return [];
+    const best = Math.min(...h.map((x) => x.miss));
+    return h.filter((x) => x.miss === best).map((x) => x.offset);
+  });
 }
 
 const enc = {
@@ -293,14 +300,17 @@ export async function findLocalizeSite(read, onProgress) {
     return w >>> 26 === 37 ? off + signExtend(w & 0x3ffffff, 26) * 4 : null;
   };
   const specs = [
-    { id: "gd", fp: Array.from(hexWords(FINGERPRINT_HEX), maskWord) },
-    { id: "gc", fp: Array.from(hexWords(FP_GC), maskWord), wild: GC_WILD },
-    { id: "get", fp: Array.from(hexWords(FP_GET), maskWord) },
-    { id: "gbls", fp: Array.from(hexWords(FP_GBLS), maskWord) },
-    { id: "gfn", fp: Array.from(hexWords(FP_GFN), maskWord) },
-    { id: "add", fp: Array.from(hexWords(FP_ADD), maskWord) },
-    { id: "sdo", fp: Array.from(hexWords(FP_SDO), maskWord) },
-  ];
+    { id: "gd", hex: FINGERPRINT_HEX },
+    { id: "gc", hex: FP_GC, wild: GC_WILD },
+    { id: "get", hex: FP_GET },
+    { id: "gbls", hex: FP_GBLS },
+    { id: "gfn", hex: FP_GFN },
+    { id: "add", hex: FP_ADD },
+    { id: "sdo", hex: FP_SDO },
+  ].map((sp) => {
+    const fp = Array.from(hexWords(sp.hex), maskWord);
+    return { id: sp.id, fp, wild: sp.wild, tol: tolFor(fp.length) };
+  });
   const hits = await scanAll(read, range, specs, onProgress);
   const one = {};
   for (let i = 0; i < specs.length; i++) {

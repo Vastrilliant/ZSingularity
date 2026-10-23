@@ -14,24 +14,12 @@ const TARGET_HEX = [
   "35fffc48940000009000001339786a683707fc28900000009100000094000000" +
   "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08" +
   "f9400100b5fffb4094000000",
-  "d10183ffa90167faa9025ff8a90357f6a9044ff4a9057bfd910003fdaa0203f3" +
-  "aa0103f4900000153954bea8370002a89000000891000108aa0003f6aa0803e0" +
-  "9400000090000000910000009400000090000000910000009400000090000000" +
-  "9100000094000000900000009100000094000000aa1603e0528000283914bea8" +
-  "b4000a40d280000194000000b40009e090000017910002f79000001891000318" +
-  "900000199100033990000016910002d6f9400008a95b8509d63f0120aa0003f5" +
-  "b9000ff4f94002e0910003e194000000aa0003e2f9400300aa1503e1aa1303e3" +
-  "d280000494000000f9400328b940e50934000389d280000194000000f94002c0" +
-  "b940e408340004089000001339786a6836000428f94002c0b940e408340004c8" +
-  "f9405c08f9400100b40005009000000891000108f9400101d2800002d2800003" +
-  "94000000a9457bfda9444ff4a94357f6a9425ff8a94167fa910003ffd65f03c0" +
-  "aa0003f3aa0803e094000000aa1303e0d280000194000000f94002c0b940e408" +
-  "35fffc48940000009000001339786a683707fc28900000009100000094000000" +
-  "5280002839386a68f94002c0b940e40835fffb8894000000f94002c0f9405c08" +
-  "f9400100b5fffb4094000000",
 ];
 
 const SITE_INDEX = 80;
+const ANCHOR_AT = 1;
+const ANCHOR_LEN = 4;
+const MAX_MISMATCH = 6;
 const NOP = 0xd503201f;
 const PIECE = 1 << 22;
 const ARM64 = 0x0100000c;
@@ -48,6 +36,7 @@ function maskWord(w) {
   if (top === 37 || top === 5) return (w & 0xfc000000) >>> 0;
   if (((w & 0x9f000000) >>> 0) === 0x90000000) return (w & 0x9f00001f) >>> 0;
   if (((w & 0xff800000) >>> 0) === 0x91000000) return (w & 0xffc003ff) >>> 0;
+  if (((w & 0x3b000000) >>> 0) === 0x39000000) return (w & 0xffc003ff) >>> 0;
   return w >>> 0;
 }
 
@@ -104,44 +93,41 @@ export async function findIapSite(read, onProgress) {
   if (new Uint8Array(new Uint32Array([1]).buffer)[0] !== 1) return { status: "unsupported" };
   const range = await textRange(read);
   if (!range) return { status: "missing" };
-  const targets = TARGET_HEX.map(hexWords);
-  const L = targets[0].length;
+  const fp = hexWords(TARGET_HEX[0]);
+  const L = fp.length;
+  const m = Uint32Array.from(fp, maskWord);
   const end = range.start + (range.size - (range.size % 4));
-  const hits = targets.map(() => []);
+  const hits = [];
   for (let pos = range.start; pos + L * 4 <= end; pos += PIECE) {
     const len = Math.min(PIECE + L * 4, end - pos);
     const buf = await read(pos, len);
     const u = new Uint32Array(buf.buffer, buf.byteOffset, len >> 2);
     const last = Math.min(PIECE >> 2, (len >> 2) - L + 1);
     for (let i = 0; i < last; i++) {
-      const m0 = maskWord(u[i]);
-      for (let t = 0; t < targets.length; t++) {
-        const fp = targets[t];
-        if (m0 !== fp[0]) continue;
-        let ok = true;
-        for (let k = 1; k < L; k++) {
-          if (k === SITE_INDEX) continue;
-          if (maskWord(u[i + k]) !== fp[k]) { ok = false; break; }
-        }
-        if (ok) hits[t].push({ offset: pos + (i + SITE_INDEX) * 4, word: u[i + SITE_INDEX] >>> 0 });
+      if (maskWord(u[i + ANCHOR_AT]) !== m[ANCHOR_AT]) continue;
+      let ok = true;
+      for (let k = 1; k < ANCHOR_LEN; k++) if (maskWord(u[i + ANCHOR_AT + k]) !== m[ANCHOR_AT + k]) { ok = false; break; }
+      if (!ok) continue;
+      let miss = 0;
+      for (let k = 0; k < L && miss <= MAX_MISMATCH; k++) {
+        if (k !== SITE_INDEX && maskWord(u[i + k]) !== m[k]) miss++;
       }
+      if (miss > MAX_MISMATCH) continue;
+      hits.push({ offset: pos + (i + SITE_INDEX) * 4, word: u[i + SITE_INDEX] >>> 0, miss });
     }
     if (onProgress) onProgress(Math.min(1, (pos - range.start + len) / range.size));
   }
+  if (!hits.length) return { status: "missing" };
+  if (hits.length > 4) return { status: "ambiguous", offset: hits[0].offset };
   const patches = [];
   let already = 0;
   let status = "missing";
-  let firstOffset = null;
-  for (const h of hits) {
-    if (h.length === 0) continue;
-    if (h.length > 1) { status = "ambiguous"; continue; }
-    const hit = h[0];
-    if (firstOffset === null) firstOffset = hit.offset;
+  for (const hit of hits) {
     if (hit.word === NOP) { already++; continue; }
     if (hit.word >>> 26 !== 37) { status = "unexpected"; continue; }
     patches.push({ offset: hit.offset, bytes: NOP_BYTES });
   }
   if (patches.length) return { status: "patch", offset: patches[0].offset, patches };
-  if (already) return { status: "already", offset: firstOffset };
-  return { status, offset: firstOffset };
+  if (already) return { status: "already", offset: hits[0].offset };
+  return { status, offset: hits[0].offset };
 }
