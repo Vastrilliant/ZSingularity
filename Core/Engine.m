@@ -4712,7 +4712,7 @@ static void ZSCombatTipPatcherConstructor(void) {
 
 static NSString * const kUIDRedactorSettingsSection = @"uidRedactor";
 static NSString * const kUIDRedactorEnabledKey = @"enabled";
-static NSString * const kUIDRedactorRedactedText = @"[REDACTED]";
+static NSString * const kUIDRedactorRedactedText = @"[CENSORED]";
 
 typedef struct {
     const char *namespaze;
