@@ -158,7 +158,7 @@ export async function inject(ipa, payload, opts = {}) {
         } else if (res.id === "hooks") {
           hooksStatus = reportHooks(res, log, warnings);
         } else {
-          localizeStatus = reportPatch(res, "Custom localize path", "This game build's localization path code did not match the expected layout (" + res.status + "), so the Custom Localize Manager was not enabled.", log, warnings);
+          localizeStatus = reportPatch(res, "Custom localize path", "This game build's localization path code did not match the expected layout (" + res.status + (res.stage ? ": " + res.stage : "") + "), so the Custom Localize Manager was not enabled.", log, warnings);
         }
       }
     }

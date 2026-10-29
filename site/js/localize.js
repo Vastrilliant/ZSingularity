@@ -51,16 +51,6 @@ const FP_ADD =
   "f940010214000000a9bf7bfd910003fd94000000a9bd57f6a9014ff4a9027bfd" +
   "910003fdf9400008b40003a8b9800014";
 
-const FP_SDO =
-  "94000000aa0003f4f9400275f94002c0b940000834000228aa1503e0d2800001" +
-  "d28000029400000035000240b4000054b9400294f9400260f94002c8b9400109" +
-  "34000c29d2800001d28000029400000035000ca01400000094000000aa1503e0" +
-  "d2800001d28000029400000034fffe009000000891000108f940010094000000" +
-  "aa0003f9d2800001940000009000000891000108f940010094000000aa0003f7" +
-  "9000000891000108f940010194000000b4002139aa1903f5f8010eb7aa1503e0" +
-  "aa1703e194000000b4001374f90003f9b94002887100051f54001aab52800017" +
-  "5280001990000016910002d614000000f9400108f9400108f9400102aa1b03e0" +
-  "aa1a03e19400000011000739b94002886b08033f540018ea";
 
 const SITE_INDEX = 23;
 const GETTER_WORDS = 60;
@@ -71,17 +61,19 @@ const PIECE = 1 << 22;
 const DATA_PATH_ICALL = "UnityEngine.Application::get_dataPath";
 const PERSISTENT_PATH_ICALL = "UnityEngine.Application::get_persistentDataPath";
 const GC_WILD = [11, 48];
-const CAVE_BACK = 0x12c;
-const CAVE_ROOM = (CAVE_BACK - 8) / 4;
-const GET_SITE_BYTES = 0x2d49490 - 0x2d493a4;
-const SDO_NEW = 31;
-const SDO_CTOR = 43;
 const CELL_LIST = 7;
 const CELL_CTOR = 5;
 const CELL_ADD = 3;
 const NOP_RET0 = 0x52800000;
 const RET1 = 0x52800020;
 const MOV_X0_0 = 0xd2800000;
+const LDP_FP_LR = 0xa9417bfd;
+const RET = 0xd65f03c0;
+const BL_OP = 37;
+const B_OP = 5;
+const LC_FUNCTION_STARTS = 0x26;
+const OBJNEW_WINDOW = 0x600;
+const CAVE_MAX_FUNCS = 6;
 
 function hexWords(hex) {
   const out = new Uint32Array(hex.length / 8);
@@ -288,16 +280,141 @@ async function pathPatch(read, range, hit) {
   return { status: "patch", offset: site, patches: [{ offset: site, bytes: wordBytes([(0x94000000 | (delta & 0x3ffffff)) >>> 0]) }] };
 }
 
+function words32(buf) {
+  if ((buf.byteOffset & 3) === 0) return wordsOf(buf);
+  const copy = new Uint8Array(buf.length & ~3);
+  copy.set(buf.subarray(0, copy.length));
+  return new Uint32Array(copy.buffer);
+}
+
+function blTargetIn(u, i, at) {
+  const w = u[i];
+  return w >>> 26 === BL_OP ? at + i * 4 + signExtend(w & 0x3ffffff, 26) * 4 : null;
+}
+
+async function functionStarts(read, range) {
+  const mh = await read(range.base, 32);
+  const mdv = new DataView(mh.buffer, mh.byteOffset, mh.byteLength);
+  const ncmds = mdv.getUint32(16, true);
+  const sizeofcmds = mdv.getUint32(20, true);
+  const cmds = await read(range.base + 32, sizeofcmds);
+  const cdv = new DataView(cmds.buffer, cmds.byteOffset, cmds.byteLength);
+  let p = 0;
+  let dataoff = 0;
+  let datasize = 0;
+  for (let i = 0; i < ncmds; i++) {
+    const cmd = cdv.getUint32(p, true);
+    const size = cdv.getUint32(p + 4, true);
+    if (size < 8 || p + size > cmds.length) return null;
+    if (cmd === LC_FUNCTION_STARTS) {
+      dataoff = cdv.getUint32(p + 8, true);
+      datasize = cdv.getUint32(p + 12, true);
+      break;
+    }
+    p += size;
+  }
+  if (!datasize) return null;
+  const raw = await read(range.base + dataoff, datasize);
+  const starts = [];
+  let va = range.vmaddr;
+  for (let i = 0; i < raw.length;) {
+    let delta = 0;
+    let mul = 1;
+    for (;;) {
+      if (i >= raw.length) return null;
+      const b = raw[i++];
+      delta += (b & 0x7f) * mul;
+      mul *= 128;
+      if (!(b & 0x80)) break;
+    }
+    if (delta === 0) break;
+    va += delta;
+    const off = va - range.vmaddr + range.fileoff + range.base;
+    if (off >= range.start && off < range.start + range.size) starts.push(off);
+  }
+  return starts.length ? starts : null;
+}
+
+function startIndex(starts, off) {
+  let lo = 0;
+  let hi = starts.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] === off) return mid;
+    if (starts[mid] < off) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+function isAdrpAdd(a, b, rd) {
+  return ((a & 0x9f00001f) >>> 0) === ((0x90000000 | rd) >>> 0) && ((b & 0xffc003ff) >>> 0) === ((0x91000000 | (rd << 5) | rd) >>> 0);
+}
+
+function matchObjNewBlock(u, i, at) {
+  if (i + 16 > u.length) return null;
+  const a = u[i] & 31;
+  const b = u[i + 7] & 31;
+  const c = u[i + 12] & 31;
+  if (!isAdrpAdd(u[i], u[i + 1], a) || u[i + 2] !== ((0xf9400000 | (a << 5)) >>> 0)) return null;
+  if (!isAdrpAdd(u[i + 7], u[i + 8], b) || u[i + 9] !== ((0xf9400000 | (b << 5)) >>> 0)) return null;
+  if (!isAdrpAdd(u[i + 12], u[i + 13], c) || u[i + 14] !== ((0xf9400001 | (c << 5)) >>> 0)) return null;
+  if ((u[i + 4] & 0xffffffe0) >>> 0 !== 0xaa0003e0 || (u[i + 11] & 0xffffffe0) >>> 0 !== 0xaa0003e0) return null;
+  if (u[i + 5] !== 0xd2800001) return null;
+  const objNew = blTargetIn(u, i + 3, at);
+  const ctor0 = blTargetIn(u, i + 6, at);
+  const objNew2 = blTargetIn(u, i + 10, at);
+  const ctor = blTargetIn(u, i + 15, at);
+  if (objNew === null || ctor0 === null || objNew2 === null || ctor === null) return null;
+  if (objNew !== objNew2 || ctor === ctor0) return null;
+  return { at: at + i * 4, objNew, ctor };
+}
+
+async function scanBranches(read, range, gc, cave, caveEnd, gcEnd, onProgress) {
+  const callers = [];
+  const stray = [];
+  const end = range.start + (range.size - (range.size % 4));
+  for (let pos = range.start; pos + 4 <= end; pos += PIECE) {
+    const len = Math.min(PIECE, end - pos);
+    const u = words32(await read(pos, len));
+    for (let i = 0; i < u.length; i++) {
+      const top = u[i] >>> 26;
+      if (top !== BL_OP && top !== B_OP) continue;
+      const at = pos + i * 4;
+      const target = at + signExtend(u[i] & 0x3ffffff, 26) * 4;
+      if (top === BL_OP && target === gc) callers.push(at);
+      if (target >= cave && target < caveEnd && !(at >= cave && at < caveEnd)) {
+        if (!(target === cave && at >= gc && at < gcEnd)) stray.push(at);
+      }
+    }
+    if (onProgress) onProgress(Math.min(1, (pos - range.start + len) / range.size));
+  }
+  return { callers, stray };
+}
+
+async function findObjNew(read, callers) {
+  const found = [];
+  for (const caller of callers) {
+    const u = words32(await read(caller, OBJNEW_WINDOW));
+    for (let i = 0; i + 16 <= u.length; i++) {
+      const m = matchObjNewBlock(u, i, caller);
+      if (m) found.push(m);
+    }
+  }
+  const uniq = new Map();
+  for (const f of found) uniq.set(f.objNew + ":" + f.ctor, f);
+  return [...uniq.values()];
+}
+
 export async function findLocalizeSite(read, onProgress) {
   if (new Uint8Array(new Uint32Array([1]).buffer)[0] !== 1) return { status: "unsupported" };
   const range = await textRange(read);
   if (!range) return { status: "missing" };
   const toVa = (off) => range.vmaddr + (off - range.fileoff - range.base);
-  const toOff = (va) => va - range.vmaddr + range.fileoff + range.base;
-  const rdWord = async (off) => wordsOf(await read(off, 4))[0] >>> 0;
+  const rdWord = async (off) => words32(await read(off, 4))[0] >>> 0;
   const blTarget = async (off) => {
     const w = await rdWord(off);
-    return w >>> 26 === 37 ? off + signExtend(w & 0x3ffffff, 26) * 4 : null;
+    return w >>> 26 === BL_OP ? off + signExtend(w & 0x3ffffff, 26) * 4 : null;
   };
   const specs = [
     { id: "gd", hex: FINGERPRINT_HEX },
@@ -306,12 +423,11 @@ export async function findLocalizeSite(read, onProgress) {
     { id: "gbls", hex: FP_GBLS },
     { id: "gfn", hex: FP_GFN },
     { id: "add", hex: FP_ADD },
-    { id: "sdo", hex: FP_SDO },
   ].map((sp) => {
     const fp = Array.from(hexWords(sp.hex), maskWord);
     return { id: sp.id, fp, wild: sp.wild, tol: tolFor(fp.length) };
   });
-  const hits = await scanAll(read, range, specs, onProgress);
+  const hits = await scanAll(read, range, specs, (f) => onProgress && onProgress(f * 0.6));
   const one = {};
   for (let i = 0; i < specs.length; i++) {
     if (hits[i].length === 0) return { status: "missing", stage: specs[i].id };
@@ -320,14 +436,24 @@ export async function findLocalizeSite(read, onProgress) {
   }
   const path = await pathPatch(read, range, one.gd);
   if (path.status !== "patch" && path.status !== "already") return path;
+
+  const starts = await functionStarts(read, range);
+  if (!starts) return { status: "unexpected", stage: "funcstarts" };
+  const idx = {};
+  for (const k of ["gd", "gc", "get", "gbls"]) {
+    idx[k] = startIndex(starts, one[k]);
+    if (idx[k] < 0) return { status: "unexpected", stage: "start-" + k, offset: one[k] };
+  }
+  const fnEnd = (off) => starts[startIndex(starts, off) + 1];
   const gc = one.gc;
+  const gcEnd = fnEnd(gc);
+  const gcWords = words32(await read(gc, gcEnd - gc));
   const cells = [];
-  const gcWords = wordsOf(await read(gc, 0xd0));
   for (let i = 0; i + 2 < gcWords.length; i++) {
     const a = gcWords[i];
     const b = gcWords[i + 1];
     const c = gcWords[i + 2];
-    if (((a & 0x9f00001f) >>> 0) === 0x90000000 && ((b & 0xffc003ff) >>> 0) === 0x91000000 && c >>> 26 === 37) {
+    if (((a & 0x9f00001f) >>> 0) === 0x90000000 && ((b & 0xffc003ff) >>> 0) === 0x91000000 && c >>> 26 === BL_OP) {
       const pc = toVa(gc + i * 4);
       const imm = signExtend((((a >>> 5) & 0x7ffff) << 2) | ((a >>> 29) & 3), 21) * 4096;
       const shift = (b >>> 22) & 1 ? 4096 : 1;
@@ -335,30 +461,63 @@ export async function findLocalizeSite(read, onProgress) {
     }
   }
   if (cells.length !== 9) return { status: "unexpected", stage: "cells", offset: gc };
-  const head = await rdWord(gc - 8);
-  const tail = await rdWord(gc - 4);
-  if ((head !== NOP_RET0 && head !== RET1) || tail !== 0xd65f03c0) return { status: "unexpected", stage: "isrunning", offset: gc };
-  const dirs = gc + 0xd0;
-  const noneKey = dirs + 0x11c;
-  const dirsCall = await blTarget(dirs + (0x2d48610 - 0x2d485b4));
-  if (dirsCall !== one.gd) return { status: "unexpected", stage: "dirs", offset: dirs };
-  if (noneKey + 0x44 !== one.gd) return { status: "unexpected", stage: "nonekey", offset: noneKey };
-  const objNew = await blTarget(one.sdo + SDO_NEW * 4);
-  const ctor = await blTarget(one.sdo + SDO_CTOR * 4);
-  const getCall = await blTarget(one.sdo);
-  if (objNew === null || ctor === null || getCall !== gc) return { status: "unexpected", stage: "donor", offset: one.sdo };
-  const getSite = one.get + GET_SITE_BYTES;
-  const emptyInited = await blTarget(getSite);
-  const gblsBytes = wordsOf(await read(one.gbls, 0x7c4));
-  let gblsOk = false;
-  const getBlWord = await rdWord(getSite);
-  const gblsNow = getBlWord >>> 26 === 37 ? getSite + signExtend(getBlWord & 0x3ffffff, 26) * 4 : null;
-  for (let i = 0; i < gblsBytes.length; i++) {
-    if (gblsBytes[i] >>> 26 === 37 && one.gbls + i * 4 + signExtend(gblsBytes[i] & 0x3ffffff, 26) * 4 === emptyInited) gblsOk = true;
+
+  const noneKey = starts[idx.gd - 1];
+  const dirs = starts[idx.gd - 2];
+  let headIdx = idx.gd - 3;
+  if (starts[headIdx] === gc || starts[headIdx] === one.get) headIdx--;
+  const head = starts[headIdx];
+  const dirsWords = words32(await read(dirs, noneKey - dirs));
+  let dirsCalls = 0;
+  for (let i = 0; i < dirsWords.length; i++) if (blTargetIn(dirsWords, i, dirs) === one.gd) dirsCalls++;
+  if (dirsCalls < 1) return { status: "unexpected", stage: "dirs", offset: dirs };
+  if (one.gd - noneKey > 0x100 || noneKey - dirs < 0x20) return { status: "unexpected", stage: "nonekey", offset: noneKey };
+  const headOrig = await rdWord(head);
+  if (fnEnd(head) - head !== 8 || (headOrig !== NOP_RET0 && headOrig !== RET1) || (await rdWord(head + 4)) !== RET) return { status: "unexpected", stage: "isrunning", offset: head };
+
+  const sites = [];
+  let epilogueAt = -1;
+  const caveProbe = buildCave(0, { dirs: 0, noneKey: 0, objNew: 0, ctor: 0, add: 0, fileName: 0, listClass: 0, ctorInfo: 0, addInfo: 0, epilogue: 0 });
+  const needBytes = caveProbe.length * 4;
+  let caveIdx = headIdx;
+  while (head - starts[caveIdx] < needBytes) {
+    caveIdx--;
+    if (caveIdx < 0 || headIdx - caveIdx > CAVE_MAX_FUNCS) return { status: "unexpected", stage: "cave", offset: head };
   }
-  const alreadyGet = gblsNow === one.gbls;
+  const cave = starts[caveIdx];
+  const caveWords = head - cave >> 2;
+  for (let i = 0; i + 1 < gcWords.length; i++) {
+    const w = gcWords[i];
+    const isSite = w === MOV_X0_0 || w >>> 26 === B_OP && gc + i * 4 + signExtend(w & 0x3ffffff, 26) * 4 === cave;
+    if (isSite && gcWords[i + 1] === LDP_FP_LR) {
+      sites.push(gc + i * 4);
+      if (epilogueAt < 0) epilogueAt = gc + (i + 1) * 4;
+    }
+  }
+  if (!sites.length || epilogueAt < 0) return { status: "unexpected", stage: "isrunning-sites", offset: gc };
+
+  const scan = await scanBranches(read, range, gc, cave, head, gcEnd, (f) => onProgress && onProgress(0.6 + f * 0.35));
+  if (scan.stray.length) return { status: "unexpected", stage: "cave-live", offset: scan.stray[0] };
+  const blocks = await findObjNew(read, scan.callers);
+  if (blocks.length !== 1) return { status: blocks.length ? "ambiguous" : "missing", stage: "objnew", count: blocks.length };
+  const objNew = blocks[0].objNew;
+  const ctor = blocks[0].ctor;
+
+  const getEnd = fnEnd(one.get);
+  const getWords = words32(await read(one.get, getEnd - one.get));
+  const getSites = [];
+  for (let i = 0; i + 1 < getWords.length; i++) {
+    if (((getWords[i] & 0xffc003ff) >>> 0) === 0x910003e8 && getWords[i + 1] >>> 26 === BL_OP) getSites.push(one.get + (i + 1) * 4);
+  }
+  if (getSites.length !== 1) return { status: "unexpected", stage: "get", offset: one.get };
+  const getSite = getSites[0];
+  const emptyInited = await blTarget(getSite);
+  const gblsWords = words32(await read(one.gbls, fnEnd(one.gbls) - one.gbls));
+  let gblsOk = false;
+  for (let i = 0; i < gblsWords.length; i++) if (blTargetIn(gblsWords, i, one.gbls) === emptyInited) gblsOk = true;
+  const alreadyGet = emptyInited === one.gbls;
   if (!alreadyGet && !gblsOk) return { status: "unexpected", stage: "get", offset: getSite };
-  const cave = gc - CAVE_BACK;
+
   const t = {
     dirs: toVa(dirs),
     noneKey: toVa(noneKey),
@@ -369,18 +528,15 @@ export async function findLocalizeSite(read, onProgress) {
     listClass: cells[CELL_LIST],
     ctorInfo: cells[CELL_CTOR],
     addInfo: cells[CELL_ADD],
-    epilogue: toVa(gc + 0x30),
+    epilogue: toVa(epilogueAt),
   };
-  const caveWords = buildCave(toVa(cave), t);
-  if (caveWords.length > CAVE_ROOM) return { status: "unexpected", stage: "cave", offset: cave };
-  while (caveWords.length < CAVE_ROOM) caveWords.push(0xd4200000);
-  const wanted = [
-    { offset: cave, bytes: wordBytes(caveWords) },
-    { offset: gc + 0x2c, bytes: wordBytes([enc.b(toVa(gc + 0x2c), toVa(cave))]) },
-    { offset: gc + 0xc0, bytes: wordBytes([enc.b(toVa(gc + 0xc0), toVa(cave))]) },
-    { offset: gc - 8, bytes: wordBytes([RET1]) },
-    { offset: getSite, bytes: wordBytes([enc.bl(toVa(getSite), toVa(one.gbls))]) },
-  ];
+  const words = buildCave(toVa(cave), t);
+  if (words.length > caveWords) return { status: "unexpected", stage: "cave", offset: cave };
+  while (words.length < caveWords) words.push(0xd4200000);
+  const wanted = [{ offset: cave, bytes: wordBytes(words) }];
+  for (const s of sites) wanted.push({ offset: s, bytes: wordBytes([enc.b(toVa(s), toVa(cave))]) });
+  wanted.push({ offset: head, bytes: wordBytes([RET1]) });
+  wanted.push({ offset: getSite, bytes: wordBytes([enc.bl(toVa(getSite), toVa(one.gbls))]) });
   if (path.status === "patch") wanted.push(...path.patches);
   const needed = [];
   for (const p of wanted) {
