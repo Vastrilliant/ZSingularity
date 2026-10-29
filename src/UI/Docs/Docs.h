@@ -95,14 +95,14 @@ static NSString *zs_docs_key_for_filename(NSString *filename) {
 
 static NSURL *zs_docs_remote_url(NSString *filename) {
     NSString *urlString = [NSString stringWithFormat:
-        @"https://raw.githubusercontent.com/%@/%@/%@/Documentation/%@/%@",
+        @"https://raw.githubusercontent.com/%@/%@/%@/docs/%@/%@",
         kZSDocsRepoOwner, kZSDocsRepoName, kZSDocsRepoBranch, zs_docs_current_language(), filename];
     return [NSURL URLWithString:urlString];
 }
 
 static NSURL *zs_docs_image_remote_url(NSString *filename) {
     NSString *urlString = [NSString stringWithFormat:
-        @"https://raw.githubusercontent.com/%@/%@/%@/Documentation/%@",
+        @"https://raw.githubusercontent.com/%@/%@/%@/docs/%@",
         kZSDocsRepoOwner, kZSDocsRepoName, kZSDocsRepoBranch, filename];
     return [NSURL URLWithString:urlString];
 }

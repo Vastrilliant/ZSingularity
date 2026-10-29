@@ -99,10 +99,14 @@ jobs:
             local commit header=""
             commit="$(gh release view nightly --repo "$REPO" --json targetCommitish -q .targetCommitish || true)"
             if [[ -n "$commit" ]]; then
+              header="$(gh api "repos/$REPO/contents/src/Core/Version.h?ref=$commit" -H 'Accept: application/vnd.github.raw' || true)"
+            fi
+            
+            if [[ -z "$header" && -n "$commit" ]]; then
               header="$(gh api "repos/$REPO/contents/Core/Version.h?ref=$commit" -H 'Accept: application/vnd.github.raw' || true)"
             fi
             if [[ -z "$header" ]]; then
-              header="$(cat Core/Version.h)"
+              header="$(cat src/Core/Version.h)"
             fi
             part() { printf '%s' "$header" | grep -oE "#define ZS_VERSION_$1 [0-9]+" | grep -oE '[0-9]+$'; }
             write_manifest "$dir" nightly "$(part MAJOR).$(part MINOR).$(part PATCH)" "$(build_of nightly)" "$commit"

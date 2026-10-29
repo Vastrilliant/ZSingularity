@@ -107,10 +107,14 @@ jobs:
             REF="$(gh release view nightly --repo "$REPO" --json targetCommitish -q .targetCommitish || true)"
             HEADER=""
             if [[ -n "$REF" ]]; then
+              HEADER="$(gh api "repos/$REPO/contents/src/Core/Version.h?ref=$REF" -H 'Accept: application/vnd.github.raw' || true)"
+            fi
+            # Commits from before the move to src/ keep the header at the old path
+            if [[ -z "$HEADER" && -n "$REF" ]]; then
               HEADER="$(gh api "repos/$REPO/contents/Core/Version.h?ref=$REF" -H 'Accept: application/vnd.github.raw' || true)"
             fi
             if [[ -z "$HEADER" ]]; then
-              HEADER="$(cat Core/Version.h)"
+              HEADER="$(cat src/Core/Version.h)"
             fi
             part() { printf '%s' "$HEADER" | grep -oE "#define ZS_VERSION_$1 [0-9]+" | grep -oE '[0-9]+$'; }
             TWEAK_VERSION="$(part MAJOR).$(part MINOR).$(part PATCH)"

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths-ignore:
-      - 'Documentation/**'
+      - 'docs/**'
       - 'README.md'
       - 'assets/**'
       - '.github/workflows/**'
@@ -111,7 +111,7 @@ jobs:
       - name: Compile Metal transcoder
         run: |
           set -euo pipefail
-          xcrun -sdk iphoneos metal -c -O3 -std=metal3.0 -target air64-apple-ios15.0 Mods/Transcoder/Astc.metal -o Astc.air
+          xcrun -sdk iphoneos metal -c -O3 -std=metal3.0 -target air64-apple-ios15.0 src/Mods/Transcoder/Astc.metal -o Astc.air
           xcrun -sdk iphoneos metallib Astc.air -o Astc.metallib
 
       - name: Compile ASTC encoder
@@ -127,8 +127,8 @@ jobs:
             -isysroot "${{ steps.sdk.outputs.path }}" \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -I. -IDiagnostics -IMods/Transcoder -Iastcenc \
-            Mods/Transcoder/Astc.mm \
+            -I. -Isrc/Diagnostics -Isrc/Mods/Transcoder -Iastcenc \
+            src/Mods/Transcoder/Astc.mm \
             -o Astc.o
 
       - name: Compile Crunch decoder
@@ -144,8 +144,8 @@ jobs:
             -isysroot "${{ steps.sdk.outputs.path }}" \
             -arch arm64 \
             -miphoneos-version-min=15.0 \
-            -I. -IDiagnostics -IMods/Transcoder \
-            Mods/Transcoder/Crunch.mm \
+            -I. -Isrc/Diagnostics -Isrc/Mods/Transcoder \
+            src/Mods/Transcoder/Crunch.mm \
             -o Crunch.o
 
       - name: Compile tweak dylib
@@ -185,32 +185,32 @@ jobs:
             -stdlib=libc++ \
             -install_name "@rpath/ZSingularity.dylib" \
             -Wl,-ld_classic \
-            -Wl,-sectcreate,__DATA,__zstips,Resources/tips.json \
+            -Wl,-sectcreate,__DATA,__zstips,src/Resources/tips.json \
             -Wl,-sectcreate,__DATA,__zsastcmetal,Astc.metallib \
             -I. \
-            -ICore -ICore/RamBypass -IUI/Core -IUI/Sections -IUI/Components -IUI/Misc -IUI/Docs -IMods -IMods/BundleTools -IMods/Transcoder -INetwork -IDiagnostics -IResources -INotifications \
-            Mods/BundleTools/UnityBundleTools.m \
-            Mods/BundleTools/AssetExplorer.m \
-            Core/IL2CppIntrospection.m \
-            Mods/Dumper/Dumper.m \
-            Mods/Dumper/ScriptDump.m \
-            Mods/Dumper/BinaryDiff.m \
-            Core/DumpTypeRegistry.m \
-            Core/Engine.m \
-            Core/Hook.m \
-            Core/Rebind.m \
-            Core/RamBypass/RamDonor.m \
-            Core/RamBypass/DonatedHeap.m \
-            Diagnostics/Diagnostics.m \
-            Mods/Mods.m \
-            Mods/Transcoder/Transcoder.m \
-            Mods/Transcoder/TexComp.m \
+            -Isrc/Core -Isrc/Core/RamBypass -Isrc/UI/Core -Isrc/UI/Sections -Isrc/UI/Components -Isrc/UI/Misc -Isrc/UI/Docs -Isrc/Mods -Isrc/Mods/BundleTools -Isrc/Mods/Transcoder -Isrc/Network -Isrc/Diagnostics -Isrc/Resources -Isrc/Notifications \
+            src/Mods/BundleTools/UnityBundleTools.m \
+            src/Mods/BundleTools/AssetExplorer.m \
+            src/Core/IL2CppIntrospection.m \
+            src/Mods/Dumper/Dumper.m \
+            src/Mods/Dumper/ScriptDump.m \
+            src/Mods/Dumper/BinaryDiff.m \
+            src/Core/DumpTypeRegistry.m \
+            src/Core/Engine.m \
+            src/Core/Hook.m \
+            src/Core/Rebind.m \
+            src/Core/RamBypass/RamDonor.m \
+            src/Core/RamBypass/DonatedHeap.m \
+            src/Diagnostics/Diagnostics.m \
+            src/Mods/Mods.m \
+            src/Mods/Transcoder/Transcoder.m \
+            src/Mods/Transcoder/TexComp.m \
             Crunch.o \
             Astc.o \
             astcenc-obj/*.o \
-            Network/PatchManifestNetwork.m \
-            Network/Updater.m \
-            UI/*/*.m \
+            src/Network/PatchManifestNetwork.m \
+            src/Network/Updater.m \
+            src/UI/*/*.m \
             lz4.c \
             lz4hc.c \
             -o ZSingularity.dylib
@@ -236,10 +236,10 @@ jobs:
             -miphoneos-version-min=15.0 \
             -framework Foundation \
             -Wl,-e,_NSExtensionMain \
-            -ICore/RamBypass \
-            Extension/ZSRamDonor/main.m \
+            -Isrc/Core/RamBypass \
+            src/Extension/ZSRamDonor/main.m \
             -o ZSRamDonor.appex/ZSRamDonor
-          cp Extension/ZSRamDonor/Info.plist ZSRamDonor.appex/Info.plist
+          cp src/Extension/ZSRamDonor/Info.plist ZSRamDonor.appex/Info.plist
           codesign -f -s - ZSRamDonor.appex
           ditto -c -k --keepParent ZSRamDonor.appex ZSRamDonor.appex.zip
 
