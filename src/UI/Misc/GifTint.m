@@ -121,7 +121,7 @@ static const size_t kZSGifCacheRowAlignment = 64;
 static NSString * const kZSGifRepoOwner = @"vastrilliant";
 static NSString * const kZSGifRepoName = @"ZSingularity";
 static NSString * const kZSGifRepoBranch = @"main";
-static NSString * const kZSGifRepoPath = @"Resources/Enkephalin.gif";
+static NSString * const kZSGifRepoPath = @"src/Resources/Enkephalin.gif";
 static const NSTimeInterval kZSGifFetchTimeout = 120.0;
 static const CFTimeInterval kZSGifFetchRetryInterval = 60.0;
 

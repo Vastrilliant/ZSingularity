@@ -21,7 +21,7 @@ NSNotificationName const ZSLogoInstallStateDidChangeNotification = @"ZSLogoInsta
 static NSString * const kZSLogoRepoOwner = @"vastrilliant";
 static NSString * const kZSLogoRepoName = @"ZSingularity";
 static NSString * const kZSLogoRepoBranch = @"main";
-static NSString * const kZSLogoRepoPath = @"Resources/Logos";
+static NSString * const kZSLogoRepoPath = @"src/Resources/Logos";
 
 static NSString * const kZSLogoSettingsSection = @"logo";
 static NSString * const kZSLogoSelectedKey = @"selected";
