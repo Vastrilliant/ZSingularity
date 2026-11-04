@@ -292,6 +292,7 @@ const a64 = {
   stp: (rt, rt2, off) => (0xa9000000 | (((off / 8) & 0x7f) << 15) | (rt2 << 10) | (31 << 5) | rt) >>> 0,
   ldp: (rt, rt2, off) => (0xa9400000 | (((off / 8) & 0x7f) << 15) | (rt2 << 10) | (31 << 5) | rt) >>> 0,
   movw0: (r) => (0x52800000 | r) >>> 0,
+  strb: (t, n, i) => (0x39000000 | (i << 10) | (n << 5) | t) >>> 0,
   movw: (d, m) => (0x2a0003e0 | (m << 16) | d) >>> 0,
   subw1: (d, n) => (0x51000400 | (n << 5) | d) >>> 0,
   ldrhPost2: (t, n) => (0x78402400 | (n << 5) | t) >>> 0,
@@ -300,6 +301,8 @@ const a64 = {
   cbzx: (rt) => (pc, va) => enc.cbz(rt, pc, va),
   cbzw: (rt) => (pc, va) => enc.cbzw(rt, pc, va),
 };
+const SEL_INTERACTABLE = 0xd8;
+const SEL_GROUPS_ALLOW = 0xe8;
 const COND_EQ = 0;
 const COND_NE = 1;
 const COND_GE = 10;
@@ -314,6 +317,10 @@ function buildOptionsCave(base, t) {
   a.emit(enc.ldrx(1, 20, 0));
   a.emit(enc.movz(2));
   a.emit(enc.bl(a.pc(), t.setOptions));
+  a.emit(enc.ldrx(0, 19, t.dropdownOff));
+  a.emit(0x52800028);
+  a.emit(a64.strb(8, 0, SEL_INTERACTABLE));
+  a.emit(a64.strb(8, 0, SEL_GROUPS_ALLOW));
   a.emit(enc.movz(0));
   a.emit(enc.bl(a.pc(), t.candidates));
   a.emit(enc.mov(23, 0));
