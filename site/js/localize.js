@@ -51,6 +51,21 @@ const FP_ADD =
   "f940010214000000a9bf7bfd910003fd94000000a9bd57f6a9014ff4a9027bfd" +
   "910003fdf9400008b40003a8b9800014";
 
+const FP_ADDOPTS =
+  "d101c3ffa9016ffca90267faa9035ff8a90457f6a9054ff4a9067bfd910183fd" +
+  "aa0103f4aa0003f3b0012e15396c72a8370001e8900108a0911ae00096091668" +
+  "b0010860912cc00096091665b0010860912ce00096091662b001070091308000" +
+  "9609165f52800028392c72a8b4000934b9401a887100051f540007ab52800015" +
+  "b0010879912ce339b001071a9130835a4f03f6003d8003e0900108bb911ae37b";
+
+const FP_UCHARS =
+  "d10283ffa9046ffca90567faa9065ff8a90757f6a9084ff4a9097bfd910243fd" +
+  "aa0003f49003c356397cb6c8d0039b9391232273f0039db5912d02b5370002a8" +
+  "f0039da0912d200097540828f0039da0912d000097540825d0039b8091232000" +
+  "9754082290039c20910ea0009754081fb0039c60910da0009754081cb003a100" +
+  "911360009754081952800028393cb6c8";
+
+const OPTIONAL_SPECS = new Set(["addopts", "uchars"]);
 
 const SITE_INDEX = 23;
 const GETTER_WORDS = 60;
@@ -252,6 +267,126 @@ function buildCave(base, t) {
   return w;
 }
 
+class Asm {
+  constructor(base) {
+    this.base = base;
+    this.w = [];
+    this.fix = [];
+    this.labels = {};
+  }
+  pc() { return this.base + this.w.length * 4; }
+  emit(x) { this.w.push(x >>> 0); }
+  label(n) { this.labels[n] = this.pc(); }
+  ref(n, fn) { this.fix.push({ i: this.w.length, n, fn }); this.w.push(0); }
+  done() {
+    for (const f of this.fix) {
+      const at = this.base + f.i * 4;
+      if (this.labels[f.n] === undefined) throw new Error("label " + f.n);
+      this.w[f.i] = f.fn(at, this.labels[f.n]) >>> 0;
+    }
+    return this.w;
+  }
+}
+
+const a64 = {
+  stp: (rt, rt2, off) => (0xa9000000 | (((off / 8) & 0x7f) << 15) | (rt2 << 10) | (31 << 5) | rt) >>> 0,
+  ldp: (rt, rt2, off) => (0xa9400000 | (((off / 8) & 0x7f) << 15) | (rt2 << 10) | (31 << 5) | rt) >>> 0,
+  movw0: (r) => (0x52800000 | r) >>> 0,
+  movw: (d, m) => (0x2a0003e0 | (m << 16) | d) >>> 0,
+  subw1: (d, n) => (0x51000400 | (n << 5) | d) >>> 0,
+  ldrhPost2: (t, n) => (0x78402400 | (n << 5) | t) >>> 0,
+  bcond: (cond) => (pc, va) => (0x54000000 | ((((va - pc) >> 2) & 0x7ffff) << 5) | cond) >>> 0,
+  bTo: (pc, va) => enc.b(pc, va),
+  cbzx: (rt) => (pc, va) => enc.cbz(rt, pc, va),
+  cbzw: (rt) => (pc, va) => enc.cbzw(rt, pc, va),
+};
+const COND_EQ = 0;
+const COND_NE = 1;
+const COND_GE = 10;
+
+function buildOptionsCave(base, t) {
+  const a = new Asm(base);
+  a.emit(enc.subSp(0x40));
+  a.emit(a64.stp(29, 30, 0x30));
+  a.emit(a64.stp(26, 25, 0x20));
+  a.emit(a64.stp(24, 23, 0x10));
+  a.emit(enc.ldrx(0, 19, t.dropdownOff));
+  a.emit(enc.ldrx(1, 20, 0));
+  a.emit(enc.movz(2));
+  a.emit(enc.bl(a.pc(), t.setOptions));
+  a.emit(enc.movz(0));
+  a.emit(enc.bl(a.pc(), t.candidates));
+  a.emit(enc.mov(23, 0));
+  a.ref("done", a64.cbzx(23));
+  a.emit(enc.ldrx(0, 19, t.dropdownOff));
+  a.emit(enc.mov(1, 23));
+  a.emit(enc.movz(2));
+  a.emit(enc.bl(a.pc(), t.addOptions));
+  a.emit(enc.movz(0));
+  a.emit(enc.bl(a.pc(), t.lastSelected));
+  a.emit(enc.mov(24, 0));
+  a.emit(a64.movw0(25));
+  a.ref("setv", a64.cbzx(24));
+  a.emit(enc.ldrw(26, 23, 0x18));
+  a.label("loop");
+  a.emit(enc.cmpw(25, 26));
+  a.ref("notfound", a64.bcond(COND_GE));
+  a.emit(enc.ldrx(8, 23, 0x10));
+  a.emit(enc.add(8, 8, 0x20));
+  a.emit(enc.ldrxLsl3(9, 8, 25));
+  a.emit(enc.ldrw(10, 9, 0x10));
+  a.emit(enc.ldrw(11, 24, 0x10));
+  a.emit(enc.cmpw(10, 11));
+  a.ref("next", a64.bcond(COND_NE));
+  a.emit(enc.add(12, 9, 0x14));
+  a.emit(enc.add(13, 24, 0x14));
+  a.label("cmp");
+  a.ref("setv", a64.cbzw(10));
+  a.emit(a64.ldrhPost2(14, 12));
+  a.emit(a64.ldrhPost2(15, 13));
+  a.emit(a64.subw1(10, 10));
+  a.emit(enc.cmpw(14, 15));
+  a.ref("cmp", a64.bcond(COND_EQ));
+  a.label("next");
+  a.emit(enc.addw1(25, 25));
+  a.ref("loop", a64.bTo);
+  a.label("notfound");
+  a.emit(a64.movw0(25));
+  a.label("setv");
+  a.emit(enc.ldrx(0, 19, t.dropdownOff));
+  a.emit(a64.movw(1, 25));
+  a.emit(enc.movz(2));
+  a.emit(enc.bl(a.pc(), t.setValue));
+  a.label("done");
+  a.emit(a64.ldp(24, 23, 0x10));
+  a.emit(a64.ldp(26, 25, 0x20));
+  a.emit(a64.ldp(29, 30, 0x30));
+  a.emit(enc.addSp(0x40));
+  a.emit(enc.b(a.pc(), t.resume));
+  return a.done();
+}
+
+function buildOkCave(base, t) {
+  const a = new Asm(base);
+  a.emit(enc.subSp(0x20));
+  a.emit(a64.stp(19, 30, 0x10));
+  a.emit(enc.mov(19, 0));
+  a.emit(enc.ldrx(8, 19, t.dropdownOff));
+  a.ref("out", a64.cbzx(8));
+  a.emit(enc.ldrx(0, 8, t.optionsOff));
+  a.ref("out", a64.cbzx(0));
+  a.emit(enc.ldrw(1, 8, t.valueOff));
+  a.emit(enc.movz(2));
+  a.emit(enc.bl(a.pc(), t.applyChoice));
+  a.label("out");
+  a.emit(enc.mov(0, 19));
+  a.emit(enc.movz(1));
+  a.emit(a64.ldp(19, 30, 0x10));
+  a.emit(enc.addSp(0x20));
+  a.emit(enc.b(a.pc(), t.close));
+  return a.done();
+}
+
 function wordBytes(words) {
   const out = new Uint8Array(words.length * 4);
   const dv = new DataView(out.buffer);
@@ -370,7 +505,7 @@ function matchObjNewBlock(u, i, at) {
   return { at: at + i * 4, objNew, ctor };
 }
 
-async function scanBranches(read, range, gc, cave, caveEnd, gcEnd, onProgress) {
+async function scanBranches(read, range, gc, cave, caveEnd, gcEnd, onProgress, extra) {
   const callers = [];
   const stray = [];
   const end = range.start + (range.size - (range.size % 4));
@@ -383,6 +518,7 @@ async function scanBranches(read, range, gc, cave, caveEnd, gcEnd, onProgress) {
       const at = pos + i * 4;
       const target = at + signExtend(u[i] & 0x3ffffff, 26) * 4;
       if (top === BL_OP && target === gc) callers.push(at);
+      if (extra && target >= extra.start && target < extra.end && !(at >= extra.start && at < extra.end)) extra.stray.push(at);
       if (target >= cave && target < caveEnd && !(at >= cave && at < caveEnd)) {
         if (!(target === cave && at >= gc && at < gcEnd)) stray.push(at);
       }
@@ -406,6 +542,148 @@ async function findObjNew(read, callers) {
   return [...uniq.values()];
 }
 
+function initCells(words, base, toVa) {
+  const out = [];
+  for (let i = 0; i + 2 < words.length; i++) {
+    const a = words[i];
+    const b = words[i + 1];
+    const c = words[i + 2];
+    if (((a & 0x9f00001f) >>> 0) === 0x90000000 && ((b & 0xffc003ff) >>> 0) === 0x91000000 && c >>> 26 === BL_OP) {
+      const pc = toVa(base + i * 4);
+      const imm = signExtend((((a >>> 5) & 0x7ffff) << 2) | ((a >>> 29) & 3), 21) * 4096;
+      const shift = (b >>> 22) & 1 ? 4096 : 1;
+      out.push(pc - (pc % 4096) + imm + ((b >>> 10) & 0xfff) * shift);
+    }
+  }
+  return out;
+}
+
+const DROPDOWN_FIELD = 0xf9401660;
+const HOOK_STR_OPTIONS = 0xf8010e95;
+
+async function planDropdown(c) {
+  const { read, toVa, starts, idx, one, extra } = c;
+  const fnEnd = (off) => starts[startIndex(starts, off) + 1];
+  const wordsAt = async (off) => words32(await read(off, fnEnd(off) - off));
+  let addopts = one.addopts;
+  if (!addopts && c.multi.addopts) {
+    const want = c.gcCells[6];
+    const pick = [];
+    for (const h of c.multi.addopts) {
+      const cells = initCells(words32(await read(h, fnEnd(h) - h)), h, toVa);
+      if (cells.includes(want)) pick.push(h);
+    }
+    if (pick.length === 1) addopts = pick[0];
+  }
+  if (!addopts) return { status: "skip", stage: "addoptions" };
+  if (!one.uchars) return { status: "skip", stage: "space" };
+  const uc = one.uchars;
+  const ucEnd = fnEnd(uc);
+  if (extra.stray.length) return { status: "skip", stage: "space-live", offset: extra.stray[0] };
+  if (ucEnd - uc < 0x180) return { status: "skip", stage: "space-size" };
+
+  const lo = Math.max(0, idx.get - 4);
+  const hi = Math.min(starts.length - 2, idx.get + 14);
+  const funcs = [];
+  for (let k = lo; k <= hi; k++) funcs.push({ off: starts[k], words: await wordsAt(starts[k]) });
+  const calls = (f, target) => {
+    for (let i = 0; i < f.words.length; i++) if (blTargetIn(f.words, i, f.off) === target) return true;
+    return false;
+  };
+  const slsList = funcs.filter((f) => f.off !== one.get && f.off !== one.gbls && calls(f, one.gbls));
+  if (slsList.length !== 1) return { status: "skip", stage: "select-fn" };
+  const sls = slsList[0].off;
+  const b0List = funcs.filter((f) => f.off !== sls && calls(f, sls));
+  if (b0List.length !== 1) return { status: "skip", stage: "changed-fn" };
+  const b0 = b0List[0].off;
+
+  let sdo = null;
+  for (const f of funcs) {
+    for (let i = 0; i + 1 < f.words.length; i++) {
+      if (blTargetIn(f.words, i, f.off) === one.get && blTargetIn(f.words, i + 1, f.off) === one.gc) {
+        if (sdo) return { status: "skip", stage: "setdata-dup" };
+        sdo = f;
+      }
+    }
+  }
+  if (!sdo) return { status: "skip", stage: "setdata" };
+  const w = sdo.words;
+  let hook = -1;
+  let hooked = false;
+  for (let i = 4; i + 10 <= w.length; i++) {
+    const isCbz = (x) => ((x & 0xff00001f) >>> 0) === 0xb4000000;
+    const rest =
+      w[i - 4] === HOOK_STR_OPTIONS &&
+      w[i] === DROPDOWN_FIELD &&
+      isCbz(w[i + 1]) &&
+      w[i + 3] === 0xd2800002 &&
+      w[i + 4] >>> 26 === BL_OP &&
+      w[i + 5] === DROPDOWN_FIELD &&
+      isCbz(w[i + 6]) &&
+      w[i + 7] === 0x52800001 &&
+      w[i + 8] === 0xd2800002 &&
+      w[i + 9] >>> 26 === BL_OP;
+    if (!rest) continue;
+    if (w[i + 2] === 0xf9400281) { hook = i; break; }
+    if (w[i + 2] >>> 26 === B_OP) { hook = i; hooked = true; break; }
+  }
+  if (hook < 0) return { status: "skip", stage: "setdata-shape" };
+  if (hooked) return { status: "already" };
+
+  const setOptions = blTargetIn(w, hook + 4, sdo.off);
+  const setValue = blTargetIn(w, hook + 9, sdo.off);
+  const so = words32(await read(setOptions, 24));
+  const optionsOff = (((so[4] >>> 10) & 0xfff) * 8) | 0;
+  if (((so[4] & 0xffc003ff) >>> 0) !== 0xf9400000 || optionsOff < 0x20 || optionsOff > 0x400) return { status: "skip", stage: "options-field" };
+  const gv = words32(await read(setValue - 8, 8));
+  const valueOff = ((gv[0] >>> 10) & 0xfff) * 4;
+  if (((gv[0] & 0xffc003ff) >>> 0) !== 0xb9400000 || gv[1] !== RET || valueOff < 0x20 || valueOff > 0x400) return { status: "skip", stage: "value-field" };
+
+  const gls = starts[idx.gd + 1];
+  const glsEnd = fnEnd(gls);
+  const glsWords = words32(await read(gls, glsEnd - gls));
+  if (glsEnd - gls < 0x40 || glsEnd - gls > 0xc0 || glsWords[0] !== 0xa9be4ff4 || !glsWords.includes(0xf9400800) || !glsWords.includes(RET)) return { status: "skip", stage: "last-selected" };
+
+  const okFn = starts[idx.gc + 2];
+  const closeFn = starts[idx.gc + 3];
+  if (fnEnd(okFn) - okFn !== 4 || (await rdWordAt(read, okFn)) !== RET) return { status: "skip", stage: "ok-fn" };
+  if (fnEnd(starts[idx.gc + 1]) - starts[idx.gc + 1] !== 8 || fnEnd(closeFn) - closeFn < 0x40) return { status: "skip", stage: "close-fn" };
+
+  const base = toVa(uc);
+  const optT = {
+    dropdownOff: 0x28,
+    setOptions: toVa(setOptions),
+    candidates: toVa(one.gc),
+    addOptions: toVa(addopts),
+    lastSelected: toVa(gls),
+    setValue: toVa(setValue),
+    resume: toVa(sdo.off + (hook + 10) * 4),
+  };
+  const optWords = buildOptionsCave(base, optT);
+  const okBase = base + optWords.length * 4;
+  const okWords = buildOkCave(okBase, {
+    dropdownOff: 0x28,
+    optionsOff,
+    valueOff,
+    applyChoice: toVa(b0),
+    close: toVa(closeFn),
+  });
+  if ((optWords.length + okWords.length) * 4 > ucEnd - uc) return { status: "skip", stage: "space-fit" };
+  const hookAt = sdo.off + (hook + 2) * 4;
+  return {
+    status: "patch",
+    patches: [
+      { offset: uc, bytes: wordBytes(optWords.concat(okWords)) },
+      { offset: hookAt, bytes: wordBytes([enc.b(toVa(hookAt), base)]) },
+      { offset: okFn, bytes: wordBytes([enc.b(toVa(okFn), okBase)]) },
+    ],
+  };
+}
+
+async function rdWordAt(read, off) {
+  return words32(await read(off, 4))[0] >>> 0;
+}
+
 export async function findLocalizeSite(read, onProgress) {
   if (new Uint8Array(new Uint32Array([1]).buffer)[0] !== 1) return { status: "unsupported" };
   const range = await textRange(read);
@@ -423,15 +701,28 @@ export async function findLocalizeSite(read, onProgress) {
     { id: "gbls", hex: FP_GBLS },
     { id: "gfn", hex: FP_GFN },
     { id: "add", hex: FP_ADD },
+    { id: "addopts", hex: FP_ADDOPTS },
+    { id: "uchars", hex: FP_UCHARS },
   ].map((sp) => {
     const fp = Array.from(hexWords(sp.hex), maskWord);
     return { id: sp.id, fp, wild: sp.wild, tol: tolFor(fp.length) };
   });
   const hits = await scanAll(read, range, specs, (f) => onProgress && onProgress(f * 0.6));
   const one = {};
+  const multi = {};
   for (let i = 0; i < specs.length; i++) {
-    if (hits[i].length === 0) return { status: "missing", stage: specs[i].id };
-    if (hits[i].length > 1) return { status: "ambiguous", stage: specs[i].id, count: hits[i].length };
+    const optional = OPTIONAL_SPECS.has(specs[i].id);
+    if (hits[i].length === 0) {
+      if (optional) continue;
+      return { status: "missing", stage: specs[i].id };
+    }
+    if (hits[i].length > 1) {
+      if (optional) {
+        multi[specs[i].id] = hits[i];
+        continue;
+      }
+      return { status: "ambiguous", stage: specs[i].id, count: hits[i].length };
+    }
     one[specs[i].id] = hits[i][0];
   }
   const path = await pathPatch(read, range, one.gd);
@@ -496,7 +787,8 @@ export async function findLocalizeSite(read, onProgress) {
   }
   if (!sites.length || epilogueAt < 0) return { status: "unexpected", stage: "isrunning-sites", offset: gc };
 
-  const scan = await scanBranches(read, range, gc, cave, head, gcEnd, (f) => onProgress && onProgress(0.6 + f * 0.35));
+  const extra = one.uchars ? { start: one.uchars, end: fnEnd(one.uchars), stray: [] } : null;
+  const scan = await scanBranches(read, range, gc, cave, head, gcEnd, (f) => onProgress && onProgress(0.6 + f * 0.35), extra);
   if (scan.stray.length) return { status: "unexpected", stage: "cave-live", offset: scan.stray[0] };
   const blocks = await findObjNew(read, scan.callers);
   if (blocks.length !== 1) return { status: blocks.length ? "ambiguous" : "missing", stage: "objnew", count: blocks.length };
@@ -538,11 +830,20 @@ export async function findLocalizeSite(read, onProgress) {
   wanted.push({ offset: head, bytes: wordBytes([RET1]) });
   wanted.push({ offset: getSite, bytes: wordBytes([enc.bl(toVa(getSite), toVa(one.gbls))]) });
   if (path.status === "patch") wanted.push(...path.patches);
+  let dropdown = { status: "skip", stage: "space" };
+  if (extra) {
+    try {
+      dropdown = await planDropdown({ read, toVa, starts, idx, one, extra, multi, gcCells: cells });
+    } catch (e) {
+      dropdown = { status: "skip", stage: "error" };
+    }
+  }
+  if (dropdown.status === "patch") wanted.push(...dropdown.patches);
   const needed = [];
   for (const p of wanted) {
     const cur = await read(p.offset, p.bytes.length);
     if (!sameBytes(cur, p.bytes)) needed.push(p);
   }
-  if (!needed.length) return { status: "already", offset: gc };
-  return { status: "patch", offset: gc, patches: needed.sort((a, b) => a.offset - b.offset) };
+  if (!needed.length) return { status: "already", offset: gc, dropdown: dropdown.status === "patch" ? "applied" : dropdown.stage || dropdown.status };
+  return { status: "patch", offset: gc, dropdown: dropdown.status === "patch" ? "applied" : dropdown.stage || dropdown.status, patches: needed.sort((a, b) => a.offset - b.offset) };
 }
