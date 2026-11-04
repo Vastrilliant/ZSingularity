@@ -102,9 +102,8 @@ input[type=file] { display: none; }
   <div class="divider"><span>§</span></div>
 
   <section>
-    <h2>Decrypted Game IPA</h2>
     <label class="drop" id="drop">
-      <strong id="pickTitle">「 Choose .ipa 」</strong>
+      <strong id="pickTitle">「 Import binary 」</strong>
       <input type="file" id="file">
     </label>
     <div class="row">
@@ -134,12 +133,12 @@ input[type=file] { display: none; }
 </div>
 
 <script type="module">
-import { inject } from "./js/inject.js";
+import { inject, patchBinary, sniffMachO } from "./js/inject.js";
 
 const $ = (id) => document.getElementById(id);
 const state = {
   channel: "release", versions: [], version: null, manifests: {}, nightly: null,
-  file: null, t0: 0, busy: false, outUrl: null, outBlob: null, outName: "",
+  file: null, kind: null, t0: 0, busy: false, outUrl: null, outBlob: null, outName: "",
 };
 
 function fmtSize(n) {
@@ -178,7 +177,8 @@ function refresh() {
   $("versionPop").classList.toggle("hidden", !(state.channel === "release" && state.versions.length));
   $("channelBtn").disabled = state.busy;
   $("versionBtn").disabled = state.busy;
-  $("go").disabled = !(m && state.file) || state.busy;
+  $("go").disabled = !(state.file && state.kind && (state.kind === "macho" || m)) || state.busy;
+  $("go").textContent = state.kind === "macho" ? "\u300c Patch \u300d" : "\u300c Inject \u300d";
 }
 
 async function fetchJson(path) {
@@ -254,10 +254,18 @@ $("versionBtn").addEventListener("click", () => {
   });
 });
 
-function setFile(f) {
+async function setFile(f) {
   state.file = f || null;
-  $("pickTitle").textContent = f ? f.name : "\u300c Choose .ipa \u300d";
+  state.kind = null;
+  $("pickTitle").textContent = f ? f.name : "\u300c Import binary \u300d";
   $("drop").classList.toggle("has-file", !!f);
+  refresh();
+  if (!f) return;
+  let macho = false;
+  try { macho = await sniffMachO(f); } catch (e) {}
+  if (state.file !== f) return;
+  state.kind = macho ? "macho" : "ipa";
+  $("dl").textContent = macho ? "\u300c Save Binary \u300d" : "\u300c Save IPA \u300d";
   refresh();
 }
 
@@ -307,9 +315,54 @@ function reset() {
   $("progressCard").classList.remove("done");
 }
 
-const STAGE_SPAN = { "Reading IPA": [0, 0.05], "Patching Info.plist": [0.05, 0.08], "Patching executable": [0.08, 0.4], "Patching framework": [0.4, 0.7], "Writing IPA": [0.7, 1], Done: [1, 1] };
+const STAGE_SPAN = { "Reading IPA": [0, 0.05], "Patching Info.plist": [0.05, 0.08], "Patching executable": [0.08, 0.4], "Patching framework": [0.4, 0.7], "Patching binary": [0, 1], "Writing IPA": [0.7, 1], Done: [1, 1] };
+
+async function runBinary() {
+  closeMenu();
+  reset();
+  state.busy = true;
+  refresh();
+  const t0 = performance.now();
+  state.t0 = t0;
+  try {
+    log("Input: " + state.file.name + " \u00b7 " + fmtSize(state.file.size) + " (" + state.file.size + " bytes) \u00b7 Mach-O binary, patching only (no dylib injection)");
+    let lastStage = "";
+    const res = await patchBinary(state.file, {
+      onLog: (msg, cls) => log("  " + msg, cls),
+      onProgress(stage, f) {
+        const [a, b] = STAGE_SPAN[stage] || [0, 1];
+        $("barFill").style.width = Math.round((a + (b - a) * f) * 100) + "%";
+        if (stage !== lastStage) { lastStage = stage; $("stage").textContent = stage + "\u2026"; log(stage); }
+      },
+    });
+    for (const w of res.warnings) log(w, "w");
+    if (!res.blob) {
+      $("stage").textContent = "Nothing to change";
+      log("All patches were already present, so there is nothing to save.", "k");
+      $("progressCard").classList.add("done");
+      return;
+    }
+    state.outBlob = res.blob;
+    state.outName = state.file.name;
+    state.outUrl = URL.createObjectURL(res.blob);
+    $("stage").textContent = "Done in " + ((performance.now() - t0) / 1000).toFixed(1) + "s";
+    $("outMeta").textContent = state.outName + " \u00b7 " + fmtSize(res.blob.size) + " \u00b7 " + Object.entries(res.status).map(([k, v]) => k + ": " + v).join(" \u00b7 ");
+    log("Output: " + fmtSize(res.blob.size), "k");
+    $("result").classList.remove("hidden");
+    $("progressCard").classList.add("done");
+  } catch (err) {
+    console.error(err);
+    $("stage").textContent = "Failed";
+    $("progressCard").classList.add("fail");
+    log(err && err.message ? err.message : String(err), "e");
+  } finally {
+    state.busy = false;
+    refresh();
+  }
+}
 
 $("go").addEventListener("click", async () => {
+  if (state.kind === "macho" && state.file) { await runBinary(); return; }
   const m = current();
   if (!m || !state.file) return;
   closeMenu();

@@ -63,3 +63,22 @@ export async function patchFramework(ipa, entry, finders, { progress, log }) {
   }
   throw new Error("Unsupported compression method " + entry.method + " on the framework executable.");
 }
+
+export async function patchRawFile(file, finders, { progress, log }) {
+  const report = (f) => progress("Patching binary", f);
+  const results = await runFinders(finders, async (o, l) => new Uint8Array(await file.slice(o, o + l).arrayBuffer()), report, 0, 0.6);
+  const patches = collectPatches(results);
+  if (!patches.length) return { results, blob: null };
+  for (let i = 1; i < patches.length; i++) {
+    if (patches[i].offset < patches[i - 1].offset + patches[i - 1].bytes.length) throw new Error("Overlapping patches at 0x" + patches[i].offset.toString(16) + ", refusing to write.");
+  }
+  const parts = [];
+  let at = 0;
+  for (const p of patches) {
+    parts.push(file.slice(at, p.offset), p.bytes);
+    at = p.offset + p.bytes.length;
+  }
+  parts.push(file.slice(at));
+  log("Binary rebuilt from " + parts.length + " parts, " + patches.length + " patch(es)");
+  return { results, blob: new Blob(parts), patches };
+}

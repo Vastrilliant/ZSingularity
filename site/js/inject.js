@@ -4,7 +4,7 @@ import { patchMachO, ChunkedBuffer } from "./macho.js";
 import { findIapSite } from "./iap.js";
 import { findLocalizeSite } from "./localize.js";
 import { findHookSites } from "./hooks.js";
-import { patchFramework } from "./framework.js";
+import { patchFramework, patchRawFile } from "./framework.js";
 
 const TRUE_KEYS = [
   "CADisableMinimumFrameDuration",
@@ -287,4 +287,36 @@ function checkMach(m, warnings) {
   }
   if (!m.slices.some((s) => s.arch === "arm64")) warnings.push("The main executable has no arm64 slice.");
   if (m.slices.every((s) => s.already)) warnings.push("The executable already loads ZSingularity; the dylib was just replaced.");
+}
+
+export async function sniffMachO(file) {
+  if (file.size < 32) return false;
+  const b = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  const m = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) >>> 0;
+  return m === 0xcffaedfe || m === 0xcafebabe || m === 0xcafebabf;
+}
+
+export async function patchBinary(file, opts = {}) {
+  const progress = opts.onProgress || (() => {});
+  const log = opts.onLog || (() => {});
+  const warnings = [];
+  const finders = [];
+  if (opts.patchIap !== false) finders.push({ id: "iap", find: findIapSite });
+  if (opts.patchLocalize !== false) finders.push({ id: "localize", find: findLocalizeSite });
+  if (opts.patchHooks !== false) finders.push({ id: "hooks", find: findHookSites });
+  progress("Patching binary", 0);
+  const r = await patchRawFile(file, finders, { progress, log });
+  const status = {};
+  for (const res of r.results) {
+    if (res.id === "iap") status.iap = reportPatch(res, "Purchase popup", "The purchase code did not match the expected layout (" + res.status + "), so the launch purchase error popup was not suppressed.", log, warnings);
+    else if (res.id === "hooks") status.hooks = reportHooks(res, log, warnings);
+    else {
+      status.localize = reportPatch(res, "Custom localize", "The localization code did not match the expected layout (" + res.status + (res.stage ? ": " + res.stage : "") + "), so the Custom Localize Manager was not enabled.", log, warnings);
+      if (res.dropdown && res.dropdown !== "applied") log("Custom localize dropdown stage: " + res.dropdown, "w");
+    }
+  }
+  const applied = Object.values(status).some((v) => v === "patched");
+  if (!applied && !Object.values(status).some((v) => v === "already")) warnings.push("Nothing matched. This must be the game's UnityFramework binary (not the main executable or a different build).");
+  progress("Done", 1);
+  return { blob: r.blob, status, warnings, applied, size: file.size };
 }
