@@ -37,6 +37,8 @@ static const int32_t kZSFontSceneStateMain = 2;
 static void *ZSUID_FindActiveInstance(void *klass);
 static void zs_reapply_all_settings_except_experimental(void);
 static void zs_apply_persisted_particle_settings(void);
+static void zs_particle_watch_install(void);
+static void zs_particle_watch_reset(void);
 void zs_particles_load_from_dictionary(NSDictionary *particles);
 NSDictionary *zs_particles_settings_dictionary(void);
 BOOL zs_particle_get_bool(NSString *key);
@@ -1070,6 +1072,7 @@ static const double kParticleApplyDelaySeconds = 2.0;
 static void zs_schedule_particle_apply(void) {
     static uint64_t generation;
     uint64_t token = ++generation;
+    zs_particle_watch_reset();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kParticleApplyDelaySeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (token != generation) return;
         zs_apply_persisted_particle_settings();
@@ -1320,6 +1323,7 @@ static void zs_schedule_particle_apply(void) {
 #pragma mark - Apply-everything entry points
 
 static void zs_apply_persisted_particle_settings(void) {
+    zs_particle_watch_install();
     zs_apply_particle_key(@"ParticleAlignment");
     zs_apply_particle_key(@"ParticleRenderMode");
     zs_apply_particle_key(@"ParticleSortMode");
@@ -3846,6 +3850,28 @@ static BOOL zs_particle_key_needs_restore(NSString *key) {
     return NO;
 }
 
+static BOOL zs_particle_apply_key_to_object(NSString *key, void *obj) {
+    if ([key isEqualToString:@"ParticleGPUInstancing"]) mt_call_instance_bool(obj, "set_enableGPUInstancing", g_expParticleGPUInstancing);
+    else if ([key isEqualToString:@"ParticleAlignment"]) zs_apply_particle_alignment_to_object(obj);
+    else if ([key isEqualToString:@"ParticleRenderMode"]) zs_apply_particle_render_mode_to_object(obj);
+    else if ([key isEqualToString:@"ParticleMeshDistribution"]) mt_call_instance_int(obj, "set_meshDistribution", g_expParticleMeshDistribution);
+    else if ([key isEqualToString:@"ParticleSortMode"]) mt_call_instance_int(obj, "set_sortMode", g_expParticleSortMode);
+    else if ([key isEqualToString:@"ParticleLengthScale"]) mt_call_instance_float(obj, "set_lengthScale", g_expParticleLengthScale);
+    else if ([key isEqualToString:@"ParticleVelocityScale"]) mt_call_instance_float(obj, "set_velocityScale", g_expParticleVelocityScale);
+    else if ([key isEqualToString:@"ParticleCameraVelocityScale"]) mt_call_instance_float(obj, "set_cameraVelocityScale", g_expParticleCameraVelocityScale);
+    else if ([key isEqualToString:@"ParticleNormalDirection"]) mt_call_instance_float(obj, "set_normalDirection", g_expParticleNormalDirection);
+    else if ([key isEqualToString:@"ParticleShadowBias"]) mt_call_instance_float(obj, "set_shadowBias", g_expParticleShadowBias);
+    else if ([key isEqualToString:@"ParticleSortingFudge"]) mt_call_instance_float(obj, "set_sortingFudge", g_expParticleSortingFudge);
+    else if ([key isEqualToString:@"ParticleMinSize"]) mt_call_instance_float(obj, "set_minParticleSize", g_expParticleMinSize);
+    else if ([key isEqualToString:@"ParticleMaxSize"]) mt_call_instance_float(obj, "set_maxParticleSize", g_expParticleMaxSize);
+    else if ([key isEqualToString:@"ParticleAllowRoll"]) mt_call_instance_bool(obj, "set_allowRoll", g_expParticleAllowRoll);
+    else if ([key isEqualToString:@"ParticleFreeformStretching"]) mt_call_instance_bool(obj, "set_freeformStretching", g_expParticleFreeformStretching);
+    else if ([key isEqualToString:@"ParticleRotateWithStretchDirection"]) mt_call_instance_bool(obj, "set_rotateWithStretchDirection", g_expParticleRotateWithStretchDirection);
+    else if ([key isEqualToString:@"ParticleApplyActiveColorSpace"]) mt_call_instance_bool(obj, "set_applyActiveColorSpace", g_expParticleApplyActiveColorSpace);
+    else return NO;
+    return YES;
+}
+
 BOOL zs_apply_particle_key(NSString *key) {
     BOOL isDefault = zs_particle_value_is_default(key);
     if (isDefault && !zs_particle_key_needs_restore(key)) return YES;
@@ -3858,24 +3884,7 @@ BOOL zs_apply_particle_key(NSString *key) {
     for (NSUInteger i = 0; i < count; i++) {
         void *obj = zs_array_object_at(array, i);
         if (!obj) continue;
-        if ([key isEqualToString:@"ParticleGPUInstancing"]) mt_call_instance_bool(obj, "set_enableGPUInstancing", g_expParticleGPUInstancing);
-        else if ([key isEqualToString:@"ParticleAlignment"]) zs_apply_particle_alignment_to_object(obj);
-        else if ([key isEqualToString:@"ParticleRenderMode"]) zs_apply_particle_render_mode_to_object(obj);
-        else if ([key isEqualToString:@"ParticleMeshDistribution"]) mt_call_instance_int(obj, "set_meshDistribution", g_expParticleMeshDistribution);
-        else if ([key isEqualToString:@"ParticleSortMode"]) mt_call_instance_int(obj, "set_sortMode", g_expParticleSortMode);
-        else if ([key isEqualToString:@"ParticleLengthScale"]) mt_call_instance_float(obj, "set_lengthScale", g_expParticleLengthScale);
-        else if ([key isEqualToString:@"ParticleVelocityScale"]) mt_call_instance_float(obj, "set_velocityScale", g_expParticleVelocityScale);
-        else if ([key isEqualToString:@"ParticleCameraVelocityScale"]) mt_call_instance_float(obj, "set_cameraVelocityScale", g_expParticleCameraVelocityScale);
-        else if ([key isEqualToString:@"ParticleNormalDirection"]) mt_call_instance_float(obj, "set_normalDirection", g_expParticleNormalDirection);
-        else if ([key isEqualToString:@"ParticleShadowBias"]) mt_call_instance_float(obj, "set_shadowBias", g_expParticleShadowBias);
-        else if ([key isEqualToString:@"ParticleSortingFudge"]) mt_call_instance_float(obj, "set_sortingFudge", g_expParticleSortingFudge);
-        else if ([key isEqualToString:@"ParticleMinSize"]) mt_call_instance_float(obj, "set_minParticleSize", g_expParticleMinSize);
-        else if ([key isEqualToString:@"ParticleMaxSize"]) mt_call_instance_float(obj, "set_maxParticleSize", g_expParticleMaxSize);
-        else if ([key isEqualToString:@"ParticleAllowRoll"]) mt_call_instance_bool(obj, "set_allowRoll", g_expParticleAllowRoll);
-        else if ([key isEqualToString:@"ParticleFreeformStretching"]) mt_call_instance_bool(obj, "set_freeformStretching", g_expParticleFreeformStretching);
-        else if ([key isEqualToString:@"ParticleRotateWithStretchDirection"]) mt_call_instance_bool(obj, "set_rotateWithStretchDirection", g_expParticleRotateWithStretchDirection);
-        else if ([key isEqualToString:@"ParticleApplyActiveColorSpace"]) mt_call_instance_bool(obj, "set_applyActiveColorSpace", g_expParticleApplyActiveColorSpace);
-        else { handled = NO; break; }
+        if (!zs_particle_apply_key_to_object(key, obj)) { handled = NO; break; }
     }
     if (isDefault) {
         if ([key isEqualToString:@"ParticleAlignment"]) [zs_particle_alignment_cache() removeAllObjects];
@@ -3884,7 +3893,7 @@ BOOL zs_apply_particle_key(NSString *key) {
     return handled;
 }
 
-BOOL zs_apply_particle_max_particles_cap(void) {
+static BOOL zs_apply_particle_max_particles_cap_filtered(NSMutableSet<NSValue *> *seen, BOOL fullPass, BOOL quiet) {
     if (!g_expParticleMaxParticlesCapEnabled) return YES;
     void *klass = mt_class("UnityEngine", "ParticleSystem", "ParticleSystemModule");
     NSUInteger count = 0;
@@ -3895,22 +3904,113 @@ BOOL zs_apply_particle_max_particles_cap(void) {
     if (!getter || !setter) return NO;
     int32_t cap = g_expParticleMaxParticlesCap;
     NSUInteger clamped = 0;
+    NSMutableSet<NSValue *> *current = seen ? [NSMutableSet setWithCapacity:count] : nil;
     for (NSUInteger i = 0; i < count; i++) {
         void *obj = zs_array_object_at(array, i);
         if (!obj) continue;
+        if (current) {
+            NSValue *key = [NSValue valueWithPointer:obj];
+            [current addObject:key];
+            if (!fullPass && [seen containsObject:key]) continue;
+        }
         void *exc = NULL;
         void *boxed = [IL2CppBridge invokeMethod:getter onInstance:obj args:NULL outException:&exc];
         if (exc || !boxed) continue;
-        int32_t current = *(int32_t *)((uint8_t *)boxed + 0x10);
-        if (current <= cap) continue;
+        int32_t value = *(int32_t *)((uint8_t *)boxed + 0x10);
+        if (value <= cap) continue;
         void *args[1] = { &cap };
         exc = NULL;
         [IL2CppBridge invokeMethod:setter onInstance:obj args:args outException:&exc];
         if (!exc) clamped++;
     }
-    ZLog(@"[ZSMemoryTweaks] particle maxParticles cap: clamped %lu/%lu loaded emitters to <= %d",
-         (unsigned long)clamped, (unsigned long)count, cap);
+    if (current) {
+        [seen removeAllObjects];
+        [seen unionSet:current];
+    }
+    if (!quiet || clamped > 0) {
+        ZLog(@"[ZSMemoryTweaks] particle maxParticles cap: clamped %lu/%lu loaded emitters to <= %d",
+             (unsigned long)clamped, (unsigned long)count, cap);
+    }
     return YES;
+}
+
+BOOL zs_apply_particle_max_particles_cap(void) {
+    return zs_apply_particle_max_particles_cap_filtered(nil, YES, NO);
+}
+
+static NSArray<NSString *> *zs_particle_renderer_keys(void) {
+    static NSArray<NSString *> *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = @[@"ParticleGPUInstancing", @"ParticleAlignment", @"ParticleRenderMode", @"ParticleMeshDistribution",
+                 @"ParticleSortMode", @"ParticleLengthScale", @"ParticleVelocityScale", @"ParticleCameraVelocityScale",
+                 @"ParticleNormalDirection", @"ParticleShadowBias", @"ParticleSortingFudge", @"ParticleMinSize",
+                 @"ParticleMaxSize", @"ParticleAllowRoll", @"ParticleFreeformStretching",
+                 @"ParticleRotateWithStretchDirection", @"ParticleApplyActiveColorSpace"];
+    });
+    return keys;
+}
+
+static NSTimer *g_particleWatchTimer;
+static NSMutableSet<NSValue *> *g_particleSeenRenderers;
+static NSMutableSet<NSValue *> *g_particleSeenSystems;
+static NSUInteger g_particleWatchTick;
+static const NSTimeInterval kParticleWatchInterval = 1.0;
+static const NSUInteger kParticleWatchFullPassEvery = 5;
+
+static void zs_particle_watch_reset(void) {
+    [g_particleSeenRenderers removeAllObjects];
+    [g_particleSeenSystems removeAllObjects];
+}
+
+static void zs_particle_watch_tick(void) {
+    @autoreleasepool {
+        @try {
+            NSMutableArray<NSString *> *activeKeys = [NSMutableArray array];
+            for (NSString *key in zs_particle_renderer_keys()) {
+                if (!zs_particle_value_is_default(key)) [activeKeys addObject:key];
+            }
+            BOOL capActive = g_expParticleMaxParticlesCapEnabled;
+            if (activeKeys.count == 0 && !capActive) return;
+
+            BOOL fullPass = (++g_particleWatchTick % kParticleWatchFullPassEvery) == 0;
+
+            if (activeKeys.count > 0) {
+                void *klass = mt_class("UnityEngine", "ParticleSystemRenderer", "ParticleSystemModule");
+                NSUInteger count = 0;
+                void *array = zs_resources_find_all_for_class(klass, &count);
+                if (array) {
+                    NSMutableSet<NSValue *> *current = [NSMutableSet setWithCapacity:count];
+                    for (NSUInteger i = 0; i < count; i++) {
+                        void *obj = zs_array_object_at(array, i);
+                        if (!obj) continue;
+                        NSValue *pointerKey = [NSValue valueWithPointer:obj];
+                        [current addObject:pointerKey];
+                        if (!fullPass && [g_particleSeenRenderers containsObject:pointerKey]) continue;
+                        for (NSString *key in activeKeys) zs_particle_apply_key_to_object(key, obj);
+                    }
+                    g_particleSeenRenderers = current;
+                }
+            }
+
+            if (capActive) {
+                if (!g_particleSeenSystems) g_particleSeenSystems = [NSMutableSet set];
+                zs_apply_particle_max_particles_cap_filtered(g_particleSeenSystems, fullPass, YES);
+            }
+        } @catch (NSException *exception) {
+            ZLog(@"[ZSParticles] watcher tick failed safely: %@", exception.reason);
+        }
+    }
+}
+
+static void zs_particle_watch_install(void) {
+    if (g_particleWatchTimer) return;
+    if (!g_particleSeenRenderers) g_particleSeenRenderers = [NSMutableSet set];
+    if (!g_particleSeenSystems) g_particleSeenSystems = [NSMutableSet set];
+    g_particleWatchTimer = [NSTimer timerWithTimeInterval:kParticleWatchInterval repeats:YES block:^(NSTimer *timer) {
+        zs_particle_watch_tick();
+    }];
+    [NSRunLoop.mainRunLoop addTimer:g_particleWatchTimer forMode:NSRunLoopCommonModes];
 }
 
 static BOOL zs_particle_apply_key_internal(NSString *key) {
@@ -3921,6 +4021,7 @@ static BOOL zs_particle_apply_key_internal(NSString *key) {
 }
 
 void zs_particle_apply_key(NSString *key) {
+    zs_particle_watch_install();
     @autoreleasepool {
         @try {
             BOOL applied = zs_particle_apply_key_internal(key);
