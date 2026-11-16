@@ -342,15 +342,17 @@ void zs_unload_unused_assets_and_collect(void);
 void zs_run_memory_cleanup(void (^ _Nullable completion)(BOOL ran));
 void zs_set_auto_unload_on_memory_warning(BOOL enabled);
 
-#define kZSAutoCleanupMinPercent 30
-#define kZSAutoCleanupMaxPercent 95
-#define kZSAutoCleanupDefaultPercent 90
+#define kZSAutoCleanupStepMB 100
 
 BOOL zs_auto_cleanup_enabled(void);
 void zs_set_auto_cleanup_enabled(BOOL enabled);
-NSInteger zs_auto_cleanup_threshold_percent(void);
-void zs_set_auto_cleanup_threshold_percent(NSInteger percent);
-double zs_auto_cleanup_current_usage_fraction(void);
+NSInteger zs_auto_cleanup_max_usable_mb(void);
+NSInteger zs_auto_cleanup_min_threshold_mb(void);
+NSInteger zs_auto_cleanup_max_threshold_mb(void);
+NSInteger zs_auto_cleanup_default_threshold_mb(void);
+NSInteger zs_auto_cleanup_threshold_mb(void);
+void zs_set_auto_cleanup_threshold_mb(NSInteger megabytes);
+NSInteger zs_auto_cleanup_current_usage_mb(void);
 void zs_auto_cleanup_apply_from_settings(void);
 void zs_clear_guide_portrait_cache(void);
 

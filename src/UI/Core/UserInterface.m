@@ -2158,10 +2158,11 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     zs_add_unavailable_subtext(autoCleanupRow, @"Automatically runs memory cleanup when memory usage hits a certain threshold.");
 
     UIView *autoCleanupThresholdRow = zs_make_expanding_picker_row(@"Memory threshold",
-        kZSAutoCleanupMinPercent, kZSAutoCleanupMaxPercent, zs_auto_cleanup_threshold_percent(), @"%",
+        zs_auto_cleanup_min_threshold_mb(), zs_auto_cleanup_max_threshold_mb(), kZSAutoCleanupStepMB,
+        zs_auto_cleanup_threshold_mb(), @" MB",
         ^(dispatch_block_t changes) { [weakRedirectSelf zs_lowResAnimateChanges:changes]; },
         ^(NSInteger value) {
-            zs_set_auto_cleanup_threshold_percent(value);
+            zs_set_auto_cleanup_threshold_mb(value);
             [weakRedirectSelf zs_scheduleSave];
         });
     zs_expanding_picker_row_set_enabled(autoCleanupThresholdRow, autoCleanupRow.toggle.isOn);

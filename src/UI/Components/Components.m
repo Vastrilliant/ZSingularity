@@ -1316,6 +1316,7 @@ UIView *zs_make_expanding_dropdown_row(NSString *title, NSArray<NSString *> *opt
 @property (nonatomic, strong) UIPickerView *picker;
 @property (nonatomic, assign) NSInteger minValue;
 @property (nonatomic, assign) NSInteger maxValue;
+@property (nonatomic, assign) NSInteger step;
 @property (nonatomic, assign) NSInteger value;
 @property (nonatomic, copy) NSString *suffix;
 @property (nonatomic, assign) BOOL expanded;
@@ -1338,7 +1339,7 @@ static const CGFloat kZSPickerRowHeight = 30;
 }
 
 - (NSInteger)pickerView:(UIPickerView *)pickerView numberOfRowsInComponent:(NSInteger)component {
-    return self.maxValue - self.minValue + 1;
+    return (self.maxValue - self.minValue) / self.step + 1;
 }
 
 - (CGFloat)pickerView:(UIPickerView *)pickerView rowHeightForComponent:(NSInteger)component {
@@ -1350,12 +1351,12 @@ static const CGFloat kZSPickerRowHeight = 30;
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor colorWithWhite:0.95 alpha:1];
     label.font = zs_mono_font(16, UIFontWeightMedium);
-    label.text = [self titleForValue:self.minValue + row];
+    label.text = [self titleForValue:self.minValue + row * self.step];
     return label;
 }
 
 - (void)pickerView:(UIPickerView *)pickerView didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
-    NSInteger picked = self.minValue + row;
+    NSInteger picked = self.minValue + row * self.step;
     if (picked == self.value) return;
     self.value = picked;
     UIControl *rowControl = self.row;
@@ -1391,7 +1392,7 @@ static const CGFloat kZSPickerRowHeight = 30;
             [picker.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
             [picker.heightAnchor constraintEqualToConstant:kZSPickerHeight],
         ]];
-        [picker selectRow:self.value - self.minValue inComponent:0 animated:NO];
+        [picker selectRow:(self.value - self.minValue) / self.step inComponent:0 animated:NO];
         self.picker = picker;
     }
     picker.userInteractionEnabled = expanded;
@@ -1438,11 +1439,14 @@ static const CGFloat kZSPickerRowHeight = 30;
 
 @end
 
-UIView *zs_make_expanding_picker_row(NSString *title, NSInteger minValue, NSInteger maxValue, NSInteger selectedValue, NSString *suffix, void (^animator)(dispatch_block_t changes), void (^onChange)(NSInteger value)) {
+UIView *zs_make_expanding_picker_row(NSString *title, NSInteger minValue, NSInteger maxValue, NSInteger step, NSInteger selectedValue, NSString *suffix, void (^animator)(dispatch_block_t changes), void (^onChange)(NSInteger value)) {
     ZSExpandingPicker *picker = [[ZSExpandingPicker alloc] init];
     picker.minValue = MIN(minValue, maxValue);
     picker.maxValue = MAX(minValue, maxValue);
-    picker.value = MAX(picker.minValue, MIN(picker.maxValue, selectedValue));
+    picker.step = MAX((NSInteger)1, step);
+    picker.maxValue = picker.minValue + (picker.maxValue - picker.minValue) / picker.step * picker.step;
+    NSInteger snapped = picker.minValue + (NSInteger)llround((double)(selectedValue - picker.minValue) / (double)picker.step) * picker.step;
+    picker.value = MAX(picker.minValue, MIN(picker.maxValue, snapped));
     picker.suffix = suffix;
     picker.animator = animator;
     picker.onChange = onChange;
