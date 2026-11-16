@@ -1308,6 +1308,180 @@ UIView *zs_make_expanding_dropdown_row(NSString *title, NSArray<NSString *> *opt
     return container;
 }
 
+@interface ZSExpandingPicker : NSObject <UIPickerViewDataSource, UIPickerViewDelegate>
+@property (nonatomic, weak) UIView *container;
+@property (nonatomic, weak) UIControl *row;
+@property (nonatomic, weak) UIImageView *chevron;
+@property (nonatomic, strong) NSLayoutConstraint *heightConstraint;
+@property (nonatomic, strong) UIPickerView *picker;
+@property (nonatomic, assign) NSInteger minValue;
+@property (nonatomic, assign) NSInteger maxValue;
+@property (nonatomic, assign) NSInteger value;
+@property (nonatomic, copy) NSString *suffix;
+@property (nonatomic, assign) BOOL expanded;
+@property (nonatomic, assign) NSUInteger generation;
+@property (nonatomic, copy) void (^animator)(dispatch_block_t changes);
+@property (nonatomic, copy) void (^onChange)(NSInteger value);
+@end
+
+static const CGFloat kZSPickerHeight = 124;
+static const CGFloat kZSPickerRowHeight = 30;
+
+@implementation ZSExpandingPicker
+
+- (NSString *)titleForValue:(NSInteger)value {
+    return [NSString stringWithFormat:@"%ld%@", (long)value, self.suffix ?: @""];
+}
+
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)pickerView {
+    return 1;
+}
+
+- (NSInteger)pickerView:(UIPickerView *)pickerView numberOfRowsInComponent:(NSInteger)component {
+    return self.maxValue - self.minValue + 1;
+}
+
+- (CGFloat)pickerView:(UIPickerView *)pickerView rowHeightForComponent:(NSInteger)component {
+    return kZSPickerRowHeight;
+}
+
+- (UIView *)pickerView:(UIPickerView *)pickerView viewForRow:(NSInteger)row forComponent:(NSInteger)component reusingView:(UIView *)view {
+    UILabel *label = [view isKindOfClass:[UILabel class]] ? (UILabel *)view : [[UILabel alloc] init];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor colorWithWhite:0.95 alpha:1];
+    label.font = zs_mono_font(16, UIFontWeightMedium);
+    label.text = [self titleForValue:self.minValue + row];
+    return label;
+}
+
+- (void)pickerView:(UIPickerView *)pickerView didSelectRow:(NSInteger)row inComponent:(NSInteger)component {
+    NSInteger picked = self.minValue + row;
+    if (picked == self.value) return;
+    self.value = picked;
+    UIControl *rowControl = self.row;
+    if (rowControl) zs_disclosure_row_set_value(rowControl, [self titleForValue:picked]);
+    if (self.onChange) self.onChange(picked);
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+- (void)setExpanded:(BOOL)expanded {
+    UIView *container = self.container;
+    UIControl *row = self.row;
+    if (!container || !row || _expanded == expanded) return;
+    _expanded = expanded;
+    NSUInteger generation = ++self.generation;
+
+    CGFloat collapsedHeight = kZSGroupedCardRowHeight;
+    CGFloat expandedHeight = collapsedHeight + kZSPickerHeight + 4;
+
+    UIPickerView *picker = self.picker;
+    if (expanded) {
+        [picker removeFromSuperview];
+        picker = [[UIPickerView alloc] init];
+        picker.translatesAutoresizingMaskIntoConstraints = NO;
+        picker.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        picker.dataSource = self;
+        picker.delegate = self;
+        picker.alpha = 0;
+        [container addSubview:picker];
+        [NSLayoutConstraint activateConstraints:@[
+            [picker.topAnchor constraintEqualToAnchor:container.topAnchor constant:collapsedHeight],
+            [picker.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+            [picker.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+            [picker.heightAnchor constraintEqualToConstant:kZSPickerHeight],
+        ]];
+        [picker selectRow:self.value - self.minValue inComponent:0 animated:NO];
+        self.picker = picker;
+    }
+    picker.userInteractionEnabled = expanded;
+
+    UIImageView *chevron = self.chevron;
+    __weak typeof(self) weakSelf = self;
+    dispatch_block_t changes = ^{
+        weakSelf.heightConstraint.constant = expanded ? expandedHeight : collapsedHeight;
+        picker.alpha = expanded ? 1 : 0;
+        chevron.transform = expanded ? CGAffineTransformMakeRotation((CGFloat)M_PI_2) : CGAffineTransformIdentity;
+    };
+    if (self.animator) {
+        self.animator(changes);
+    } else {
+        [container.window layoutIfNeeded];
+        [UIView animateWithDuration:0.46
+                              delay:0
+             usingSpringWithDamping:0.88
+              initialSpringVelocity:0
+                            options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            changes();
+            UIView *top = container;
+            while (top.superview) top = top.superview;
+            [top layoutIfNeeded];
+        } completion:nil];
+    }
+
+    if (!expanded) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            typeof(self) strongSelf = weakSelf;
+            if (!strongSelf || strongSelf.expanded || strongSelf.generation != generation) return;
+            [strongSelf.picker removeFromSuperview];
+            strongSelf.picker = nil;
+        });
+    }
+}
+
+- (void)rowTapped {
+    [self setExpanded:!self.expanded];
+    UISelectionFeedbackGenerator *haptic = [UISelectionFeedbackGenerator new];
+    [haptic selectionChanged];
+}
+
+@end
+
+UIView *zs_make_expanding_picker_row(NSString *title, NSInteger minValue, NSInteger maxValue, NSInteger selectedValue, NSString *suffix, void (^animator)(dispatch_block_t changes), void (^onChange)(NSInteger value)) {
+    ZSExpandingPicker *picker = [[ZSExpandingPicker alloc] init];
+    picker.minValue = MIN(minValue, maxValue);
+    picker.maxValue = MAX(minValue, maxValue);
+    picker.value = MAX(picker.minValue, MIN(picker.maxValue, selectedValue));
+    picker.suffix = suffix;
+    picker.animator = animator;
+    picker.onChange = onChange;
+
+    UIView *container = [[UIView alloc] init];
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    container.clipsToBounds = YES;
+
+    UIControl *row = zs_make_disclosure_row(title, [picker titleForValue:picker.value], picker, @selector(rowTapped));
+    [container addSubview:row];
+    NSLayoutConstraint *height = [container.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight];
+    [NSLayoutConstraint activateConstraints:@[
+        height,
+        [row.topAnchor constraintEqualToAnchor:container.topAnchor],
+        [row.leadingAnchor constraintEqualToAnchor:container.leadingAnchor],
+        [row.trailingAnchor constraintEqualToAnchor:container.trailingAnchor],
+        [row.heightAnchor constraintEqualToConstant:kZSGroupedCardRowHeight],
+    ]];
+
+    for (UIView *subview in row.subviews) {
+        if ([subview isKindOfClass:[UIImageView class]]) picker.chevron = (UIImageView *)subview;
+    }
+
+    picker.container = container;
+    picker.row = row;
+    picker.heightConstraint = height;
+    objc_setAssociatedObject(container, "zs_expandingPicker", picker, OBJC_ASSOCIATION_RETAIN);
+    objc_setAssociatedObject(container, "zs_selfSizingRow", @YES, OBJC_ASSOCIATION_RETAIN);
+    return container;
+}
+
+void zs_expanding_picker_row_set_enabled(UIView *container, BOOL enabled) {
+    ZSExpandingPicker *picker = objc_getAssociatedObject(container, "zs_expandingPicker");
+    if (!picker) return;
+    if (!enabled && picker.expanded) picker.expanded = NO;
+    container.userInteractionEnabled = enabled;
+    picker.row.alpha = enabled ? 1.0 : 0.35;
+}
+
 static UIView *zs_enclosing_grouped_card(UIView *view) {
     for (UIView *candidate = view; candidate; candidate = candidate.superview) {
         if (objc_getAssociatedObject(candidate, "zs_innerStack")) return candidate;

@@ -144,6 +144,8 @@ UIControl *zs_make_disclosure_row(NSString *title, NSString *value, id target, S
 void zs_disclosure_row_set_value(UIControl *row, NSString *value);
 void zs_disclosure_row_install_menu(UIControl *row, NSArray<NSString *> *titles, NSInteger selectedIndex, void (^onSelect)(NSInteger index));
 UIView *zs_make_expanding_dropdown_row(NSString *title, NSArray<NSString *> *optionTitles, NSArray<NSString *> * _Nullable valueTitles, NSArray * _Nullable optionSubtexts, NSInteger selectedIndex, void (^ _Nullable animator)(dispatch_block_t changes), void (^ _Nullable onSelect)(NSInteger index));
+UIView *zs_make_expanding_picker_row(NSString *title, NSInteger minValue, NSInteger maxValue, NSInteger selectedValue, NSString * _Nullable suffix, void (^ _Nullable animator)(dispatch_block_t changes), void (^ _Nullable onChange)(NSInteger value));
+void zs_expanding_picker_row_set_enabled(UIView *container, BOOL enabled);
 UIStackView *zs_make_card_options_stack(NSArray<NSString *> *titles, NSInteger selectedIndex, id target, SEL action);
 NSArray<NSArray<NSString *> *> *zs_memory_page_titles(BOOL fullScreen);
 CGFloat zs_memory_column_width(NSString *title, CGFloat windowWidth, BOOL fullScreen);

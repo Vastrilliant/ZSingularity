@@ -40,3 +40,11 @@ Those include:
 Then it runs `GC.Collect()` twice.
 
 Expect a brief lag spike when running this.
+
+## Auto Cleanup Memory
+
+Automatically runs Memory Cleanup when memory usage hits the selected threshold.
+
+Usage is measured against the maximum memory the game can use, which includes the extension's memory when Extend Memory Usage is active. The threshold can be set between 30% and 95% and defaults to 90%.
+
+After a cleanup finishes, it will not trigger again for 20 seconds.

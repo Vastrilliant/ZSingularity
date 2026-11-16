@@ -2117,6 +2117,89 @@ void zs_set_auto_unload_on_elevated_memory_usage(BOOL enabled) {
     if (enabled) zs_install_memory_usage_poll_if_needed();
 }
 
+#pragma mark - Auto cleanup memory
+
+static NSString * const kZSAutoCleanupSection = @"autoCleanupMemory";
+static NSString * const kZSAutoCleanupEnabledKey = @"enabled";
+static NSString * const kZSAutoCleanupThresholdKey = @"thresholdPercent";
+static const NSTimeInterval kZSAutoCleanupPollInterval = 2.0;
+static const NSTimeInterval kZSAutoCleanupCooldown = 20.0;
+
+static NSTimer *g_autoCleanupTimer;
+static NSTimeInterval g_autoCleanupLastFinishedAt;
+
+BOOL zs_auto_cleanup_enabled(void) {
+    id stored = zs_settings_section(kZSAutoCleanupSection)[kZSAutoCleanupEnabledKey];
+    return [stored respondsToSelector:@selector(boolValue)] ? [stored boolValue] : NO;
+}
+
+NSInteger zs_auto_cleanup_threshold_percent(void) {
+    id stored = zs_settings_section(kZSAutoCleanupSection)[kZSAutoCleanupThresholdKey];
+    if (![stored respondsToSelector:@selector(integerValue)]) return kZSAutoCleanupDefaultPercent;
+    NSInteger value = [stored integerValue];
+    return MAX(kZSAutoCleanupMinPercent, MIN(kZSAutoCleanupMaxPercent, value));
+}
+
+double zs_auto_cleanup_current_usage_fraction(void) {
+    RamHudSnapshot snapshot;
+    zs_ram_hud_get_snapshot(&snapshot);
+    if (snapshot.appBytes == 0) return 0;
+
+    int64_t available = 0;
+    if (@available(iOS 13.0, *)) available = (int64_t)os_proc_available_memory();
+    if (available <= 0) return 0;
+
+    double usable = (double)snapshot.appBytes + (double)available + (double)snapshot.donatedBytes;
+    return usable > 0 ? (double)snapshot.totalBytes / usable : 0;
+}
+
+static void zs_auto_cleanup_tick(void) {
+    if (!zs_auto_cleanup_enabled()) return;
+    if (g_memoryCleanupInFlight) return;
+    NSTimeInterval now = CACurrentMediaTime();
+    if (g_autoCleanupLastFinishedAt > 0 && now - g_autoCleanupLastFinishedAt < kZSAutoCleanupCooldown) return;
+
+    double fraction = zs_auto_cleanup_current_usage_fraction();
+    double threshold = (double)zs_auto_cleanup_threshold_percent() / 100.0;
+    if (fraction < threshold) return;
+
+    ZLog(@"[ZSMemoryTweaks] Auto cleanup triggered at %.1f%% of usable memory (threshold %ld%%)", fraction * 100.0, (long)zs_auto_cleanup_threshold_percent());
+    zs_run_memory_cleanup(^(BOOL ran) {
+        if (ran) g_autoCleanupLastFinishedAt = CACurrentMediaTime();
+    });
+}
+
+static void zs_auto_cleanup_sync_timer(void) {
+    if (zs_auto_cleanup_enabled()) {
+        if (g_autoCleanupTimer) return;
+        g_autoCleanupTimer = [NSTimer timerWithTimeInterval:kZSAutoCleanupPollInterval repeats:YES block:^(NSTimer *timer) {
+            zs_auto_cleanup_tick();
+        }];
+        [NSRunLoop.mainRunLoop addTimer:g_autoCleanupTimer forMode:NSRunLoopCommonModes];
+    } else {
+        [g_autoCleanupTimer invalidate];
+        g_autoCleanupTimer = nil;
+    }
+}
+
+void zs_set_auto_cleanup_enabled(BOOL enabled) {
+    NSMutableDictionary *section = [zs_settings_section(kZSAutoCleanupSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSAutoCleanupEnabledKey] = @(enabled);
+    zs_write_settings_section(kZSAutoCleanupSection, section);
+    zs_auto_cleanup_sync_timer();
+}
+
+void zs_set_auto_cleanup_threshold_percent(NSInteger percent) {
+    percent = MAX(kZSAutoCleanupMinPercent, MIN(kZSAutoCleanupMaxPercent, percent));
+    NSMutableDictionary *section = [zs_settings_section(kZSAutoCleanupSection) mutableCopy] ?: [NSMutableDictionary new];
+    section[kZSAutoCleanupThresholdKey] = @(percent);
+    zs_write_settings_section(kZSAutoCleanupSection, section);
+}
+
+void zs_auto_cleanup_apply_from_settings(void) {
+    zs_auto_cleanup_sync_timer();
+}
+
 int32_t zs_last_observed_memory_usage_tier(void) {
     return g_lastMemoryUsageTier;
 }

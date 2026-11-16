@@ -61,6 +61,7 @@ static const NSTimeInterval kSaveDebounceInterval = 0.4;
     }
     [self zs_refreshMetalTabs];
     [[ZSMetalTabs shared] setRamHudVisible:zs_ram_hud_enabled()];
+    zs_auto_cleanup_apply_from_settings();
 
     [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -2153,6 +2154,24 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
     UIButton *memoryCleanupButton = zs_make_grouped_action_button(@"Memory cleanup", [UIColor colorWithRed:0.42 green:0.62 blue:1.0 alpha:1.0]);
     [memoryCleanupButton addTarget:self action:@selector(memoryCleanupTapped:) forControlEvents:UIControlEventTouchUpInside];
 
+    ZSRow *autoCleanupRow = zs_make_switch_row(@"Auto Cleanup Memory", zs_auto_cleanup_enabled());
+    zs_add_unavailable_subtext(autoCleanupRow, @"Automatically runs memory cleanup when memory usage hits a certain threshold.");
+
+    UIView *autoCleanupThresholdRow = zs_make_expanding_picker_row(@"Memory threshold",
+        kZSAutoCleanupMinPercent, kZSAutoCleanupMaxPercent, zs_auto_cleanup_threshold_percent(), @"%",
+        ^(dispatch_block_t changes) { [weakRedirectSelf zs_lowResAnimateChanges:changes]; },
+        ^(NSInteger value) {
+            zs_set_auto_cleanup_threshold_percent(value);
+            [weakRedirectSelf zs_scheduleSave];
+        });
+    zs_expanding_picker_row_set_enabled(autoCleanupThresholdRow, autoCleanupRow.toggle.isOn);
+    [autoCleanupRow.toggle addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        BOOL on = ((UISwitch *)action.sender).isOn;
+        zs_set_auto_cleanup_enabled(on);
+        zs_expanding_picker_row_set_enabled(autoCleanupThresholdRow, on);
+        [weakRedirectSelf zs_scheduleSave];
+    }] forControlEvents:UIControlEventValueChanged];
+
     self.memoryUsageAnalyzeButton = zs_make_grouped_action_button(@"Analyze memory usage", zs_accent_green_color());
     [self.memoryUsageAnalyzeButton addTarget:self action:@selector(memoryUsageAnalyzeTapped:) forControlEvents:UIControlEventTouchUpInside];
 
@@ -2165,6 +2184,8 @@ static const CGFloat kZSSyslogConsoleHeight = 180;
         ramHudRow,
         ramRedirectModeRow,
         memoryCleanupButton,
+        autoCleanupRow,
+        autoCleanupThresholdRow,
         self.memoryUsageAnalyzeButton,
         lowResTranscodeButton,
     ]);

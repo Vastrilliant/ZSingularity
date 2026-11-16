@@ -341,6 +341,17 @@ float zs_exp_get_default_number(NSString *key);
 void zs_unload_unused_assets_and_collect(void);
 void zs_run_memory_cleanup(void (^ _Nullable completion)(BOOL ran));
 void zs_set_auto_unload_on_memory_warning(BOOL enabled);
+
+#define kZSAutoCleanupMinPercent 30
+#define kZSAutoCleanupMaxPercent 95
+#define kZSAutoCleanupDefaultPercent 90
+
+BOOL zs_auto_cleanup_enabled(void);
+void zs_set_auto_cleanup_enabled(BOOL enabled);
+NSInteger zs_auto_cleanup_threshold_percent(void);
+void zs_set_auto_cleanup_threshold_percent(NSInteger percent);
+double zs_auto_cleanup_current_usage_fraction(void);
+void zs_auto_cleanup_apply_from_settings(void);
 void zs_clear_guide_portrait_cache(void);
 
 void zs_set_debug_log_memory_usage_tier(BOOL enabled);
